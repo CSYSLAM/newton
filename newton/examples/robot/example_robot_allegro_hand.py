@@ -84,7 +84,11 @@ class Example:
         allegro_hand.default_shape_cfg.margin = 0.005
         allegro_hand.default_shape_cfg.gap = 0.015
 
-        asset_path = newton.utils.download_asset("wonik_allegro")
+        try:
+            asset_path = newton.utils.download_asset("wonik_allegro")
+        except:
+            asset_path = "C:/csy_work/CG/Engine/newton/Cache/newton-assets_unitree_h1_4589a7d5/wonik_allegro"
+
         asset_file = str(asset_path / "usd" / "allegro_left_hand_with_cube.usda")
         allegro_hand.add_usd(
             asset_file,

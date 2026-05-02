@@ -88,7 +88,11 @@ class Example:
         builder.default_shape_cfg.kf = 1.0e3
         builder.default_shape_cfg.mu = 0.75
 
-        asset_path = newton.utils.download_asset("anybotics_anymal_c")
+        try:
+            asset_path = newton.utils.download_asset("anybotics_anymal_c")
+        except:
+            asset_path = "C:/csy_work/CG/Engine/newton/Cache/newton-assets_unitree_h1_4589a7d5/anybotics_anymal_c"
+
         stage_path = str(asset_path / "urdf" / "anymal.urdf")
         builder.add_urdf(
             stage_path,

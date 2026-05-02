@@ -88,7 +88,10 @@ class Example:
         )
 
         # load pre-computed tetrahedral mesh from USD
-        duck_path = newton.utils.download_asset("manipulation_objects/rubber_duck")
+        try:
+            duck_path = newton.utils.download_asset("manipulation_objects/rubber_duck")
+        except:
+            duck_path = "C:/csy_work/CG/Engine/newton/Cache/newton-assets_unitree_h1_4589a7d5/manipulation_objects/rubber_duck"
         usd_stage = Usd.Stage.Open(str(duck_path / "model.usda"))
         prim = usd_stage.GetPrimAtPath("/root/Model/TetMesh")
         tetmesh = newton.TetMesh.create_from_usd(prim)
@@ -234,7 +237,10 @@ class Example:
             self.graph = None
 
     def create_articulation(self, builder):
-        asset_path = newton.utils.download_asset("franka_emika_panda")
+        try:
+            asset_path = newton.utils.download_asset("franka_emika_panda")
+        except:
+            asset_path = "C:/csy_work/CG/Engine/newton/Cache/newton-assets_unitree_h1_4589a7d5/franka_emika_panda"
 
         builder.add_urdf(
             str(asset_path / "urdf" / "fr3_franka_hand.urdf"),
