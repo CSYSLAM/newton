@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ###########################################################################
-# Example Sim Cloth on Rotating Sphere
+# Example XPBD Cloth on Rotating Sphere
 #
-# This simulation demonstrates a cloth falling onto a rotating sphere,
-# similar to PhysX's SnippetPBDCloth example. The cloth drapes over
-# the sphere and is affected by its rotation.
+# This simulation demonstrates a cloth falling onto a rotating sphere using
+# the XPBD solver, similar to PhysX's SnippetPBDCloth. The cloth drapes
+# over the sphere and interacts with falling boxes.
 #
-# Command: python -m newton.examples cloth_on_rotating_sphere
+# Command: python -m newton.examples xpbd_cloth_on_rotating_sphere
 #
 ###########################################################################
 
@@ -45,15 +45,15 @@ class Example:
         self.frame_dt = 1.0 / self.fps
         self.sim_substeps = 10
         self.sim_dt = self.frame_dt / self.sim_substeps
-        self.iterations = 10
+        self.iterations = 50
         self.sim_time = 0.0
 
         self.viewer = viewer
 
         # Sphere parameters
-        self.sphere_radius = 1.5
+        self.sphere_radius = 1.0
         self.sphere_height = 2.5
-        self.sphere_angular_speed = 4.0  # rad/s
+        self.sphere_angular_speed = 2.0  # rad/s
 
         builder = newton.ModelBuilder()
 
@@ -68,9 +68,6 @@ class Example:
         sphere_cfg = newton.ModelBuilder.ShapeConfig()
         sphere_cfg.density = 0.0
         sphere_cfg.has_particle_collision = True
-        sphere_cfg.ke = 1.0e1
-        sphere_cfg.kd = 1.0e3
-        sphere_cfg.mu = 2.0
 
         self.sphere_body = builder.add_link(
             xform=wp.transform(
@@ -87,26 +84,27 @@ class Example:
             cfg=sphere_cfg,
             label="rotating_sphere_shape",
         )
-        # Add a revolute joint for rotation around Z axis
+        # Revolute joint for rotation around Z axis
         self.sphere_joint = builder.add_joint_revolute(
             parent=-1,
             child=self.sphere_body,
             axis=newton.Axis.Z,
-            parent_xform=wp.transform(p=wp.vec3(0.0, 0.0, self.sphere_height), q=wp.quat_identity()),
+            parent_xform=wp.transform(
+                p=wp.vec3(0.0, 0.0, self.sphere_height),
+                q=wp.quat_identity(),
+            ),
             label="sphere_joint",
         )
         builder.add_articulation([self.sphere_joint], label="rotating_sphere")
 
-        # Cloth grid
-        # PhysX: 250x250 particles with 0.05 spacing = 12.5m x 12.5m cloth
-        # Total mass = 10kg
-        num_points_x = 80
-        num_points_z = 80
-        particle_spacing = 0.15
-        total_cloth_mass = 10.0
+        # Cloth grid with proven XPBD spring parameters
+        num_points_x = 64
+        num_points_z = 64
+        particle_spacing = 0.1
+        cloth_mass_per_particle = 0.15
         cloth_size_x = num_points_x * particle_spacing
         cloth_size_z = num_points_z * particle_spacing
-        cloth_height = 5.0  # Height of the cloth
+        cloth_height = 6.0
 
         builder.add_cloth_grid(
             pos=wp.vec3(-cloth_size_x / 2, -cloth_size_z / 2, cloth_height),
@@ -116,73 +114,68 @@ class Example:
             dim_y=num_points_z,
             cell_x=particle_spacing,
             cell_y=particle_spacing,
-            mass=total_cloth_mass / ((num_points_x + 1) * (num_points_z + 1)),
+            mass=cloth_mass_per_particle,
             fix_left=False,
             fix_right=False,
             fix_top=False,
             fix_bottom=False,
-            tri_ke=5.0e2,
-            tri_ka=5.0e2,
-            tri_kd=2.0e-1,
+            add_springs=True,
+            spring_ke=5.0e1,
+            spring_kd=5.0e0,
             edge_ke=1.0e-1,
-            edge_kd=1.0e-1,
-            particle_radius=particle_spacing * 0.5,
+            edge_kd=0.0,
+            particle_radius=particle_spacing * 0.4,
         )
 
         # Falling boxes
         box_cfg = newton.ModelBuilder.ShapeConfig()
-        box_cfg.ke = 1.0e1
-        box_cfg.kd = 5.0e3
+        box_cfg.ke = 1.0e3
+        box_cfg.kd = 1.0e2
         box_cfg.mu = 5.0
         box_cfg.has_particle_collision = True
+        box_cfg.restitution = 0.5  # Enable bouncing
 
-        box_height = cloth_height + 2.0  # Boxes above the cloth
+        box_height = cloth_height + 2.0
         for i in range(5):
-            box_body = builder.add_body(
+            box_body = builder.add_link(
                 xform=wp.transform(
-                    p=wp.vec3(i - 2.0, -3.0, box_height),
+                    p=wp.vec3((i - 2.0) * 1.2, -2.0, box_height),  # Increased spacing
                     q=wp.quat_identity(),
                 ),
-                mass=20.0,
+                mass=1.0,
                 label=f"box_{i}",
             )
             builder.add_shape_box(
                 box_body,
-                hx=0.5,
-                hy=0.5,
-                hz=0.5,
+                hx=0.4,
+                hy=0.4,
+                hz=0.4,
                 cfg=box_cfg,
             )
-            builder.add_articulation([builder.add_joint_free(box_body)], label=f"box_{i}")
+            box_joint = builder.add_joint_free(box_body)
+            builder.add_articulation([box_joint], label=f"box_{i}")
 
-        builder.color(include_bending=True)
         self.model = builder.finalize()
 
         # Contact parameters
         self.model.soft_contact_ke = 1.0e1
-        self.model.soft_contact_kd = 1.0e3
-        self.model.soft_contact_mu = 5.0
+        self.model.soft_contact_kd = 1.0e2
+        self.model.soft_contact_mu = 1.0
+        self.model.particle_max_velocity = 100.0
 
-        # Use VBD solver with self-contact
-        self.solver = newton.solvers.SolverVBD(
+        # XPBD solver with spring-based cloth constraints
+        self.solver = newton.solvers.SolverXPBD(
             self.model,
             iterations=self.iterations,
-            particle_enable_self_contact=True,
-            particle_self_contact_radius=particle_spacing * 0.4,
-            particle_self_contact_margin=particle_spacing * 0.5,
+            enable_restitution=True,  # Enable bouncing for boxes
         )
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
-        # Use CollisionPipeline for particle-rigid contact
-        self.collision_pipeline = newton.CollisionPipeline(
-            self.model,
-            broad_phase="nxn",
-            soft_contact_margin=0.05,
-        )
-        self.contacts = self.collision_pipeline.contacts()
+        # Use model's default collision pipeline
+        self.contacts = self.model.contacts()
 
         # Initialize body state from model joint buffers
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
@@ -193,10 +186,11 @@ class Example:
         self.sphere_joint_q_start = int(q_starts[self.sphere_joint])
         self.sphere_joint_qd_start = int(qd_starts[self.sphere_joint])
 
-        # Warp array for sim_time (needed for CUDA graph)
+        # Warp array for sim_time
         self.sim_time_wp = wp.zeros(1, dtype=wp.float32, device=self.model.device)
 
         self.viewer.set_model(self.model)
+        self.viewer.show_particles = True
         self.viewer.set_camera(wp.vec3(20.0, -15.0, 12.0), -20.0, 140.0)
         self.capture()
 
@@ -236,13 +230,22 @@ class Example:
                 body_flag_filter=newton.BodyFlags.KINEMATIC,
             )
 
-            self.collision_pipeline.collide(self.state_0, self.contacts)
+            self.model.collide(self.state_0, self.contacts)
             self.solver.step(
-                self.state_0, self.state_1, self.control, self.contacts, self.sim_dt
+                self.state_0,
+                self.state_1,
+                self.control,
+                self.contacts,
+                self.sim_dt,
             )
             self.state_0, self.state_1 = self.state_1, self.state_0
 
-            wp.launch(advance_time, dim=1, inputs=[self.sim_time_wp, self.sim_dt], device=self.model.device)
+            wp.launch(
+                advance_time,
+                dim=1,
+                inputs=[self.sim_time_wp, self.sim_dt],
+                device=self.model.device,
+            )
 
     def step(self):
         if self.graph:
