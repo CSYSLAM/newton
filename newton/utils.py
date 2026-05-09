@@ -15,6 +15,11 @@ __all__ = [
 # mesh utils
 # ==================================================================================
 from ._src.geometry.utils import remesh_mesh
+from ._src.geometry.tetgen import (
+    tetrahedralize_mesh,
+    tetrahedralize_obj,
+    tetrahedralize_surface_mesh,
+)
 from ._src.utils.mesh import (
     MeshAdjacency,
     solidify_mesh,
@@ -24,6 +29,9 @@ __all__ += [
     "MeshAdjacency",
     "remesh_mesh",
     "solidify_mesh",
+    "tetrahedralize_mesh",
+    "tetrahedralize_obj",
+    "tetrahedralize_surface_mesh",
 ]
 
 # ==================================================================================
