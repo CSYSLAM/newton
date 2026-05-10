@@ -61,7 +61,12 @@ class Example:
 
         for i in range(2):
             z_pos = base_height + i * (mesh_height + 0.3) + mesh_height / 2
-
+            # OBJ文件只有表面顶点和三角形面，但add_soft_mesh需要的是四面体索引（每4个顶点一组），代表体积内部
+            # OBJ表面：2930顶点 + 5856个三角面（3个索引一组）
+            # VBD需要的：顶点 + 四面体单元（4个索引一组，包括内部点）
+            # 没有四面体化，就只有一层皮，没有内部结构，无法做体积弹性仿真。
+            # 四面体化是把表面壳变成实体体积的必要步骤，TetGen是目前唯一能正确做约束Delaunay四面体化的依赖。
+            # 所以流程必须是：OBJ表面 → TetGen四面体化 → TetMesh(含内部点+四面体) → add_soft_mesh
             builder.add_soft_mesh(
                 pos=(0.0, 0.0, z_pos),
                 rot=wp.quat_identity(),
