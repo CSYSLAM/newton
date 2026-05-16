@@ -23,11 +23,11 @@ def tetrahedralize_surface_mesh(
     quality: float = 1.5,
     max_volume: float | None = None,
     verbose: bool = False,
+    backend: str = "auto",
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Tetrahedralize a triangular surface mesh using TetGen.
+    """Tetrahedralize a triangular surface mesh.
 
     Converts a closed surface mesh into a volumetric tetrahedral mesh.
-    TetGen produces high-quality tetrahedral meshes suitable for FEM simulation.
 
     Args:
         vertices: Vertex positions [m], shape (N, 3).
@@ -38,6 +38,12 @@ def tetrahedralize_surface_mesh(
         max_volume: Maximum volume constraint for tetrahedra. If None, no
             volume constraint is applied.
         verbose: Whether to print tetrahedralization progress.
+        backend: Tetrahedralization backend to use. ``"auto"`` tries the
+            external TetGen package first, falling back to the Python
+            implementation if TetGen is not installed. ``"external"`` uses
+            the TetGen C++ package. ``"python"`` uses scipy's Delaunay
+            tetrahedralization with ray-casting exterior removal. Default
+            ``"auto"``.
 
     Returns:
         Tuple of (tet_vertices, tet_indices) where:
@@ -45,36 +51,55 @@ def tetrahedralize_surface_mesh(
         - tet_indices: Flattened tetrahedron indices (4 per tet), int32
 
     Raises:
-        ImportError: If tetgen is not installed.
+        ImportError: If backend is "external" and tetgen is not installed,
+            or backend is "python" and scipy is not installed.
         ValueError: If tetrahedralization fails.
     """
-    import tetgen
+    if backend == "auto":
+        try:
+            import tetgen as _tetgen  # noqa: F401
+            backend = "external"
+        except ImportError:
+            backend = "python"
 
-    # Build kwargs for tetrahedralize
-    kwargs = {
-        "quality": True,
-        "minratio": quality,
-        "quiet": not verbose,
-    }
+    if backend == "external":
+        import tetgen
 
-    if max_volume is not None:
-        kwargs["maxvolume"] = max_volume
+        # Build kwargs for tetrahedralize
+        kwargs = {
+            "quality": True,
+            "minratio": quality,
+            "quiet": not verbose,
+        }
 
-    if verbose:
-        print(f"TetGen parameters: minratio={quality}, maxvolume={max_volume}")
+        if max_volume is not None:
+            kwargs["maxvolume"] = max_volume
 
-    # Run TetGen
-    t = tetgen.TetGen(vertices, faces)
-    t.tetrahedralize(**kwargs)
+        if verbose:
+            print(f"TetGen parameters: minratio={quality}, maxvolume={max_volume}")
 
-    # Extract results
-    tet_vertices = np.array(t.node, dtype=np.float32)
-    tet_indices = np.array(t.elem, dtype=np.int32).flatten()
+        # Run TetGen
+        t = tetgen.TetGen(vertices, faces)
+        t.tetrahedralize(**kwargs)
 
-    if len(tet_vertices) == 0 or len(tet_indices) == 0:
-        raise ValueError("Tetrahedralization failed: no vertices or indices generated")
+        # Extract results
+        tet_vertices = np.array(t.node, dtype=np.float32)
+        tet_indices = np.array(t.elem, dtype=np.int32).flatten()
 
-    return tet_vertices, tet_indices
+        if len(tet_vertices) == 0 or len(tet_indices) == 0:
+            raise ValueError("Tetrahedralization failed: no vertices or indices generated")
+
+        return tet_vertices, tet_indices
+
+    elif backend == "python":
+        from .tetgen_python.api import tetrahedralize_surface_mesh_python
+
+        return tetrahedralize_surface_mesh_python(
+            vertices, faces, quality=quality, verbose=verbose
+        )
+
+    else:
+        raise ValueError(f"Unknown backend: {backend}. Use 'auto', 'external', or 'python'.")
 
 
 def tetrahedralize_obj(
@@ -83,6 +108,7 @@ def tetrahedralize_obj(
     max_volume: float | None = None,
     verbose: bool = False,
     method: str | None = None,
+    backend: str = "auto",
 ) -> TetMesh:
     """Load an OBJ file and convert it to a tetrahedral mesh.
 
@@ -98,6 +124,7 @@ def tetrahedralize_obj(
         verbose: Whether to print loading and tetrahedralization progress.
         method: Method to use for loading the mesh ("trimesh", "meshio", "pcu", "openmesh").
             If None, tries all methods.
+        backend: Tetrahedralization backend. See :func:`tetrahedralize_surface_mesh`.
 
     Returns:
         A :class:`~newton.TetMesh` object ready for soft body simulation.
@@ -143,7 +170,7 @@ def tetrahedralize_obj(
     if verbose:
         print("Tetrahedralizing with TetGen...")
     tet_vertices, tet_indices = tetrahedralize_surface_mesh(
-        vertices, faces, quality=quality, max_volume=max_volume, verbose=verbose
+        vertices, faces, quality=quality, max_volume=max_volume, verbose=verbose, backend=backend
     )
 
     if verbose:
@@ -158,6 +185,7 @@ def tetrahedralize_mesh(
     quality: float = 1.5,
     max_volume: float | None = None,
     verbose: bool = False,
+    backend: str = "auto",
 ) -> TetMesh:
     """Convert a triangular surface mesh to a tetrahedral mesh.
 
@@ -201,7 +229,7 @@ def tetrahedralize_mesh(
     faces = np.array(faces, dtype=np.int32).reshape(-1, 3)
 
     tet_vertices, tet_indices = tetrahedralize_surface_mesh(
-        vertices, faces, quality=quality, max_volume=max_volume, verbose=verbose
+        vertices, faces, quality=quality, max_volume=max_volume, verbose=verbose, backend=backend
     )
 
     return TetMesh(tet_vertices, tet_indices)
