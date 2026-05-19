@@ -225,7 +225,7 @@ def eval_mujoco_coupling_effective_mass_kernel(
     particle_kind: int,
     body_mass: wp.array[float],
     particle_mass: wp.array[float],
-    newton_body_to_mjc_world: wp.array[int],
+    body_world: wp.array[int],
     newton_body_to_mjc_body: wp.array[int],
     body_invweight0: wp.array2d[wp.vec2],
     out: wp.array[float],
@@ -239,8 +239,13 @@ def eval_mujoco_coupling_effective_mass_kernel(
         if index >= 0 and index < body_mass.shape[0]:
             value = body_mass[index]
 
-        if index >= 0 and index < newton_body_to_mjc_world.shape[0] and index < newton_body_to_mjc_body.shape[0]:
-            world = newton_body_to_mjc_world[index]
+        if index >= 0 and index < newton_body_to_mjc_body.shape[0]:
+            world = int(0)
+            if body_invweight0.shape[0] > 1:
+                if index < body_world.shape[0]:
+                    world = body_world[index]
+                else:
+                    world = int(-1)
             mjc_body = newton_body_to_mjc_body[index]
             if (
                 world >= 0
@@ -272,7 +277,7 @@ def eval_mujoco_coupling_effective_mass_block_kernel(
     body_mass: wp.array[float],
     body_inertia: wp.array[wp.mat33],
     particle_mass: wp.array[float],
-    newton_body_to_mjc_world: wp.array[int],
+    body_world: wp.array[int],
     newton_body_to_mjc_body: wp.array[int],
     body_invweight0: wp.array2d[wp.vec2],
     out_mass: wp.array[float],
@@ -290,8 +295,13 @@ def eval_mujoco_coupling_effective_mass_block_kernel(
         if index >= 0 and index < body_inertia.shape[0]:
             inertia = body_inertia[index]
 
-        if index >= 0 and index < newton_body_to_mjc_world.shape[0] and index < newton_body_to_mjc_body.shape[0]:
-            world = newton_body_to_mjc_world[index]
+        if index >= 0 and index < newton_body_to_mjc_body.shape[0]:
+            world = int(0)
+            if body_invweight0.shape[0] > 1:
+                if index < body_world.shape[0]:
+                    world = body_world[index]
+                else:
+                    world = int(-1)
             mjc_body = newton_body_to_mjc_body[index]
             if (
                 world >= 0
