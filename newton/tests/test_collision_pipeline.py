@@ -311,6 +311,18 @@ def test_collision_pipeline_sap(
     test_collision_pipeline(_test, device, shape_type_a, shape_type_b, test_level_a, test_level_b, "sap", tolerance)
 
 
+def test_collision_pipeline_bvh(
+    _test,
+    device,
+    shape_type_a: GeoType,
+    shape_type_b: GeoType,
+    test_level_a: TestLevel,
+    test_level_b: TestLevel,
+    tolerance: float = 3e-3,
+):
+    test_collision_pipeline(_test, device, shape_type_a, shape_type_b, test_level_a, test_level_b, "bvh", tolerance)
+
+
 for test_config in collision_pipeline_contact_tests:
     shape_type_a, shape_type_b, test_level_a, test_level_b = test_config[:4]
     tolerance = test_config[4] if len(test_config) > 4 else 3e-3
@@ -343,6 +355,18 @@ for test_config in collision_pipeline_contact_tests:
         TestCollisionPipeline,
         f"test_{type_to_str(shape_type_a)}_{type_to_str(shape_type_b)}_sap",
         test_collision_pipeline_sap,
+        devices=devices,
+        shape_type_a=shape_type_a,
+        shape_type_b=shape_type_b,
+        test_level_a=test_level_a,
+        test_level_b=test_level_b,
+        tolerance=tolerance,
+    )
+    # BVH broad phase tests
+    add_function_test(
+        TestCollisionPipeline,
+        f"test_{type_to_str(shape_type_a)}_{type_to_str(shape_type_b)}_bvh",
+        test_collision_pipeline_bvh,
         devices=devices,
         shape_type_a=shape_type_a,
         shape_type_b=shape_type_b,
@@ -437,6 +461,7 @@ for mode_name, test_func in mesh_mesh_sdf_tests:
         ("explicit", "explicit"),
         ("nxn", "nxn"),
         ("sap", "sap"),
+        ("bvh", "bvh"),
     ]:
         add_function_test(
             TestCollisionPipeline,
@@ -509,6 +534,13 @@ add_function_test(
     devices=devices,
     broad_phase="sap",
 )
+add_function_test(
+    TestCollisionPipelineFilterPairs,
+    "test_shape_collision_filter_pairs_bvh",
+    test_shape_collision_filter_pairs,
+    devices=devices,
+    broad_phase="bvh",
+)
 
 
 def test_collision_filter_consistent_across_broadphases(test, device):
@@ -553,14 +585,16 @@ def test_collision_filter_consistent_across_broadphases(test, device):
         pairs_explicit = _contact_pairs("explicit")
         pairs_nxn = _contact_pairs("nxn")
         pairs_sap = _contact_pairs("sap")
+        pairs_bvh = _contact_pairs("bvh")
 
         # The excluded pair must not appear in any broad phase result
-        for name, pairs in [("EXPLICIT", pairs_explicit), ("NXN", pairs_nxn), ("SAP", pairs_sap)]:
+        for name, pairs in [("EXPLICIT", pairs_explicit), ("NXN", pairs_nxn), ("SAP", pairs_sap), ("BVH", pairs_bvh)]:
             test.assertNotIn(excluded, pairs, f"Excluded pair {excluded} must not appear in {name} contacts")
 
-        # All three broad phases must report the same set of contacting pairs
+        # All four broad phases must report the same set of contacting pairs
         test.assertEqual(pairs_explicit, pairs_nxn, "EXPLICIT and NXN should produce the same contact pairs")
         test.assertEqual(pairs_explicit, pairs_sap, "EXPLICIT and SAP should produce the same contact pairs")
+        test.assertEqual(pairs_explicit, pairs_bvh, "EXPLICIT and BVH should produce the same contact pairs")
 
         # With 3 shapes and 1 excluded pair, we expect exactly 2 contacting pairs
         test.assertEqual(
@@ -707,7 +741,7 @@ def test_rigid_contact_normal_sphere_sphere(test, device, broad_phase: str):
                 )
 
 
-for bp_name in ("explicit", "nxn", "sap"):
+for bp_name in ("explicit", "nxn", "sap", "bvh"):
     add_function_test(
         TestRigidContactNormal,
         f"test_rigid_contact_normal_sphere_sphere_{bp_name}",
@@ -772,7 +806,7 @@ def test_box_box_quaternion_perturbation(test, device, broad_phase: str):
             )
 
 
-for bp_name in ("explicit", "nxn", "sap"):
+for bp_name in ("explicit", "nxn", "sap", "bvh"):
     add_function_test(
         TestRigidContactNormal,
         f"test_box_box_quaternion_perturbation_{bp_name}",
@@ -959,7 +993,7 @@ class TestShapePairsMaxScaling(unittest.TestCase):
 
         model = builder.finalize()
 
-        for bp_mode in ("nxn", "sap"):
+        for bp_mode in ("nxn", "sap", "bvh"):
             pipeline = newton.CollisionPipeline(model, broad_phase=bp_mode)
 
             global_n = model.shape_count

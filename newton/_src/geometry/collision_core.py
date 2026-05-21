@@ -854,6 +854,45 @@ def pre_contact_check(
 
 
 @wp.func
+def transform_aabb(
+    local_lo: wp.vec3,
+    local_hi: wp.vec3,
+    orientation: wp.quat,
+    translation: wp.vec3,
+) -> tuple[wp.vec3, wp.vec3]:
+    """
+    Transform a local AABB by rotation and translation.
+
+    Args:
+        local_lo: Local AABB lower bound
+        local_hi: Local AABB upper bound
+        orientation: Rotation quaternion
+        translation: Translation vector
+
+    Returns:
+        Tuple of (transformed_lower, transformed_upper)
+    """
+    center = (local_lo + local_hi) * 0.5
+    half = (local_hi - local_lo) * 0.5
+
+    # Rotate center
+    rotated_center = wp.quat_rotate(orientation, center) + translation
+
+    # Rotated AABB half-extents via abs of rotation matrix columns
+    r0 = wp.quat_rotate(orientation, wp.vec3(1.0, 0.0, 0.0))
+    r1 = wp.quat_rotate(orientation, wp.vec3(0.0, 1.0, 0.0))
+    r2 = wp.quat_rotate(orientation, wp.vec3(0.0, 0.0, 1.0))
+
+    rotated_half = wp.vec3(
+        wp.abs(r0[0]) * half[0] + wp.abs(r1[0]) * half[1] + wp.abs(r2[0]) * half[2],
+        wp.abs(r0[1]) * half[0] + wp.abs(r1[1]) * half[1] + wp.abs(r2[1]) * half[2],
+        wp.abs(r0[2]) * half[0] + wp.abs(r1[2]) * half[1] + wp.abs(r2[2]) * half[2],
+    )
+
+    return rotated_center - rotated_half, rotated_center + rotated_half
+
+
+@wp.func
 def mesh_vs_convex_midphase(
     idx_in_thread_block: int,
     mesh_shape: int,
@@ -864,6 +903,8 @@ def mesh_vs_convex_midphase(
     shape_type: wp.array[int],
     shape_data: wp.array[wp.vec4],
     shape_source_ptr: wp.array[wp.uint64],
+    shape_collision_aabb_lower: wp.array[wp.vec3],
+    shape_collision_aabb_upper: wp.array[wp.vec3],
     rigid_gap: float,
     triangle_pairs: wp.array[wp.vec3i],
     triangle_pairs_count: wp.array[int],
@@ -884,6 +925,8 @@ def mesh_vs_convex_midphase(
         shape_type: Array of shape types
         shape_data: Array of shape data (vec4: scale.xyz, margin.w)
         shape_source_ptr: Array of mesh/SDF source pointers
+        shape_collision_aabb_lower: Precomputed local AABB lower bounds
+        shape_collision_aabb_upper: Precomputed local AABB upper bounds
         rigid_gap: Contact gap for rigid bodies
         triangle_pairs: Output array for triangle pairs (mesh_shape, non_mesh_shape, tri_index)
         triangle_pairs_count: Counter for triangle pairs
@@ -897,26 +940,34 @@ def mesh_vs_convex_midphase(
     pos_in_mesh = wp.transform_get_translation(X_mesh_shape)
     orientation_in_mesh = wp.transform_get_rotation(X_mesh_shape)
 
-    # Create generic shape data for non-mesh shape
+    # Get shape type
     geo_type = shape_type[non_mesh_shape]
-    data_vec4 = shape_data[non_mesh_shape]
-    scale = wp.vec3(data_vec4[0], data_vec4[1], data_vec4[2])
 
-    generic_shape_data = GenericShapeData()
-    generic_shape_data.shape_type = geo_type
-    generic_shape_data.scale = scale
-    generic_shape_data.auxiliary = wp.vec3(0.0, 0.0, 0.0)
+    # Compute AABB in mesh local space
+    # For CONVEX_MESH, use precomputed local AABB (O(1) instead of O(N_vertices))
+    # For other shapes, use compute_tight_aabb_from_support (all O(1))
+    aabb_lower = wp.vec3(0.0, 0.0, 0.0)
+    aabb_upper = wp.vec3(0.0, 0.0, 0.0)
 
-    # For CONVEX_MESH, pack the mesh pointer
     if geo_type == GeoType.CONVEX_MESH:
-        generic_shape_data.auxiliary = pack_mesh_ptr(shape_source_ptr[non_mesh_shape])
+        # Fast path: use precomputed local AABB and transform to mesh local space
+        local_lo = shape_collision_aabb_lower[non_mesh_shape]
+        local_hi = shape_collision_aabb_upper[non_mesh_shape]
+        aabb_lower, aabb_upper = transform_aabb(local_lo, local_hi, orientation_in_mesh, pos_in_mesh)
+    else:
+        # Generic path: compute AABB using support function (all O(1) for non-mesh shapes)
+        data_vec4 = shape_data[non_mesh_shape]
+        scale = wp.vec3(data_vec4[0], data_vec4[1], data_vec4[2])
 
-    data_provider = SupportMapDataProvider()
+        generic_shape_data = GenericShapeData()
+        generic_shape_data.shape_type = geo_type
+        generic_shape_data.scale = scale
+        generic_shape_data.auxiliary = wp.vec3(0.0, 0.0, 0.0)
 
-    # Compute tight AABB directly in mesh local space for optimal fit
-    aabb_lower, aabb_upper = compute_tight_aabb_from_support(
-        generic_shape_data, orientation_in_mesh, pos_in_mesh, data_provider
-    )
+        data_provider = SupportMapDataProvider()
+        aabb_lower, aabb_upper = compute_tight_aabb_from_support(
+            generic_shape_data, orientation_in_mesh, pos_in_mesh, data_provider
+        )
 
     # Add small margin for contact detection
     margin_vec = wp.vec3(rigid_gap, rigid_gap, rigid_gap)

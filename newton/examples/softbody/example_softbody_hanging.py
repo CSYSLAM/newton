@@ -98,7 +98,8 @@ class Example:
             self.graph = None
 
     def simulate(self):
-        for _ in range(self.sim_substeps):
+        for _ in range(2):
+        # for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
 
             # apply forces to the model

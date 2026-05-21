@@ -8,6 +8,7 @@ from typing import Literal
 import numpy as np
 import warp as wp
 
+from ..geometry.broad_phase_bvh import BroadPhaseBvh
 from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
 from ..geometry.collision_core import compute_tight_aabb_from_support
@@ -417,7 +418,7 @@ def _compute_per_world_shape_pairs_max(model: Model) -> int:
     return max(0, total)
 
 
-BROAD_PHASE_MODES = ("nxn", "sap", "explicit")
+BROAD_PHASE_MODES = ("nxn", "sap", "bvh", "explicit")
 
 
 def _normalize_broad_phase_mode(mode: str) -> str:
@@ -427,15 +428,17 @@ def _normalize_broad_phase_mode(mode: str) -> str:
     return mode_str
 
 
-def _infer_broad_phase_mode_from_instance(broad_phase: BroadPhaseAllPairs | BroadPhaseSAP | BroadPhaseExplicit) -> str:
+def _infer_broad_phase_mode_from_instance(broad_phase: BroadPhaseAllPairs | BroadPhaseSAP | BroadPhaseBvh | BroadPhaseExplicit) -> str:
     if isinstance(broad_phase, BroadPhaseAllPairs):
         return "nxn"
     if isinstance(broad_phase, BroadPhaseSAP):
         return "sap"
+    if isinstance(broad_phase, BroadPhaseBvh):
+        return "bvh"
     if isinstance(broad_phase, BroadPhaseExplicit):
         return "explicit"
     raise TypeError(
-        "broad_phase must be a BroadPhaseAllPairs, BroadPhaseSAP, or BroadPhaseExplicit instance "
+        "broad_phase must be a BroadPhaseAllPairs, BroadPhaseSAP, BroadPhaseBvh, or BroadPhaseExplicit instance "
         f"(got {type(broad_phase)!r})"
     )
 
@@ -470,7 +473,7 @@ class CollisionPipeline:
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
         requires_grad: bool | None = None,
-        broad_phase: Literal["nxn", "sap", "explicit"]
+        broad_phase: Literal["nxn", "sap", "bvh", "explicit"]
         | BroadPhaseAllPairs
         | BroadPhaseSAP
         | BroadPhaseExplicit
@@ -505,7 +508,7 @@ class CollisionPipeline:
             soft_contact_margin: Margin for soft contact generation. Defaults to 0.01.
             requires_grad: Whether to enable gradient computation. If None, uses model.requires_grad.
             broad_phase:
-                Either a broad phase mode string ("explicit", "nxn", "sap") or
+                Either a broad phase mode string ("explicit", "nxn", "sap", "bvh") or
                 a prebuilt broad phase instance for expert usage.
             narrow_phase: Optional prebuilt narrow phase instance. Must be
                 provided together with a broad phase instance for expert usage.
@@ -684,6 +687,16 @@ class CollisionPipeline:
                 if shape_world is None:
                     raise ValueError("model.shape_world is required for broad_phase=SAP")
                 self.broad_phase = BroadPhaseSAP(shape_world, shape_flags=shape_flags, device=device)
+                self.shape_pairs_filtered = None
+                self.shape_pairs_max = _compute_per_world_shape_pairs_max(model)
+                self.shape_pairs_excluded = self._build_excluded_pairs(model)
+                self.shape_pairs_excluded_count = (
+                    self.shape_pairs_excluded.shape[0] if self.shape_pairs_excluded is not None else 0
+                )
+            elif self.broad_phase_mode == "bvh":
+                if shape_world is None:
+                    raise ValueError("model.shape_world is required for broad_phase=BVH")
+                self.broad_phase = BroadPhaseBvh(shape_world, shape_flags=shape_flags, device=device)
                 self.shape_pairs_filtered = None
                 self.shape_pairs_max = _compute_per_world_shape_pairs_max(model)
                 self.shape_pairs_excluded = self._build_excluded_pairs(model)
@@ -951,6 +964,21 @@ class CollisionPipeline:
                 skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
             )
         elif isinstance(self.broad_phase, BroadPhaseSAP):
+            self.broad_phase.launch(
+                self.narrow_phase.shape_aabb_lower,
+                self.narrow_phase.shape_aabb_upper,
+                None,  # AABBs are pre-expanded, no additional margin needed
+                model.shape_collision_group,
+                model.shape_world,
+                model.shape_count,
+                self.broad_phase_shape_pairs,
+                self.broad_phase_pair_count,
+                device=self.device,
+                filter_pairs=self.shape_pairs_excluded,
+                num_filter_pairs=self.shape_pairs_excluded_count,
+                skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
+            )
+        elif isinstance(self.broad_phase, BroadPhaseBvh):
             self.broad_phase.launch(
                 self.narrow_phase.shape_aabb_lower,
                 self.narrow_phase.shape_aabb_upper,

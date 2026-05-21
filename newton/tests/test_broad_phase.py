@@ -8,7 +8,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.geometry.flags import ShapeFlags
-from newton.geometry import BroadPhaseAllPairs, BroadPhaseExplicit, BroadPhaseSAP
+from newton.geometry import BroadPhaseAllPairs, BroadPhaseBvh, BroadPhaseExplicit, BroadPhaseSAP
 
 # NOTE: The test_group_pair and test_world_and_group_pair functions below are copied
 # from newton._src.geometry.broad_phase_common because they need to be available as
@@ -2115,6 +2115,203 @@ class TestBroadPhase(unittest.TestCase):
 
         self.assertTrue(has_sphere_b_ground, "SAP: Sphere B (large margin) should overlap ground")
         self.assertFalse(has_sphere_a_ground, "SAP: Sphere A (small margin) should NOT overlap ground")
+
+    def test_bvh_broadphase(self):
+        """Test BVH broad phase against numpy ground truth."""
+        ngeom = 30
+        rng = np.random.Generator(np.random.PCG64(42))
+
+        centers = rng.random((ngeom, 3)) * 3.0
+        sizes = rng.random((ngeom, 3)) * 2.0
+        geom_bounding_box_lower = centers - sizes
+        geom_bounding_box_upper = centers + sizes
+
+        np_geom_cutoff = np.zeros(ngeom, dtype=np.float32)
+        num_groups = 5
+        np_collision_group = rng.integers(1, num_groups + 1, size=ngeom, dtype=np.int32)
+        minus_one_count = int(sqrt(ngeom))
+        random_indices = rng.choice(ngeom, size=minus_one_count, replace=False)
+        np_collision_group[random_indices] = -1
+
+        pairs_np = find_overlapping_pairs_np(
+            geom_bounding_box_lower, geom_bounding_box_upper, np_geom_cutoff, np_collision_group
+        )
+
+        num_lower_tri_elements = ngeom * (ngeom - 1) // 2
+        geom_lower = wp.array(geom_bounding_box_lower, dtype=wp.vec3)
+        geom_upper = wp.array(geom_bounding_box_upper, dtype=wp.vec3)
+        geom_cutoff = wp.array(np_geom_cutoff)
+        collision_group = wp.array(np_collision_group)
+        shape_world = wp.array(np.full(ngeom, 0, dtype=np.int32), dtype=wp.int32)
+        candidate_pair_count = wp.array([0], dtype=wp.int32)
+        candidate_pair = wp.array(np.zeros((num_lower_tri_elements, 2), dtype=np.int32), dtype=wp.vec2i)
+
+        bvh_broadphase = BroadPhaseBvh(shape_world)
+        bvh_broadphase.launch(
+            geom_lower,
+            geom_upper,
+            geom_cutoff,
+            collision_group,
+            shape_world,
+            ngeom,
+            candidate_pair,
+            candidate_pair_count,
+        )
+
+        pairs_wp = candidate_pair.numpy()
+        count = candidate_pair_count.numpy()[0]
+
+        self.assertEqual(len(pairs_np), count)
+        pairs_np_set = {tuple(pair) for pair in pairs_np}
+        for pair in pairs_wp[:count]:
+            self.assertIn(tuple(pair), pairs_np_set)
+
+    def test_bvh_broadphase_multiple_worlds(self):
+        """Test BVH broad phase with multiple worlds."""
+        ngeom = 50
+        world_count = 4
+        rng = np.random.Generator(np.random.PCG64(123))
+
+        centers = rng.random((ngeom, 3)) * 5.0
+        sizes = rng.random((ngeom, 3)) * 1.5
+        geom_bounding_box_lower = centers - sizes
+        geom_bounding_box_upper = centers + sizes
+
+        np_geom_cutoff = np.zeros(ngeom, dtype=np.float32)
+        num_groups = 5
+        np_collision_group = rng.integers(1, num_groups + 1, size=ngeom, dtype=np.int32)
+        num_shared = int(sqrt(ngeom))
+        shared_indices = rng.choice(ngeom, size=num_shared, replace=False)
+        np_collision_group[shared_indices] = -1
+
+        np_shape_world = rng.integers(0, world_count, size=ngeom, dtype=np.int32)
+        num_global = max(3, ngeom // 10)
+        global_indices = rng.choice(ngeom, size=num_global, replace=False)
+        np_shape_world[global_indices] = -1
+
+        pairs_np = find_overlapping_pairs_np(
+            geom_bounding_box_lower, geom_bounding_box_upper, np_geom_cutoff, np_collision_group, np_shape_world
+        )
+
+        num_lower_tri_elements = ngeom * (ngeom - 1) // 2
+        geom_lower = wp.array(geom_bounding_box_lower, dtype=wp.vec3)
+        geom_upper = wp.array(geom_bounding_box_upper, dtype=wp.vec3)
+        geom_cutoff = wp.array(np_geom_cutoff)
+        collision_group = wp.array(np_collision_group)
+        shape_world = wp.array(np_shape_world, dtype=wp.int32)
+        candidate_pair_count = wp.array([0], dtype=wp.int32)
+        candidate_pair = wp.array(np.zeros((num_lower_tri_elements, 2), dtype=np.int32), dtype=wp.vec2i)
+
+        bvh_broadphase = BroadPhaseBvh(shape_world)
+        bvh_broadphase.launch(
+            geom_lower,
+            geom_upper,
+            geom_cutoff,
+            collision_group,
+            shape_world,
+            ngeom,
+            candidate_pair,
+            candidate_pair_count,
+        )
+
+        pairs_wp = candidate_pair.numpy()
+        count = candidate_pair_count.numpy()[0]
+
+        self.assertEqual(len(pairs_np), count)
+        pairs_np_set = {tuple(pair) for pair in pairs_np}
+        for pair in pairs_wp[:count]:
+            self.assertIn(tuple(pair), pairs_np_set)
+
+    def test_bvh_broadphase_consistency_with_nxn(self):
+        """Cross-validate BVH broad phase against NxN on the same input."""
+        ngeom = 40
+        rng = np.random.Generator(np.random.PCG64(777))
+
+        centers = rng.random((ngeom, 3)) * 4.0
+        sizes = rng.random((ngeom, 3)) * 1.5
+        geom_bounding_box_lower = centers - sizes
+        geom_bounding_box_upper = centers + sizes
+
+        np_geom_cutoff = np.zeros(ngeom, dtype=np.float32)
+        num_groups = 4
+        np_collision_group = rng.integers(1, num_groups + 1, size=ngeom, dtype=np.int32)
+        np_shape_world = rng.integers(0, 3, size=ngeom, dtype=np.int32)
+        num_global = 5
+        global_indices = rng.choice(ngeom, size=num_global, replace=False)
+        np_shape_world[global_indices] = -1
+
+        num_lower_tri_elements = ngeom * (ngeom - 1) // 2
+        geom_lower = wp.array(geom_bounding_box_lower, dtype=wp.vec3)
+        geom_upper = wp.array(geom_bounding_box_upper, dtype=wp.vec3)
+        geom_cutoff = wp.array(np_geom_cutoff)
+        collision_group = wp.array(np_collision_group)
+        shape_world = wp.array(np_shape_world, dtype=wp.int32)
+
+        # NxN result
+        nxn_pairs = wp.zeros(num_lower_tri_elements, dtype=wp.vec2i)
+        nxn_count = wp.zeros(1, dtype=wp.int32)
+        nxn_bp = BroadPhaseAllPairs(shape_world)
+        nxn_bp.launch(geom_lower, geom_upper, geom_cutoff, collision_group, shape_world, ngeom, nxn_pairs, nxn_count)
+
+        # BVH result
+        bvh_pairs = wp.zeros(num_lower_tri_elements, dtype=wp.vec2i)
+        bvh_count = wp.zeros(1, dtype=wp.int32)
+        bvh_bp = BroadPhaseBvh(shape_world)
+        bvh_bp.launch(geom_lower, geom_upper, geom_cutoff, collision_group, shape_world, ngeom, bvh_pairs, bvh_count)
+
+        nxn_result = set(tuple(p) for p in nxn_pairs.numpy()[: nxn_count.numpy()[0]])
+        bvh_result = set(tuple(p) for p in bvh_pairs.numpy()[: bvh_count.numpy()[0]])
+
+        self.assertEqual(nxn_result, bvh_result)
+
+    def test_bvh_broadphase_refit(self):
+        """Test that BVH refit produces correct results after AABB changes."""
+        ngeom = 20
+        rng = np.random.Generator(np.random.PCG64(42))
+
+        # Initial positions
+        centers = rng.random((ngeom, 3)) * 3.0
+        sizes = rng.random((ngeom, 3)) * 0.5
+        geom_lower = centers - sizes
+        geom_upper = centers + sizes
+
+        np_geom_cutoff = np.zeros(ngeom, dtype=np.float32)
+        np_collision_group = np.ones(ngeom, dtype=np.int32)
+        np_shape_world = np.zeros(ngeom, dtype=np.int32)
+
+        num_lower_tri_elements = ngeom * (ngeom - 1) // 2
+        shape_world = wp.array(np_shape_world, dtype=wp.int32)
+        collision_group = wp.array(np_collision_group)
+        geom_cutoff = wp.array(np_geom_cutoff)
+
+        bvh_bp = BroadPhaseBvh(shape_world)
+
+        # Frame 1: build BVH
+        lower1 = wp.array(geom_lower, dtype=wp.vec3)
+        upper1 = wp.array(geom_upper, dtype=wp.vec3)
+        pairs1 = wp.zeros(num_lower_tri_elements, dtype=wp.vec2i)
+        count1 = wp.zeros(1, dtype=wp.int32)
+        bvh_bp.launch(lower1, upper1, geom_cutoff, collision_group, shape_world, ngeom, pairs1, count1)
+
+        # Move objects and refit
+        centers += rng.random((ngeom, 3)) * 0.5
+        geom_lower2 = centers - sizes
+        geom_upper2 = centers + sizes
+
+        lower2 = wp.array(geom_lower2, dtype=wp.vec3)
+        upper2 = wp.array(geom_upper2, dtype=wp.vec3)
+        pairs2 = wp.zeros(num_lower_tri_elements, dtype=wp.vec2i)
+        count2 = wp.zeros(1, dtype=wp.int32)
+        bvh_bp.launch(lower2, upper2, geom_cutoff, collision_group, shape_world, ngeom, pairs2, count2)
+
+        # Verify against numpy ground truth for frame 2
+        pairs_np = find_overlapping_pairs_np(
+            geom_lower2, geom_upper2, np_geom_cutoff, np_collision_group, np_shape_world
+        )
+        bvh_result = set(tuple(p) for p in pairs2.numpy()[: count2.numpy()[0]])
+        np_result = set(tuple(p) for p in pairs_np)
+
+        self.assertEqual(bvh_result, np_result)
 
 
 if __name__ == "__main__":

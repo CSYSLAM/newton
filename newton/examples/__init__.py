@@ -493,7 +493,7 @@ def add_broad_phase_arg(parser):
         "--broad-phase",
         type=str,
         default="explicit",
-        choices=["nxn", "sap", "explicit"],
+        choices=["nxn", "sap", "bvh", "explicit"],
         help="Broad phase for collision detection.",
     )
     return parser

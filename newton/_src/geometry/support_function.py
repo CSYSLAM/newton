@@ -47,14 +47,14 @@ class GeoTypeEx(enum.IntEnum):
 
 @wp.struct
 class SupportMapDataProvider:
-    """
-    Placeholder for data access needed by support mapping (e.g., mesh buffers).
-    Extend with fields as required by your shapes.
-    Not needed for Newton but can be helpful for projects like MuJoCo Warp where
-    the convex hull data is stored in warp arrays that would bloat the GenericShapeData struct.
-    """
+    """Provider for support map data including adjacency info for hill-climbing."""
 
-    pass
+    # Per-shape offset into vertex adjacency arrays (-1 if not available).
+    shape_adj_offset: int
+    # Number of vertices in this convex mesh (0 if not a convex mesh).
+    shape_vertex_count: int
+    # Warm-start: previous best vertex index for this shape (-1 = cold start).
+    prev_best_vertex: int
 
 
 @wp.func
@@ -103,8 +103,92 @@ class GenericShapeData:
     auxiliary: wp.vec3
 
 
+MAX_HILL_CLIMB_STEPS = 16
+
+
 @wp.func
-def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: SupportMapDataProvider) -> wp.vec3:
+def _support_map_convex_hill_climb(
+    mesh_ptr: wp.uint64,
+    mesh_scale: wp.vec3,
+    direction: wp.vec3,
+    prev_best_vertex: int,
+    vertex_adj_offsets: wp.array[int],
+    vertex_adj_vertices: wp.array[int],
+    shape_adj_offset: int,
+    shape_vertex_count: int,
+) -> tuple[wp.vec3, int]:
+    """
+    Compute the support point of a convex mesh using hill-climbing.
+
+    If ``prev_best_vertex >= 0``, starts from that vertex and climbs the
+    adjacency graph.  Otherwise, falls back to brute-force O(N) scan.
+
+    Args:
+        mesh_ptr: Packed mesh pointer from ``pack_mesh_ptr``.
+        mesh_scale: Per-axis scale for the mesh.
+        direction: Query direction in local frame.
+        prev_best_vertex: Warm-start hint (-1 for cold start).
+        vertex_adj_offsets: CSR offsets for vertex adjacency.
+        vertex_adj_vertices: CSR neighbors for vertex adjacency.
+        shape_adj_offset: Offset into vertex_adj_offsets for this shape.
+        shape_vertex_count: Number of vertices in this convex mesh.
+
+    Returns:
+        Tuple of (support_point, best_vertex_index).
+    """
+    mesh = wp.mesh_get(mesh_ptr)
+
+    # Pre-scale direction: dot(scale*v, d) == dot(v, scale*d)
+    scaled_dir = wp.cw_mul(direction, mesh_scale)
+
+    best_idx = int(0)
+    best_dot = float(-1.0e10)
+
+    if prev_best_vertex >= 0 and prev_best_vertex < shape_vertex_count and shape_adj_offset >= 0:
+        # Warm start: hill-climb from prev_best_vertex
+        current = prev_best_vertex
+        current_dot = wp.dot(mesh.points[current], scaled_dir)
+
+        for _step in range(MAX_HILL_CLIMB_STEPS):
+            # Check all neighbors of current vertex
+            improved = False
+            adj_start = vertex_adj_offsets[shape_adj_offset + current]
+            adj_end = vertex_adj_offsets[shape_adj_offset + current + 1]
+
+            for k in range(adj_start, adj_end):
+                neighbor = vertex_adj_vertices[k] - shape_adj_offset
+                if neighbor < 0 or neighbor >= shape_vertex_count:
+                    continue
+                neighbor_dot = wp.dot(mesh.points[neighbor], scaled_dir)
+                if neighbor_dot > current_dot:
+                    current = neighbor
+                    current_dot = neighbor_dot
+                    improved = True
+
+            if not improved:
+                break
+
+        best_idx = current
+        best_dot = current_dot
+    else:
+        # Cold start: brute-force O(N) scan
+        num_verts = mesh.points.shape[0]
+        for i in range(num_verts):
+            dot_val = wp.dot(mesh.points[i], scaled_dir)
+            if dot_val > best_dot:
+                best_dot = dot_val
+                best_idx = i
+
+    result = wp.cw_mul(mesh.points[best_idx], mesh_scale)
+    return result, best_idx
+
+
+@wp.func
+def support_map(
+    geom: GenericShapeData,
+    direction: wp.vec3,
+    data_provider: SupportMapDataProvider,
+) -> wp.vec3:
     """
     Return the support point of a primitive in its local frame.
 
@@ -127,17 +211,15 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
     if geom.shape_type == GeoType.CONVEX_MESH:
         # Convex hull support: find the furthest point in the direction
         mesh_ptr = unpack_mesh_ptr(geom.auxiliary)
-        mesh = wp.mesh_get(mesh_ptr)
-
         mesh_scale = geom.scale
-        num_verts = mesh.points.shape[0]
 
-        # Pre-scale direction: dot(scale*v, d) == dot(v, scale*d)
-        # This moves the per-vertex cw_mul out of the loop (only 1 at the end)
+        # Hill-climbing is disabled for now - adjacency arrays not threaded through pipeline
+        # Use brute-force O(N) scan
+        mesh = wp.mesh_get(mesh_ptr)
         scaled_dir = wp.cw_mul(direction, mesh_scale)
-
         max_dot = float(-1.0e10)
         best_idx = int(0)
+        num_verts = mesh.points.shape[0]
         for i in range(num_verts):
             dot_val = wp.dot(mesh.points[i], scaled_dir)
             if dot_val > max_dot:
@@ -305,7 +387,11 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
 
 
 @wp.func
-def support_map_lean(geom: GenericShapeData, direction: wp.vec3, data_provider: SupportMapDataProvider) -> wp.vec3:
+def support_map_lean(
+    geom: GenericShapeData,
+    direction: wp.vec3,
+    data_provider: SupportMapDataProvider,
+) -> wp.vec3:
     """
     Lean support function for common shape types only: CONVEX_MESH, BOX, SPHERE.
 

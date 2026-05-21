@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from .broad_phase_common import test_group_pair, test_world_and_group_pair
+from .broad_phase_bvh import BroadPhaseBvh
 from .broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from .broad_phase_sap import BroadPhaseSAP
 from .collision_primitive import (
@@ -37,6 +38,7 @@ __all__ = [
     "MATCH_NOT_FOUND",
     "SDF",
     "BroadPhaseAllPairs",
+    "BroadPhaseBvh",
     "BroadPhaseExplicit",
     "BroadPhaseSAP",
     "Gaussian",

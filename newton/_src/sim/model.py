@@ -292,6 +292,18 @@ class Model:
         self.shape_edge_range: wp.array[wp.vec2i] | None = None
         """Per-shape (start, count) into mesh_edge_indices, shape [shape_count]. (-1,0) if no edges."""
 
+        # Vertex adjacency for convex mesh support function hill-climbing (CSR format)
+        self.vertex_adj_offsets: wp.array[wp.int32] | None = None
+        """Concatenated CSR offset array for vertex adjacency, shape [total_convex_mesh_vertices + num_convex_shapes]."""
+        self.vertex_adj_vertices: wp.array[wp.int32] | None = None
+        """Concatenated CSR neighbor array for vertex adjacency, shape [total_adj_entries]."""
+        self.shape_adj_offset: wp.array[wp.int32] | None = None
+        """Per-shape offset into vertex_adj_offsets, shape [shape_count]. -1 for non-convex shapes."""
+        self.shape_vertex_count: wp.array[wp.int32] | None = None
+        """Per-shape vertex count for convex meshes, shape [shape_count]. 0 for non-convex shapes."""
+        self.total_convex_mesh_vertices: int = 0
+        """Total number of vertices across all convex mesh shapes."""
+
         # SDF storage (compact table + per-shape index indirection)
         self.shape_sdf_index: wp.array[wp.int32] | None = None
         """Per-shape SDF index, shape [shape_count]. -1 means shape has no SDF."""

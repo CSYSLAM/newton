@@ -10198,6 +10198,7 @@ class ModelBuilder:
 
             # ---------------------
             # mesh edges (packed array + per-shape slice)
+            # Also includes CONVEX_MESH shapes for support function hill-climbing.
 
             shape_edge_ranges = []
             edge_chunks = []
@@ -10206,7 +10207,7 @@ class ModelBuilder:
 
             for i in range(len(self.shape_type)):
                 if (
-                    self.shape_type[i] == GeoType.MESH
+                    (self.shape_type[i] == GeoType.MESH or self.shape_type[i] == GeoType.CONVEX_MESH)
                     and self.shape_source[i] is not None
                     and (self.shape_flags[i] & ShapeFlags.COLLIDE_SHAPES)
                 ):
@@ -10236,6 +10237,107 @@ class ModelBuilder:
                 if edge_chunks
                 else wp.zeros(1, dtype=wp.vec2i, device=device)
             )
+
+            # ---------------------
+            # vertex adjacency for convex mesh support function hill-climbing
+            # CSR format: vertex_adj_offsets[num_verts+1] + vertex_adj_vertices[total_adj]
+            # Also per-shape vertex count for indexing into the adjacency arrays.
+
+            shape_vertex_count = []
+            adj_offset_chunks = []
+            adj_vertex_chunks = []
+            adj_cache = {}  # mesh python id → (vertex_count, adj_offsets, adj_vertices)
+
+            for i in range(len(self.shape_type)):
+                if (
+                    self.shape_type[i] == GeoType.CONVEX_MESH
+                    and self.shape_source[i] is not None
+                    and (self.shape_flags[i] & ShapeFlags.COLLIDE_SHAPES)
+                ):
+                    mesh = self.shape_source[i]
+                    mesh_key = id(mesh)
+                    if mesh_key in adj_cache:
+                        vc, ao, av = adj_cache[mesh_key]
+                        shape_vertex_count.append(vc)
+                        adj_offset_chunks.append(ao)
+                        adj_vertex_chunks.append(av)
+                    else:
+                        edges = mesh.edges  # (E, 2) array of vertex pairs
+                        num_verts = len(mesh.vertices)
+                        # Build adjacency list from edges
+                        adj_list = [[] for _ in range(num_verts)]
+                        for e0, e1 in edges:
+                            adj_list[e0].append(e1)
+                            adj_list[e1].append(e0)
+                        # Convert to CSR format
+                        adj_offsets = np.zeros(num_verts + 1, dtype=np.int32)
+                        adj_vertices_list = []
+                        offset = 0
+                        for v in range(num_verts):
+                            neighbors = adj_list[v]
+                            adj_offsets[v] = offset
+                            adj_vertices_list.extend(neighbors)
+                            offset += len(neighbors)
+                        adj_offsets[num_verts] = offset
+                        adj_vertices = np.array(adj_vertices_list, dtype=np.int32)
+
+                        adj_cache[mesh_key] = (num_verts, adj_offsets, adj_vertices)
+                        shape_vertex_count.append(num_verts)
+                        adj_offset_chunks.append(adj_offsets)
+                        adj_vertex_chunks.append(adj_vertices)
+                else:
+                    shape_vertex_count.append(0)
+
+            m.shape_vertex_count = wp.array(
+                shape_vertex_count if shape_vertex_count else [0],
+                dtype=wp.int32,
+                device=device,
+            )
+            if adj_offset_chunks:
+                # Concatenate adjacency data with per-shape offsets
+                # We need to adjust the vertex_adj_offsets for each shape since
+                # the adjacency arrays are concatenated.
+                all_adj_offsets = []
+                all_adj_vertices = []
+                m.shape_adj_offset = []  # Per-shape offset into concatenated arrays
+                vertex_offset = 0
+                adj_vertex_offset = 0
+                for i in range(len(self.shape_type)):
+                    if (
+                        self.shape_type[i] == GeoType.CONVEX_MESH
+                        and self.shape_source[i] is not None
+                        and (self.shape_flags[i] & ShapeFlags.COLLIDE_SHAPES)
+                    ):
+                        mesh = self.shape_source[i]
+                        mesh_key = id(mesh)
+                        vc, ao, av = adj_cache[mesh_key]
+                        m.shape_adj_offset.append(vertex_offset)
+                        # Adjust offsets: add adj_vertex_offset to each entry
+                        adjusted_offsets = ao + adj_vertex_offset
+                        # Also adjust vertex indices in adj_vertices by adding vertex_offset
+                        adjusted_vertices = av + vertex_offset
+                        all_adj_offsets.append(adjusted_offsets)
+                        all_adj_vertices.append(adjusted_vertices)
+                        vertex_offset += vc
+                        adj_vertex_offset += len(av)
+                    else:
+                        m.shape_adj_offset.append(-1)
+
+                m.vertex_adj_offsets = wp.array(
+                    np.concatenate(all_adj_offsets), dtype=wp.int32, device=device
+                )
+                m.vertex_adj_vertices = wp.array(
+                    np.concatenate(all_adj_vertices), dtype=wp.int32, device=device
+                )
+                m.shape_adj_offset = wp.array(
+                    m.shape_adj_offset, dtype=wp.int32, device=device
+                )
+                m.total_convex_mesh_vertices = vertex_offset
+            else:
+                m.vertex_adj_offsets = wp.zeros(1, dtype=wp.int32, device=device)
+                m.vertex_adj_vertices = wp.zeros(1, dtype=wp.int32, device=device)
+                m.shape_adj_offset = wp.array([-1], dtype=wp.int32, device=device)
+                m.total_convex_mesh_vertices = 0
 
             # ---------------------
             # springs

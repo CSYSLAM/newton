@@ -786,6 +786,8 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
     shape_gap: wp.array[float],  # Per-shape contact gaps
     shape_data: wp.array[wp.vec4],  # Shape data (scale xyz, margin w)
     shape_collision_radius: wp.array[float],
+    shape_collision_aabb_lower: wp.array[wp.vec3],  # Precomputed local AABB lower bounds
+    shape_collision_aabb_upper: wp.array[wp.vec3],  # Precomputed local AABB upper bounds
     shape_heightfield_index: wp.array[wp.int32],
     heightfield_data: wp.array[HeightfieldData],
     shape_pairs_mesh: wp.array[wp.vec2i],
@@ -880,6 +882,8 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
             shape_types,
             shape_data,
             shape_source,
+            shape_collision_aabb_lower,
+            shape_collision_aabb_upper,
             gap_sum,
             triangle_pairs,
             triangle_pairs_count,
@@ -1864,6 +1868,8 @@ class NarrowPhase:
                     shape_gap,
                     shape_data,
                     shape_collision_radius,
+                    shape_collision_aabb_lower,
+                    shape_collision_aabb_upper,
                     shape_heightfield_index,
                     heightfield_data,
                     self.shape_pairs_mesh,
