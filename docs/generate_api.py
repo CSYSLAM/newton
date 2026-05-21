@@ -118,6 +118,15 @@ def solver_submodule_pages() -> list[str]:
 
         public_name = f"newton.solvers.{info.name}"
         modules.append(public_name)
+
+    for name in public_symbols(public_solvers):
+        attr = getattr(public_solvers, name)
+        if not inspect.ismodule(attr):
+            continue
+        public_name = f"newton.solvers.{name}"
+        if public_name not in modules:
+            modules.append(public_name)
+
     return modules
 
 
@@ -243,7 +252,7 @@ def write_module_page(mod_name: str) -> None:
     if classes:
         classes.sort()
         lines.extend([".. rubric:: Classes", ""])
-        if uses_internal_solver_module:
+        if uses_internal_solver_module or is_solver_submodule:
             for cls in classes:
                 lines.extend([f".. autoclass:: {cls}", ""])
         else:
@@ -261,7 +270,7 @@ def write_module_page(mod_name: str) -> None:
     if functions:
         functions.sort()
         lines.extend([".. rubric:: Functions", ""])
-        if uses_internal_solver_module:
+        if uses_internal_solver_module or is_solver_submodule:
             for fn in functions:
                 lines.extend([f".. autofunction:: {fn}", ""])
         else:
