@@ -149,9 +149,9 @@ def _support_map_convex_hill_climb(
         current = prev_best_vertex
         current_dot = wp.dot(mesh.points[current], scaled_dir)
 
-        for _step in range(MAX_HILL_CLIMB_STEPS):
+        for _step in range(16):
             # Check all neighbors of current vertex
-            improved = False
+            improved = int(0)
             adj_start = vertex_adj_offsets[shape_adj_offset + current]
             adj_end = vertex_adj_offsets[shape_adj_offset + current + 1]
 
@@ -163,9 +163,9 @@ def _support_map_convex_hill_climb(
                 if neighbor_dot > current_dot:
                     current = neighbor
                     current_dot = neighbor_dot
-                    improved = True
+                    improved = int(1)
 
-            if not improved:
+            if improved == 0:
                 break
 
         best_idx = current
@@ -188,6 +188,8 @@ def support_map(
     geom: GenericShapeData,
     direction: wp.vec3,
     data_provider: SupportMapDataProvider,
+    vertex_adj_offsets: wp.array[int],
+    vertex_adj_vertices: wp.array[int],
 ) -> wp.vec3:
     """
     Return the support point of a primitive in its local frame.
@@ -213,19 +215,31 @@ def support_map(
         mesh_ptr = unpack_mesh_ptr(geom.auxiliary)
         mesh_scale = geom.scale
 
-        # Hill-climbing is disabled for now - adjacency arrays not threaded through pipeline
-        # Use brute-force O(N) scan
-        mesh = wp.mesh_get(mesh_ptr)
-        scaled_dir = wp.cw_mul(direction, mesh_scale)
-        max_dot = float(-1.0e10)
-        best_idx = int(0)
-        num_verts = mesh.points.shape[0]
-        for i in range(num_verts):
-            dot_val = wp.dot(mesh.points[i], scaled_dir)
-            if dot_val > max_dot:
-                max_dot = dot_val
-                best_idx = i
-        result = wp.cw_mul(mesh.points[best_idx], mesh_scale)
+        # Use hill-climbing if adjacency data is available
+        if data_provider.shape_vertex_count > 0 and data_provider.shape_adj_offset >= 0:
+            result, _best_idx = _support_map_convex_hill_climb(
+                mesh_ptr,
+                mesh_scale,
+                direction,
+                data_provider.prev_best_vertex,
+                vertex_adj_offsets,
+                vertex_adj_vertices,
+                data_provider.shape_adj_offset,
+                data_provider.shape_vertex_count,
+            )
+        else:
+            # Fallback: brute-force O(N) scan
+            mesh = wp.mesh_get(mesh_ptr)
+            scaled_dir = wp.cw_mul(direction, mesh_scale)
+            max_dot = float(-1.0e10)
+            best_idx = int(0)
+            num_verts = mesh.points.shape[0]
+            for i in range(num_verts):
+                dot_val = wp.dot(mesh.points[i], scaled_dir)
+                if dot_val > max_dot:
+                    max_dot = dot_val
+                    best_idx = i
+            result = wp.cw_mul(mesh.points[best_idx], mesh_scale)
 
     elif geom.shape_type == GeoTypeEx.TRIANGLE or geom.shape_type == GeoTypeEx.TRIANGLE_PRISM:
         # Triangle vertices: a at origin, b at scale, c at auxiliary
@@ -391,6 +405,8 @@ def support_map_lean(
     geom: GenericShapeData,
     direction: wp.vec3,
     data_provider: SupportMapDataProvider,
+    vertex_adj_offsets: wp.array[int],
+    vertex_adj_vertices: wp.array[int],
 ) -> wp.vec3:
     """
     Lean support function for common shape types only: CONVEX_MESH, BOX, SPHERE.
@@ -403,16 +419,32 @@ def support_map_lean(
 
     if geom.shape_type == GeoType.CONVEX_MESH:
         mesh_ptr = unpack_mesh_ptr(geom.auxiliary)
-        mesh = wp.mesh_get(mesh_ptr)
-        scaled_dir = wp.cw_mul(direction, geom.scale)
-        max_dot = float(-1.0e10)
-        best_idx = int(0)
-        for i in range(mesh.points.shape[0]):
-            dot_val = wp.dot(mesh.points[i], scaled_dir)
-            if dot_val > max_dot:
-                max_dot = dot_val
-                best_idx = i
-        result = wp.cw_mul(mesh.points[best_idx], geom.scale)
+        mesh_scale = geom.scale
+
+        # Use hill-climbing if adjacency data is available
+        if data_provider.shape_vertex_count > 0 and data_provider.shape_adj_offset >= 0:
+            result, _best_idx = _support_map_convex_hill_climb(
+                mesh_ptr,
+                mesh_scale,
+                direction,
+                data_provider.prev_best_vertex,
+                vertex_adj_offsets,
+                vertex_adj_vertices,
+                data_provider.shape_adj_offset,
+                data_provider.shape_vertex_count,
+            )
+        else:
+            # Fallback: brute-force O(N) scan
+            mesh = wp.mesh_get(mesh_ptr)
+            scaled_dir = wp.cw_mul(direction, mesh_scale)
+            max_dot = float(-1.0e10)
+            best_idx = int(0)
+            for i in range(mesh.points.shape[0]):
+                dot_val = wp.dot(mesh.points[i], scaled_dir)
+                if dot_val > max_dot:
+                    max_dot = dot_val
+                    best_idx = i
+            result = wp.cw_mul(mesh.points[best_idx], mesh_scale)
 
     elif geom.shape_type == GeoType.BOX:
         threshold = BOX_SUPPORT_DEADBAND * wp.length(direction)

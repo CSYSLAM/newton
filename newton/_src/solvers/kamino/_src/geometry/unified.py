@@ -333,6 +333,8 @@ def _update_geom_poses_and_compute_aabbs(
     geom_gap: wp.array(dtype=float32),
     shape_collision_radius: wp.array(dtype=float32),
     body_pose: wp.array(dtype=transformf),
+    vertex_adj_offsets: wp.array(dtype=int32),
+    vertex_adj_vertices: wp.array(dtype=int32),
     # Outputs:
     geom_pose: wp.array(dtype=transformf),
     shape_aabb_lower: wp.array(dtype=vec3f),
@@ -397,7 +399,12 @@ def _update_geom_poses_and_compute_aabbs(
 
         # Compute tight AABB using helper function
         data_provider = SupportMapDataProvider()
-        aabb_min_world, aabb_max_world = compute_tight_aabb_from_support(shape_data, q_g, r_g, data_provider)
+        data_provider.shape_adj_offset = -1
+        data_provider.shape_vertex_count = 0
+        data_provider.prev_best_vertex = -1
+        aabb_min_world, aabb_max_world = compute_tight_aabb_from_support(
+            shape_data, q_g, r_g, data_provider, vertex_adj_offsets, vertex_adj_vertices
+        )
         aabb_lower = aabb_min_world - margin_vec
         aabb_upper = aabb_max_world + margin_vec
 
@@ -544,6 +551,7 @@ class CollisionPipelineUnifiedKamino:
             self.narrow_phase_contact_count = wp.zeros(1, dtype=int32)
             self.shape_sdf_data = wp.empty(shape=(0,), dtype=TextureSDFData)
             self.shape_sdf_index = wp.full_like(self.geom_type, -1)
+            self._empty_int_array = wp.zeros(1, dtype=wp.int32)
 
         # Wire mesh / heightfield data from the model when explicit shapes exist;
         # otherwise use empty placeholder arrays that satisfy the narrow-phase interface.
@@ -711,6 +719,8 @@ class CollisionPipelineUnifiedKamino:
                 self._model.geoms.gap,
                 self.collision_radius,
                 state.q_i,
+                self._model.geoms.vertex_adj_offsets if self._model.geoms.vertex_adj_offsets is not None else self._empty_int_array,
+                self._model.geoms.vertex_adj_vertices if self._model.geoms.vertex_adj_vertices is not None else self._empty_int_array,
             ],
             outputs=[
                 data.geoms.pose,
@@ -833,5 +843,9 @@ class CollisionPipelineUnifiedKamino:
             heightfield_data=self.heightfield_data,
             heightfield_elevations=self.heightfield_elevations,
             writer_data=writer_data,
+            shape_adj_offset=self._model.geoms.shape_adj_offset,
+            shape_vertex_count=self._model.geoms.shape_vertex_count,
+            vertex_adj_offsets=self._model.geoms.vertex_adj_offsets,
+            vertex_adj_vertices=self._model.geoms.vertex_adj_vertices,
             device=self._device,
         )

@@ -91,6 +91,9 @@ class SolverSemiImplicit(SolverBase):
         self.joint_attach_kd = joint_attach_kd
         self.enable_tri_contact = enable_tri_contact
 
+        # Persistent scratch buffer to avoid per-frame GPU allocation
+        self._body_f_work = None
+
     @override
     def step(
         self,

@@ -507,6 +507,10 @@ class BroadPhaseSAP:
         )
         self.segment_indices = wp.array(segment_indices_np, dtype=wp.int32, device=device)
 
+        # Pre-allocate sentinel arrays to avoid per-frame GPU allocations
+        self._empty_gap = wp.empty(0, dtype=wp.float32, device=device)
+        self._empty_filter = wp.empty(0, dtype=wp.vec2i, device=device)
+
     def launch(
         self,
         shape_lower: wp.array[wp.vec3],  # Lower bounds of shape bounding boxes
@@ -567,11 +571,11 @@ class BroadPhaseSAP:
 
         # If no gaps provided, pass empty array (kernel will use 0.0 gaps)
         if shape_gap is None:
-            shape_gap = wp.empty(0, dtype=wp.float32, device=device)
+            shape_gap = self._empty_gap
 
         # Exclusion filter: empty array and 0 when not provided or empty
         if filter_pairs is None or filter_pairs.shape[0] == 0:
-            filter_pairs_arr = wp.empty(0, dtype=wp.vec2i, device=device)
+            filter_pairs_arr = self._empty_filter
             n_filter = 0
         else:
             filter_pairs_arr = filter_pairs

@@ -789,7 +789,10 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
         p_a: wp.vec3,
         p_b: wp.vec3,
         normal: wp.vec3,
-        data_provider: Any,
+        data_provider_a: Any,
+        data_provider_b: Any,
+        vertex_adj_offsets: wp.array[int],
+        vertex_adj_vertices: wp.array[int],
         writer_data: Any,
         contact_template: ContactData,
     ) -> int:
@@ -810,7 +813,10 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
             p_a: Anchor contact point on shape A in A-local frame (from GJK/MPR).
             p_b: Anchor contact point on shape B in A-local frame (from GJK/MPR).
             normal: Contact normal in A-local frame pointing from A to B.
-            data_provider: Support mapping data provider for shape queries.
+            data_provider_a: Support mapping data provider for shape A.
+            data_provider_b: Support mapping data provider for shape B.
+            vertex_adj_offsets: CSR offsets for vertex adjacency.
+            vertex_adj_vertices: CSR neighbors for vertex adjacency.
             writer_data: Data structure for contact writer.
             contact_template: Pre-packed ContactData with static fields.
 
@@ -874,7 +880,7 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
 
             # Shape A: direction and result both in A-local frame, zero quaternion ops.
             dir_a = normal * cos_tilt + c_sin * tangent_a + s_sin * tangent_b
-            pt_a_3d = support_func(geom_a, dir_a, data_provider)
+            pt_a_3d = support_func(geom_a, dir_a, data_provider_a, vertex_adj_offsets, vertex_adj_vertices)
             projected_a = pt_a_3d - center
             pt_a_2d = wp.vec2(wp.dot(tangent_a, projected_a), wp.dot(tangent_b, projected_a))
             a_count, was_added_a = add_avoid_duplicates_vec2(a_buffer, a_count, pt_a_2d, EPS)
@@ -883,7 +889,7 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
 
             # Shape B: direction in B-local, result transformed to A-local.
             local_dir_b = local_normal_b * cos_tilt + c_sin * local_ta_b + s_sin * local_tb_b
-            pt_b_local = support_func(geom_b, local_dir_b, data_provider)
+            pt_b_local = support_func(geom_b, local_dir_b, data_provider_b, vertex_adj_offsets, vertex_adj_vertices)
             pt_b_3d = wp.quat_rotate(relative_orientation_b, pt_b_local) + relative_position_b
             projected_b = pt_b_3d - center
             pt_b_2d = wp.vec2(wp.dot(tangent_a, projected_b), wp.dot(tangent_b, projected_b))

@@ -1489,6 +1489,10 @@ def mesh_triangle_contacts_to_reducer_kernel(
     triangle_pairs_count: wp.array[int],
     reducer_data: GlobalContactReducerData,
     total_num_threads: int,
+    shape_adj_offset: wp.array[int],
+    shape_vertex_count: wp.array[int],
+    vertex_adj_offsets: wp.array[int],
+    vertex_adj_vertices: wp.array[int],
 ):
     """Process mesh/heightfield-triangle contacts and store them in GlobalContactReducer.
 
@@ -1576,5 +1580,9 @@ def mesh_triangle_contacts_to_reducer_kernel(
             margin_offset_a,
             margin_offset_b,
             reducer_data,
+            shape_adj_offset,
+            shape_vertex_count,
+            vertex_adj_offsets,
+            vertex_adj_vertices,
             (tri_idx << 1) | 1,
         )

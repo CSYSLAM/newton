@@ -166,6 +166,13 @@ def compute_shape_aabbs(
     contact_generation: wp.array[wp.int32],
     broad_phase_pair_count: wp.array[wp.int32],
     num_contact_counters: int,
+    narrow_phase_counters: wp.array[wp.int32],
+    num_narrow_phase_counters: int,
+    # Adjacency arrays for hill-climbing support mapping
+    shape_adj_offset: wp.array[int],
+    shape_vertex_count: wp.array[int],
+    vertex_adj_offsets: wp.array[int],
+    vertex_adj_vertices: wp.array[int],
     # outputs
     aabb_lower: wp.array[wp.vec3],
     aabb_upper: wp.array[wp.vec3],
@@ -175,12 +182,14 @@ def compute_shape_aabbs(
     """Compute AABBs, narrow-phase geometry data, and zero collision counters.
 
     Fuses AABB computation, narrow-phase data preparation, contact counter
-    zeroing, and generation bumping into a single kernel launch.
+    zeroing, narrow-phase counter zeroing, and generation bumping into a
+    single kernel launch.
     """
     shape_id = wp.tid()
 
     # Thread 0: zero contact counters, bump contact generation, and zero the
-    # broad phase candidate-pair count in a single fused step.
+    # broad phase candidate-pair count and narrow-phase counters in a single
+    # fused step.
     if shape_id == 0:
         for c in range(num_contact_counters):
             contact_counters[c] = 0
@@ -191,6 +200,8 @@ def compute_shape_aabbs(
             g = g + 1
         contact_generation[0] = g
         broad_phase_pair_count[0] = 0
+        for c in range(num_narrow_phase_counters):
+            narrow_phase_counters[c] = 0
 
     rigid_id = shape_body[shape_id]
     geo_type = shape_type[shape_id]
@@ -264,9 +275,14 @@ def compute_shape_aabbs(
             shape_data.auxiliary = pack_mesh_ptr(shape_source_ptr[shape_id])
 
         data_provider = SupportMapDataProvider()
+        data_provider.shape_adj_offset = shape_adj_offset[shape_id]
+        data_provider.shape_vertex_count = shape_vertex_count[shape_id]
+        data_provider.prev_best_vertex = -1
 
         # Compute tight AABB using helper function
-        aabb_min_world, aabb_max_world = compute_tight_aabb_from_support(shape_data, orientation, pos, data_provider)
+        aabb_min_world, aabb_max_world = compute_tight_aabb_from_support(
+            shape_data, orientation, pos, data_provider, vertex_adj_offsets, vertex_adj_vertices
+        )
 
         aabb_lower[shape_id] = aabb_min_world - margin_vec
         aabb_upper[shape_id] = aabb_max_world + margin_vec
@@ -916,7 +932,8 @@ class CollisionPipeline:
         # and recorded normally.
 
         # Compute AABBs for all shapes, zero counters, bump generation.
-        # Fuses contacts.clear() + broad_phase_pair_count.zero_() + AABB update.
+        # Fuses contacts.clear() + broad_phase_pair_count.zero_() +
+        # narrow_phase._counter_array.zero_() + AABB update.
         wp.launch(
             kernel=compute_shape_aabbs,
             dim=model.shape_count,
@@ -936,6 +953,12 @@ class CollisionPipeline:
                 contacts.contact_generation,
                 self.broad_phase_pair_count,
                 contacts.contact_counters.shape[0],
+                self.narrow_phase._counter_array,
+                self.narrow_phase._counter_array.shape[0],
+                model.shape_adj_offset,
+                model.shape_vertex_count,
+                model.vertex_adj_offsets,
+                model.vertex_adj_vertices,
             ],
             outputs=[
                 self.narrow_phase.shape_aabb_lower,
@@ -1058,8 +1081,13 @@ class CollisionPipeline:
             heightfield_elevations=model.heightfield_elevations,
             mesh_edge_indices=model.mesh_edge_indices,
             shape_edge_range=model.shape_edge_range,
+            shape_adj_offset=model.shape_adj_offset,
+            shape_vertex_count=model.shape_vertex_count,
+            vertex_adj_offsets=model.vertex_adj_offsets,
+            vertex_adj_vertices=model.vertex_adj_vertices,
             writer_data=writer_data,
             device=self.device,
+            skip_counter_zero=True,  # Counters already zeroed by compute_shape_aabbs
         )
 
         # Match contacts against previous frame before sorting.

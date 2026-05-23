@@ -294,6 +294,15 @@ class ViewerGL(ViewerBase):
         # Per-name cache of numpy arrays for Gaussian point cloud rendering.
         self._gaussian_cache: dict[str, dict] = {}
 
+        # Per-name cache for color expansion arrays (avoids per-frame GPU allocs in log_lines/log_arrows)
+        self._color_expand_cache: dict[str, wp.array] = {}
+
+        # Per-name cache for capsule cap arrays (avoids per-frame GPU allocs in log_capsules)
+        self._cap_xforms_cache: dict[str, wp.array] = {}
+        self._cap_scales_cache: dict[str, wp.array] = {}
+        self._cap_colors_cache: dict[str, wp.array] = {}
+        self._cap_materials_cache: dict[str, wp.array] = {}
+
         # UI visibility toggle
         self.show_ui = True
 
@@ -914,7 +923,12 @@ class ViewerGL(ViewerBase):
         if isinstance(colors, tuple | list):
             if num_lines > 0:
                 color_vec = wp.vec3(*colors)
-                colors = wp.zeros(num_lines, dtype=wp.vec3, device=self.device)
+                cache_key = f"lines_{name}"
+                cached = self._color_expand_cache.get(cache_key)
+                if cached is None or cached.shape[0] < num_lines:
+                    cached = wp.zeros(num_lines, dtype=wp.vec3, device=self.device)
+                    self._color_expand_cache[cache_key] = cached
+                colors = cached[:num_lines]
                 colors.fill_(color_vec)  # Efficiently fill on GPU
             else:
                 # Handle zero lines case

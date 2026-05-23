@@ -118,6 +118,22 @@ class SolverXPBD(SolverBase):
         self._particle_delta_counter = 0
         self._body_delta_counter = 0
 
+        # Pre-allocate persistent scratch buffers to avoid per-frame GPU allocations.
+        # These are lazily sized on first use (since contacts.rigid_contact_max
+        # is not known at solver construction time) and reused across frames.
+        self._rigid_contact_inv_weight = None
+        self._contact_impulse = None
+        self._contact_impulse_iter = None
+        self._body_deltas = None
+        self._particle_deltas = None
+        self._body_f_tmp = None
+        self._spring_constraint_lambdas = None
+        self._edge_constraint_lambdas = None
+        self._particle_q_init_buf = None
+        self._particle_qd_init_buf = None
+        self._body_q_init_buf = None
+        self._body_qd_init_buf = None
+
         if model.particle_count > 1 and model.particle_grid is not None:
             # reserve space for the particle hash grid
             with wp.ScopedDevice(model.device):
@@ -266,14 +282,23 @@ class SolverXPBD(SolverBase):
 
         if contacts:
             if self.rigid_contact_con_weighting:
-                rigid_contact_inv_weight = wp.zeros(model.body_count, dtype=float, device=model.device)
+                if self._rigid_contact_inv_weight is None or self._rigid_contact_inv_weight.shape[0] != model.body_count:
+                    self._rigid_contact_inv_weight = wp.zeros(model.body_count, dtype=float, device=model.device)
+                else:
+                    self._rigid_contact_inv_weight.zero_()
+                rigid_contact_inv_weight = self._rigid_contact_inv_weight
             rigid_contact_inv_weight_init = None
 
             if contacts.force is not None:
-                contact_impulse = wp.zeros(contacts.rigid_contact_max, dtype=wp.spatial_vector, device=model.device)
-                contact_impulse_iter = wp.zeros(
-                    contacts.rigid_contact_max, dtype=wp.spatial_vector, device=model.device
-                )
+                cap = contacts.rigid_contact_max
+                if self._contact_impulse is None or self._contact_impulse.shape[0] != cap:
+                    self._contact_impulse = wp.zeros(cap, dtype=wp.spatial_vector, device=model.device)
+                    self._contact_impulse_iter = wp.zeros(cap, dtype=wp.spatial_vector, device=model.device)
+                else:
+                    self._contact_impulse.zero_()
+                    self._contact_impulse_iter.zero_()
+                contact_impulse = self._contact_impulse
+                contact_impulse_iter = self._contact_impulse_iter
 
         if control is None:
             control = model.control(clone_variables=False)
@@ -283,10 +308,19 @@ class SolverXPBD(SolverBase):
                 particle_q = state_out.particle_q
                 particle_qd = state_out.particle_qd
 
-                self.particle_q_init = wp.clone(state_in.particle_q)
+                # Copy initial particle state into persistent buffer
+                if self._particle_q_init_buf is None or self._particle_q_init_buf.shape[0] != model.particle_count:
+                    self._particle_q_init_buf = wp.empty(model.particle_count, dtype=wp.vec3, device=model.device)
+                wp.copy(self._particle_q_init_buf, state_in.particle_q)
+                self.particle_q_init = self._particle_q_init_buf
                 if self.enable_restitution:
-                    self.particle_qd_init = wp.clone(state_in.particle_qd)
-                particle_deltas = wp.empty_like(state_out.particle_qd)
+                    if self._particle_qd_init_buf is None or self._particle_qd_init_buf.shape[0] != model.particle_count:
+                        self._particle_qd_init_buf = wp.empty(model.particle_count, dtype=wp.vec3, device=model.device)
+                    wp.copy(self._particle_qd_init_buf, state_in.particle_qd)
+                    self.particle_qd_init = self._particle_qd_init_buf
+                if self._particle_deltas is None or self._particle_deltas.shape[0] != model.particle_count:
+                    self._particle_deltas = wp.empty(model.particle_count, dtype=wp.vec3, device=model.device)
+                particle_deltas = self._particle_deltas
 
                 self.integrate_particles(model, state_in, state_out, dt)
 
@@ -305,12 +339,17 @@ class SolverXPBD(SolverBase):
                     body_q_init = wp.clone(state_in.body_q)
                     body_qd_init = wp.clone(state_in.body_qd)
 
-                body_deltas = wp.empty_like(state_out.body_qd)
+                if self._body_deltas is None or self._body_deltas.shape[0] != model.body_count:
+                    self._body_deltas = wp.empty(model.body_count, dtype=wp.spatial_vector, device=model.device)
+                body_deltas = self._body_deltas
 
                 body_f_tmp = state_in.body_f
                 if model.joint_count:
                     # Avoid accumulating joint_f into the persistent state body_f buffer.
-                    body_f_tmp = wp.clone(state_in.body_f)
+                    if self._body_f_tmp is None or self._body_f_tmp.shape[0] != model.body_count:
+                        self._body_f_tmp = wp.empty(model.body_count, dtype=wp.spatial_vector, device=model.device)
+                    body_f_tmp = self._body_f_tmp
+                    wp.copy(body_f_tmp, state_in.body_f)
                     wp.launch(
                         kernel=apply_joint_forces,
                         dim=model.joint_count,
@@ -342,10 +381,14 @@ class SolverXPBD(SolverBase):
 
             spring_constraint_lambdas = None
             if model.spring_count:
-                spring_constraint_lambdas = wp.empty_like(model.spring_rest_length)
+                if self._spring_constraint_lambdas is None or self._spring_constraint_lambdas.shape[0] != model.spring_count:
+                    self._spring_constraint_lambdas = wp.empty(model.spring_count, dtype=float, device=model.device)
+                spring_constraint_lambdas = self._spring_constraint_lambdas
             edge_constraint_lambdas = None
             if model.edge_count:
-                edge_constraint_lambdas = wp.empty_like(model.edge_rest_angle)
+                if self._edge_constraint_lambdas is None or self._edge_constraint_lambdas.shape[0] != model.edge_count:
+                    self._edge_constraint_lambdas = wp.empty(model.edge_count, dtype=float, device=model.device)
+                edge_constraint_lambdas = self._edge_constraint_lambdas
 
             for i in range(self.iterations):
                 with wp.ScopedTimer(f"iteration_{i}", False):

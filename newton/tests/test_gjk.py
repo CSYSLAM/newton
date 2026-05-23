@@ -13,6 +13,8 @@ from newton._src.geometry.support_function import GenericShapeData, SupportMapDa
 
 MAX_ITERATIONS = 30
 
+_empty_int_array = wp.zeros(1, dtype=wp.int32)
+
 
 @wp.kernel
 def _gjk_kernel(
@@ -24,6 +26,8 @@ def _gjk_kernel(
     size_b: wp.vec3,
     pos_b: wp.vec3,
     quat_b: wp.quat,
+    vertex_adj_offsets: wp.array[int],
+    vertex_adj_vertices: wp.array[int],
     # Outputs:
     collision_out: wp.array[int],
     dist_out: wp.array[float],
@@ -42,7 +46,15 @@ def _gjk_kernel(
     shape_b.scale = size_b
     shape_b.auxiliary = wp.vec3(0.0)
 
-    data_provider = SupportMapDataProvider()
+    data_provider_a = SupportMapDataProvider()
+    data_provider_a.shape_adj_offset = -1
+    data_provider_a.shape_vertex_count = 0
+    data_provider_a.prev_best_vertex = -1
+
+    data_provider_b = SupportMapDataProvider()
+    data_provider_b.shape_adj_offset = -1
+    data_provider_b.shape_vertex_count = 0
+    data_provider_b.prev_best_vertex = -1
 
     # Call GJK solver
     collision, distance, point, normal = wp.static(create_solve_closest_distance(support_map))(
@@ -53,7 +65,10 @@ def _gjk_kernel(
         pos_a,
         pos_b,
         0.0,  # combined_margin
-        data_provider,
+        data_provider_a,
+        data_provider_b,
+        vertex_adj_offsets,
+        vertex_adj_vertices,
         MAX_ITERATIONS,
         1e-6,  # COLLIDE_EPSILON
     )
@@ -92,7 +107,7 @@ def _geom_dist(
     wp.launch(
         _gjk_kernel,
         dim=1,
-        inputs=[type1, size1, pos1, quat1, type2, size2, pos2, quat2],
+        inputs=[type1, size1, pos1, quat1, type2, size2, pos2, quat2, _empty_int_array, _empty_int_array],
         outputs=[collision_out, dist_out, point_out, normal_out],
     )
 

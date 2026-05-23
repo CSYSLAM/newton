@@ -110,6 +110,12 @@ class ViewerBase(ABC):
         self._com_colors = None
         self._com_radii = None
 
+        # Particle compaction scratch buffers (pre-allocated to avoid per-frame GPU allocs)
+        self._particle_mask = None
+        self._particle_offsets = None
+        self._particle_points_out = None
+        self._particle_radii_out = None
+
         # World offset support
         self.world_offsets = None
         self._user_spacing: tuple[float, float, float] | None = None
@@ -2133,11 +2139,20 @@ class ViewerBase(ABC):
             # Uses Warp stream compaction to stay on device and avoid GPU→CPU→GPU roundtrips.
             if self.model.particle_flags is not None:
                 n = self.model.particle_count
-                mask = wp.zeros(n, dtype=wp.int32, device=self.device)
+                # Pre-allocate mask/offsets buffers (fixed size = particle_count)
+                if self._particle_mask is None or self._particle_mask.shape[0] != n:
+                    self._particle_mask = wp.zeros(n, dtype=wp.int32, device=self.device)
+                    self._particle_offsets = wp.empty(n, dtype=wp.int32, device=self.device)
+                    # Pre-allocate compaction output buffers at max size
+                    self._particle_points_out = wp.empty(n, dtype=wp.vec3, device=self.device)
+                    self._particle_radii_out = wp.empty(n, dtype=wp.float32, device=self.device)
+                else:
+                    self._particle_mask.zero_()
+                mask = self._particle_mask
+                offsets = self._particle_offsets
                 wp.launch(
                     build_active_particle_mask, dim=n, inputs=[self.model.particle_flags, mask], device=self.device
                 )
-                offsets = wp.empty(n, dtype=wp.int32, device=self.device)
                 wp.utils.array_scan(mask, offsets, inclusive=False)
 
                 # Slice to transfer only the last element instead of the full array.
@@ -2146,11 +2161,12 @@ class ViewerBase(ABC):
                     self.log_points(name="/model/particles", points=None, hidden=True)
                     return
                 if active_count < n:
-                    points_out = wp.empty(active_count, dtype=wp.vec3, device=self.device)
+                    # Use pre-allocated buffer sliced to active_count
+                    points_out = self._particle_points_out[:active_count]
                     wp.launch(compact, dim=n, inputs=[points, mask, offsets, points_out], device=self.device)
                     points = points_out
                     if isinstance(radii, wp.array):
-                        radii_out = wp.empty(active_count, dtype=wp.float32, device=self.device)
+                        radii_out = self._particle_radii_out[:active_count]
                         wp.launch(compact, dim=n, inputs=[radii, mask, offsets, radii_out], device=self.device)
                         radii = radii_out
 

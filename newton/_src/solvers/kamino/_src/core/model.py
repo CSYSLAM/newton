@@ -1329,6 +1329,10 @@ class ModelKamino:
                 collision_aabb_upper=model.shape_collision_aabb_upper,
                 voxel_resolution=model._shape_voxel_resolution,
                 collision_radius=model.shape_collision_radius,
+                vertex_adj_offsets=model.vertex_adj_offsets,
+                vertex_adj_vertices=model.vertex_adj_vertices,
+                shape_adj_offset=model.shape_adj_offset,
+                shape_vertex_count=model.shape_vertex_count,
             )
 
             # Per-material properties

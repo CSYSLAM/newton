@@ -356,6 +356,18 @@ class GeometriesModel:
     collision_radius: wp.array | None = None
     """Per-shape bounding-sphere radius for broadphase AABB computation."""
 
+    vertex_adj_offsets: wp.array | None = None
+    """CSR offsets for vertex adjacency data, shared across all convex meshes."""
+
+    vertex_adj_vertices: wp.array | None = None
+    """CSR adjacency list for vertex adjacency data, shared across all convex meshes."""
+
+    shape_adj_offset: wp.array | None = None
+    """Per-shape offset into vertex_adj_offsets, shape [num_geoms]. -1 for non-convex shapes."""
+
+    shape_vertex_count: wp.array | None = None
+    """Per-shape vertex count for convex meshes, shape [num_geoms]. 0 for non-convex shapes."""
+
 
 @dataclass
 class GeometriesData:

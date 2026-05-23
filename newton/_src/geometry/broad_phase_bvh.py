@@ -169,6 +169,9 @@ class BroadPhaseBvh:
         self._bvh_built = True
         self._shape_count = shape_count
 
+        # Pre-allocate sentinel array to avoid per-frame GPU allocations
+        self._empty_filter = wp.empty(0, dtype=wp.vec2i, device=device)
+
     def launch(
         self,
         shape_lower: wp.array[wp.vec3],
@@ -234,7 +237,7 @@ class BroadPhaseBvh:
 
         # Exclusion filter: empty array and 0 when not provided or empty
         if filter_pairs is None or filter_pairs.shape[0] == 0:
-            filter_pairs_arr = wp.empty(0, dtype=wp.vec2i, device=device)
+            filter_pairs_arr = self._empty_filter
             n_filter = 0
         else:
             filter_pairs_arr = filter_pairs

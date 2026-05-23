@@ -638,6 +638,10 @@ def create_narrow_phase_kernel_gjk_mpr(
         shape_aabb_upper: wp.array[wp.vec3],
         writer_data: Any,
         total_num_threads: int,
+        shape_adj_offset: wp.array[int],
+        shape_vertex_count: wp.array[int],
+        vertex_adj_offsets: wp.array[int],
+        vertex_adj_vertices: wp.array[int],
     ):
         """
         GJK/MPR collision detection for complex convex pairs.
@@ -710,8 +714,11 @@ def create_narrow_phase_kernel_gjk_mpr(
                         aabb_a_upper = pos_a + half_extents_a + gap_vec_a
                     else:
                         data_provider = SupportMapDataProvider()
+                        data_provider.shape_adj_offset = -1
+                        data_provider.shape_vertex_count = 0
+                        data_provider.prev_best_vertex = -1
                         aabb_a_lower, aabb_a_upper = compute_tight_aabb_from_support(
-                            shape_data_a, quat_a, pos_a, data_provider
+                            shape_data_a, quat_a, pos_a, data_provider, vertex_adj_offsets, vertex_adj_vertices
                         )
                         aabb_a_lower = aabb_a_lower - gap_vec_a
                         aabb_a_upper = aabb_a_upper + gap_vec_a
@@ -724,8 +731,11 @@ def create_narrow_phase_kernel_gjk_mpr(
                         aabb_b_upper = pos_b + half_extents_b + gap_vec_b
                     else:
                         data_provider = SupportMapDataProvider()
+                        data_provider.shape_adj_offset = -1
+                        data_provider.shape_vertex_count = 0
+                        data_provider.prev_best_vertex = -1
                         aabb_b_lower, aabb_b_upper = compute_tight_aabb_from_support(
-                            shape_data_b, quat_b, pos_b, data_provider
+                            shape_data_b, quat_b, pos_b, data_provider, vertex_adj_offsets, vertex_adj_vertices
                         )
                         aabb_b_lower = aabb_b_lower - gap_vec_b
                         aabb_b_upper = aabb_b_upper + gap_vec_b
@@ -773,6 +783,10 @@ def create_narrow_phase_kernel_gjk_mpr(
                 margin_offset_a,
                 margin_offset_b,
                 writer_data,
+                shape_adj_offset,
+                shape_vertex_count,
+                vertex_adj_offsets,
+                vertex_adj_vertices,
             )
 
     return narrow_phase_kernel_gjk_mpr
@@ -793,6 +807,8 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
     shape_pairs_mesh: wp.array[wp.vec2i],
     shape_pairs_mesh_count: wp.array[int],
     total_num_threads: int,
+    vertex_adj_offsets: wp.array[int],
+    vertex_adj_vertices: wp.array[int],
     # outputs
     triangle_pairs: wp.array[wp.vec3i],  # (shape_a, shape_b, triangle_idx)
     triangle_pairs_count: wp.array[int],
@@ -887,6 +903,8 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
             gap_sum,
             triangle_pairs,
             triangle_pairs_count,
+            vertex_adj_offsets,
+            vertex_adj_vertices,
         )
 
 
@@ -907,6 +925,10 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
         triangle_pairs_count: wp.array[int],
         writer_data: Any,
         total_num_threads: int,
+        shape_adj_offset: wp.array[int],
+        shape_vertex_count: wp.array[int],
+        vertex_adj_offsets: wp.array[int],
+        vertex_adj_vertices: wp.array[int],
     ):
         """
         Process triangle pairs to generate contacts using GJK/MPR.
@@ -992,6 +1014,10 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
                 margin_offset_a,
                 margin_offset_b,
                 writer_data,
+                shape_adj_offset,
+                shape_vertex_count,
+                vertex_adj_offsets,
+                vertex_adj_vertices,
                 (tri_idx << 1) | 1,
             )
 
@@ -1663,6 +1689,15 @@ class NarrowPhase:
                 # Empty arrays for when hydroelastic is disabled
                 self.shape_pairs_sdf_sdf = None
 
+            # Placeholder adjacency arrays for scenes without convex meshes
+            self._empty_int_array = wp.zeros(1, dtype=wp.int32, device=device)
+
+            # Pre-allocate sentinel for shape_sdf_index (avoids per-frame wp.full)
+            self._empty_sdf_index = wp.full(max(num_shapes, 1), -1, dtype=wp.int32, device=device)
+
+            # Pre-allocate sentinel for texture_sdf_data (avoids per-frame wp.zeros)
+            self._empty_texture_sdf = wp.zeros(0, dtype=TextureSDFData, device=device)
+
         # Fixed thread count for kernel launches
         # Use a reasonable minimum for GPU occupancy (256 blocks = 32K threads)
         # but scale with expected workload to avoid massive overprovisioning.
@@ -1734,8 +1769,13 @@ class NarrowPhase:
         heightfield_elevations: wp.array[wp.float32] | None = None,
         mesh_edge_indices: wp.array[wp.vec2i] | None = None,
         shape_edge_range: wp.array[wp.vec2i] | None = None,
+        shape_adj_offset: wp.array[wp.int32] | None = None,
+        shape_vertex_count: wp.array[wp.int32] | None = None,
+        vertex_adj_offsets: wp.array[wp.int32] | None = None,
+        vertex_adj_vertices: wp.array[wp.int32] | None = None,
         writer_data: Any,
         device: Devicelike | None = None,  # Device to launch on
+        skip_counter_zero: bool = False,  # Skip _counter_array.zero_() if already zeroed by caller
     ) -> None:
         """
         Launch narrow phase collision detection with a custom contact writer struct.
@@ -1766,8 +1806,10 @@ class NarrowPhase:
         if device is None:
             device = self.device if self.device is not None else candidate_pair.device
 
-        # Clear all counters with a single kernel launch (consolidated counter array)
-        self._counter_array.zero_()
+        # Clear all counters (consolidated counter array).
+        # Skip if the caller already zeroed them (e.g. fused into compute_shape_aabbs).
+        if not skip_counter_zero:
+            self._counter_array.zero_()
 
         # Stage 1: Launch primitive kernel for fast analytical collisions
         # This handles sphere-sphere, sphere-capsule, capsule-capsule, plane-sphere, plane-capsule
@@ -1825,6 +1867,10 @@ class NarrowPhase:
                 self.shape_aabb_upper,
                 writer_data,
                 self.total_num_threads,
+                shape_adj_offset if shape_adj_offset is not None else self._empty_int_array,
+                shape_vertex_count if shape_vertex_count is not None else self._empty_int_array,
+                vertex_adj_offsets if vertex_adj_offsets is not None else self._empty_int_array,
+                vertex_adj_vertices if vertex_adj_vertices is not None else self._empty_int_array,
             ],
             device=device,
             block_dim=self.block_dim,
@@ -1875,6 +1921,8 @@ class NarrowPhase:
                     self.shape_pairs_mesh,
                     self.shape_pairs_mesh_count,
                     self.num_tile_blocks,
+                    vertex_adj_offsets if vertex_adj_offsets is not None else self._empty_int_array,
+                    vertex_adj_vertices if vertex_adj_vertices is not None else self._empty_int_array,
                 ],
                 outputs=[
                     self.triangle_pairs,
@@ -1944,6 +1992,10 @@ class NarrowPhase:
                         self.triangle_pairs_count,
                         reducer_data,
                         self.total_num_threads,
+                        shape_adj_offset if shape_adj_offset is not None else self._empty_int_array,
+                        shape_vertex_count if shape_vertex_count is not None else self._empty_int_array,
+                        vertex_adj_offsets if vertex_adj_offsets is not None else self._empty_int_array,
+                        vertex_adj_vertices if vertex_adj_vertices is not None else self._empty_int_array,
                     ],
                     device=device,
                     block_dim=self.block_dim,
@@ -1967,6 +2019,10 @@ class NarrowPhase:
                         self.triangle_pairs_count,
                         writer_data,
                         self.total_num_threads,
+                        shape_adj_offset if shape_adj_offset is not None else self._empty_int_array,
+                        shape_vertex_count if shape_vertex_count is not None else self._empty_int_array,
+                        vertex_adj_offsets if vertex_adj_offsets is not None else self._empty_int_array,
+                        vertex_adj_vertices if vertex_adj_vertices is not None else self._empty_int_array,
                     ],
                     device=device,
                     block_dim=self.block_dim,
@@ -1996,7 +2052,7 @@ class NarrowPhase:
             # The kernel uses texture SDF for fast sampling, with BVH fallback via shape_sdf_index,
             # as well as on-the-fly heightfield evaluation via heightfield_data.
             if texture_sdf_data is None:
-                texture_sdf_data = wp.zeros(0, dtype=TextureSDFData, device=device)
+                texture_sdf_data = self._empty_texture_sdf
             if mesh_edge_indices is None:
                 mesh_edge_indices = self._empty_edge_indices
             if shape_edge_range is None:
@@ -2172,6 +2228,10 @@ class NarrowPhase:
         contact_count: wp.array[int],  # Number of active contacts after narrow
         contact_tangent: wp.array[wp.vec3] | None = None,  # Represents x axis of local contact frame (None to disable)
         device: Devicelike | None = None,  # Device to launch on
+        shape_adj_offset: wp.array[wp.int32] | None = None,
+        shape_vertex_count: wp.array[wp.int32] | None = None,
+        vertex_adj_offsets: wp.array[wp.int32] | None = None,
+        vertex_adj_vertices: wp.array[wp.int32] | None = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -2226,7 +2286,7 @@ class NarrowPhase:
                 "shape_local_aabb_lower/shape_local_aabb_upper"
             )
         if shape_sdf_index is None:
-            shape_sdf_index = wp.full(shape_types.shape[0], -1, dtype=wp.int32, device=device)
+            shape_sdf_index = self._empty_sdf_index
 
         contact_max = contact_pair.shape[0]
 
@@ -2280,6 +2340,10 @@ class NarrowPhase:
             mesh_edge_indices=mesh_edge_indices,
             shape_edge_range=shape_edge_range,
             writer_data=writer_data,
+            shape_adj_offset=shape_adj_offset,
+            shape_vertex_count=shape_vertex_count,
+            vertex_adj_offsets=vertex_adj_offsets,
+            vertex_adj_vertices=vertex_adj_vertices,
             device=device,
         )
 

@@ -61,7 +61,8 @@ def create_support_map_function(support_func: Any):
 
     Args:
         support_func: Support mapping function for individual shapes that takes
-                     (geometry, direction, data_provider) and returns a support point
+                     (geometry, direction, data_provider, vertex_adj_offsets, vertex_adj_vertices)
+                     and returns a support point
 
     Returns:
         Tuple of three functions:
@@ -77,7 +78,9 @@ def create_support_map_function(support_func: Any):
         direction: wp.vec3,
         orientation_b: wp.quat,
         position_b: wp.vec3,
-        data_provider: Any,
+        data_provider_b: Any,
+        vertex_adj_offsets: wp.array[int],
+        vertex_adj_vertices: wp.array[int],
     ) -> wp.vec3:
         """
         Support mapping for shape B with transformation.
@@ -87,7 +90,9 @@ def create_support_map_function(support_func: Any):
             direction: Support direction in world space
             orientation_b: Orientation of shape B
             position_b: Position of shape B
-            data_provider: Support mapping data provider
+            data_provider_b: Support mapping data provider for shape B
+            vertex_adj_offsets: CSR offsets for vertex adjacency
+            vertex_adj_vertices: CSR neighbors for vertex adjacency
 
         Returns:
             Support point in world space
@@ -96,7 +101,7 @@ def create_support_map_function(support_func: Any):
         tmp = wp.quat_rotate_inv(orientation_b, direction)
 
         # Get support point in local space
-        result = support_func(geom_b, tmp, data_provider)
+        result = support_func(geom_b, tmp, data_provider_b, vertex_adj_offsets, vertex_adj_vertices)
 
         # Transform result to world space
         result = wp.quat_rotate(orientation_b, result)
@@ -112,7 +117,10 @@ def create_support_map_function(support_func: Any):
         orientation_b: wp.quat,
         position_b: wp.vec3,
         extend: float,
-        data_provider: Any,
+        data_provider_a: Any,
+        data_provider_b: Any,
+        vertex_adj_offsets: wp.array[int],
+        vertex_adj_vertices: wp.array[int],
     ) -> Vert:
         """
         Compute support point on Minkowski difference A - B.
@@ -124,7 +132,10 @@ def create_support_map_function(support_func: Any):
             orientation_b: Orientation of shape B
             position_b: Position of shape B
             extend: Combined margin extension [m]
-            data_provider: Support mapping data provider
+            data_provider_a: Support mapping data provider for shape A
+            data_provider_b: Support mapping data provider for shape B
+            vertex_adj_offsets: CSR offsets for vertex adjacency
+            vertex_adj_vertices: CSR neighbors for vertex adjacency
 
         Returns:
             Vert containing support points
@@ -132,11 +143,11 @@ def create_support_map_function(support_func: Any):
         v = Vert()
 
         # Support point on A in positive direction
-        point_a = support_func(geom_a, direction, data_provider)
+        point_a = support_func(geom_a, direction, data_provider_a, vertex_adj_offsets, vertex_adj_vertices)
 
         # Support point on B in negative direction
         tmp_direction = -direction
-        v.B = support_map_b(geom_b, tmp_direction, orientation_b, position_b, data_provider)
+        v.B = support_map_b(geom_b, tmp_direction, orientation_b, position_b, data_provider_b, vertex_adj_offsets, vertex_adj_vertices)
 
         # Apply contact offset extension (skip normalize when extend is zero)
         if extend != 0.0:
@@ -155,7 +166,10 @@ def create_support_map_function(support_func: Any):
         geom_b: Any,
         orientation_b: wp.quat,
         position_b: wp.vec3,
-        data_provider: Any,
+        data_provider_a: Any,
+        data_provider_b: Any,
+        vertex_adj_offsets: wp.array[int],
+        vertex_adj_vertices: wp.array[int],
     ) -> Vert:
         """
         Compute geometric center of Minkowski difference.
@@ -171,7 +185,10 @@ def create_support_map_function(support_func: Any):
             geom_b: Shape B geometry data
             orientation_b: Orientation of shape B
             position_b: Position of shape B
-            data_provider: Support mapping data provider
+            data_provider_a: Support mapping data provider for shape A
+            data_provider_b: Support mapping data provider for shape B
+            vertex_adj_offsets: CSR offsets for vertex adjacency
+            vertex_adj_vertices: CSR neighbors for vertex adjacency
 
         Returns:
             Vert containing geometric centers of both shapes
@@ -241,7 +258,10 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
         orientation_b: wp.quat,
         position_b: wp.vec3,
         extend: float,
-        data_provider: Any,
+        data_provider_a: Any,
+        data_provider_b: Any,
+        vertex_adj_offsets: wp.array[int],
+        vertex_adj_vertices: wp.array[int],
         MAX_ITER: int = 30,
         COLLIDE_EPSILON: float = 1e-5,
     ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float]:
@@ -280,7 +300,7 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
         normal = wp.vec3(0.0, 0.0, 0.0)
 
         # Get geometric center
-        v0 = geometric_center(geom_a, geom_b, orientation_b, position_b, data_provider)
+        v0 = geometric_center(geom_a, geom_b, orientation_b, position_b, data_provider_a, data_provider_b, vertex_adj_offsets, vertex_adj_vertices)
 
         normal = v0.BtoA
         if wp.length_sq(normal) < NUMERIC_EPSILON:
@@ -292,7 +312,7 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
             for axis_idx in range(3):
                 probe = wp.vec3(0.0, 0.0, 0.0)
                 probe[axis_idx] = 1.0
-                sv = minkowski_support(geom_a, geom_b, probe, orientation_b, position_b, extend, data_provider)
+                sv = minkowski_support(geom_a, geom_b, probe, orientation_b, position_b, extend, data_provider_a, data_provider_b, vertex_adj_offsets, vertex_adj_vertices)
                 d = wp.dot(sv.BtoA, probe)
                 if d > best_dot:
                     best_dot = d
@@ -302,7 +322,7 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
         normal = -v0.BtoA
 
         # First support point
-        v1 = minkowski_support(geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider)
+        v1 = minkowski_support(geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider_a, data_provider_b, vertex_adj_offsets, vertex_adj_vertices)
 
         point_a = vert_a(v1)
         point_b = v1.B
@@ -322,7 +342,7 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
             return True, point_a, point_b, normal, penetration
 
         # Second support point
-        v2 = minkowski_support(geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider)
+        v2 = minkowski_support(geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider_a, data_provider_b, vertex_adj_offsets, vertex_adj_vertices)
 
         if wp.dot(v2.BtoA, normal) <= 0.0:
             return False, point_a, point_b, normal, penetration
@@ -357,7 +377,7 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
 
             phase1 += 1
 
-            v3 = minkowski_support(geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider)
+            v3 = minkowski_support(geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider_a, data_provider_b, vertex_adj_offsets, vertex_adj_vertices)
 
             if wp.dot(v3.BtoA, normal) <= 0.0:
                 return False, point_a, point_b, normal, penetration
@@ -404,7 +424,7 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
                 # If the origin is inside the wedge, we have a hit
                 hit = d >= 0.0
 
-            v4 = minkowski_support(geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider)
+            v4 = minkowski_support(geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider_a, data_provider_b, vertex_adj_offsets, vertex_adj_vertices)
 
             temp3 = v4.BtoA - v3.BtoA
             delta = wp.dot(temp3, normal)
@@ -461,7 +481,10 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
         position_a: wp.vec3,
         position_b: wp.vec3,
         combined_margin: float,
-        data_provider: Any,
+        data_provider_a: Any,
+        data_provider_b: Any,
+        vertex_adj_offsets: wp.array[int],
+        vertex_adj_vertices: wp.array[int],
         MAX_ITER: int = 30,
         COLLIDE_EPSILON: float = 1e-5,
     ) -> tuple[bool, float, wp.vec3, wp.vec3]:
@@ -476,7 +499,10 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
             position_a: Position of shape A
             position_b: Position of shape B
             combined_margin: Sum of margin extensions for both shapes [m]
-            data_provider: Support mapping data provider
+            data_provider_a: Support mapping data provider for shape A
+            data_provider_b: Support mapping data provider for shape B
+            vertex_adj_offsets: CSR offsets for vertex adjacency
+            vertex_adj_vertices: CSR neighbors for vertex adjacency
             MAX_ITER: Maximum number of iterations for MPR algorithm
             COLLIDE_EPSILON: Small number for numerical comparisons
 
@@ -498,7 +524,10 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
             relative_orientation_b,
             relative_position_b,
             combined_margin,
-            data_provider,
+            data_provider_a,
+            data_provider_b,
+            vertex_adj_offsets,
+            vertex_adj_vertices,
             MAX_ITER,
             COLLIDE_EPSILON,
         )

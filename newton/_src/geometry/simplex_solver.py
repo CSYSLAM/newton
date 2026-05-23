@@ -315,7 +315,10 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
         orientation_b: wp.quat,
         position_b: wp.vec3,
         extend: float,
-        data_provider: Any,
+        data_provider_a: Any,
+        data_provider_b: Any,
+        vertex_adj_offsets: wp.array[int],
+        vertex_adj_vertices: wp.array[int],
         MAX_ITER: int = 30,
         COLLIDE_EPSILON: float = 1e-4,
     ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float]:
@@ -361,7 +364,7 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
         iter_count = int(MAX_ITER)
 
         # Get geometric center
-        center = geometric_center(geom_a, geom_b, orientation_b, position_b, data_provider)
+        center = geometric_center(geom_a, geom_b, orientation_b, position_b, data_provider_a, data_provider_b, vertex_adj_offsets, vertex_adj_vertices)
 
         # Use BtoA directly (Minkowski difference)
         v = center.BtoA
@@ -384,7 +387,7 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
             last_search_dir = search_dir
 
             # Get support point in search direction
-            w = minkowski_support(geom_a, geom_b, search_dir, orientation_b, position_b, extend, data_provider)
+            w = minkowski_support(geom_a, geom_b, search_dir, orientation_b, position_b, extend, data_provider_a, data_provider_b, vertex_adj_offsets, vertex_adj_vertices)
 
             # Check for convergence using Frank-Wolfe duality gap
             # Use BtoA directly (Minkowski difference)
@@ -499,7 +502,10 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
         position_a: wp.vec3,
         position_b: wp.vec3,
         combined_margin: float,
-        data_provider: Any,
+        data_provider_a: Any,
+        data_provider_b: Any,
+        vertex_adj_offsets: wp.array[int],
+        vertex_adj_vertices: wp.array[int],
         MAX_ITER: int = 30,
         COLLIDE_EPSILON: float = 1e-4,
     ) -> tuple[bool, float, wp.vec3, wp.vec3]:
@@ -531,7 +537,10 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
             relative_orientation_b,
             relative_position_b,
             combined_margin,
-            data_provider,
+            data_provider_a,
+            data_provider_b,
+            vertex_adj_offsets,
+            vertex_adj_vertices,
             MAX_ITER,
             COLLIDE_EPSILON,
         )

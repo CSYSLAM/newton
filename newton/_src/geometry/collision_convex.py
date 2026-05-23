@@ -39,7 +39,10 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
         orientation_b: wp.quat,
         position_a: wp.vec3,
         position_b: wp.vec3,
-        data_provider: Any,
+        data_provider_a: Any,
+        data_provider_b: Any,
+        vertex_adj_offsets: wp.array[int],
+        vertex_adj_vertices: wp.array[int],
         contact_threshold: float,
         skip_multi_contact: bool,
         writer_data: Any,
@@ -50,11 +53,6 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
         relative_position_b = wp.quat_rotate_inv(orientation_a, position_b - position_a)
 
         # MPR inflate to prevent MPR/GJK flickering for resting contacts.
-        # The switchover must never coincide with the resting signed distance
-        # (which equals margin_sum when bodies are in stable contact):
-        #   - margin == 0:       enlarge = 1e-4  (resting at 0, switch at 1e-4)
-        #   - 0 < margin < 1e-4: enlarge = 2e-4  (resting < 1e-4, switch at 2e-4)
-        #   - margin >= 1e-4:    enlarge = 0      (resting far from 0, no trick needed)
         margin_sum = contact_template.margin_a + contact_template.margin_b
         eps = 1.0e-4
         if margin_sum <= 0.0:
@@ -65,33 +63,35 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
             enlarge = 0.0
 
         # MPR with inflate for overlapping shapes.
-        # Exits early (few support queries) when shapes are separated.
         collision, point_a, point_b, normal, penetration = wp.static(solve_mpr.core)(
             geom_a,
             geom_b,
             relative_orientation_b,
             relative_position_b,
             enlarge,
-            data_provider,
+            data_provider_a,
+            data_provider_b,
+            vertex_adj_offsets,
+            vertex_adj_vertices,
         )
 
         if collision:
             signed_distance = -penetration + enlarge
-            # Undo the inflate on the witness points so downstream consumers
-            # (manifold builder, contact writer) see true-surface positions.
-            # The midpoint 0.5*(point_a + point_b) is unchanged (corrections cancel).
             half_enlarge = enlarge * 0.5
             point_a = point_a - normal * half_enlarge
             point_b = point_b + normal * half_enlarge
         else:
-            # GJK fallback for separated shapes -- no Minkowski inflate; accurate normals/distances.
+            # GJK fallback for separated shapes.
             _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
                 geom_a,
                 geom_b,
                 relative_orientation_b,
                 relative_position_b,
                 0.0,
-                data_provider,
+                data_provider_a,
+                data_provider_b,
+                vertex_adj_offsets,
+                vertex_adj_vertices,
             )
 
         if skip_multi_contact or signed_distance > contact_threshold:
@@ -125,7 +125,10 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
             point_a,
             point_b,
             normal,
-            data_provider,
+            data_provider_a,
+            data_provider_b,
+            vertex_adj_offsets,
+            vertex_adj_vertices,
             writer_data,
             contact_template,
         )
@@ -151,7 +154,10 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
         orientation_b: wp.quat,
         position_a: wp.vec3,
         position_b: wp.vec3,
-        data_provider: Any,
+        data_provider_a: Any,
+        data_provider_b: Any,
+        vertex_adj_offsets: wp.array[int],
+        vertex_adj_vertices: wp.array[int],
         contact_threshold: float,
         writer_data: Any,
         contact_template: ContactData,
@@ -178,7 +184,10 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
             relative_orientation_b,
             relative_position_b,
             enlarge,
-            data_provider,
+            data_provider_a,
+            data_provider_b,
+            vertex_adj_offsets,
+            vertex_adj_vertices,
         )
 
         if collision:
@@ -194,7 +203,10 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
                 relative_orientation_b,
                 relative_position_b,
                 0.0,
-                data_provider,
+                data_provider_a,
+                data_provider_b,
+                vertex_adj_offsets,
+                vertex_adj_vertices,
             )
 
         # Transform results back to world space (once).

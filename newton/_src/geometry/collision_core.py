@@ -307,6 +307,10 @@ def create_compute_gjk_mpr_contacts(
         margin_a: float,
         margin_b: float,
         writer_data: Any,
+        shape_adj_offset: wp.array[int],
+        shape_vertex_count: wp.array[int],
+        vertex_adj_offsets: wp.array[int],
+        vertex_adj_vertices: wp.array[int],
         sort_sub_key: int = 0,
     ):
         """
@@ -325,9 +329,21 @@ def create_compute_gjk_mpr_contacts(
             margin_a: Per-shape margin offset for shape A (signed distance padding)
             margin_b: Per-shape margin offset for shape B (signed distance padding)
             writer_data: Data structure for contact writer
+            shape_adj_offset: Per-shape offset into vertex adjacency arrays (-1 for non-convex)
+            shape_vertex_count: Per-shape vertex count for convex meshes (0 for non-convex)
+            vertex_adj_offsets: CSR offsets for vertex adjacency
+            vertex_adj_vertices: CSR neighbors for vertex adjacency
             sort_sub_key: Sub-key for deterministic contact sorting (e.g. triangle/edge index)
         """
-        data_provider = SupportMapDataProvider()
+        data_provider_a = SupportMapDataProvider()
+        data_provider_a.shape_adj_offset = shape_adj_offset[shape_a]
+        data_provider_a.shape_vertex_count = shape_vertex_count[shape_a]
+        data_provider_a.prev_best_vertex = -1  # Cold start
+
+        data_provider_b = SupportMapDataProvider()
+        data_provider_b.shape_adj_offset = shape_adj_offset[shape_b]
+        data_provider_b.shape_vertex_count = shape_vertex_count[shape_b]
+        data_provider_b.prev_best_vertex = -1  # Cold start
 
         radius_eff_a = float(0.0)
         radius_eff_b = float(0.0)
@@ -366,7 +382,10 @@ def create_compute_gjk_mpr_contacts(
                 rot_b,
                 pos_a_adjusted,
                 pos_b_adjusted,
-                data_provider,
+                data_provider_a,
+                data_provider_b,
+                vertex_adj_offsets,
+                vertex_adj_vertices,
                 rigid_gap + radius_eff_a + radius_eff_b + margin_a + margin_b,
                 type_a == GeoType.SPHERE
                 or type_b == GeoType.SPHERE
@@ -383,7 +402,10 @@ def create_compute_gjk_mpr_contacts(
                 rot_b,
                 pos_a_adjusted,
                 pos_b_adjusted,
-                data_provider,
+                data_provider_a,
+                data_provider_b,
+                vertex_adj_offsets,
+                vertex_adj_vertices,
                 rigid_gap + radius_eff_a + radius_eff_b + margin_a + margin_b,
                 writer_data,
                 contact_template,
@@ -398,6 +420,8 @@ def compute_tight_aabb_from_support(
     orientation: wp.quat,
     center_pos: wp.vec3,
     data_provider: SupportMapDataProvider,
+    vertex_adj_offsets: wp.array[int],
+    vertex_adj_vertices: wp.array[int],
 ) -> tuple[wp.vec3, wp.vec3]:
     """
     Compute tight AABB for a shape using support function.
@@ -465,22 +489,22 @@ def compute_tight_aabb_from_support(
             max_z = wp.max(max_z, vz)
     else:
         # Generic path: 6 support evaluations for other shape types (all O(1))
-        support_point = support_map(shape_data, local_x, data_provider)
+        support_point = support_map(shape_data, local_x, data_provider, vertex_adj_offsets, vertex_adj_vertices)
         max_x = wp.dot(local_x, support_point)
 
-        support_point = support_map(shape_data, local_y, data_provider)
+        support_point = support_map(shape_data, local_y, data_provider, vertex_adj_offsets, vertex_adj_vertices)
         max_y = wp.dot(local_y, support_point)
 
-        support_point = support_map(shape_data, local_z, data_provider)
+        support_point = support_map(shape_data, local_z, data_provider, vertex_adj_offsets, vertex_adj_vertices)
         max_z = wp.dot(local_z, support_point)
 
-        support_point = support_map(shape_data, -local_x, data_provider)
+        support_point = support_map(shape_data, -local_x, data_provider, vertex_adj_offsets, vertex_adj_vertices)
         min_x = wp.dot(local_x, support_point)
 
-        support_point = support_map(shape_data, -local_y, data_provider)
+        support_point = support_map(shape_data, -local_y, data_provider, vertex_adj_offsets, vertex_adj_vertices)
         min_y = wp.dot(local_y, support_point)
 
-        support_point = support_map(shape_data, -local_z, data_provider)
+        support_point = support_map(shape_data, -local_z, data_provider, vertex_adj_offsets, vertex_adj_vertices)
         min_z = wp.dot(local_z, support_point)
 
     # AABB in world space (add world position to extents)
@@ -657,6 +681,10 @@ def create_find_contacts(writer_func: Any, support_func: Any = None, post_proces
         margin_a: float,
         margin_b: float,
         writer_data: Any,
+        shape_adj_offset: wp.array[int],
+        shape_vertex_count: wp.array[int],
+        vertex_adj_offsets: wp.array[int],
+        vertex_adj_vertices: wp.array[int],
     ):
         """
         Find contacts between two shapes using GJK/MPR algorithm and write them using the writer function.
@@ -678,6 +706,10 @@ def create_find_contacts(writer_func: Any, support_func: Any = None, post_proces
             margin_a: Per-shape margin offset for shape A (signed distance padding)
             margin_b: Per-shape margin offset for shape B (signed distance padding)
             writer_data: Data structure for contact writer
+            shape_adj_offset: Per-shape offset into vertex adjacency arrays (-1 for non-convex)
+            shape_vertex_count: Per-shape vertex count for convex meshes (0 for non-convex)
+            vertex_adj_offsets: CSR offsets for vertex adjacency
+            vertex_adj_vertices: CSR neighbors for vertex adjacency
         """
         if writer_data.contact_count[0] >= writer_data.contact_max:
             return
@@ -719,6 +751,10 @@ def create_find_contacts(writer_func: Any, support_func: Any = None, post_proces
             margin_a,
             margin_b,
             writer_data,
+            shape_adj_offset,
+            shape_vertex_count,
+            vertex_adj_offsets,
+            vertex_adj_vertices,
         )
 
     return find_contacts
@@ -908,6 +944,8 @@ def mesh_vs_convex_midphase(
     rigid_gap: float,
     triangle_pairs: wp.array[wp.vec3i],
     triangle_pairs_count: wp.array[int],
+    vertex_adj_offsets: wp.array[int],
+    vertex_adj_vertices: wp.array[int],
 ):
     """
     Perform mesh vs convex shape midphase collision detection.
@@ -965,8 +1003,11 @@ def mesh_vs_convex_midphase(
         generic_shape_data.auxiliary = wp.vec3(0.0, 0.0, 0.0)
 
         data_provider = SupportMapDataProvider()
+        data_provider.shape_adj_offset = -1
+        data_provider.shape_vertex_count = 0
+        data_provider.prev_best_vertex = -1
         aabb_lower, aabb_upper = compute_tight_aabb_from_support(
-            generic_shape_data, orientation_in_mesh, pos_in_mesh, data_provider
+            generic_shape_data, orientation_in_mesh, pos_in_mesh, data_provider, vertex_adj_offsets, vertex_adj_vertices
         )
 
     # Add small margin for contact detection
