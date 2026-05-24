@@ -11,6 +11,9 @@ pybind11_add_module(_voxel_tet
     nt_pybind.cpp
     nt_voxel_tet.cpp
     nt_union_find.cpp
+    nt_remesher.cpp
+    nt_skinning.cpp
+    nt_physx_aabb_tree.cpp
 )
 
 # Compiler flags

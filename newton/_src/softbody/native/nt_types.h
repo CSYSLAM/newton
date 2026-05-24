@@ -149,6 +149,22 @@ struct Bounds3 {
                  b.minimum.y > maximum.y || b.maximum.y < minimum.y ||
                  b.minimum.z > maximum.z || b.maximum.z < minimum.z);
     }
+
+    bool contains(const Vec3& p) const {
+        return p.x >= minimum.x && p.x <= maximum.x &&
+               p.y >= minimum.y && p.y <= maximum.y &&
+               p.z >= minimum.z && p.z <= maximum.z;
+    }
+
+    Pf32 sqrDistance(const Vec3& p) const {
+        Pf32 dist2 = 0.0f;
+        for (int i = 0; i < 3; i++) {
+            Pf32 v = p[i];
+            if (v < minimum[i]) { Pf32 d = minimum[i] - v; dist2 += d * d; }
+            else if (v > maximum[i]) { Pf32 d = v - maximum[i]; dist2 += d * d; }
+        }
+        return dist2;
+    }
 };
 
 // ---------- Bounds3d (double precision, replaces ExtVec3.h Bounds3) ----------

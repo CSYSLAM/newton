@@ -17,6 +17,120 @@ from .types import TetMesh
 from .utils import load_mesh
 
 
+def remesh_surface(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    resolution: int = 100,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Remesh a surface mesh using voxel grid + marching cubes.
+
+    Takes a surface mesh with potentially bad topology and produces a clean
+    remeshed surface via voxelization + marching cubes isosurface, then
+    deduplication, pruning internal surfaces, projection onto input surface,
+    and normal computation.
+
+    Args:
+        vertices: Vertex positions [m], shape (N, 3), float32.
+        faces: Triangle face indices, shape (M, 3), int32.
+        resolution: Controls voxel grid density. Higher values produce
+            finer remeshed surfaces. Default 100.
+        verbose: Whether to print progress information.
+
+    Returns:
+        Tuple of (remeshed_vertices, remeshed_faces) where:
+        - remeshed_vertices: Vertex positions [m], shape (K, 3), float32
+        - remeshed_faces: Triangle face indices, shape (L, 3), uint32
+
+    Raises:
+        ImportError: If the native module is not compiled/installed.
+    """
+    from ..softbody._voxelize_native import remesh_surface_native
+
+    if verbose:
+        print(f"Surface remeshing: resolution={resolution}")
+
+    result = remesh_surface_native(
+        vertices, faces, resolution=resolution,
+    )
+
+    remeshed_verts = result["vertices"]
+    remeshed_faces = result["tri_ids"].reshape(-1, 3)
+
+    if verbose:
+        stats = result["debug_stats"]
+        print(f"Remesh result: {stats['output_vertex_count']} vertices, "
+              f"{stats['output_triangle_count']} triangles "
+              f"(from {stats['input_vertex_count']} vertices, "
+              f"{stats['input_triangle_count']} triangles)")
+
+    return remeshed_verts, remeshed_faces
+
+
+def compute_volume_embedding(
+    tet_verts: np.ndarray,
+    tet_indices: np.ndarray,
+    render_verts: np.ndarray,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute volume skinning embedding for render vertices into a tet mesh.
+
+    For each render vertex, finds the closest tetrahedron and computes
+    4-component barycentric coordinates. At runtime, deformed positions
+    are recovered via ``p = p0*w0 + p1*w1 + p2*w2 + p3*w3``.
+
+    Args:
+        tet_verts: Tetrahedron vertex positions [m], shape (N, 3), float32.
+        tet_indices: Tetrahedron indices, shape (M, 4), int32.
+        render_verts: Render vertex positions to embed [m], shape (K, 3), float32.
+        verbose: Whether to print progress information.
+
+    Returns:
+        Tuple of (tet_idx, bary_weights) where:
+        - tet_idx: Tetrahedron index per render vertex, shape (K,), int32
+        - bary_weights: Barycentric coordinates, shape (K, 4), float32
+
+    Raises:
+        ImportError: If the native module is not compiled/installed.
+    """
+    from ..softbody._voxelize_native import compute_volume_embedding_native
+
+    result = compute_volume_embedding_native(tet_verts, tet_indices, render_verts)
+
+    if verbose:
+        num_verts = len(result["tet_idx"])
+        print(f"Volume embedding: {num_verts} render vertices embedded")
+
+    return result["tet_idx"], result["bary_weights"]
+
+
+def deform_with_embedding(
+    deformed_tet_verts: np.ndarray,
+    tet_indices: np.ndarray,
+    skin_tet_idx: np.ndarray,
+    skin_weights: np.ndarray,
+) -> np.ndarray:
+    """Apply volume skinning deformation to render vertices.
+
+    Args:
+        deformed_tet_verts: Deformed tet vertex positions [m], shape (N, 3), float32.
+        tet_indices: Tetrahedron indices, shape (M, 4), int32.
+        skin_tet_idx: Tetrahedron index per render vertex, shape (K,), int32.
+        skin_weights: Barycentric coordinates, shape (K, 4), float32.
+
+    Returns:
+        Deformed render vertex positions [m], shape (K, 3), float32.
+
+    Raises:
+        ImportError: If the native module is not compiled/installed.
+    """
+    from ..softbody._voxelize_native import deform_with_embedding_native
+
+    return deform_with_embedding_native(
+        deformed_tet_verts, tet_indices, skin_tet_idx, skin_weights,
+    )
+
+
 def tetrahedralize_surface_mesh(
     vertices: np.ndarray,
     faces: np.ndarray,
