@@ -24,6 +24,10 @@ def tetrahedralize_surface_mesh(
     max_volume: float | None = None,
     verbose: bool = False,
     backend: str = "auto",
+    resolution: int = 32,
+    num_relaxation_iters: int = 5,
+    rel_min_tet_volume: float = 0.05,
+    surface_dist_ratio: float = 0.2,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Tetrahedralize a triangular surface mesh.
 
@@ -42,8 +46,19 @@ def tetrahedralize_surface_mesh(
             external TetGen package first, falling back to the Python
             implementation if TetGen is not installed. ``"external"`` uses
             the TetGen C++ package. ``"python"`` uses scipy's Delaunay
-            tetrahedralization with ray-casting exterior removal. Default
-            ``"auto"``.
+            tetrahedralization with ray-casting exterior removal.
+            ``"voxel"`` uses the PhysX voxel-based tetrahedralizer with
+            density controlled by ``resolution``. Default ``"auto"``.
+        resolution: Voxel grid resolution for the ``"voxel"`` backend.
+            Higher values produce denser tet meshes. Default 32.
+        num_relaxation_iters: Number of relaxation iterations for the
+            ``"voxel"`` backend. Default 5.
+        rel_min_tet_volume: Minimum relative tet volume for volume
+            conservation in the ``"voxel"`` backend. Default 0.05.
+        surface_dist_ratio: Ratio controlling how far surface vertices
+            are pulled toward the input surface during relaxation in the
+            ``"voxel"`` backend. The actual distance is
+            ``surface_dist_ratio * gridSpacing``. Default 0.2.
 
     Returns:
         Tuple of (tet_vertices, tet_indices) where:
@@ -98,8 +113,25 @@ def tetrahedralize_surface_mesh(
             vertices, faces, quality=quality, verbose=verbose
         )
 
+    elif backend == "voxel":
+        from ..softbody._voxelize_native import voxelize_soft_body_native
+
+        if verbose:
+            print(f"Voxel tetrahedralization: resolution={resolution}, "
+                  f"num_relaxation_iters={num_relaxation_iters}, "
+                  f"rel_min_tet_volume={rel_min_tet_volume}")
+
+        result = voxelize_soft_body_native(
+            vertices, faces,
+            resolution=resolution,
+            num_relaxation_iters=num_relaxation_iters,
+            rel_min_tet_volume=rel_min_tet_volume,
+            surface_dist_ratio=surface_dist_ratio,
+        )
+        return result["tet_vertices"], result["tet_indices"]
+
     else:
-        raise ValueError(f"Unknown backend: {backend}. Use 'auto', 'external', or 'python'.")
+        raise ValueError(f"Unknown backend: {backend}. Use 'auto', 'external', 'python', or 'voxel'.")
 
 
 def tetrahedralize_obj(
@@ -109,6 +141,10 @@ def tetrahedralize_obj(
     verbose: bool = False,
     method: str | None = None,
     backend: str = "auto",
+    resolution: int = 32,
+    num_relaxation_iters: int = 5,
+    rel_min_tet_volume: float = 0.05,
+    surface_dist_ratio: float = 0.2,
 ) -> TetMesh:
     """Load an OBJ file and convert it to a tetrahedral mesh.
 
@@ -170,7 +206,9 @@ def tetrahedralize_obj(
     if verbose:
         print("Tetrahedralizing with TetGen...")
     tet_vertices, tet_indices = tetrahedralize_surface_mesh(
-        vertices, faces, quality=quality, max_volume=max_volume, verbose=verbose, backend=backend
+        vertices, faces, quality=quality, max_volume=max_volume, verbose=verbose, backend=backend,
+        resolution=resolution, num_relaxation_iters=num_relaxation_iters, rel_min_tet_volume=rel_min_tet_volume,
+        surface_dist_ratio=surface_dist_ratio,
     )
 
     if verbose:
@@ -186,6 +224,10 @@ def tetrahedralize_mesh(
     max_volume: float | None = None,
     verbose: bool = False,
     backend: str = "auto",
+    resolution: int = 32,
+    num_relaxation_iters: int = 5,
+    rel_min_tet_volume: float = 0.05,
+    surface_dist_ratio: float = 0.2,
 ) -> TetMesh:
     """Convert a triangular surface mesh to a tetrahedral mesh.
 
@@ -229,7 +271,9 @@ def tetrahedralize_mesh(
     faces = np.array(faces, dtype=np.int32).reshape(-1, 3)
 
     tet_vertices, tet_indices = tetrahedralize_surface_mesh(
-        vertices, faces, quality=quality, max_volume=max_volume, verbose=verbose, backend=backend
+        vertices, faces, quality=quality, max_volume=max_volume, verbose=verbose, backend=backend,
+        resolution=resolution, num_relaxation_iters=num_relaxation_iters, rel_min_tet_volume=rel_min_tet_volume,
+        surface_dist_ratio=surface_dist_ratio,
     )
 
     return TetMesh(tet_vertices, tet_indices)

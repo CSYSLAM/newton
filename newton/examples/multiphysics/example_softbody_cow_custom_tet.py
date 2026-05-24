@@ -41,13 +41,15 @@ class Example:
         )
 
         print(f"Loading and tetrahedralizing {cow_obj_path}...")
-        # Use quality=1.2 for high quality mesh (smaller = better quality)
-        # TetGen produces meshes suitable for FEM simulation without inverted elements
+        # Use voxel backend for density-controlled tetrahedralization
+        # resolution controls voxel grid density: higher = more tets, independent of surface vertices
         tet_mesh = newton.utils.tetrahedralize_obj(
             cow_obj_path,
-            quality=2.5,
+            backend="voxel",
+            resolution=16,
+            num_relaxation_iters=5,
+            rel_min_tet_volume=0.05,
             verbose=True,
-            backend="python",
         )
         print(f"Created tetrahedral mesh with {len(tet_mesh.vertices)} vertices and {len(tet_mesh.tet_indices) // 4} tetrahedra")
 

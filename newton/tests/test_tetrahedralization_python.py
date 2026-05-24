@@ -4,9 +4,11 @@
 """Tests for the Python tetrahedralization backend."""
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
+from newton._src.geometry import tetgen
 from newton._src.geometry.tetgen_python.predicates import orient3d, insphere
 from newton._src.geometry.tetgen_python.api import tetrahedralize_surface_mesh_python
 
@@ -150,6 +152,47 @@ class TestTetrahedralizationPython(unittest.TestCase):
 
         self.assertGreater(len(tet_verts), 0)
         self.assertGreater(len(tet_indices), 0)
+
+    def test_tetrahedralize_obj_forwards_voxel_parameters(self):
+        """Test that tetrahedralize_obj forwards voxel backend parameters."""
+        vertices = np.array([
+            [0, 0, 0],
+            [1, 0, 0],
+            [0, 1, 0],
+        ], dtype=np.float32)
+        faces = np.array([[0, 1, 2]], dtype=np.int32)
+        tet_vertices = np.array([
+            [0, 0, 0],
+            [1, 0, 0],
+            [0, 1, 0],
+            [0, 0, 1],
+        ], dtype=np.float32)
+        tet_indices = np.array([0, 1, 2, 3], dtype=np.int32)
+
+        with (
+            mock.patch("newton._src.geometry.tetgen.os.path.exists", return_value=True),
+            mock.patch("newton._src.geometry.tetgen.load_mesh", return_value=(vertices, faces)),
+            mock.patch(
+                "newton._src.geometry.tetgen.tetrahedralize_surface_mesh",
+                return_value=(tet_vertices, tet_indices),
+            ) as tetrahedralize_mock,
+        ):
+            tetgen.tetrahedralize_obj(
+                "cow.obj",
+                backend="voxel",
+                resolution=16,
+                num_relaxation_iters=7,
+                rel_min_tet_volume=0.125,
+                surface_dist_ratio=0.35,
+            )
+
+        tetrahedralize_mock.assert_called_once()
+        kwargs = tetrahedralize_mock.call_args.kwargs
+        self.assertEqual(kwargs["backend"], "voxel")
+        self.assertEqual(kwargs["resolution"], 16)
+        self.assertEqual(kwargs["num_relaxation_iters"], 7)
+        self.assertEqual(kwargs["rel_min_tet_volume"], 0.125)
+        self.assertEqual(kwargs["surface_dist_ratio"], 0.35)
 
 
 if __name__ == "__main__":
