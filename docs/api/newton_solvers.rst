@@ -66,6 +66,14 @@ Supported Features
      - ❌
      - ❌
      - ❌
+   * - :class:`~newton.solvers.SolverIPC`
+     - Implicit
+     - 🟨 obstacle only
+     - ❌
+     - ❌
+     - ❌
+     - ✅
+     - ❌
    * - :class:`~newton.solvers.SolverKamino`
      - Semi-implicit: Euler, Moreau-Jean
      - ✅ maximal coordinates
@@ -420,6 +428,7 @@ See the `DiffSim examples on GitHub`_ for the current reference workflows.
 
    SolverBase
    SolverFeatherstone
+   SolverIPC
    SolverImplicitMPM
    SolverKamino
    SolverMuJoCo

@@ -4,6 +4,7 @@
 from .featherstone import SolverFeatherstone
 from .flags import SolverNotifyFlags
 from .implicit_mpm import SolverImplicitMPM
+from .ipc import SolverIPC
 from .kamino import SolverKamino
 from .mujoco import SolverMuJoCo
 from .semi_implicit import SolverSemiImplicit
@@ -16,6 +17,7 @@ __all__ = [
     "SolverBase",
     "SolverFeatherstone",
     "SolverImplicitMPM",
+    "SolverIPC",
     "SolverKamino",
     "SolverMuJoCo",
     "SolverNotifyFlags",

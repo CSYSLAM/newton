@@ -64,6 +64,14 @@ Supported Features
      - ❌
      - ❌
      - ❌
+   * - :class:`~newton.solvers.SolverIPC`
+     - Implicit
+     - 🟨 obstacle only
+     - ❌
+     - ❌
+     - ❌
+     - ✅
+     - ❌
    * - :class:`~newton.solvers.SolverKamino`
      - Semi-implicit: Euler, Moreau-Jean
      - ✅ maximal coordinates
@@ -404,6 +412,7 @@ from ._src.solvers import (
     SolverBase,
     SolverFeatherstone,
     SolverImplicitMPM,
+    SolverIPC,
     SolverKamino,
     SolverMuJoCo,
     SolverSemiImplicit,
@@ -420,6 +429,7 @@ __all__ = [
     "SolverBase",
     "SolverFeatherstone",
     "SolverImplicitMPM",
+    "SolverIPC",
     "SolverKamino",
     "SolverMuJoCo",
     "SolverNotifyFlags",
