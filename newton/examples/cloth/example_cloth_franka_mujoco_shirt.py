@@ -4,14 +4,15 @@
 ###########################################################################
 # Example Cloth Franka MuJoCo Interactive
 #
-# A red target cube (no collision) marks the desired end-effector
-# position. Modify TARGET_CUBE_POS to try different placements.
+# Same shirt/table/Franka setup as ``example_cloth_franka_mujoco`` but with
+# a toggle to freeze the robot. A red debug cube (no collision) tracks the
+# end-effector target position for visualization.
 #
-# With --enable-franka: Franka follows the cube via IK + MuJoCo.
+# With --enable-franka: Franka follows the scripted grasp trajectory.
 # Without: Franka stays frozen, cloth drapes freely.
 #
 # Command: python -m newton.examples cloth_franka_mujoco_interactive
-#          python -m newton.examples cloth_franka_mujoco_interactive --enable-franka
+#          python -m newton.examples cloth_franka_mujoco_interactive --disable-franka
 #
 ###########################################################################
 
@@ -72,12 +73,11 @@ def update_joint_velocity_kernel(
     joint_qd[i] = (joint_q_next[i] - joint_q_prev[i]) * inv_dt
 
 
-# ----- Modify this to try different target positions (cm scale) -----
-TARGET_CUBE_POS = wp.vec3(27.0, -56.0, 7.0)
-TARGET_CUBE_ROT = wp.quat(0.8536, -0.3536, 0.3536, -0.1464)
-TARGET_CUBE_SIZE = 1.0  # cm, half-extents
-TARGET_CUBE_COLOR = wp.vec3(1.0, 0.2, 0.2)  # red
-GRIPPER_TARGET = 3.2  # open by default
+# Debug cube parameters (no collision, only visualization)
+DEBUG_CUBE_SIZE = 1.0  # cm, half-extents
+DEBUG_CUBE_COLOR = wp.vec3(1.0, 0.2, 0.2)  # red
+CLOTH_COLOR = (0.16, 0.55, 0.78)
+DOWNWARD_GRASP_QUAT = [0.88806, -0.45973, 0.0, 0.0]
 
 
 class Example:
@@ -271,7 +271,10 @@ class Example:
             force_show_colliders=False,
         )
         builder.joint_q[:7] = [0.0, 0.0, 0.0, -1.59695, 0.0, 2.5307, 0.7854]
-        builder.joint_q[7:9] = [3.2, 3.2]
+
+        gripper_open = 3.2
+        gripper_close = 0.4
+        builder.joint_q[7:9] = [gripper_open, gripper_open]
         builder.joint_target_pos[:9] = [*builder.joint_q[:9]]
         builder.joint_target_ke[:9] = [4000.0] * 7 + [12000.0, 12000.0]
         builder.joint_target_kd[:9] = [400.0] * 7 + [1200.0, 1200.0]
@@ -280,6 +283,21 @@ class Example:
         builder.joint_armature[:7] = [0.2] * 7
         builder.joint_armature[7:9] = [0.5, 0.5]
 
+        grasp_quat = DOWNWARD_GRASP_QUAT
+        self.robot_key_poses = np.array(
+            [
+                [2.0, 22.0, -60.0, 40.0, *grasp_quat, gripper_open],
+                [1.0, 25.0, -54.0, 7.0, *grasp_quat, gripper_open],
+                [1.0, 25.0, -54.0, 7.0, *grasp_quat, gripper_close],
+                [1.0, 22.0, -60.0, 13.0, *grasp_quat, gripper_close],
+                [1.0, 12.0, -60.0, 23.0, *grasp_quat, gripper_close],
+                [1.0, -6.0, -60.0, 23.0, *grasp_quat, gripper_close],
+                [1.0, -6.0, -60.0, 10.0, *grasp_quat, gripper_open],
+            ],
+            dtype=np.float32,
+        )
+        self.robot_targets = self.robot_key_poses[:, 1:]
+        self.robot_key_poses_time = np.cumsum(self.robot_key_poses[:, 0])
         self.endeffector_id = builder.body_count - 3
         self.endeffector_offset = wp.vec3(0.0, 0.0, 22.0)
 
@@ -288,15 +306,12 @@ class Example:
         self.pos_obj = ik.IKObjectivePosition(
             link_index=self.endeffector_id,
             link_offset=self.endeffector_offset,
-            target_positions=wp.array([TARGET_CUBE_POS], dtype=wp.vec3),
+            target_positions=wp.array([wp.vec3(*self.robot_targets[0][:3].tolist())], dtype=wp.vec3),
         )
         self.rot_obj = ik.IKObjectiveRotation(
             link_index=self.endeffector_id,
             link_offset_rotation=wp.quat_identity(),
-            target_rotations=wp.array(
-                [wp.vec4(TARGET_CUBE_ROT[0], TARGET_CUBE_ROT[1], TARGET_CUBE_ROT[2], TARGET_CUBE_ROT[3])],
-                dtype=wp.vec4,
-            ),
+            target_rotations=wp.array([wp.vec4(*self.robot_targets[0][3:7].tolist())], dtype=wp.vec4),
         )
         self.joint_limits_obj = ik.IKObjectiveJointLimit(
             joint_limit_lower=self.model.joint_limit_lower,
@@ -311,21 +326,31 @@ class Example:
             jacobian_mode=ik.IKJacobianType.ANALYTIC,
         )
         self.ik_iters = 24
+        self.current_gripper_target = float(self.robot_targets[0][-1])
 
-        # Solve IK once and print the result
-        self.ik_solver.step(self.ik_joint_q, self.ik_joint_q, iterations=self.ik_iters)
-        ik_q = self.ik_joint_q.numpy()[0, :7]
-        print(f"IK solution for target {TARGET_CUBE_POS}:")
-        print(f"  joint_q[:7] = {ik_q.tolist()}")
+    def interpolated_target(self) -> np.ndarray:
+        if self.sim_time >= self.robot_key_poses_time[-1]:
+            return self.robot_targets[-1]
+
+        interval = int(np.searchsorted(self.robot_key_poses_time, self.sim_time))
+        t_start = float(self.robot_key_poses_time[interval - 1]) if interval > 0 else 0.0
+        t_end = float(self.robot_key_poses_time[interval])
+        alpha = float(np.clip((self.sim_time - t_start) / max(t_end - t_start, 1.0e-6), 0.0, 1.0))
+
+        target_cur = self.robot_targets[interval]
+        target_prev = self.robot_targets[interval - 1] if interval > 0 else target_cur
+        return (1.0 - alpha) * target_prev + alpha * target_cur
 
     def set_joint_targets(self) -> None:
-        self.pos_obj.set_target_position(0, TARGET_CUBE_POS)
-        self.rot_obj.set_target_rotation(0, wp.vec4(TARGET_CUBE_ROT[0], TARGET_CUBE_ROT[1], TARGET_CUBE_ROT[2], TARGET_CUBE_ROT[3]))
+        target = self.interpolated_target()
+        self.pos_obj.set_target_position(0, wp.vec3(*target[:3].tolist()))
+        self.rot_obj.set_target_rotation(0, wp.vec4(*target[3:7].tolist()))
+        self.current_gripper_target = float(target[-1])
         self.ik_solver.step(self.ik_joint_q, self.ik_joint_q, iterations=self.ik_iters)
         wp.launch(
             broadcast_ik_solution_kernel,
             dim=1,
-            inputs=[self.ik_joint_q, self.control.joint_target_pos, GRIPPER_TARGET],
+            inputs=[self.ik_joint_q, self.control.joint_target_pos, self.current_gripper_target],
             device=self.model.device,
         )
 
@@ -379,6 +404,14 @@ class Example:
 
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.viz_state)
+        self.viewer.log_mesh(
+            "/model/triangles",
+            self.viz_state.particle_q,
+            self.model.tri_indices.flatten(),
+            hidden=not self.viewer.show_triangles,
+            backface_culling=False,
+            color=CLOTH_COLOR,
+        )
 
         # Table
         self.viewer.log_shapes(
@@ -389,18 +422,21 @@ class Example:
             self.table_viz_color,
         )
 
-        # Target cube (meter scale, no collision)
+        # Debug cube tracking the IK target (no collision)
+        target = self.interpolated_target()
+        target1 = wp.vec3(25.0, -54.0, 7.0)
         cube_pos_m = wp.vec3(
-            float(TARGET_CUBE_POS[0]) * self.viz_scale,
-            float(TARGET_CUBE_POS[1]) * self.viz_scale,
-            float(TARGET_CUBE_POS[2]) * self.viz_scale,
+            float(target1[0]) * self.viz_scale,
+            float(target1[1]) * self.viz_scale,
+            float(target1[2]) * self.viz_scale,
         )
+        cube_rot = wp.quat(float(target[3]), float(target[4]), float(target[5]), float(target[6]))
         self.viewer.log_shapes(
-            "/target_cube",
+            "/debug_cube",
             newton.GeoType.BOX,
-            (TARGET_CUBE_SIZE * self.viz_scale, TARGET_CUBE_SIZE * self.viz_scale, TARGET_CUBE_SIZE * self.viz_scale),
-            wp.array([wp.transform(cube_pos_m, TARGET_CUBE_ROT)], dtype=wp.transform),
-            wp.array([TARGET_CUBE_COLOR], dtype=wp.vec3),
+            (DEBUG_CUBE_SIZE * self.viz_scale, DEBUG_CUBE_SIZE * self.viz_scale, DEBUG_CUBE_SIZE * self.viz_scale),
+            wp.array([wp.transform(cube_pos_m, cube_rot)], dtype=wp.transform),
+            wp.array([DEBUG_CUBE_COLOR], dtype=wp.vec3),
         )
 
         self.viewer.end_frame()
@@ -416,11 +452,22 @@ class Example:
             "particles are within a reasonable volume",
             lambda q, qd: newton.math.vec_inside_limits(q, p_lower, p_upper),
         )
+        newton.examples.test_particle_state(
+            self.state_0,
+            "particle velocities are within a reasonable range",
+            lambda q, qd: max(abs(qd)) < 200.0,
+        )
+        newton.examples.test_body_state(
+            self.model,
+            self.state_0,
+            "body velocities are within a reasonable range",
+            lambda q, qd: max(abs(qd)) < 70.0,
+        )
 
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
-        parser.add_argument("--enable-franka", action="store_true", default=True, help="Enable Franka IK tracking to target cube (default: True)")
+        parser.add_argument("--enable-franka", action="store_true", default=True, help="Enable Franka grasp trajectory (default: True)")
         parser.add_argument("--disable-franka", action="store_true", help="Disable Franka, keep it frozen")
         parser.set_defaults(num_frames=3850)
         return parser
