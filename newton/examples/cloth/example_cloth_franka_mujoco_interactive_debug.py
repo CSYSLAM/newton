@@ -287,8 +287,8 @@ class Example:
         self.robot_key_poses = np.array(
             [
                 [2.0, 22.0, -60.0, 40.0, *grasp_quat, gripper_open],
-                [1.0, 25.0, -54.0, 7.0, *grasp_quat, gripper_open],
-                [1.0, 25.0, -54.0, 7.0, *grasp_quat, gripper_close],
+                [1.0, 25.0, -54.0,  7.0, *grasp_quat, gripper_open],
+                [1.0, 25.0, -54.0,  7.0, *grasp_quat, gripper_close],
                 [1.0, 22.0, -60.0, 13.0, *grasp_quat, gripper_close],
                 [1.0, 12.0, -60.0, 23.0, *grasp_quat, gripper_close],
                 [1.0, -6.0, -60.0, 23.0, *grasp_quat, gripper_close],

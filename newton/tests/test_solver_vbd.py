@@ -10,6 +10,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton.solvers import SolverStyle3D, style3d
 from newton._src.solvers.vbd.particle_vbd_kernels import evaluate_self_contact_force_norm
 from newton._src.solvers.vbd.rigid_vbd_kernels import (
     RigidContactHistory,
@@ -770,6 +771,156 @@ def _collect_rigid_contact_forces_reports_surface_points(test, device):
     np.testing.assert_allclose(reported1_np[:count], expected1, atol=1.0e-5)
 
 
+def _self_contact_safe_step_tracks_active_contacts(test, device):
+    builder = newton.ModelBuilder(up_axis="Y")
+
+    def add_layer(y: float, vy: float) -> None:
+        builder.add_cloth_grid(
+            pos=wp.vec3(0.0, y, 0.0),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, vy, 0.0),
+            dim_x=4,
+            dim_y=4,
+            cell_x=0.05,
+            cell_y=0.05,
+            mass=0.1,
+            tri_ke=1.0e3,
+            tri_ka=1.0e3,
+            tri_kd=1.0e-1,
+            edge_ke=1.0e2,
+            edge_kd=0.0,
+            particle_radius=0.04,
+        )
+
+    add_layer(0.0, 0.0)
+    add_layer(0.03, -5.0)
+    builder.color(include_bending=True)
+
+    with wp.ScopedDevice(device):
+        model = builder.finalize()
+        model.set_gravity((0.0, 0.0, 0.0))
+        solver = newton.solvers.SolverVBD(
+            model=model,
+            iterations=2,
+            particle_enable_self_contact=True,
+            particle_self_contact_radius=0.04,
+            particle_self_contact_margin=0.06,
+        )
+
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        contacts = model.contacts()
+        mean_y_0 = float(state_0.particle_q.numpy()[:, 1].mean())
+
+        model.collide(state_0, contacts)
+        solver.step(state_0, state_1, control, contacts, 1.0 / 240.0)
+        mean_y_1 = float(state_1.particle_q.numpy()[:, 1].mean())
+
+    test.assertGreater(solver.last_active_vt_count + solver.last_active_ee_count, 0)
+    test.assertGreaterEqual(solver.last_safe_step, 0.0)
+    test.assertLessEqual(solver.last_safe_step, 1.0)
+    test.assertLess(solver.last_safe_step, 1.0)
+    test.assertLess(mean_y_1, mean_y_0)
+
+
+def _persistent_self_contacts_reactivate_from_previous_active_set(test, device):
+    builder = newton.ModelBuilder(up_axis="Y")
+
+    def add_layer(y: float, vy: float) -> None:
+        builder.add_cloth_grid(
+            pos=wp.vec3(0.0, y, 0.0),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, vy, 0.0),
+            dim_x=4,
+            dim_y=4,
+            cell_x=0.05,
+            cell_y=0.05,
+            mass=0.1,
+            tri_ke=1.0e3,
+            tri_ka=1.0e3,
+            tri_kd=1.0e-1,
+            edge_ke=1.0e2,
+            edge_kd=0.0,
+            particle_radius=0.04,
+        )
+
+    add_layer(0.0, 0.0)
+    add_layer(0.03, -1.0)
+    builder.color(include_bending=True)
+
+    with wp.ScopedDevice(device):
+        model = builder.finalize()
+        model.set_gravity((0.0, 0.0, 0.0))
+        solver = newton.solvers.SolverVBD(
+            model=model,
+            iterations=2,
+            particle_enable_self_contact=True,
+            particle_self_contact_radius=0.04,
+            particle_self_contact_margin=0.06,
+        )
+
+        state_0 = model.state()
+        solver._collision_detection_penetration_free(state_0)
+
+        previous_vt_count = int(solver.previous_active_vt_count.numpy()[0])
+        previous_ee_count = int(solver.previous_active_ee_count.numpy()[0])
+
+        solver.active_vt_count.zero_()
+        solver.active_ee_count.zero_()
+        solver._append_persistent_particle_contacts(state_0)
+
+        active_vt_count = int(solver.active_vt_count.numpy()[0])
+        active_ee_count = int(solver.active_ee_count.numpy()[0])
+
+    test.assertGreater(previous_vt_count + previous_ee_count, 0)
+    test.assertGreater(active_vt_count + active_ee_count, 0)
+
+
+def _style3d_cloth_uses_style3d_membrane_in_vbd(test, device):
+    builder = newton.ModelBuilder(up_axis="Y")
+    SolverStyle3D.register_custom_attributes(builder)
+
+    style3d.add_cloth_grid(
+        builder,
+        pos=wp.vec3(0.0, 0.0, 0.0),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(0.0, 0.0, 0.0),
+        dim_x=4,
+        dim_y=4,
+        cell_x=0.05,
+        cell_y=0.05,
+        mass=0.1,
+        tri_aniso_ke=wp.vec3(1.0e3, 7.5e2, 2.5e2),
+        tri_ka=0.0,
+        tri_kd=1.0e-2,
+        edge_aniso_ke=wp.vec3(1.0, 1.0, 1.0),
+        edge_kd=0.0,
+        particle_radius=0.02,
+    )
+    builder.color(include_bending=True)
+
+    with wp.ScopedDevice(device):
+        model = builder.finalize()
+        model.set_gravity((0.0, 0.0, 0.0))
+        solver = newton.solvers.SolverVBD(model=model, iterations=2)
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        contacts = model.contacts()
+
+        model.collide(state_0, contacts)
+        solver.step(state_0, state_1, control, contacts, 1.0 / 240.0)
+
+        material_models = solver.tri_material_models.numpy()
+        tri_aniso_ke = solver.tri_style3d_aniso_ke.numpy()
+        particle_q = state_1.particle_q.numpy()
+
+    test.assertEqual(int(material_models.sum()), model.tri_count)
+    np.testing.assert_allclose(tri_aniso_ke[0], np.array([1.0e3, 7.5e2, 2.5e2], dtype=np.float32))
+    test.assertTrue(np.isfinite(particle_q).all())
+
+
 class TestSolverVBD(unittest.TestCase):
     pass
 
@@ -832,6 +983,24 @@ add_function_test(
     TestSolverVBD,
     "test_collect_rigid_contact_forces_reports_surface_points",
     _collect_rigid_contact_forces_reports_surface_points,
+    devices=devices,
+)
+add_function_test(
+    TestSolverVBD,
+    "test_self_contact_safe_step_tracks_active_contacts",
+    _self_contact_safe_step_tracks_active_contacts,
+    devices=devices,
+)
+add_function_test(
+    TestSolverVBD,
+    "test_persistent_self_contacts_reactivate_from_previous_active_set",
+    _persistent_self_contacts_reactivate_from_previous_active_set,
+    devices=devices,
+)
+add_function_test(
+    TestSolverVBD,
+    "test_style3d_cloth_uses_style3d_membrane_in_vbd",
+    _style3d_cloth_uses_style3d_membrane_in_vbd,
     devices=devices,
 )
 

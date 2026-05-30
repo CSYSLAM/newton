@@ -24,6 +24,7 @@ import newton
 import newton.examples
 import newton.usd
 from newton import ParticleFlags
+from newton.solvers import SolverStyle3D, style3d
 
 
 @wp.kernel
@@ -129,7 +130,12 @@ class Example:
         self.bvh_rebuild_frames = 10
 
         self.rot_angular_velocity = math.pi / 3
-        self.rot_end_time = 10
+        self.rot_end_time = 10000
+        self.tri_ka = 1.0e3
+        self.tri_kd = 2.0e-7
+        self.tri_aniso_ke = wp.vec3(1.0e3, 1.0e3, 2.5e2)
+        self.edge_kd = 1.0e-4
+        self.edge_aniso_ke = wp.vec3(1.0e-3, 1.0e-3, 1.0e-3)
 
         # save a reference to the viewer
         self.viewer = viewer
@@ -140,26 +146,30 @@ class Example:
         cloth_mesh = newton.usd.get_mesh(usd_prim)
         mesh_points = cloth_mesh.vertices
         mesh_indices = cloth_mesh.indices
+        panel_vertices = mesh_points[:, [2, 0]]
 
         vertices = [wp.vec3(v) for v in mesh_points]
         self.faces = mesh_indices.reshape(-1, 3)
 
         scene = newton.ModelBuilder(gravity=0)
-        scene.add_cloth_mesh(
+        SolverStyle3D.register_custom_attributes(scene)
+        style3d.add_cloth_mesh(
+            scene,
             pos=wp.vec3(0.0, 0.0, 0.0),
             rot=wp.quat_from_axis_angle(wp.vec3(0, 0, 1), np.pi / 2),
             scale=0.01,
+            panel_verts=panel_vertices.tolist(),
             vertices=vertices,
             indices=mesh_indices,
             vel=wp.vec3(0.0, 0.0, 0.0),
             density=0.2,
-            tri_ke=1.0e3,
-            tri_ka=1.0e3,
-            tri_kd=2.0e-7,
-            edge_ke=1e-3,
-            edge_kd=1e-4,
+            tri_aniso_ke=self.tri_aniso_ke,
+            tri_ka=self.tri_ka,
+            tri_kd=self.tri_kd,
+            edge_aniso_ke=self.edge_aniso_ke,
+            edge_kd=self.edge_kd,
         )
-        scene.color()
+        scene.color(include_bending=True)
         self.model = scene.finalize()
         self.model.soft_contact_ke = 1.0e3
         self.model.soft_contact_kd = 1.0e-4

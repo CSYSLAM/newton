@@ -73,6 +73,17 @@ def update_joint_velocity_kernel(
     joint_qd[i] = (joint_q_next[i] - joint_q_prev[i]) * inv_dt
 
 
+@wp.kernel
+def interpolate_joint_positions_kernel(
+    joint_q_start: wp.array[wp.float32],
+    joint_q_end: wp.array[wp.float32],
+    alpha: float,
+    joint_q_out: wp.array[wp.float32],
+):
+    i = wp.tid()
+    joint_q_out[i] = joint_q_start[i] * (1.0 - alpha) + joint_q_end[i] * alpha
+
+
 # Debug cube parameters (no collision, only visualization)
 DEBUG_CUBE_SIZE = 1.0  # cm, half-extents
 DEBUG_CUBE_COLOR = wp.vec3(1.0, 0.2, 0.2)  # red
@@ -209,6 +220,8 @@ class Example:
         self.viz_state = self.model.state()
         self.control = self.model.control()
         wp.copy(self.control.joint_target_pos[:9], self.model.joint_q[:9])
+        self.frame_joint_q_start = wp.zeros_like(self.model.joint_q)
+        self.frame_joint_q_end = wp.zeros_like(self.model.joint_q)
 
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
@@ -328,21 +341,23 @@ class Example:
         self.ik_iters = 24
         self.current_gripper_target = float(self.robot_targets[0][-1])
 
-    def interpolated_target(self) -> np.ndarray:
-        if self.sim_time >= self.robot_key_poses_time[-1]:
+    def interpolated_target(self, query_time: float | None = None) -> np.ndarray:
+        sample_time = self.sim_time if query_time is None else query_time
+
+        if sample_time >= self.robot_key_poses_time[-1]:
             return self.robot_targets[-1]
 
-        interval = int(np.searchsorted(self.robot_key_poses_time, self.sim_time))
+        interval = int(np.searchsorted(self.robot_key_poses_time, sample_time))
         t_start = float(self.robot_key_poses_time[interval - 1]) if interval > 0 else 0.0
         t_end = float(self.robot_key_poses_time[interval])
-        alpha = float(np.clip((self.sim_time - t_start) / max(t_end - t_start, 1.0e-6), 0.0, 1.0))
+        alpha = float(np.clip((sample_time - t_start) / max(t_end - t_start, 1.0e-6), 0.0, 1.0))
 
         target_cur = self.robot_targets[interval]
         target_prev = self.robot_targets[interval - 1] if interval > 0 else target_cur
         return (1.0 - alpha) * target_prev + alpha * target_cur
 
-    def set_joint_targets(self) -> None:
-        target = self.interpolated_target()
+    def set_joint_targets(self, query_time: float | None = None) -> None:
+        target = self.interpolated_target(query_time)
         self.pos_obj.set_target_position(0, wp.vec3(*target[:3].tolist()))
         self.rot_obj.set_target_rotation(0, wp.vec4(*target[3:7].tolist()))
         self.current_gripper_target = float(target[-1])
@@ -356,7 +371,13 @@ class Example:
 
     def simulate(self) -> None:
         self.cloth_solver.rebuild_bvh(self.state_0)
-        for _ in range(self.sim_substeps):
+
+        if self.enable_franka:
+            wp.copy(self.frame_joint_q_start, self.state_0.joint_q)
+            self.set_joint_targets(self.sim_time + self.frame_dt)
+            wp.copy(self.frame_joint_q_end, self.control.joint_target_pos)
+
+        for substep in range(self.sim_substeps):
             self.state_0.clear_forces()
             self.state_1.clear_forces()
             self.viewer.apply_forces(self.state_0)
@@ -364,8 +385,14 @@ class Example:
             self.state_1.assign(self.state_0)
 
             if self.enable_franka:
-                self.set_joint_targets()
-                wp.copy(self.state_1.joint_q, self.control.joint_target_pos)
+                substep_alpha = float((substep + 1) / self.sim_substeps)
+                wp.launch(
+                    interpolate_joint_positions_kernel,
+                    dim=self.model.joint_coord_count,
+                    inputs=[self.frame_joint_q_start, self.frame_joint_q_end, substep_alpha],
+                    outputs=[self.state_1.joint_q],
+                    device=self.model.device,
+                )
                 wp.launch(
                     update_joint_velocity_kernel,
                     dim=self.model.joint_dof_count,

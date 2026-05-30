@@ -25,7 +25,7 @@ import newton.examples
 import newton.ik as ik
 import newton.utils
 from newton import ModelBuilder, eval_fk
-from newton.solvers import SolverMuJoCo, SolverVBD
+from newton.solvers import SolverMuJoCo, SolverStyle3D, SolverVBD, style3d
 
 
 @wp.kernel
@@ -68,6 +68,17 @@ def update_joint_velocity_kernel(
 ):
     i = wp.tid()
     joint_qd[i] = (joint_q_next[i] - joint_q_prev[i]) * inv_dt
+
+
+@wp.kernel
+def interpolate_joint_positions_kernel(
+    joint_q_start: wp.array[wp.float32],
+    joint_q_end: wp.array[wp.float32],
+    alpha: float,
+    joint_q_out: wp.array[wp.float32],
+):
+    i = wp.tid()
+    joint_q_out[i] = joint_q_start[i] * (1.0 - alpha) + joint_q_end[i] * alpha
 
 
 TARGET_CUBE_SIZE = 1.0  # cm, half-extents
@@ -119,14 +130,16 @@ class Example:
         self.robot_contact_mu = 1.5
         self.self_contact_friction = 0.25
 
-        self.tri_ke = 1.0e3
         self.tri_ka = 1.0e3
         self.tri_kd = 1.0e-5
+        self.tri_aniso_ke = wp.vec3(1.0e3, 1.0e3, 2.5e2)
 
         self.bending_ke = 1.0
         self.bending_kd = 0.1
+        self.edge_aniso_ke = wp.vec3(self.bending_ke, self.bending_ke, self.bending_ke)
 
         self.scene = ModelBuilder(gravity=-981.0)
+        SolverStyle3D.register_custom_attributes(self.scene)
 
         franka = ModelBuilder()
         SolverMuJoCo.register_custom_attributes(franka)
@@ -138,7 +151,8 @@ class Example:
         self._add_support_cubes()
         self.support_cube_shape_end = self.scene.shape_count
 
-        self.scene.add_cloth_grid(
+        style3d.add_cloth_grid(
+            self.scene,
             pos=CLOTH_POS,
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0, 0.0, 0.0),
@@ -149,10 +163,10 @@ class Example:
             mass=CLOTH_MASS,
             fix_left=False,
             fix_right=False,
-            tri_ke=self.tri_ke,
+            tri_aniso_ke=self.tri_aniso_ke,
             tri_ka=self.tri_ka,
             tri_kd=self.tri_kd,
-            edge_ke=self.bending_ke,
+            edge_aniso_ke=self.edge_aniso_ke,
             edge_kd=self.bending_kd,
             particle_radius=self.cloth_particle_radius,
         )
@@ -206,6 +220,8 @@ class Example:
         self.viz_state = self.model.state()
         self.control = self.model.control()
         wp.copy(self.control.joint_target_pos[:9], self.model.joint_q[:9])
+        self.frame_joint_q_start = wp.zeros_like(self.model.joint_q)
+        self.frame_joint_q_end = wp.zeros_like(self.model.joint_q)
 
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
@@ -299,7 +315,6 @@ class Example:
                 [0.8, 27.0, -56.0, 9.0, *GRASP_QUAT, GRIPPER_CLOSED],
                 [1.0, 22.0, -58.0, 16.0, *GRASP_QUAT, GRIPPER_CLOSED],
                 [1.4, 10.0, -52.0, 22.0, *GRASP_QUAT, GRIPPER_CLOSED],
-                [1.0, 4.0, -46.0, 14.0, *GRASP_QUAT, GRIPPER_OPEN],
             ],
             dtype=np.float32,
         )
@@ -342,21 +357,23 @@ class Example:
         print(f"IK solution for first target {self.robot_targets[0][:3].tolist()}:")
         print(f"  joint_q[:7] = {ik_q.tolist()}")
 
-    def interpolated_target(self) -> np.ndarray:
-        if self.sim_time >= self.robot_key_poses_time[-1]:
+    def interpolated_target(self, query_time: float | None = None) -> np.ndarray:
+        sample_time = self.sim_time if query_time is None else query_time
+
+        if sample_time >= self.robot_key_poses_time[-1]:
             return self.robot_targets[-1]
 
-        interval = int(np.searchsorted(self.robot_key_poses_time, self.sim_time))
+        interval = int(np.searchsorted(self.robot_key_poses_time, sample_time))
         t_start = float(self.robot_key_poses_time[interval - 1]) if interval > 0 else 0.0
         t_end = float(self.robot_key_poses_time[interval])
-        alpha = float(np.clip((self.sim_time - t_start) / max(t_end - t_start, 1.0e-6), 0.0, 1.0))
+        alpha = float(np.clip((sample_time - t_start) / max(t_end - t_start, 1.0e-6), 0.0, 1.0))
 
         target_cur = self.robot_targets[interval]
         target_prev = self.robot_targets[interval - 1] if interval > 0 else target_cur
         return (1.0 - alpha) * target_prev + alpha * target_cur
 
-    def set_joint_targets(self) -> None:
-        target = self.interpolated_target()
+    def set_joint_targets(self, query_time: float | None = None) -> None:
+        target = self.interpolated_target(query_time)
         self.pos_obj.set_target_position(0, wp.vec3(*target[:3].tolist()))
         self.rot_obj.set_target_rotation(0, wp.vec4(*target[3:7].tolist()))
         self.current_gripper_target = float(target[-1])
@@ -370,6 +387,12 @@ class Example:
 
     def simulate(self) -> None:
         self.cloth_solver.rebuild_bvh(self.state_0)
+
+        if self.enable_franka:
+            wp.copy(self.frame_joint_q_start, self.state_0.joint_q)
+            self.set_joint_targets(self.sim_time + self.frame_dt)
+            wp.copy(self.frame_joint_q_end, self.control.joint_target_pos)
+
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
             self.state_1.clear_forces()
@@ -378,8 +401,14 @@ class Example:
             self.state_1.assign(self.state_0)
 
             if self.enable_franka:
-                self.set_joint_targets()
-                wp.copy(self.state_1.joint_q, self.control.joint_target_pos)
+                substep_alpha = float((_ + 1) / self.sim_substeps)
+                wp.launch(
+                    interpolate_joint_positions_kernel,
+                    dim=self.model.joint_coord_count,
+                    inputs=[self.frame_joint_q_start, self.frame_joint_q_end, substep_alpha],
+                    outputs=[self.state_1.joint_q],
+                    device=self.model.device,
+                )
                 wp.launch(
                     update_joint_velocity_kernel,
                     dim=self.model.joint_dof_count,
@@ -443,13 +472,13 @@ class Example:
             float(target[1]) * self.viz_scale,
             float(target[2]) * self.viz_scale,
         )
-        self.viewer.log_shapes(
-            "/target_cube",
-            newton.GeoType.BOX,
-            (TARGET_CUBE_SIZE * self.viz_scale, TARGET_CUBE_SIZE * self.viz_scale, TARGET_CUBE_SIZE * self.viz_scale),
-            wp.array([wp.transform(cube_pos_m, wp.quat(float(target[3]), float(target[4]), float(target[5]), float(target[6])))], dtype=wp.transform),
-            wp.array([TARGET_CUBE_COLOR], dtype=wp.vec3),
-        )
+        # self.viewer.log_shapes(
+        #     "/target_cube",
+        #     newton.GeoType.BOX,
+        #     (TARGET_CUBE_SIZE * self.viz_scale, TARGET_CUBE_SIZE * self.viz_scale, TARGET_CUBE_SIZE * self.viz_scale),
+        #     wp.array([wp.transform(cube_pos_m, wp.quat(float(target[3]), float(target[4]), float(target[5]), float(target[6])))], dtype=wp.transform),
+        #     wp.array([TARGET_CUBE_COLOR], dtype=wp.vec3),
+        # )
 
         self.viewer.end_frame()
 

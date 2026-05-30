@@ -38,11 +38,19 @@ from .particle_vbd_kernels import (
     accumulate_particle_body_contact_force_and_hessian,
     accumulate_self_contact_force_and_hessian,
     accumulate_spring_force_and_hessian,
+    append_persistent_ee_contacts,
+    append_persistent_vt_contacts,
+    build_active_ee_contacts,
+    build_active_vt_contacts,
     # Planar DAT (Divide and Truncate) kernels
     apply_planar_truncation_parallel_by_collision,
     apply_truncation_ts,
     build_edge_n_ring_edge_collision_filter,
     build_vertex_n_ring_tris_collision_filter,
+    compute_ee_safe_step,
+    compute_vt_safe_step,
+    seed_truncation_ts_from_line_search,
+    update_line_search_alpha,
     # Solver kernels (particle VBD)
     forward_step,
     set_to_csr,
@@ -466,6 +474,7 @@ class SolverVBD(SolverBase):
             model.particle_q, device=self.device
         )  # per-substep previous q (for velocity)
         self.inertia = wp.zeros_like(model.particle_q, device=self.device)  # inertial target positions
+        self._init_particle_membrane_materials(model)
 
         # Particle adjacency info
         self.particle_adjacency = self._compute_particle_force_element_adjacency().to(self.device)
@@ -535,6 +544,48 @@ class SolverVBD(SolverBase):
         self.pos_prev_collision_detection = wp.zeros_like(model.particle_q, device=self.device)
         self.particle_displacements = wp.zeros(self.model.particle_count, dtype=wp.vec3, device=self.device)
         self.truncation_ts = wp.zeros(self.model.particle_count, dtype=float, device=self.device)
+        self.last_safe_step = 1.0
+        self.last_active_vt_count = 0
+        self.last_active_ee_count = 0
+        self.has_active_particle_self_contacts = particle_enable_self_contact
+
+        if self.particle_enable_self_contact:
+            self.particle_active_contact_distance = 0.5 * (
+                self.particle_self_contact_radius + self.particle_self_contact_margin
+            )
+            self.particle_persistent_contact_distance = self.particle_self_contact_margin
+            self.particle_safe_step_distance = 0.5 * self.particle_self_contact_radius
+            self.particle_safe_step_eta = 0.9
+            self.particle_line_search_iterations = 4
+            self.particle_line_search_shrink_factor = 0.5
+            self.particle_line_search_acceptance_threshold = 0.99
+            self.particle_safe_step_fallback_threshold = 1.0e-3
+
+            active_vt_capacity = model.particle_count * self.trimesh_collision_detector.vertex_collision_buffer_pre_alloc
+            active_ee_capacity = model.edge_count * self.trimesh_collision_detector.edge_collision_buffer_pre_alloc
+
+            self.active_vt_vertex = wp.full(active_vt_capacity, value=-1, dtype=wp.int32, device=self.device)
+            self.active_vt_tri = wp.full(active_vt_capacity, value=-1, dtype=wp.int32, device=self.device)
+            self.active_vt_bary = wp.zeros(active_vt_capacity, dtype=wp.vec3, device=self.device)
+            self.active_vt_normal = wp.zeros(active_vt_capacity, dtype=wp.vec3, device=self.device)
+            self.active_vt_distance = wp.zeros(active_vt_capacity, dtype=float, device=self.device)
+            self.active_vt_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+            self.previous_active_vt_vertex = wp.full(active_vt_capacity, value=-1, dtype=wp.int32, device=self.device)
+            self.previous_active_vt_tri = wp.full(active_vt_capacity, value=-1, dtype=wp.int32, device=self.device)
+            self.previous_active_vt_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+
+            self.active_ee_edge0 = wp.full(active_ee_capacity, value=-1, dtype=wp.int32, device=self.device)
+            self.active_ee_edge1 = wp.full(active_ee_capacity, value=-1, dtype=wp.int32, device=self.device)
+            self.active_ee_st = wp.zeros(active_ee_capacity, dtype=wp.vec2, device=self.device)
+            self.active_ee_normal = wp.zeros(active_ee_capacity, dtype=wp.vec3, device=self.device)
+            self.active_ee_distance = wp.zeros(active_ee_capacity, dtype=float, device=self.device)
+            self.active_ee_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+            self.previous_active_ee_edge0 = wp.full(active_ee_capacity, value=-1, dtype=wp.int32, device=self.device)
+            self.previous_active_ee_edge1 = wp.full(active_ee_capacity, value=-1, dtype=wp.int32, device=self.device)
+            self.previous_active_ee_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+            self.safe_step_alpha = wp.array([1.0], dtype=float, device=self.device)
+            self.line_search_alpha = wp.array([1.0], dtype=float, device=self.device)
+            self.line_search_accepted_alpha = wp.zeros(1, dtype=float, device=self.device)
 
     def _init_rigid_system(
         self,
@@ -1150,6 +1201,26 @@ class SolverVBD(SolverBase):
     # Adjacency Building Methods
     # =====================================================
 
+    def _init_particle_membrane_materials(self, model: Model) -> None:
+        self.tri_material_models = wp.zeros(model.tri_count, dtype=wp.int32, device=self.device)
+        self.tri_style3d_aniso_ke = wp.zeros(model.tri_count, dtype=wp.vec3, device=self.device)
+
+        if model.tri_count == 0:
+            return
+
+        if not hasattr(model, "style3d") or not hasattr(model.style3d, "tri_aniso_ke"):
+            return
+
+        tri_aniso_ke = np.asarray(model.style3d.tri_aniso_ke.numpy(), dtype=np.float32)
+        if tri_aniso_ke.shape[0] != model.tri_count:
+            raise ValueError(
+                "model.style3d.tri_aniso_ke shape does not match model.tri_count for SolverVBD membrane materials."
+            )
+
+        material_models = np.any(tri_aniso_ke > 0.0, axis=1).astype(np.int32)
+        self.tri_material_models = wp.array(material_models, dtype=wp.int32, device=self.device)
+        self.tri_style3d_aniso_ke = wp.array(tri_aniso_ke, dtype=wp.vec3, device=self.device)
+
     def _compute_particle_force_element_adjacency(self):
         particle_adjacency = ParticleForceElementAdjacencyInfo()
 
@@ -1666,8 +1737,39 @@ class SolverVBD(SolverBase):
             )
 
         else:
+            if not self.has_active_particle_self_contacts:
+                self.truncation_ts.fill_(1.0)
+                self.line_search_accepted_alpha.fill_(1.0)
+                self.last_safe_step = 1.0
+                wp.launch(
+                    kernel=apply_truncation_ts,
+                    dim=self.model.particle_count,
+                    inputs=[
+                        self.pos_prev_collision_detection,
+                        self.particle_displacements,
+                        self.truncation_ts,
+                        wp.inf,
+                    ],
+                    outputs=[
+                        self.particle_displacements,
+                        particle_q_out,
+                    ],
+                    device=self.device,
+                )
+                return
+
             ##  parallel by collision and atomic operation
-            self.truncation_ts.fill_(1.0)
+            self._run_particle_contact_line_search()
+            wp.launch(
+                kernel=seed_truncation_ts_from_line_search,
+                dim=self.model.particle_count,
+                inputs=[
+                    self.line_search_accepted_alpha,
+                    self.particle_safe_step_fallback_threshold,
+                    self.truncation_ts,
+                ],
+                device=self.device,
+            )
             wp.launch(
                 kernel=apply_planar_truncation_parallel_by_collision,
                 inputs=[
@@ -2066,7 +2168,7 @@ class SolverVBD(SolverBase):
 
         if model.particle_count > 0 and particle_refresh and contacts is not None:
             # Build body-particle contact lists (only when SolverVBD integrates bodies).
-            if not self.integrate_with_external_rigid_solver and model.body_count > 0:
+            if not self.integrate_with_external_rigid_solver and model.body_count > 0 and contacts.soft_contact_max > 0:
                 self.body_particle_contact_counts.zero_()
                 self.body_particle_contact_overflow_max.zero_()
                 wp.launch(
@@ -2101,28 +2203,29 @@ class SolverVBD(SolverBase):
                     soft_contact_launch_dim,
                 )
                 self._init_body_particle_contact_state(soft_contact_launch_dim)
-            wp.launch(
-                kernel=init_body_particle_contacts,
-                inputs=[
-                    contacts.soft_contact_count,
-                    contacts.soft_contact_shape,
-                    model.soft_contact_ke,
-                    model.soft_contact_kd,
-                    model.soft_contact_mu,
-                    model.shape_material_ke,
-                    model.shape_material_kd,
-                    model.shape_material_mu,
-                    self.rigid_contact_k_start_value,
-                ],
-                outputs=[
-                    self.body_particle_contact_penalty_k,
-                    self.body_particle_contact_material_kd,
-                    self.body_particle_contact_material_mu,
-                    self.body_particle_contact_material_ke,
-                ],
-                dim=soft_contact_launch_dim,
-                device=self.device,
-            )
+            if contacts.soft_contact_max > 0:
+                wp.launch(
+                    kernel=init_body_particle_contacts,
+                    inputs=[
+                        contacts.soft_contact_count,
+                        contacts.soft_contact_shape,
+                        model.soft_contact_ke,
+                        model.soft_contact_kd,
+                        model.soft_contact_mu,
+                        model.shape_material_ke,
+                        model.shape_material_kd,
+                        model.shape_material_mu,
+                        self.rigid_contact_k_start_value,
+                    ],
+                    outputs=[
+                        self.body_particle_contact_penalty_k,
+                        self.body_particle_contact_material_kd,
+                        self.body_particle_contact_material_mu,
+                        self.body_particle_contact_material_ke,
+                    ],
+                    dim=soft_contact_launch_dim,
+                    device=self.device,
+                )
 
     def _solve_particle_iteration(
         self, state_in: State, state_out: State, contacts: Contacts | None, dt: float, iter_num: int
@@ -2159,45 +2262,42 @@ class SolverVBD(SolverBase):
         self.particle_forces.zero_()
         self.particle_hessians.zero_()
 
+        if contacts is not None and contacts.soft_contact_max > 0:
+            wp.launch(
+                kernel=accumulate_particle_body_contact_force_and_hessian,
+                dim=contacts.soft_contact_max,
+                inputs=[
+                    dt,
+                    self.particle_q_prev,
+                    state_in.particle_q,
+                    self.friction_epsilon,
+                    model.particle_radius,
+                    contacts.soft_contact_particle,
+                    contacts.soft_contact_count,
+                    contacts.soft_contact_max,
+                    self.body_particle_contact_penalty_k,
+                    self.body_particle_contact_material_kd,
+                    self.body_particle_contact_material_mu,
+                    model.shape_material_mu,
+                    model.shape_body,
+                    body_q_for_particles,
+                    body_q_prev_for_particles,
+                    body_qd_for_particles,
+                    model.body_com,
+                    contacts.soft_contact_shape,
+                    contacts.soft_contact_body_pos,
+                    contacts.soft_contact_body_vel,
+                    contacts.soft_contact_normal,
+                ],
+                outputs=[
+                    self.particle_forces,
+                    self.particle_hessians,
+                ],
+                device=self.device,
+            )
+
         # Iterate over color groups
         for color in range(len(self.model.particle_color_groups)):
-            if contacts is not None:
-                wp.launch(
-                    kernel=accumulate_particle_body_contact_force_and_hessian,
-                    dim=contacts.soft_contact_max,
-                    inputs=[
-                        dt,
-                        color,
-                        self.particle_q_prev,
-                        state_in.particle_q,
-                        model.particle_colors,
-                        # body-particle contact
-                        self.friction_epsilon,
-                        model.particle_radius,
-                        contacts.soft_contact_particle,
-                        contacts.soft_contact_count,
-                        contacts.soft_contact_max,
-                        self.body_particle_contact_penalty_k,
-                        self.body_particle_contact_material_kd,
-                        self.body_particle_contact_material_mu,
-                        model.shape_material_mu,
-                        model.shape_body,
-                        body_q_for_particles,
-                        body_q_prev_for_particles,
-                        body_qd_for_particles,
-                        model.body_com,
-                        contacts.soft_contact_shape,
-                        contacts.soft_contact_body_pos,
-                        contacts.soft_contact_body_vel,
-                        contacts.soft_contact_normal,
-                    ],
-                    outputs=[
-                        self.particle_forces,
-                        self.particle_hessians,
-                    ],
-                    device=self.device,
-                )
-
             if model.spring_count:
                 wp.launch(
                     kernel=accumulate_spring_force_and_hessian,
@@ -2259,6 +2359,8 @@ class SolverVBD(SolverBase):
                         self.model.tri_indices,
                         self.model.tri_poses,
                         self.model.tri_materials,
+                        self.tri_material_models,
+                        self.tri_style3d_aniso_ke,
                         self.model.tri_areas,
                         self.model.edge_indices,
                         self.model.edge_rest_angle,
@@ -2291,6 +2393,8 @@ class SolverVBD(SolverBase):
                         self.model.tri_indices,
                         self.model.tri_poses,
                         self.model.tri_materials,
+                        self.tri_material_models,
+                        self.tri_style3d_aniso_ke,
                         self.model.tri_areas,
                         self.model.edge_indices,
                         self.model.edge_rest_angle,
@@ -2326,7 +2430,7 @@ class SolverVBD(SolverBase):
         # external rigid mode uses state_out.body_q, while static-shape contacts use _empty_body_q.
         skip_rigid_solve = self.integrate_with_external_rigid_solver or model.body_count == 0
         if skip_rigid_solve:
-            if model.particle_count > 0 and contacts is not None:
+            if model.particle_count > 0 and contacts is not None and contacts.soft_contact_max > 0:
                 body_q = state_out.body_q if self.integrate_with_external_rigid_solver else state_in.body_q
                 if body_q is None:
                     body_q = self._empty_body_q
@@ -2541,26 +2645,26 @@ class SolverVBD(SolverBase):
             )
 
             if model.particle_count > 0:
-                soft_contact_launch_dim = contacts.soft_contact_max
-                wp.launch(
-                    kernel=update_duals_body_particle_contacts,
-                    dim=soft_contact_launch_dim,
-                    inputs=[
-                        contacts.soft_contact_count,
-                        contacts.soft_contact_particle,
-                        contacts.soft_contact_shape,
-                        contacts.soft_contact_body_pos,
-                        contacts.soft_contact_normal,
-                        state_in.particle_q,
-                        model.particle_radius,
-                        model.shape_body,
-                        state_in.body_q,
-                        self.body_particle_contact_material_ke,
-                        self.rigid_linear_beta,
-                        self.body_particle_contact_penalty_k,  # input/output
-                    ],
-                    device=self.device,
-                )
+                if contacts.soft_contact_max > 0:
+                    wp.launch(
+                        kernel=update_duals_body_particle_contacts,
+                        dim=contacts.soft_contact_max,
+                        inputs=[
+                            contacts.soft_contact_count,
+                            contacts.soft_contact_particle,
+                            contacts.soft_contact_shape,
+                            contacts.soft_contact_body_pos,
+                            contacts.soft_contact_normal,
+                            state_in.particle_q,
+                            model.particle_radius,
+                            model.shape_body,
+                            state_in.body_q,
+                            self.body_particle_contact_material_ke,
+                            self.rigid_linear_beta,
+                            self.body_particle_contact_penalty_k,  # input/output
+                        ],
+                        device=self.device,
+                    )
 
         if model.joint_count > 0:
             wp.launch(
@@ -2822,6 +2926,199 @@ class SolverVBD(SolverBase):
             min_query_radius=self.particle_rest_shape_contact_exclusion_radius,
             min_distance_filtering_ref_pos=self.particle_q_rest,
         )
+
+        self.active_vt_count.zero_()
+        self.active_ee_count.zero_()
+
+        wp.launch(
+            kernel=build_active_vt_contacts,
+            dim=self.model.particle_count,
+            inputs=[
+                current_state.particle_q,
+                self.model.tri_indices,
+                self.trimesh_collision_info,
+                self.particle_active_contact_distance,
+                self.active_vt_vertex,
+                self.active_vt_tri,
+                self.active_vt_bary,
+                self.active_vt_normal,
+                self.active_vt_distance,
+                self.active_vt_count,
+            ],
+            device=self.device,
+        )
+
+        wp.launch(
+            kernel=build_active_ee_contacts,
+            dim=self.model.edge_count,
+            inputs=[
+                current_state.particle_q,
+                self.model.edge_indices,
+                self.trimesh_collision_info,
+                self.particle_active_contact_distance,
+                self.trimesh_collision_detector.edge_edge_parallel_epsilon,
+                self.active_ee_edge0,
+                self.active_ee_edge1,
+                self.active_ee_st,
+                self.active_ee_normal,
+                self.active_ee_distance,
+                self.active_ee_count,
+            ],
+            device=self.device,
+        )
+
+        self._append_persistent_particle_contacts(current_state)
+
+        self._snapshot_active_particle_contacts()
+
+        if self._can_sync_particle_contact_debug_metrics():
+            self.last_active_vt_count = int(self.active_vt_count.numpy()[0])
+            self.last_active_ee_count = int(self.active_ee_count.numpy()[0])
+            self.has_active_particle_self_contacts = (self.last_active_vt_count + self.last_active_ee_count) > 0
+        else:
+            self.has_active_particle_self_contacts = True
+
+    def _append_persistent_particle_contacts(self, current_state: State) -> None:
+        if not self.particle_enable_self_contact:
+            return
+
+        wp.launch(
+            kernel=append_persistent_vt_contacts,
+            dim=self.previous_active_vt_vertex.shape[0],
+            inputs=[
+                current_state.particle_q,
+                self.model.tri_indices,
+                self.particle_persistent_contact_distance,
+                self.previous_active_vt_vertex,
+                self.previous_active_vt_tri,
+                self.previous_active_vt_count,
+                self.active_vt_vertex,
+                self.active_vt_tri,
+                self.active_vt_bary,
+                self.active_vt_normal,
+                self.active_vt_distance,
+                self.active_vt_count,
+            ],
+            device=self.device,
+        )
+
+        wp.launch(
+            kernel=append_persistent_ee_contacts,
+            dim=self.previous_active_ee_edge0.shape[0],
+            inputs=[
+                current_state.particle_q,
+                self.model.edge_indices,
+                self.particle_persistent_contact_distance,
+                self.trimesh_collision_detector.edge_edge_parallel_epsilon,
+                self.previous_active_ee_edge0,
+                self.previous_active_ee_edge1,
+                self.previous_active_ee_count,
+                self.active_ee_edge0,
+                self.active_ee_edge1,
+                self.active_ee_st,
+                self.active_ee_normal,
+                self.active_ee_distance,
+                self.active_ee_count,
+            ],
+            device=self.device,
+        )
+
+    def _snapshot_active_particle_contacts(self) -> None:
+        if not self.particle_enable_self_contact:
+            return
+
+        wp.copy(self.previous_active_vt_vertex, self.active_vt_vertex)
+        wp.copy(self.previous_active_vt_tri, self.active_vt_tri)
+        wp.copy(self.previous_active_vt_count, self.active_vt_count)
+
+        wp.copy(self.previous_active_ee_edge0, self.active_ee_edge0)
+        wp.copy(self.previous_active_ee_edge1, self.active_ee_edge1)
+        wp.copy(self.previous_active_ee_count, self.active_ee_count)
+
+    def _compute_particle_safe_step(self, displacement_scale: wp.array[float]) -> None:
+        if not self.particle_enable_self_contact:
+            self.safe_step_alpha.fill_(1.0)
+            self.last_safe_step = 1.0
+            return
+
+        self.safe_step_alpha.fill_(1.0)
+
+        wp.launch(
+            kernel=compute_vt_safe_step,
+            dim=self.active_vt_vertex.shape[0],
+            inputs=[
+                self.model.tri_indices,
+                self.particle_displacements,
+                displacement_scale,
+                self.particle_safe_step_distance,
+                self.particle_safe_step_eta,
+                self.active_vt_vertex,
+                self.active_vt_tri,
+                self.active_vt_bary,
+                self.active_vt_normal,
+                self.active_vt_distance,
+                self.active_vt_count,
+                self.safe_step_alpha,
+            ],
+            device=self.device,
+        )
+
+        wp.launch(
+            kernel=compute_ee_safe_step,
+            dim=self.active_ee_edge0.shape[0],
+            inputs=[
+                self.model.edge_indices,
+                self.particle_displacements,
+                displacement_scale,
+                self.particle_safe_step_distance,
+                self.particle_safe_step_eta,
+                self.active_ee_edge0,
+                self.active_ee_edge1,
+                self.active_ee_st,
+                self.active_ee_normal,
+                self.active_ee_distance,
+                self.active_ee_count,
+                self.safe_step_alpha,
+            ],
+            device=self.device,
+        )
+
+        if self._can_sync_particle_contact_debug_metrics():
+            self.last_safe_step = float(self.safe_step_alpha.numpy()[0])
+
+    def _run_particle_contact_line_search(self) -> None:
+        if not self.particle_enable_self_contact:
+            self.line_search_accepted_alpha.fill_(1.0)
+            self.last_safe_step = 1.0
+            return
+
+        self.line_search_alpha.fill_(1.0)
+        self.line_search_accepted_alpha.zero_()
+
+        for _ in range(self.particle_line_search_iterations):
+            self._compute_particle_safe_step(self.line_search_alpha)
+            wp.launch(
+                kernel=update_line_search_alpha,
+                dim=1,
+                inputs=[
+                    self.line_search_alpha,
+                    self.safe_step_alpha,
+                    self.line_search_accepted_alpha,
+                    self.particle_line_search_acceptance_threshold,
+                    self.particle_line_search_shrink_factor,
+                ],
+                device=self.device,
+            )
+
+        if self._can_sync_particle_contact_debug_metrics():
+            accepted_alpha = float(self.line_search_accepted_alpha.numpy()[0])
+            self.last_safe_step = accepted_alpha
+
+    def _can_sync_particle_contact_debug_metrics(self) -> bool:
+        if not self.device.is_cuda:
+            return True
+
+        return not wp.get_stream(self.device).is_capturing
 
     def rebuild_bvh(self, state: State):
         """This function will rebuild the BVHs used for detecting self-contacts using the input `state`.
