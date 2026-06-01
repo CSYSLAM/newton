@@ -38,13 +38,13 @@ from .particle_vbd_kernels import (
     accumulate_particle_body_contact_force_and_hessian,
     accumulate_self_contact_force_and_hessian,
     accumulate_spring_force_and_hessian,
-    detect_any_active_self_contacts,
     # Planar DAT (Divide and Truncate) kernels
     apply_planar_truncation_parallel_by_collision,
     apply_truncation_identity_selected,
     apply_truncation_ts,
     build_edge_n_ring_edge_collision_filter,
     build_vertex_n_ring_tris_collision_filter,
+    compact_active_self_contact_primitives,
     # Solver kernels (particle VBD)
     forward_step,
     set_to_csr,
@@ -482,7 +482,9 @@ class SolverVBD(SolverBase):
             self.volumetric_particle_color_groups,
         ) = self._build_particle_elasticity_color_groups(particle_adjacency_host)
         (
+            self.surface_tile_skip_active_checks,
             self.surface_tile_skip_material_checks,
+            self.volumetric_tile_skip_active_checks,
             self.volumetric_tile_skip_material_checks,
         ) = self._compute_tile_material_check_fast_path_flags()
 
@@ -535,11 +537,19 @@ class SolverVBD(SolverBase):
                 self.model.edge_count * NUM_THREADS_PER_COLLISION_PRIMITIVE,
             )
             self.active_self_contact_scan_dim = max(self.model.particle_count, self.model.edge_count)
+            self.active_self_contact_edge_ids = wp.empty(self.model.edge_count, dtype=wp.int32, device=self.device)
+            self.active_self_contact_edge_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+            self.active_self_contact_vertex_ids = wp.empty(self.model.particle_count, dtype=wp.int32, device=self.device)
+            self.active_self_contact_vertex_count = wp.zeros(1, dtype=wp.int32, device=self.device)
             self.has_active_self_contact = wp.zeros(1, dtype=wp.int32, device=self.device)
             self._has_active_self_contact_host = True
         else:
             self.particle_self_contact_evaluation_kernel_launch_size = None
             self.active_self_contact_scan_dim = None
+            self.active_self_contact_edge_ids = None
+            self.active_self_contact_edge_count = None
+            self.active_self_contact_vertex_ids = None
+            self.active_self_contact_vertex_count = None
             self.has_active_self_contact = None
             self._has_active_self_contact_host = False
 
@@ -558,7 +568,15 @@ class SolverVBD(SolverBase):
         self.particle_displacements = wp.zeros(self.model.particle_count, dtype=wp.vec3, device=self.device)
         self.truncation_ts = wp.zeros(self.model.particle_count, dtype=float, device=self.device)
 
-    def _compute_tile_material_check_fast_path_flags(self) -> tuple[int, int]:
+    def _compute_tile_material_check_fast_path_flags(self) -> tuple[int, int, int, int]:
+        particle_all_active = True
+        if self.model.particle_count > 0 and self.model.particle_flags is not None:
+            particle_all_active = bool(np.all(self.model.particle_flags.numpy() != 0))
+
+        particle_mass_all_positive = True
+        if self.model.particle_count > 0 and self.model.particle_mass is not None:
+            particle_mass_all_positive = bool(np.all(self.model.particle_mass.numpy() > 0.0))
+
         tri_all_active = True
         if self.model.tri_count > 0 and self.model.tri_materials is not None:
             tri_materials = self.model.tri_materials.numpy()
@@ -574,7 +592,15 @@ class SolverVBD(SolverBase):
             tet_materials = self.model.tet_materials.numpy()
             tet_all_active = bool(np.all((tet_materials[:, 0] > 0.0) | (tet_materials[:, 1] > 0.0)))
 
-        return 0, int(tri_all_active and edge_all_active and tet_all_active)
+        skip_active_checks = int(particle_all_active and particle_mass_all_positive)
+        surface_skip_material_checks = int(tri_all_active and edge_all_active)
+        volumetric_skip_material_checks = int(tri_all_active and edge_all_active and tet_all_active)
+        return (
+            skip_active_checks,
+            surface_skip_material_checks,
+            skip_active_checks,
+            volumetric_skip_material_checks,
+        )
 
     def _init_rigid_system(
         self,
@@ -779,6 +805,7 @@ class SolverVBD(SolverBase):
         self.body_particle_contact_material_mu = wp.zeros(0, dtype=float, device=self.device)
         self.body_particle_contact_active_count_host = 0
         self.body_particle_contact_launch_dim = 0
+        self._body_particle_contact_launch_dim_is_saturated = False
         # Zero-length body poses for static-shape contact kernels when State.body_q is absent.
         self._empty_body_q = wp.empty(0, dtype=wp.transform, device=self.device)
         if model.particle_count > 0 and model.shape_count > 0:
@@ -872,20 +899,31 @@ class SolverVBD(SolverBase):
         if contacts is None or contacts.soft_contact_max <= 0:
             return
 
-        if self.device.is_capturing:
-            self.body_particle_contact_active_count_host = min(
-                int(contacts.soft_contact_max),
-                int(self.body_particle_contact_penalty_k.shape[0]),
-            )
-            self.body_particle_contact_launch_dim = self._body_particle_contact_launch_dim(contacts.soft_contact_max)
+        soft_contact_max = int(contacts.soft_contact_max)
+
+        if not self.device.is_capturing and self._body_particle_contact_launch_dim_is_saturated:
+            self.body_particle_contact_active_count_host = soft_contact_max
+            self.body_particle_contact_launch_dim = self._body_particle_contact_launch_dim(soft_contact_max, soft_contact_max)
             return
 
-        active_count = min(int(contacts.soft_contact_max), int(contacts.soft_contact_count.numpy()[0]))
+        if self.device.is_capturing:
+            self.body_particle_contact_active_count_host = min(
+                soft_contact_max,
+                int(self.body_particle_contact_penalty_k.shape[0]),
+            )
+            self.body_particle_contact_launch_dim = self._body_particle_contact_launch_dim(
+                soft_contact_max,
+                self.body_particle_contact_active_count_host,
+            )
+            return
+
+        active_count = min(soft_contact_max, int(contacts.soft_contact_count.numpy()[0]))
         self.body_particle_contact_active_count_host = active_count
         self.body_particle_contact_launch_dim = self._body_particle_contact_launch_dim(
-            contacts.soft_contact_max,
+            soft_contact_max,
             active_count,
         )
+        self._body_particle_contact_launch_dim_is_saturated = active_count >= soft_contact_max
 
     def _init_rigid_contact_warmstart(self, rigid_contact_max: int) -> None:
         """Allocate rigid contact warm-start buffers."""
@@ -1794,7 +1832,7 @@ class SolverVBD(SolverBase):
             device=self.device,
         )
 
-    def _penetration_free_truncation(self, particle_q_out=None):
+    def _penetration_free_truncation(self, particle_q_out=None, current_color: int = -1):
         """
         Modify displacements_in in-place, also modify particle_q if its not None
 
@@ -1834,6 +1872,12 @@ class SolverVBD(SolverBase):
                     self.model.tri_indices,
                     self.model.edge_indices,
                     self.trimesh_collision_info,
+                    self.active_self_contact_edge_ids,
+                    self.active_self_contact_edge_count,
+                    self.active_self_contact_vertex_ids,
+                    self.active_self_contact_vertex_count,
+                    current_color,
+                    self.model.particle_colors,
                     self.trimesh_collision_detector.edge_edge_parallel_epsilon,
                     self.particle_conservative_bound_relaxation,
                 ],
@@ -2436,6 +2480,10 @@ class SolverVBD(SolverBase):
                         self.model.edge_indices,
                         # self-contact
                         self.trimesh_collision_info,
+                        self.active_self_contact_edge_ids,
+                        self.active_self_contact_edge_count,
+                        self.active_self_contact_vertex_ids,
+                        self.active_self_contact_vertex_count,
                         self.particle_self_contact_radius,
                         self.model.soft_contact_ke,
                         self.model.soft_contact_kd,
@@ -2474,6 +2522,7 @@ class SolverVBD(SolverBase):
                             self.particle_adjacency,
                             self.particle_forces,
                             self.particle_hessians,
+                            self.surface_tile_skip_active_checks,
                             self.surface_tile_skip_material_checks,
                             local_truncation_flag,
                             local_max_displacement,
@@ -2514,6 +2563,7 @@ class SolverVBD(SolverBase):
                             self.particle_adjacency,
                             self.particle_forces,
                             self.particle_hessians,
+                            self.volumetric_tile_skip_active_checks,
                             self.volumetric_tile_skip_material_checks,
                             local_truncation_flag,
                             local_max_displacement,
@@ -2562,7 +2612,7 @@ class SolverVBD(SolverBase):
                 )
 
             if not use_local_particle_truncation:
-                self._penetration_free_truncation(state_in.particle_q)
+                self._penetration_free_truncation(state_in.particle_q, color)
 
         wp.copy(state_out.particle_q, state_in.particle_q)
 
@@ -3082,12 +3132,20 @@ class SolverVBD(SolverBase):
             min_distance_filtering_ref_pos=self.particle_q_rest,
         )
 
+        self.active_self_contact_edge_count.zero_()
+        self.active_self_contact_vertex_count.zero_()
         self.has_active_self_contact.zero_()
         wp.launch(
-            kernel=detect_any_active_self_contacts,
+            kernel=compact_active_self_contact_primitives,
             dim=self.active_self_contact_scan_dim,
             inputs=[self.trimesh_collision_info],
-            outputs=[self.has_active_self_contact],
+            outputs=[
+                self.active_self_contact_edge_ids,
+                self.active_self_contact_edge_count,
+                self.active_self_contact_vertex_ids,
+                self.active_self_contact_vertex_count,
+                self.has_active_self_contact,
+            ],
             device=self.device,
         )
 

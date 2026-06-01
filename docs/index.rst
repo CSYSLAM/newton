@@ -19,6 +19,7 @@ Newton Physics
    guide/compatibility
    guide/visualization
    guide/tutorials
+   guide/mujoco_vbd_shirt_performance
    Development <guide/development>
 
 .. toctree::
