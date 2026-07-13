@@ -215,7 +215,10 @@ class Example:
 
         self.support_cube_viz_xforms = wp.array(
             [
-                wp.transform((float(x) * self.viz_scale, float(y) * self.viz_scale, SUPPORT_CUBE_HZ * self.viz_scale), wp.quat_identity())
+                wp.transform(
+                    (float(x) * self.viz_scale, float(y) * self.viz_scale, SUPPORT_CUBE_HZ * self.viz_scale),
+                    wp.quat_identity(),
+                )
                 for y in SUPPORT_CUBE_Y
                 for x in SUPPORT_CUBE_X
             ],
@@ -626,7 +629,14 @@ class Example:
             "/target_cube",
             newton.GeoType.BOX,
             (TARGET_CUBE_SIZE * self.viz_scale, TARGET_CUBE_SIZE * self.viz_scale, TARGET_CUBE_SIZE * self.viz_scale),
-            wp.array([wp.transform(cube_pos_m, wp.quat(float(target[3]), float(target[4]), float(target[5]), float(target[6])))], dtype=wp.transform),
+            wp.array(
+                [
+                    wp.transform(
+                        cube_pos_m, wp.quat(float(target[3]), float(target[4]), float(target[5]), float(target[6]))
+                    )
+                ],
+                dtype=wp.transform,
+            ),
             wp.array([TARGET_CUBE_COLOR], dtype=wp.vec3),
         )
 
@@ -647,7 +657,12 @@ class Example:
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
-        parser.add_argument("--enable-franka", action="store_true", default=True, help="Enable Franka IK tracking to target cube (default: True)")
+        parser.add_argument(
+            "--enable-franka",
+            action="store_true",
+            default=True,
+            help="Enable Franka IK tracking to target cube (default: True)",
+        )
         parser.add_argument("--disable-franka", action="store_true", help="Disable Franka, keep it frozen")
         parser.set_defaults(num_frames=3850)
         return parser

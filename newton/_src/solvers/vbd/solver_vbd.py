@@ -38,19 +38,19 @@ from .particle_vbd_kernels import (
     accumulate_particle_body_contact_force_and_hessian,
     accumulate_self_contact_force_and_hessian,
     accumulate_spring_force_and_hessian,
-    detect_any_active_self_contacts,
     # Planar DAT (Divide and Truncate) kernels
     apply_planar_truncation_parallel_by_collision,
     apply_truncation_identity_selected,
     apply_truncation_ts,
     build_edge_n_ring_edge_collision_filter,
     build_vertex_n_ring_tris_collision_filter,
+    detect_any_active_self_contacts,
     # Solver kernels (particle VBD)
     forward_step,
     set_to_csr,
     solve_elasticity,
-    solve_surface_elasticity_tile,
     solve_elasticity_tile,
+    solve_surface_elasticity_tile,
     update_velocity,
 )
 from .rigid_vbd_kernels import (
@@ -1434,7 +1434,8 @@ class SolverVBD(SolverBase):
 
         if self.model.tet_count == 0:
             surface_groups = [
-                group if group.device == self.device else group.to(self.device) for group in self.model.particle_color_groups
+                group if group.device == self.device else group.to(self.device)
+                for group in self.model.particle_color_groups
             ]
             volumetric_groups = [_empty_group() for _ in self.model.particle_color_groups]
             return surface_groups, volumetric_groups
@@ -1862,7 +1863,9 @@ class SolverVBD(SolverBase):
                 device=self.device,
             )
 
-    def _apply_particle_displacements_after_color(self, particle_ids_in_color: wp.array[wp.int32], particle_q_out) -> None:
+    def _apply_particle_displacements_after_color(
+        self, particle_ids_in_color: wp.array[wp.int32], particle_q_out
+    ) -> None:
         """Update positions after one color solve.
 
         When no active self-contact is present, only the current color group's
@@ -2392,7 +2395,9 @@ class SolverVBD(SolverBase):
                 device=self.device,
             )
 
-        use_local_particle_truncation = (not self.particle_enable_self_contact) or (not self._has_active_self_contact_host)
+        use_local_particle_truncation = (not self.particle_enable_self_contact) or (
+            not self._has_active_self_contact_host
+        )
         local_truncation_flag = int(use_local_particle_truncation)
         local_max_displacement = (
             self.particle_self_contact_margin * self.particle_conservative_bound_relaxation * 0.5

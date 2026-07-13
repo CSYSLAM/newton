@@ -73,3 +73,14 @@ docs/_static/viser/
 
 # Notebook checkpoints
 **/*.ipynb_checkpoints/
+
+# Example assets (large files)
+newton/examples/cloth/DexforceW1V021/
+newton/examples/cloth/DexforceW1V021-simple/
+newton/examples/cloth/pika/
+newton/examples/cloth/ricecooker/
+newton/examples/cloth/BurgerMeat.glb
+
+# Runtime artifacts (USD exports, trajectories)
+/*.usd
+/trajectory.json

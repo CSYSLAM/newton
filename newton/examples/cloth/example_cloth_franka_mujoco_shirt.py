@@ -648,7 +648,9 @@ class Example:
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
-        parser.add_argument("--enable-franka", action="store_true", default=True, help="Enable Franka grasp trajectory (default: True)")
+        parser.add_argument(
+            "--enable-franka", action="store_true", default=True, help="Enable Franka grasp trajectory (default: True)"
+        )
         parser.add_argument("--disable-franka", action="store_true", help="Disable Franka, keep it frozen")
         parser.set_defaults(num_frames=3850)
         return parser

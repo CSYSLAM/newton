@@ -328,6 +328,8 @@ def _average_contact_material(
     avg_kd = 0.5 * (kd0 + kd1)
     avg_mu = wp.sqrt(mu0 * mu1)
     return avg_ke, avg_kd, avg_mu
+
+
 @wp.func
 def _update_dual_vec3(
     C_vec: wp.vec3,
@@ -2307,6 +2309,7 @@ def step_body_body_contact_C0_lambda(
             C0_t = -(d_surf - n * wp.dot(n, d_surf))
             contact_C0[i] = n * C0_n + C0_t
 
+
 @wp.kernel
 def init_body_particle_contacts(
     body_particle_contact_count: wp.array[int],
@@ -3787,6 +3790,8 @@ def update_duals_body_particle_contacts(
         k = body_particle_contact_penalty_k[idx]
         body_particle_contact_penalty_k[idx] = wp.min(k + beta * penetration, stiffness)
         idx += body_particle_contact_launch_dim
+
+
 # -----------------------------
 # Post-iteration kernels (after all iterations)
 # -----------------------------

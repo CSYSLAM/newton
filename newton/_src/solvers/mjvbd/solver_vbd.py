@@ -49,8 +49,8 @@ from .particle_vbd_kernels import (
     forward_step,
     set_to_csr,
     solve_elasticity,
-    solve_surface_elasticity_tile,
     solve_elasticity_tile,
+    solve_surface_elasticity_tile,
     update_velocity,
 )
 from .rigid_vbd_kernels import (
@@ -539,7 +539,9 @@ class SolverVBD(SolverBase):
             self.active_self_contact_scan_dim = max(self.model.particle_count, self.model.edge_count)
             self.active_self_contact_edge_ids = wp.empty(self.model.edge_count, dtype=wp.int32, device=self.device)
             self.active_self_contact_edge_count = wp.zeros(1, dtype=wp.int32, device=self.device)
-            self.active_self_contact_vertex_ids = wp.empty(self.model.particle_count, dtype=wp.int32, device=self.device)
+            self.active_self_contact_vertex_ids = wp.empty(
+                self.model.particle_count, dtype=wp.int32, device=self.device
+            )
             self.active_self_contact_vertex_count = wp.zeros(1, dtype=wp.int32, device=self.device)
             self.has_active_self_contact = wp.zeros(1, dtype=wp.int32, device=self.device)
             self._has_active_self_contact_host = True
@@ -903,7 +905,9 @@ class SolverVBD(SolverBase):
 
         if not self.device.is_capturing and self._body_particle_contact_launch_dim_is_saturated:
             self.body_particle_contact_active_count_host = soft_contact_max
-            self.body_particle_contact_launch_dim = self._body_particle_contact_launch_dim(soft_contact_max, soft_contact_max)
+            self.body_particle_contact_launch_dim = self._body_particle_contact_launch_dim(
+                soft_contact_max, soft_contact_max
+            )
             return
 
         if self.device.is_capturing:
@@ -1472,7 +1476,8 @@ class SolverVBD(SolverBase):
 
         if self.model.tet_count == 0:
             surface_groups = [
-                group if group.device == self.device else group.to(self.device) for group in self.model.particle_color_groups
+                group if group.device == self.device else group.to(self.device)
+                for group in self.model.particle_color_groups
             ]
             volumetric_groups = [_empty_group() for _ in self.model.particle_color_groups]
             return surface_groups, volumetric_groups
@@ -1906,7 +1911,9 @@ class SolverVBD(SolverBase):
                 device=self.device,
             )
 
-    def _apply_particle_displacements_after_color(self, particle_ids_in_color: wp.array[wp.int32], particle_q_out) -> None:
+    def _apply_particle_displacements_after_color(
+        self, particle_ids_in_color: wp.array[wp.int32], particle_q_out
+    ) -> None:
         """Update positions after one color solve.
 
         When no active self-contact is present, only the current color group's
@@ -2436,7 +2443,9 @@ class SolverVBD(SolverBase):
                 device=self.device,
             )
 
-        use_local_particle_truncation = (not self.particle_enable_self_contact) or (not self._has_active_self_contact_host)
+        use_local_particle_truncation = (not self.particle_enable_self_contact) or (
+            not self._has_active_self_contact_host
+        )
         local_truncation_flag = int(use_local_particle_truncation)
         local_max_displacement = (
             self.particle_self_contact_margin * self.particle_conservative_bound_relaxation * 0.5

@@ -10,7 +10,9 @@
 #   python -m newton.examples mpm_anymal --viewer gl
 ###########################################################################
 
+import os
 import sys
+from pathlib import Path
 
 import numpy as np
 import warp as wp
@@ -25,6 +27,42 @@ from newton.examples.robot.example_robot_anymal_c_walk import (
     mujoco_to_lab,
 )
 from newton.solvers import SolverImplicitMPM
+
+
+def _resolve_asset(asset_folder: str) -> Path:
+    """Resolve an asset folder, falling back to the local Cache when offline.
+
+    Tries :func:`newton.utils.download_asset` first.  If the git fetch fails
+    (e.g. no network), searches the local ``Cache`` directory for a previously
+    downloaded copy of *asset_folder* and returns that path instead.
+    """
+    try:
+        return Path(newton.utils.download_asset(asset_folder))
+    except RuntimeError:
+        pass
+
+    # Search candidate cache roots: NEWTON_CACHE_PATH, then a "Cache" folder at
+    # the repository root (relative to this example file).
+    cache_roots = []
+    env_cache = os.environ.get("NEWTON_CACHE_PATH")
+    if env_cache:
+        cache_roots.append(Path(env_cache))
+    cache_roots.append(Path(__file__).resolve().parents[3] / "Cache")
+
+    for cache_root in cache_roots:
+        if not cache_root.is_dir():
+            continue
+        for entry in cache_root.iterdir():
+            if not entry.is_dir():
+                continue
+            candidate = entry / asset_folder
+            if candidate.is_dir():
+                return candidate
+
+    raise RuntimeError(
+        f"Could not download asset '{asset_folder}' (git fetch failed) and no "
+        f"local copy was found under: {[str(r) for r in cache_roots]}"
+    )
 
 
 class Example:
@@ -56,7 +94,7 @@ class Example:
         builder.default_shape_cfg.kf = 1.0e3
         builder.default_shape_cfg.mu = 0.75
 
-        asset_path = newton.utils.download_asset("anybotics_anymal_c")
+        asset_path = _resolve_asset("anybotics_anymal_c")
         stage_path = str(asset_path / "urdf" / "anymal.urdf")
         builder.add_urdf(
             stage_path,

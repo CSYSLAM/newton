@@ -2050,7 +2050,9 @@ def accumulate_self_contact_force_and_hessian(
                 collision_buffer_offset = collision_info.edge_colliding_edges_offsets[e1_idx]
                 edge_collision_count = get_edge_colliding_edges_count(collision_info, e1_idx)
                 while collision_buffer_counter < edge_collision_count:
-                    e2_idx = collision_info.edge_colliding_edges[2 * (collision_buffer_offset + collision_buffer_counter) + 1]
+                    e2_idx = collision_info.edge_colliding_edges[
+                        2 * (collision_buffer_offset + collision_buffer_counter) + 1
+                    ]
 
                     if e2_idx != -1:
                         has_contact, collision_force_0, collision_force_1, collision_hessian_0, collision_hessian_1 = (
@@ -2865,7 +2867,9 @@ def apply_planar_truncation_parallel_by_collision(
             collision_buffer_offset = collision_info.edge_colliding_edges_offsets[e1_idx]
             edge_collision_count = get_edge_colliding_edges_count(collision_info, e1_idx)
             while collision_buffer_counter < edge_collision_count:
-                e2_idx = collision_info.edge_colliding_edges[2 * (collision_buffer_offset + collision_buffer_counter) + 1]
+                e2_idx = collision_info.edge_colliding_edges[
+                    2 * (collision_buffer_offset + collision_buffer_counter) + 1
+                ]
 
                 if e2_idx != -1:
                     if filter_by_color and not e1_touches_current:
@@ -3140,7 +3144,9 @@ def solve_surface_elasticity_tile(
     thread_idx = tid % TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
     particle_index = particle_ids_in_color[block_idx]
 
-    if skip_active_checks == 0 and (not particle_flags[particle_index] & ParticleFlags.ACTIVE or mass[particle_index] == 0):
+    if skip_active_checks == 0 and (
+        not particle_flags[particle_index] & ParticleFlags.ACTIVE or mass[particle_index] == 0
+    ):
         if thread_idx == 0:
             particle_displacements[particle_index] = wp.vec3(0.0)
             if apply_local_truncation == 1 and pos_out:
@@ -3325,7 +3331,9 @@ def solve_elasticity_tile(
     thread_idx = tid % TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
     particle_index = particle_ids_in_color[block_idx]
 
-    if skip_active_checks == 0 and (not particle_flags[particle_index] & ParticleFlags.ACTIVE or mass[particle_index] == 0):
+    if skip_active_checks == 0 and (
+        not particle_flags[particle_index] & ParticleFlags.ACTIVE or mass[particle_index] == 0
+    ):
         if thread_idx == 0:
             particle_displacements[particle_index] = wp.vec3(0.0)
             if apply_local_truncation == 1 and pos_out:
@@ -3710,8 +3718,6 @@ def solve_elasticity(
         particle_displacements[particle_index] = particle_displacement
         if pos_out:
             pos_out[particle_index] = pos_ref[particle_index] + particle_displacement
-
-
 
 
 @wp.kernel

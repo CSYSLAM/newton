@@ -137,9 +137,9 @@ class SolverMJVBD:
         """
 
         shape_flags_np = self.model.shape_flags.numpy()
-        collidable_shape_indices_np = np.flatnonzero(
-            (shape_flags_np & int(ShapeFlags.COLLIDE_PARTICLES)) != 0
-        ).astype(np.int32, copy=False)
+        collidable_shape_indices_np = np.flatnonzero((shape_flags_np & int(ShapeFlags.COLLIDE_PARTICLES)) != 0).astype(
+            np.int32, copy=False
+        )
 
         self._soft_contact_shape_count = int(collidable_shape_indices_np.size)
         self._compact_soft_contact_shapes = self._soft_contact_shape_count < int(self.model.shape_count)

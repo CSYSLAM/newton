@@ -39,7 +39,11 @@ class Example:
         self.frame_dt = 1.0 / self.fps
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.sim_time = 0.0
-        self.enable_franka = True if args is None else getattr(args, "enable_franka", True) and not getattr(args, "disable_franka", False)
+        self.enable_franka = (
+            True
+            if args is None
+            else getattr(args, "enable_franka", True) and not getattr(args, "disable_franka", False)
+        )
 
         self.particle_radius = 0.006
         self.soft_body_contact_margin = 0.012
@@ -317,7 +321,9 @@ class Example:
             wp.synchronize_device()
             cache[frame_index] = self.target_joint_q.numpy()[: self.n_coords]
 
-        self.solver.set_joint_target_cache(wp.array(cache, dtype=wp.float32, device=self.model.device), cache_frame_count)
+        self.solver.set_joint_target_cache(
+            wp.array(cache, dtype=wp.float32, device=self.model.device), cache_frame_count
+        )
         self.ik_joint_q = wp.array(self.model.joint_q, shape=(1, self.n_coords))
         wp.copy(self.control.joint_target_pos[: self.n_coords], self.model.joint_q[: self.n_coords])
 

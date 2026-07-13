@@ -142,7 +142,10 @@ class Example:
         self.state_1 = self.model.state()
 
         self.control = self.model.control()
-        wp.copy(self.control.joint_target_pos[: self.model.joint_coord_count], self.model.joint_q[: self.model.joint_coord_count])
+        wp.copy(
+            self.control.joint_target_pos[: self.model.joint_coord_count],
+            self.model.joint_q[: self.model.joint_coord_count],
+        )
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
             rigid_contact_max=0,

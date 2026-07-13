@@ -3620,8 +3620,6 @@ def solve_elasticity(
             pos_out[particle_index] = pos_ref[particle_index] + particle_displacement
 
 
-
-
 @wp.kernel
 def accumulate_contact_force_and_hessian(
     # inputs

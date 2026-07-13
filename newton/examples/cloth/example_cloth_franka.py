@@ -74,7 +74,8 @@ class Example:
         self.add_cloth = True
         self.add_robot = True
         self.sim_substeps = 10
-        self.iterations = 5
+        # Increase solver iterations for better convergence at startup
+        self.iterations = 20
         self.fps = 60
         self.frame_dt = 1 / self.fps
         self.sim_dt = self.frame_dt / self.sim_substeps
@@ -85,11 +86,11 @@ class Example:
 
         #   contact (cm scale)
         #       body-cloth contact
-        self.cloth_particle_radius = 0.8
-        self.cloth_body_contact_margin = 0.8
+        self.cloth_particle_radius = 0.5
+        self.cloth_body_contact_margin = 0.5
         #       self-contact
-        self.particle_self_contact_radius = 0.2
-        self.particle_self_contact_margin = 0.2
+        self.particle_self_contact_radius = 0.1
+        self.particle_self_contact_margin = 0.1
 
         self.soft_contact_ke = 1e4
         self.soft_contact_kd = 1e-2
@@ -103,10 +104,12 @@ class Example:
         #   elasticity
         self.tri_ke = 1e4
         self.tri_ka = 1e4
-        self.tri_kd = 1.5e-6
+        # Increase material damping to reduce oscillations
+        self.tri_kd = 1.0e-2
 
         self.bending_ke = 5
-        self.bending_kd = 1e-2
+        # Increase bending damping
+        self.bending_kd = 1.0e-1
 
         self.scene = ModelBuilder(gravity=-981.0)
 
@@ -152,7 +155,7 @@ class Example:
                 vertices=vertices,
                 indices=mesh_indices,
                 rot=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), np.pi),
-                pos=wp.vec3(0.0, 70.0, 30.0),
+                pos=wp.vec3(0.0, 70.0, 42.0),
                 vel=wp.vec3(0.0, 0.0, 0.0),
                 density=0.02,
                 scale=1.0,
@@ -224,6 +227,15 @@ class Example:
         self.state_1 = self.model.state()
         self.target_joint_qd = wp.empty_like(self.state_0.joint_qd)
 
+        # Separate robot-only states to decouple robot from cloth simulation.
+        # The robot will be simulated on `robot_state_*` so its body transforms
+        # do not modify the cloth particle state used for collisions.
+        self.robot_state_0 = self.model.state()
+        self.robot_state_1 = self.model.state()
+        # initialize robot_state from the main state
+        self.robot_state_0.joint_q.assign(self.state_0.joint_q)
+        self.robot_state_0.joint_qd.assign(self.state_0.joint_qd)
+
         self.control = self.model.control()
 
         # Explicit collision pipeline for cloth-body contacts with custom margin
@@ -241,7 +253,6 @@ class Example:
 
         self.cloth_solver: SolverVBD | None = None
         if self.add_cloth:
-            self.model.edge_rest_angle.zero_()
             self.cloth_solver = SolverVBD(
                 self.model,
                 iterations=self.iterations,
@@ -295,11 +306,28 @@ class Example:
         # gravity in cm/s²
         self.gravity_earth = wp.array(wp.vec3(0.0, 0.0, -981.0), dtype=wp.vec3)
 
-        # Ensure FK evaluation (for non-MuJoCo solvers):
-        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+        # Ensure FK evaluation for robot-only state and seed the robot command
+        # before capture so robot velocities are initialized without touching
+        # the cloth state.
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.robot_state_0)
+        self.generate_control_joint_qd(self.robot_state_0)
 
-        # graph capture
+        # Aggressive pre-relaxation: run the cloth solver for a number of
+        # steps with the robot temporarily disabled so the cloth can settle
+        # without rigid-body disturbances. This reduces remaining jitter.
         if self.add_cloth:
+            relax_steps = 80
+            # temporarily disable robot integration during relaxation
+            for _ in range(relax_steps):
+                # update collisions and advance cloth solver one step (robot is
+                # already decoupled so no need to disable it here)
+                self.collision_pipeline.collide(self.state_0, self.contacts)
+                self.cloth_solver.rebuild_bvh(self.state_0)
+                self.cloth_solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+                # swap states
+                self.state_0, self.state_1 = self.state_1, self.state_0
+
+            # capture graph after cloth has relaxed
             self.capture()
 
     def set_up_control(self):
@@ -534,7 +562,10 @@ class Example:
         self.target_joint_qd.assign(delta_q)
 
     def step(self):
-        self.generate_control_joint_qd(self.state_0)
+        # generate robot control based on robot-only state so commands are
+        # computed from the robot's own state and do not read/write cloth state
+        if self.add_robot:
+            self.generate_control_joint_qd(self.robot_state_0)
         if self.graph:
             wp.capture_launch(self.graph)
         else:
@@ -553,23 +584,12 @@ class Example:
             self.viewer.apply_forces(self.state_0)
 
             if self.add_robot:
-                particle_count = self.model.particle_count
-                # set particle_count = 0 to disable particle simulation in robot solver
-                self.model.particle_count = 0
-                self.model.gravity.assign(self.gravity_zero)
-
-                # Update the robot pose - this will modify state_0 and copy to state_1
-                self.model.shape_contact_pair_count = 0
-
-                self.state_0.joint_qd.assign(self.target_joint_qd)
-                # Just update the forward kinematics to get body positions from joint coordinates
-                self.robot_solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
-
-                self.state_0.particle_f.zero_()
-
-                # restore original settings
-                self.model.particle_count = particle_count
-                self.model.gravity.assign(self.gravity_earth)
+                # Run the robot solver on robot-only states so body transforms
+                # are computed separately and do not affect cloth particles.
+                self.robot_state_0.joint_qd.assign(self.target_joint_qd)
+                self.robot_solver.step(self.robot_state_0, self.robot_state_1, self.control, None, self.sim_dt)
+                # swap robot states
+                self.robot_state_0, self.robot_state_1 = self.robot_state_1, self.robot_state_0
 
             # cloth sim
             self.collision_pipeline.collide(self.state_0, self.contacts)
@@ -593,10 +613,12 @@ class Example:
             outputs=[self.viz_state.particle_q],
         )
         if self.model.body_count > 0:
+            # prefer robot body transforms for visualization if robot is active
+            body_source = self.robot_state_0 if self.add_robot else self.state_0
             wp.launch(
                 scale_body_transforms,
                 dim=self.model.body_count,
-                inputs=[self.state_0.body_q, self.viz_scale],
+                inputs=[body_source.body_q, self.viz_scale],
                 outputs=[self.viz_state.body_q],
             )
 
