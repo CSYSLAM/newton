@@ -92,7 +92,7 @@ TABLE_HALF_EXTENTS = (0.32, 0.78, 0.025)
 TABLE_TOP_Z = float(TABLE_POS[2]) + TABLE_HALF_EXTENTS[2]
 TABLE_COLOR = (0.35, 0.42, 0.48)
 
-BURGER_ASSET = Path(__file__).with_name("BurgerMeat.glb")
+BURGER_ASSET = Path("E:/csy_work/CG/assets/BurgerMeat.glb")
 BURGER_CENTER_XY = wp.vec3(float(TABLE_POS[0]), 0.0, 0.0)
 BURGER_ROT = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), np.pi / 2.0)
 BURGER_SCALE = 1.0
@@ -178,7 +178,7 @@ class Example:
         builder.default_shape_cfg.kd = 1.0e-6
         builder.default_shape_cfg.mu = 2.0
 
-        urdf_path = Path(__file__).with_name("DexforceW1V021") / "DexforceW1V021.urdf"
+        urdf_path = Path("E:/csy_work/CG/assets/DexforceW1V021") / "DexforceW1V021.urdf"
         builder.add_urdf(
             urdf_path,
             xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()),

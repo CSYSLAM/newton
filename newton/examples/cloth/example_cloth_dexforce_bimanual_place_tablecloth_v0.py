@@ -299,7 +299,7 @@ class Example:
         builder.default_shape_cfg.kd = 1.0e-6
         builder.default_shape_cfg.mu = 2.0
 
-        urdf_path = Path(__file__).with_name("DexforceW1V021") / "DexforceW1V021.urdf"
+        urdf_path = Path("E:/csy_work/CG/assets/DexforceW1V021") / "DexforceW1V021.urdf"
         builder.add_urdf(
             urdf_path,
             xform=wp.transform(wp.vec3(0.0, TABLECLOTH_START_Y, 0.0), wp.quat_identity()),

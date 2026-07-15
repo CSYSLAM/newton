@@ -228,7 +228,7 @@ class Example:
         self._add_grasp_cube_preview(builder, table_cfg, WORKCELLS[2].room_pos)
 
         w1_body_start = builder.body_count
-        urdf_path = Path(__file__).with_name("DexforceW1V021") / "DexforceW1V021.urdf"
+        urdf_path = Path("E:/csy_work/CG/assets/DexforceW1V021") / "DexforceW1V021.urdf"
         builder.add_urdf(
             urdf_path,
             xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()),

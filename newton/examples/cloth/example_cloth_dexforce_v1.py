@@ -59,7 +59,7 @@ class Example:
         builder.default_shape_cfg.margin = 0.002
         builder.default_shape_cfg.gap = 0.001
 
-        urdf_path = Path(__file__).with_name("DexforceW1V021") / "DexforceW1V021.urdf"
+        urdf_path = Path("E:/csy_work/CG/assets/DexforceW1V021") / "DexforceW1V021.urdf"
         builder.add_urdf(
             urdf_path,
             xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()),
