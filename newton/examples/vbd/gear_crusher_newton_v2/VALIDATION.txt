@@ -1,0 +1,10 @@
+{
+  "armadillo_vertices": 15758,
+  "armadillo_tetrahedra": 60216,
+  "armadillo_boundary_triangles": 22760,
+  "minimum_positive_tet_volume": 5.117124256114675e-12,
+  "gear_vertices": 506,
+  "gear_triangles": 1008,
+  "gear_watertight": true,
+  "gear_winding_consistent": true
+}

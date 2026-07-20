@@ -563,6 +563,13 @@ add_example_test(
     test_options={"num-frames": 360},
     use_viewer=True,
 )
+add_example_test(
+    TestClothExamples,
+    name="vbd.example_gear_crusher",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 10},
+    use_viewer=True,
+)
 
 
 class TestRobotExamples(unittest.TestCase):

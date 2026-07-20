@@ -1,0 +1,42 @@
+{
+  "armadillo": {
+    "source_vertices": 43243,
+    "source_triangles": 86482,
+    "tet_vertices": 15758,
+    "tetrahedra": 60216,
+    "surface_triangles": 22760,
+    "minimum_tet_volume": 5.116232957585831e-12,
+    "bounds": [
+      [
+        -0.5248182872542749,
+        -0.477626961649821,
+        0.0
+      ],
+      [
+        0.5248182872542749,
+        0.477626961649821,
+        1.25
+      ]
+    ]
+  },
+  "crusher_gear": {
+    "tooth_count": 18,
+    "vertices": 506,
+    "triangles": 1008,
+    "root_radius": 0.5,
+    "tip_radius": 0.62,
+    "half_width": 0.38,
+    "watertight": true
+  },
+  "paper_target": {
+    "soft_vertices": 15000,
+    "tetrahedra": 60000,
+    "lambda": 1000000.0,
+    "mu": 100000.0,
+    "contact_stiffness": 1000000.0,
+    "friction": 0.2,
+    "contact_radius_m": 0.005,
+    "dt_s": 0.0016666666666666668,
+    "vbd_iterations": 10
+  }
+}

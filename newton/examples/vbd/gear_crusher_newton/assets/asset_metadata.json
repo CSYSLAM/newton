@@ -1,0 +1,22 @@
+{
+  "generator": "generate_assets.py",
+  "gear": {
+    "file": "crusher_gear.npz",
+    "vertices": 130,
+    "triangles": 256,
+    "teeth": 16,
+    "root_radius_m": 0.58,
+    "tip_radius_m": 0.78,
+    "half_width_m": 0.34
+  },
+  "soft_body": {
+    "file": "armadillo_proxy_tet.npz",
+    "description": "Original armadillo-like implicit-union proxy; not the Stanford Armadillo asset.",
+    "vertices": 12559,
+    "tetrahedra": 59016,
+    "surface_triangles": 10260,
+    "voxel_spacing_m_before_demo_scale": 0.045,
+    "all_tetrahedra_positive_volume": true,
+    "surface_is_closed_two_manifold": true
+  }
+}
