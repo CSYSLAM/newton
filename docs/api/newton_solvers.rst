@@ -41,7 +41,6 @@ https://newton-physics.github.io/newton/stable/solvers/index.html.
    SolverMJVBD
    SolverMJVBDV2
    SolverMuJoCo
-   SolverNotifyFlags
    SolverSemiImplicit
    SolverStyle3D
    SolverVBD
