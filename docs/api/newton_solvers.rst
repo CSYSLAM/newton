@@ -38,6 +38,8 @@ https://newton-physics.github.io/newton/stable/solvers/index.html.
    SolverFeatherstone
    SolverImplicitMPM
    SolverKamino
+   SolverMJVBD
+   SolverMJVBDV2
    SolverMuJoCo
    SolverNotifyFlags
    SolverSemiImplicit

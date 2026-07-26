@@ -283,6 +283,9 @@ If you run the examples from a source checkout with uv, use
       </a>
     </td>
     <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/cloth/example_cloth_w1_left_hand_card_bend.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_w1_left_hand_card_bend.jpg" alt="W1 Left-Hand Card Bend">
+      </a>
     </td>
   </tr>
   <tr>
@@ -293,6 +296,7 @@ If you run the examples from a source checkout with uv, use
       <code>python -m newton.examples cable_cross_slide_table</code>
     </td>
     <td align="center" width="33%">
+      <code>python -m newton.examples cloth_w1_left_hand_card_bend</code>
     </td>
   </tr>
   <tr>
@@ -374,6 +378,26 @@ If you run the examples from a source checkout with uv, use
     </td>
     <td align="center" width="33%">
       <code>python -m newton.examples cloth_poker_cards</code>
+    </td>
+    <td align="center" width="33%">
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/cloth/example_cloth_mjvbd_v2_dynamic_dexforce_bimanual_fold_tshirt_waic_house.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_mjvbd_v2_dynamic_dexforce_bimanual_fold_tshirt_waic_house.jpg" alt="MJVBDV2 Dynamic Dexforce T-Shirt Fold">
+      </a>
+    </td>
+    <td align="center" width="33%">
+    </td>
+    <td align="center" width="33%">
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <code>python -m newton.examples cloth_mjvbd_v2_dynamic_dexforce_bimanual_fold_tshirt_waic_house</code>
+    </td>
+    <td align="center" width="33%">
     </td>
     <td align="center" width="33%">
     </td>
@@ -722,6 +746,30 @@ If you run the examples from a source checkout with uv, use
     </td>
     <td align="center" width="33%">
       <code>python -m newton.examples mujoco_franka_vbd_cable_admm_solver</code>
+    </td>
+    <td></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/multiphysics/example_mjvbd_v2_robot_rigid_soft_cloth.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_robot_rigid_soft_cloth.jpg" alt="MJVBDV2 Robot Coupling Matrix">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/multiphysics/example_mjvbd_v2_rigid_soft_cloth.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_rigid_soft_cloth.jpg" alt="MJVBDV2 Rigid Soft Cloth">
+      </a>
+    </td>
+    <td></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <code>python -m newton.examples mjvbd_v2_robot_rigid_soft_cloth --joint-mode dynamic</code><br>
+      <small>Use <code>--joint-mode kinematic</code>; single-object and pair variants use the same name pattern.</small>
+    </td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples mjvbd_v2_rigid_soft_cloth</code><br>
+      <small>Use <code>--solver vbd</code> for the native VBD comparison.</small>
     </td>
     <td></td>
   </tr>

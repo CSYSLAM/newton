@@ -74,3 +74,27 @@ docs/_static/viser/
 
 # Notebook checkpoints
 **/*.ipynb_checkpoints/
+
+# Local asset caches (downloaded meshes / models)
+/Cache/
+
+# Non-source artifacts in example/multiphysics work areas (docs, scripts, robot assets)
+# Keep only .py under these dirs; everything else is local scratch.
+/newton/_src/solvers/mjvbd/*.md
+/newton/examples/multiphysics/*.md
+/newton/examples/multiphysics/*.ps1
+/newton/examples/multiphysics/*.sh
+/newton/examples/multiphysics/*.txt
+/newton/examples/multiphysics/newton_cloth_folding_v7/*.md
+/newton/examples/multiphysics/newton_cloth_folding_v7/*.ps1
+/newton/examples/multiphysics/newton_cloth_folding_v7/*.sh
+/newton/examples/multiphysics/newton_cloth_folding_v7/*.txt
+/newton/examples/multiphysics/newton_g1_bimanual_tabletop/*.md
+/newton/examples/multiphysics/newton_g1_bimanual_tabletop/*.ps1
+/newton/examples/multiphysics/newton_g1_bimanual_tabletop/*.sh
+/newton/examples/multiphysics/newton_g1_bimanual_tabletop/*.txt
+/newton/examples/multiphysics/newton_g1_bimanual_tabletop_v2/*.md
+/newton/examples/multiphysics/newton_g1_bimanual_tabletop_v2/*.ps1
+/newton/examples/multiphysics/newton_g1_bimanual_tabletop_v2/*.sh
+/newton/examples/multiphysics/newton_g1_bimanual_tabletop_v2/*.txt
+/newton/examples/multiphysics/newton_cloth_dexforce_place_tablecloth/DexforceW1V021/
