@@ -4,6 +4,8 @@
 
 ### Added
 
+- Add experimental `SolverMuJoCoVBD` for direct reduced-coordinate MuJoCo and VBD coupling.
+- Add experimental `SolverMJVBD` for one-way MuJoCo/FK-to-VBD coupling, with a Dexforce W1 T-shirt folding example.
 - Add `forward_depth_image` output support to `SensorTiledCamera.update()` and `SensorTiledCamera.utils.create_forward_depth_image_output()` for native forward-depth rendering without post-processing `depth_image`.
 
 ### Changed
