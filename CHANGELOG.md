@@ -6,6 +6,7 @@
 
 - Add an MJVBDV2 dynamic Dexforce bimanual T-shirt folding example.
 - Add a VBD example of a standalone Dexforce W1 left hand holding a stiff C-bent card packet.
+- Add `genesis_w1_card_shuffle_replay` and `genesis_w1_card_shuffle_square_replay` examples that replay Genesis-IPC-baked complete-W1 card-shuffle caches (robot link poses and deforming card vertices) without re-solving the IPC scene.
 - Add experimental `SolverMJVBDV2` joint-proxy coupling and rigid, soft-body, and cloth example matrix.
 - Add selection of the shapes included in model shape BVHs through `Model.bvh_build_shapes(shape_flags=...)` and `ModelBuilder.default_bvh_cfg.shape_flags`, e.g. `ShapeFlags.VISIBLE | ShapeFlags.COLLIDE_SHAPES` to also include collision shapes.
 - Add a `damping` parameter to `ModelBuilder.add_joint_ball()` that applies passive angular damping to all three ball-joint DOFs; when omitted, `ModelBuilder.default_joint_cfg.damping` applies.

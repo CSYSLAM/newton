@@ -1022,6 +1022,22 @@ add_example_test(
 )
 add_example_test(
     TestMultiphysicsExamples,
+    name="cloth.example_genesis_w1_card_shuffle_replay",
+    devices=test_devices,
+    test_options={"num-frames": 30},
+    test_options_cpu={"num-frames": 2},
+    use_viewer=True,
+)
+add_example_test(
+    TestMultiphysicsExamples,
+    name="cloth.example_genesis_w1_card_shuffle_square_replay",
+    devices=test_devices,
+    test_options={"num-frames": 30},
+    test_options_cpu={"num-frames": 2},
+    use_viewer=True,
+)
+add_example_test(
+    TestMultiphysicsExamples,
     name="multiphysics.example_softbody_dropping_to_cloth",
     devices=test_devices,
     test_options={"num-frames": 200},
