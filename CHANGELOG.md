@@ -47,6 +47,7 @@
 - Add simulation throughput, real-time factor, p95 step-time, steady-state GPU-memory, timestep, and MuJoCo solver-iteration metrics to the ASV robot-learning benchmarks.
 - Add `joint_dof_mask` to `newton.ik.IKSolver` to keep selected joint DOFs fixed during LM optimization. (#3488)
 - Add `SolverMuJoCo(disable_sensors=True)` to skip MuJoCo sensor computation.
+- Add `SolverLBM`, an independent D3Q27 lattice-Boltzmann fluid solver that advances a fluid lattice per world and applies hydrodynamic wrenches to the model's rigid bodies through `state.body_f`; add `lbm_karman_3d` (Karman vortex street behind a static cylinder) and `lbm_eel_3d` (articulated eel with traveling-wave control) examples.
 
 ### Changed
 
