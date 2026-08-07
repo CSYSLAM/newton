@@ -15,7 +15,6 @@ Run from the repository root::
 
 from __future__ import annotations
 
-import argparse
 import json
 from pathlib import Path
 
@@ -25,7 +24,6 @@ import warp as wp
 import newton
 import newton.examples
 from newton.examples.vbd import example_vbd_mjvbd_v2_dexforce_grasp_rigid_into_bag_soft0 as soft0
-
 
 # Match the isolated-hand demo's soft cube exactly.
 soft0.SOFT_CUBE_DENSITY = 100.0
@@ -54,6 +52,9 @@ APPROACH_JOINTS_DEGREES = {
     "HAND_PINKY": 24.0,
     "PINKY_PIP": 26.0,
 }
+START_HOLD_DURATION = 0.50
+START_TO_APPROACH_DURATION = 1.50
+APPROACH_HOLD_DURATION = 0.50
 
 
 class Example(soft0.Example):
@@ -106,17 +107,19 @@ class Example(soft0.Example):
     def _right_hand_q(self):
         """Return the recorded target-point and closure finger configurations."""
 
-        q = self.model.joint_q.numpy()
         q_start = self.model.joint_q_start.numpy()
         indices = []
+        start_q = []
         approach_q = []
         grasp_q = []
         for suffix in self.HAND_SUFFIXES:
             joint = self._joint_index(f"RIGHT_{suffix}")
             index = int(q_start[joint])
             indices.append(index)
+            start_q.append(np.radians(90.0 if suffix == "HAND_THUMB2" else 0.0))
             approach_q.append(np.radians(self.approach_hand_q[suffix]))
             grasp_q.append(np.radians(self.grasp_hand_q[suffix]))
+        self.hand_start = wp.array(start_q, dtype=wp.float32, device=self.device)
         return (
             wp.array(indices, dtype=wp.int32, device=self.device),
             wp.array(approach_q, dtype=wp.float32, device=self.device),
@@ -165,13 +168,30 @@ class Example(soft0.Example):
 
         initial_q = self.model.joint_q.numpy()
         initial_q[: self.ik_model.joint_coord_count] = self.ik_q.numpy()[0]
-        initial_q[self.hand_indices.numpy()] = self.hand_open.numpy()
+        initial_q[self.hand_indices.numpy()] = self.hand_start.numpy()
         self.model.joint_q.assign(initial_q)
         self.state_0.joint_q.assign(initial_q)
         self.state_1.joint_q.assign(initial_q)
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
         newton.eval_fk(self.model, self.state_1.joint_q, self.state_1.joint_qd, self.state_1)
         super()._build_joint_target_cache()
+
+        cache = self.cached_joint_targets.numpy()
+        hand_indices = self.hand_indices.numpy()
+        start_q = self.hand_start.numpy()
+        approach_q = self.hand_open.numpy()
+        transition_end = START_HOLD_DURATION + START_TO_APPROACH_DURATION
+        for frame in range(self.cached_frame_count + 1):
+            script_time = frame * self.frame_dt * self.args.trajectory_time_scale
+            if script_time <= START_HOLD_DURATION:
+                cache[frame, hand_indices] = start_q
+            elif script_time <= transition_end:
+                alpha = (script_time - START_HOLD_DURATION) / START_TO_APPROACH_DURATION
+                alpha = alpha * alpha * (3.0 - 2.0 * alpha)
+                cache[frame, hand_indices] = start_q * (1.0 - alpha) + approach_q * alpha
+            else:
+                break
+        self.cached_joint_targets.assign(cache)
 
     def _segments(self):
         """Build the isolated-hand trajectory from its recorded initial pose."""
@@ -201,14 +221,25 @@ class Example(soft0.Example):
 
         self.hand_collision_enable_time = 0.50
         return (
-            (0.50, self.left_home, self.left_home, approach, approach, 0.0, 0.0, 0),
+            (START_HOLD_DURATION, self.left_home, self.left_home, approach, approach, 0.0, 0.0, 0),
+            (START_TO_APPROACH_DURATION, self.left_home, self.left_home, approach, approach, 0.0, 0.0, 0),
+            (APPROACH_HOLD_DURATION, self.left_home, self.left_home, approach, approach, 0.0, 0.0, 0),
             (1.80, self.left_home, self.left_home, approach, approach, 0.0, 1.0, 0),
             (0.60, self.left_home, self.left_home, approach, approach, 1.0, 1.0, 0),
             (1.20, self.left_home, self.left_home, approach, lift, 1.0, 1.0, 0),
             (7.00, self.left_home, self.left_home, lift, bag_hover, 1.0, 1.0, 0),
             (0.40, self.left_home, self.left_home, bag_hover, bag_hover, 1.0, 1.0, 0),
             (soft0.SOFT_CUBE_RELEASE_OPEN_DURATION, self.left_home, self.left_home, bag_hover, bag_hover, 1.0, 0.0, 0),
-            (soft0.SOFT_CUBE_RELEASE_SETTLE_DURATION, self.left_home, self.left_home, bag_hover, bag_hover, 0.0, 0.0, 0),
+            (
+                soft0.SOFT_CUBE_RELEASE_SETTLE_DURATION,
+                self.left_home,
+                self.left_home,
+                bag_hover,
+                bag_hover,
+                0.0,
+                0.0,
+                0,
+            ),
             (1.00, self.left_home, self.left_home, bag_hover, retreat, 0.0, 0.0, -1),
         )
 

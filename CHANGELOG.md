@@ -5,6 +5,7 @@
 ### Added
 
 - Add a physical MJVBDV2 Dexforce hand-pose recorder with five-finger TCP tuning and JSON trajectory export.
+- Add a full-W1 MJVBDV2 example that sequentially places a soft cube and a rigid cube into one compliant bag.
 - Add ViewerGL TCP gizmos for coarse hand-arm placement before fine pose adjustment.
 - Add an MJVBDV2 dynamic Dexforce bimanual T-shirt folding example.
 - Add a VBD example of a standalone Dexforce W1 left hand holding a stiff C-bent card packet.
@@ -72,6 +73,7 @@
 ### Changed
 
 - Change the MJVBDV2 hand-pose recorder to use the asset finger pose and enable hand-shape collisions with dynamic cubes.
+- Soften the sequential MJVBDV2 pick-and-place example's bag to show impact deformation and rebound.
 - Change the MJVBDV2 grasp demo to use the recorded hand pose for one-cube bag placement.
 - Change the MJVBDV2 Dexforce grasp-into-bag example to pick one red cube instead of mixed rigid shapes.
 - Change the MJVBDV2 Dexforce grasp-into-bag example to pick up a soft FEM cube (tetrahedral grid) and carry it into the suspended bag instead of a rigid cube.

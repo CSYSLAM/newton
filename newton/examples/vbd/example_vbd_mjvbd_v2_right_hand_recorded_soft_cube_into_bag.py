@@ -18,9 +18,9 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.vbd import example_vbd_mjvbd_v2_right_hand_soft_cube_recorder as recorder
 from newton.examples.vbd import example_vbd_mjvbd_v2_dexforce_grasp_rigid_into_bag_soft0 as full_reference
-
+from newton.examples.vbd import example_vbd_mjvbd_v2_right_hand_soft_cube_recorder as recorder
+from newton.solvers import SolverMJVBDV2
 
 DEFAULT_GRASP_KEYFRAME = Path("vbd_w1_right_hand_last_keyframe.json")
 
@@ -41,7 +41,9 @@ APPROACH_JOINTS = {
     "RIGHT_HAND_PINKY": 24.0,
     "RIGHT_PINKY_PIP": 26.0,
 }
-OPEN_JOINTS = {name: 0.0 for name in recorder.HAND_JOINTS}
+OPEN_JOINTS = dict.fromkeys(recorder.HAND_JOINTS, 0.0)
+START_JOINTS = dict(OPEN_JOINTS)
+START_JOINTS["RIGHT_HAND_THUMB2"] = 90.0
 
 # Keep material, contact, and solver settings identical to the full-robot
 # reference; only the articulated robot is replaced with the isolated hand.
@@ -59,13 +61,19 @@ recorder.CONTACT_MU = full_reference.GRASP_FRICTION
 recorder.CONTACT_MARGIN = full_reference.SOFT_CONTACT_MARGIN
 recorder.RIGID_BODY_PARTICLE_CONTACT_BUFFER_SIZE = full_reference.RIGID_BODY_PARTICLE_CONTACT_BUFFER_SIZE
 
-# Match the stable suspended-bag material from example_vbd_soft_rigid_mix_contact.
-recorder.BAG_DENSITY = 0.08
-recorder.BAG_TRI_KE = 1.0e5
-recorder.BAG_TRI_KA = 1.0e5
-recorder.BAG_TRI_KD = 1.0e2
-recorder.BAG_EDGE_KE = 50.0
-recorder.BAG_EDGE_KD = 0.5
+# Keep cube-bag collision detection identical to the full-W1 example. The
+# isolated-hand scene needs a stiffer bag material to support the cube without
+# the sustained creep seen with the full-W1 cloth constants.
+recorder.PARTICLE_VERTEX_CONTACT_BUFFER_SIZE = 32
+recorder.PARTICLE_EDGE_CONTACT_BUFFER_SIZE = 64
+recorder.BAG_RESOLUTION = full_reference.BAG_RESOLUTION
+recorder.BAG_PARTICLE_RADIUS = full_reference.BAG_PARTICLE_RADIUS
+recorder.BAG_DENSITY = full_reference.BAG_DENSITY
+recorder.BAG_TRI_KE = 5.0e4
+recorder.BAG_TRI_KA = 5.0e4
+recorder.BAG_TRI_KD = 50.0
+recorder.BAG_EDGE_KE = 25.0
+recorder.BAG_EDGE_KD = 0.25
 
 
 class Example(recorder.Example):
@@ -81,11 +89,43 @@ class Example(recorder.Example):
         self.release_friction_applied = False
         self.hand_soft_contact_enabled = True
         super().__init__(viewer, args)
-        self._set_hand_target(APPROACH_ROOT, APPROACH_JOINTS)
+        self._set_hand_target(APPROACH_ROOT, START_JOINTS)
         self._set_initial_hand_pose()
+        self._create_reference_solver()
         self._set_hand_soft_contact(False)
         self.segments = self._build_segments()
         self.script_duration = sum(segment[0] for segment in self.segments)
+
+    def _create_reference_solver(self):
+        """Match the full-W1 cube-bag self-contact configuration."""
+
+        self.solver = SolverMJVBDV2(
+            self.model,
+            mujoco_articulations=self.hand_articulations,
+            joint_mode="kinematic",
+            contact_mode="full",
+            vbd_options={
+                "iterations": full_reference.VBD_ITERATIONS,
+                "rigid_body_contact_buffer_size": 4096,
+                "rigid_body_particle_contact_buffer_size": full_reference.RIGID_BODY_PARTICLE_CONTACT_BUFFER_SIZE,
+                "particle_enable_self_contact": True,
+                "particle_self_contact_radius": max(
+                    full_reference.BAG_PARTICLE_RADIUS,
+                    full_reference.SOFT_CUBE_PARTICLE_RADIUS,
+                ),
+                "particle_self_contact_margin": 2.0
+                * max(
+                    full_reference.BAG_PARTICLE_RADIUS,
+                    full_reference.SOFT_CUBE_PARTICLE_RADIUS,
+                ),
+                "particle_topological_contact_filter_threshold": 3,
+            },
+            collision_options={
+                "broad_phase": "nxn",
+                "soft_contact_margin": full_reference.SOFT_CONTACT_MARGIN,
+                "enable_rigid_soft_full_surface_contact": True,
+            },
+        )
 
     @staticmethod
     def _load_grasp_keyframe(path_value: str):
@@ -102,7 +142,9 @@ class Example(recorder.Example):
         joints = keyframe["target_finger_joints_degrees"]
         if len(position) != 3 or len(rotation) != 4:
             raise ValueError(f"Invalid root pose in recorded grasp keyframe: {path}")
-        return wp.transform(wp.vec3(*position), wp.quat(*rotation)), {name: float(value) for name, value in joints.items()}
+        return wp.transform(wp.vec3(*position), wp.quat(*rotation)), {
+            name: float(value) for name, value in joints.items()
+        }
 
     def _set_hand_target(self, root: wp.transform, joints: dict[str, float]):
         """Set the next kinematic root and five-finger target without moving particles."""
@@ -139,6 +181,8 @@ class Example(recorder.Example):
             wp.transform_get_rotation(APPROACH_ROOT),
         )
         return (
+            (0.50, APPROACH_ROOT, APPROACH_ROOT, START_JOINTS, START_JOINTS, False),
+            (1.50, APPROACH_ROOT, APPROACH_ROOT, START_JOINTS, APPROACH_JOINTS, False),
             (0.50, APPROACH_ROOT, APPROACH_ROOT, APPROACH_JOINTS, APPROACH_JOINTS, False),
             (1.80, APPROACH_ROOT, APPROACH_ROOT, APPROACH_JOINTS, self.grasp_joints, False),
             (0.60, APPROACH_ROOT, APPROACH_ROOT, self.grasp_joints, self.grasp_joints, False),
@@ -158,7 +202,9 @@ class Example(recorder.Example):
                 alpha = float(np.clip(time_s / duration, 0.0, 1.0))
                 alpha = alpha * alpha * (3.0 - 2.0 * alpha)
                 root = self._lerp_transform(root_a, root_b, alpha)
-                joints = {name: joints_a[name] * (1.0 - alpha) + joints_b[name] * alpha for name in recorder.HAND_JOINTS}
+                joints = {
+                    name: joints_a[name] * (1.0 - alpha) + joints_b[name] * alpha for name in recorder.HAND_JOINTS
+                }
                 return root, joints, release
             time_s -= duration
         _, _, root, _, joints, release = self.segments[-1]
@@ -177,16 +223,22 @@ class Example(recorder.Example):
         return wp.transform(wp.vec3(*(position_a * (1.0 - alpha) + position_b * alpha)), wp.quat(*rotation))
 
     def _apply_release_friction(self):
-        """Remove hand friction after opening so the cube releases physically."""
+        """Match the full-W1 release material after opening the hand."""
 
         if self.release_friction_applied:
             return
-        friction = self.model.shape_material_mu.numpy()
-        friction[: self.hand_shape_end] = 0.0
-        self.model.shape_material_mu.assign(friction)
-        self.model.soft_contact_ke = full_reference.SOFT_CONTACT_KE
-        self.model.soft_contact_kd = full_reference.SOFT_CONTACT_KD
-        self.model.soft_contact_mu = full_reference.SOFT_CONTACT_MU
+        shape_ke = self.model.shape_material_ke.numpy()
+        shape_kd = self.model.shape_material_kd.numpy()
+        shape_mu = self.model.shape_material_mu.numpy()
+        shape_ke[: self.hand_shape_end] = full_reference.RELEASE_CONTACT_KE
+        shape_kd[: self.hand_shape_end] = full_reference.RELEASE_CONTACT_KD
+        shape_mu[: self.hand_shape_end] = full_reference.RELEASE_FRICTION
+        self.model.shape_material_ke.assign(shape_ke)
+        self.model.shape_material_kd.assign(shape_kd)
+        self.model.shape_material_mu.assign(shape_mu)
+        self.model.soft_contact_ke = full_reference.RELEASE_CONTACT_KE
+        self.model.soft_contact_kd = full_reference.RELEASE_CONTACT_KD
+        self.model.soft_contact_mu = full_reference.RELEASE_FRICTION
         self.release_friction_applied = True
 
     def _set_hand_soft_contact(self, enabled: bool):
@@ -253,7 +305,7 @@ class Example(recorder.Example):
         """Create parser options for the right-hand recorded grasp demo."""
 
         parser = recorder.Example.create_parser()
-        parser.set_defaults(num_frames=800, paused=False)
+        parser.set_defaults(num_frames=1020, paused=False)
         parser.add_argument(
             "--grasp-keyframe",
             default=str(DEFAULT_GRASP_KEYFRAME),
