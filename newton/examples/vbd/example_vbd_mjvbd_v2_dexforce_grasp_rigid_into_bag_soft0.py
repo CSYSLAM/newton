@@ -260,11 +260,7 @@ class Example:
             joint_mode="kinematic",
             contact_mode="full",
             vbd_options=self._solver_vbd_options(),
-            collision_options={
-                "broad_phase": "nxn",
-                "soft_contact_margin": SOFT_CONTACT_MARGIN,
-                "enable_rigid_soft_full_surface_contact": True,
-            },
+            collision_options=self._solver_collision_options(),
         )
         self.contacts = self.solver.contacts
         self.maximum_soft_contact_count = wp.zeros(1, dtype=wp.int32, device=self.device)
@@ -415,6 +411,15 @@ class Example:
             "particle_self_contact_radius": max(BAG_PARTICLE_RADIUS, SOFT_CUBE_PARTICLE_RADIUS),
             "particle_self_contact_margin": 2.0 * max(BAG_PARTICLE_RADIUS, SOFT_CUBE_PARTICLE_RADIUS),
             "particle_topological_contact_filter_threshold": 3,
+        }
+
+    def _solver_collision_options(self):
+        """Return the collision-pipeline options for the coupled scene."""
+
+        return {
+            "broad_phase": "nxn",
+            "soft_contact_margin": SOFT_CONTACT_MARGIN,
+            "enable_rigid_soft_full_surface_contact": True,
         }
 
     def _build_scene(self):

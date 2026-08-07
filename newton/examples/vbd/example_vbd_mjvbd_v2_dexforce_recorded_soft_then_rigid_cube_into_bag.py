@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-"""Use the full Dexforce W1 to place a soft cube, then a rigid cube, into a soft bag.
+"""Run the recorded soft-then-rigid placement trajectory on the full W1.
 
-The right arm first reproduces the recorded physical soft-cube grasp. After
-releasing that cube into the compliant box bag, it returns to the table and
-uses the rigid-grasp fingertip pads, contact material, and timing to pick a
-dynamic rigid cube and release it into the same bag. Object poses are never
-attached to or copied from the hand.
+The right arm tracks the exact hand-root and finger-joint trajectory from
+``example_vbd_mjvbd_v2_right_hand_recorded_soft_then_rigid_cube_into_bag``.
+Each hand-root target is converted to the W1 right-arm TCP and solved with IK.
+Both cubes remain physical, and only collision meshes imported from the W1
+URDF participate in either grasp; no auxiliary fingertip pads are created.
 
 Run from the repository root::
 
-    uv run --extra examples newton/examples/vbd/example_vbd_mjvbd_v2_dexforce_recorded_soft_then_rigid_cube_into_bag.py --viewer gl
+    uv run --extra examples -m newton.examples vbd_mjvbd_v2_dexforce_recorded_soft_then_rigid_cube_into_bag --viewer gl
 """
 
 from __future__ import annotations
@@ -22,255 +22,151 @@ import newton
 import newton.examples
 from newton.examples.vbd import example_vbd_mjvbd_v2_dexforce_grasp_rigid_into_bag_rigid as rigid_reference
 from newton.examples.vbd import example_vbd_mjvbd_v2_dexforce_recorded_soft_cube_into_bag as recorded_soft
-from newton.examples.vbd import example_vbd_mjvbd_v2_right_hand_soft_then_rigid_cube_into_bag as hand_reference
+from newton.examples.vbd import example_vbd_mjvbd_v2_right_hand_recorded_soft_then_rigid_cube_into_bag as hand_reference
 
 soft0 = recorded_soft.soft0
+
+# The isolated-hand rigid cube is shifted by -0.11 m in world X. With the W1
+# base rotated +90 degrees about Z, that is +0.11 m in scene-local Y.
 RIGID_CUBE_POSITION = wp.vec3(
     float(soft0.CUBE_POSITIONS[0][0]),
     float(soft0.CUBE_POSITIONS[0][1]) + 0.11,
     float(soft0.CUBE_POSITIONS[0][2]),
 )
-RIGID_GRASP_ROOT = hand_reference.RIGID_GRASP_ROOT
-RIGID_GRASP_JOINTS_DEGREES = {
-    suffix: hand_reference.RIGID_GRASP_JOINTS[f"RIGHT_{suffix}"] for suffix in recorded_soft.soft0.Example.HAND_SUFFIXES
-}
 
-SOFT_WAIT = 0
-SOFT_GRASP = 1
-SOFT_RELEASE = 2
-RIGID_GRASP = 3
-RIGID_RELEASE = 4
+# Build the full-robot scene with the same integration and bag material used
+# by the canonical isolated-hand trajectory.
+soft0.SIM_SUBSTEPS = hand_reference.sequential_base.recorder.SIM_SUBSTEPS
+soft0.VBD_ITERATIONS = hand_reference.sequential_base.recorder.VBD_ITERATIONS
+soft0.BAG_RESOLUTION = hand_reference.BAG_RESOLUTION
+soft0.BAG_PARTICLE_RADIUS = hand_reference.BAG_PARTICLE_RADIUS
+soft0.BAG_DENSITY = hand_reference.BAG_DENSITY
+soft0.BAG_TRI_KE = hand_reference.BAG_TRI_KE
+soft0.BAG_TRI_KA = hand_reference.BAG_TRI_KA
+soft0.BAG_TRI_KD = hand_reference.BAG_TRI_KD
+soft0.BAG_EDGE_KE = hand_reference.BAG_EDGE_KE
+soft0.BAG_EDGE_KD = hand_reference.BAG_EDGE_KD
 
 
 class Example(recorded_soft.Example):
-    """Run the two physical pick-and-place operations with the full W1."""
+    """Track the canonical two-pick trajectory with the full Dexforce W1."""
 
     def __init__(self, viewer, args):
+        rigid_root, self.rigid_grasp_joints, _ = hand_reference.rigid_demo.Example._load_grasp_keyframe(
+            args.rigid_grasp_keyframe
+        )
+        rigid_root_position = wp.transform_get_translation(rigid_root)
+        self.rigid_grasp_root_world = wp.transform(
+            rigid_root_position + hand_reference.RIGID_CUBE_CENTRE - hand_reference.rigid_demo.recorder.CUBE_CENTRE,
+            wp.transform_get_rotation(rigid_root),
+        )
         self.contact_phase = None
+        self.hand_shape_collision_enabled = True
         super().__init__(viewer, args)
         self.object_released = np.zeros(2, dtype=bool)
-        self.previous_grip = 0.0
-        # Both pad sets must be present when the NxN broad phase is built.
-        # Runtime flags can then select the stage-specific set safely.
-        self._apply_contact_phase(SOFT_WAIT)
+        self._apply_contact_phase("soft_wait")
+
+    def _finger_pad_specs(self):
+        """Disable the base example's auxiliary fingertip pads."""
+
+        return ()
 
     def _add_additional_finger_pads(self, builder):
-        """Add the larger rigid-grasp pads alongside the soft-stage pads."""
-
-        pad_cfg = newton.ModelBuilder.ShapeConfig(
-            ke=rigid_reference.GRASP_CONTACT_KE,
-            kd=rigid_reference.GRASP_CONTACT_KD,
-            mu=rigid_reference.GRASP_FRICTION,
-            is_visible=False,
-        )
-        self.rigid_finger_pad_shapes = []
-        for body_name, half_extents, pad_xform in hand_reference.RIGID_FINGER_PADS:
-            body = self._body_index(builder.body_label, body_name)
-            self.rigid_finger_pad_shapes.append(
-                builder.add_shape_box(
-                    body,
-                    hx=half_extents[0],
-                    hy=half_extents[1],
-                    hz=half_extents[2],
-                    cfg=pad_cfg,
-                    xform=pad_xform,
-                    label=f"{body_name}_rigid_physical_pad",
-                )
-            )
+        """Keep the full-W1 scene limited to URDF collision meshes."""
 
     def _solver_vbd_options(self):
-        """Match the isolated sequential example's VBD settings."""
+        """Combine the canonical particle and rigid-contact solver settings."""
 
         options = super()._solver_vbd_options()
         options.update(
-            particle_vertex_contact_buffer_size=hand_reference.recorder.PARTICLE_VERTEX_CONTACT_BUFFER_SIZE,
-            particle_edge_contact_buffer_size=hand_reference.recorder.PARTICLE_EDGE_CONTACT_BUFFER_SIZE,
+            iterations=hand_reference.rigid_demo.recorder.VBD_ITERATIONS,
+            rigid_avbd_contact_alpha=0.0,
+            rigid_contact_history=True,
+            rigid_contact_stick_motion_eps=5.0e-4,
+            rigid_contact_stick_freeze_translation_eps=2.0e-4,
+            rigid_contact_stick_freeze_angular_eps=2.0e-4,
+            rigid_body_contact_buffer_size=hand_reference.rigid_demo.recorder.RIGID_BODY_CONTACT_BUFFER_SIZE,
+            particle_vertex_contact_buffer_size=hand_reference.soft_demo.recorder.PARTICLE_VERTEX_CONTACT_BUFFER_SIZE,
+            particle_edge_contact_buffer_size=hand_reference.soft_demo.recorder.PARTICLE_EDGE_CONTACT_BUFFER_SIZE,
             particle_collision_detection_interval=0,
             particle_topological_contact_filter_threshold=3,
             particle_rest_shape_contact_exclusion_radius=0.03,
         )
         return options
 
-    def _build_scene(self):
-        """Build both reference pad sets before the broad phase is allocated."""
+    def _solver_collision_options(self):
+        """Enable contact matching required by rigid-contact history."""
 
-        super()._build_scene()
+        options = super()._solver_collision_options()
+        options["contact_matching"] = "latest"
+        return options
 
     def _add_additional_scene_objects(self, builder):
-        """Add the rigid cube while keeping it dynamic at solver construction."""
+        """Add the second dynamic cube with the canonical rigid material."""
 
         cube_cfg = newton.ModelBuilder.ShapeConfig(
-            density=rigid_reference.CUBE_DENSITY,
-            ke=rigid_reference.GRASP_CONTACT_KE,
-            kd=rigid_reference.GRASP_CONTACT_KD,
-            mu=rigid_reference.GRASP_FRICTION,
-            margin=rigid_reference.CUBE_MARGIN,
+            density=hand_reference.RIGID_CUBE_DENSITY,
+            ke=hand_reference.RIGID_GRASP_CONTACT[0],
+            kd=hand_reference.RIGID_GRASP_CONTACT[1],
+            mu=hand_reference.RIGID_GRASP_CONTACT[2],
+            margin=hand_reference.RIGID_CUBE_MARGIN,
         )
         cube_cfg.configure_sdf(force_sdf=True)
         cube_cfg.has_particle_collision = True
         self.rigid_cube_body = builder.add_body(
             xform=wp.transform(self._world_vec(RIGID_CUBE_POSITION), self.base_rot),
-            label="pick_rigid_cube",
+            label="pick_recorded_rigid_cube",
         )
         self.rigid_cube_shape = builder.shape_count
         builder.add_shape_box(
             self.rigid_cube_body,
-            hx=hand_reference.recorder.CUBE_HALF_EXTENTS[0],
-            hy=hand_reference.recorder.CUBE_HALF_EXTENTS[1],
-            hz=hand_reference.recorder.CUBE_HALF_EXTENTS[2],
+            hx=hand_reference.sequential_base.recorder.CUBE_HALF_EXTENTS[0],
+            hy=hand_reference.sequential_base.recorder.CUBE_HALF_EXTENTS[1],
+            hz=hand_reference.sequential_base.recorder.CUBE_HALF_EXTENTS[2],
             cfg=cube_cfg,
-            xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), rigid_reference.CUBE_ROTATION),
+            xform=wp.transform(wp.vec3(), rigid_reference.CUBE_ROTATION),
             color=rigid_reference.CUBE_COLORS[0],
-            label="pick_rigid_cube_shape",
+            label="pick_recorded_rigid_cube_shape",
         )
-
-    def _right_hand_q(self):
-        """Cache separate recorded closures for the soft and rigid grasps."""
-
-        hand_indices, hand_open, soft_hand_grasp = super()._right_hand_q()
-        initial_q = self.model.joint_q.numpy()
-        self.rigid_hand_open = wp.array(
-            initial_q[hand_indices.numpy()],
-            dtype=wp.float32,
-            device=self.device,
-        )
-        rigid_hand_grasp = [np.radians(RIGID_GRASP_JOINTS_DEGREES[suffix]) for suffix in self.HAND_SUFFIXES]
-        self.rigid_hand_grasp = wp.array(rigid_hand_grasp, dtype=wp.float32, device=self.device)
-        return hand_indices, hand_open, soft_hand_grasp
 
     def _segments(self):
-        """Build the recorded soft trajectory followed by the rigid trajectory."""
+        """Convert the canonical hand-root segments to right-arm TCP segments."""
 
-        soft_approach = self._root_to_tcp(self.approach_root_world)
-        soft_root_position = wp.transform_get_translation(self.approach_root_world)
-        soft_cube_position = self._world_vec(soft0.CUBE_POSITIONS[0])
-        soft_root_cube_offset = soft_root_position - soft_cube_position
-        bag_position = self._world_vec(soft0.BAG_POS)
-        soft_bag_root = wp.transform(
-            wp.vec3(
-                float(bag_position[0]) + float(soft_root_cube_offset[0]),
-                float(bag_position[1]) + float(soft_root_cube_offset[1]),
-                float(bag_position[2]) + soft0.BAG_HEIGHT + 0.06 + float(soft_root_cube_offset[2]),
-            ),
-            wp.transform_get_rotation(self.approach_root_world),
+        soft_grasp_joints = {f"RIGHT_{suffix}": float(self.grasp_hand_q[suffix]) for suffix in self.HAND_SUFFIXES}
+        self.hand_trajectory_segments = hand_reference._build_recorded_trajectory(
+            soft_grasp_joints,
+            self.rigid_grasp_root_world,
+            self.rigid_grasp_joints,
         )
-        soft_bag_hover = self._root_to_tcp(soft_bag_root)
-        soft_lift = wp.transform(
-            wp.transform_get_translation(soft_approach) + wp.vec3(0.0, 0.0, 0.07),
-            wp.transform_get_rotation(soft_approach),
-        )
-        soft_retreat = wp.transform(
-            wp.transform_get_translation(soft_bag_hover) + wp.vec3(0.0, 0.0, 0.10),
-            wp.transform_get_rotation(soft_bag_hover),
-        )
-
-        rigid_approach = self._root_to_tcp(RIGID_GRASP_ROOT)
-        rigid_pregrasp_root = wp.transform(
-            wp.transform_get_translation(RIGID_GRASP_ROOT) + wp.vec3(0.0, 0.0, 0.18),
-            wp.transform_get_rotation(RIGID_GRASP_ROOT),
-        )
-        rigid_pregrasp = self._root_to_tcp(rigid_pregrasp_root)
-        rigid_cube_position = hand_reference.RIGID_CUBE_CENTRE
-        rigid_root_cube_offset = wp.transform_get_translation(RIGID_GRASP_ROOT) - rigid_cube_position
-        rigid_bag_root = wp.transform(
-            wp.vec3(
-                float(bag_position[0]) + float(rigid_root_cube_offset[0]),
-                float(bag_position[1]) + float(rigid_root_cube_offset[1]),
-                float(bag_position[2]) + soft0.BAG_HEIGHT + 0.06 + float(rigid_root_cube_offset[2]),
-            ),
-            wp.transform_get_rotation(RIGID_GRASP_ROOT),
-        )
-        rigid_bag_hover = self._root_to_tcp(rigid_bag_root)
-        rigid_lift = wp.transform(
-            wp.transform_get_translation(rigid_approach) + wp.vec3(0.0, 0.0, 0.10),
-            wp.transform_get_rotation(rigid_approach),
-        )
-        rigid_transport = wp.transform(
-            wp.transform_get_translation(rigid_bag_hover) + wp.vec3(0.0, 0.0, 0.05),
-            wp.transform_get_rotation(rigid_bag_hover),
-        )
-        rigid_retreat = wp.transform(
-            wp.transform_get_translation(rigid_bag_hover) + wp.vec3(0.0, 0.0, 0.10),
-            wp.transform_get_rotation(rigid_bag_hover),
-        )
-
-        segments = [
-            (0.50, self.left_home, self.left_home, soft_approach, soft_approach, 0.0, 0.0, 0),
-            (1.80, self.left_home, self.left_home, soft_approach, soft_approach, 0.0, 1.0, 0),
-            (0.60, self.left_home, self.left_home, soft_approach, soft_approach, 1.0, 1.0, 0),
-            (1.20, self.left_home, self.left_home, soft_approach, soft_lift, 1.0, 1.0, 0),
-            (7.00, self.left_home, self.left_home, soft_lift, soft_bag_hover, 1.0, 1.0, 0),
-            (0.40, self.left_home, self.left_home, soft_bag_hover, soft_bag_hover, 1.0, 1.0, 0),
-        ]
-        self.soft_contact_start_time = segments[0][0]
-        self.soft_release_start_time = sum(segment[0] for segment in segments)
-        segments.extend(
-            (
+        arm_segments = []
+        for duration, root_a, root_b, _joints_a, _joints_b, phase in self.hand_trajectory_segments:
+            right_a = self._root_to_tcp(root_a)
+            right_b = self._root_to_tcp(root_b)
+            if phase.startswith("soft_"):
+                object_index = 0
+            elif phase != "rigid_move":
+                object_index = 1
+            else:
+                object_index = -1
+            arm_segments.append(
                 (
-                    soft0.SOFT_CUBE_RELEASE_OPEN_DURATION,
+                    duration,
                     self.left_home,
                     self.left_home,
-                    soft_bag_hover,
-                    soft_bag_hover,
-                    1.0,
-                    0.0,
-                    0,
-                ),
-                (
-                    soft0.SOFT_CUBE_RELEASE_SETTLE_DURATION,
-                    self.left_home,
-                    self.left_home,
-                    soft_bag_hover,
-                    soft_bag_hover,
+                    right_a,
+                    right_b,
                     0.0,
                     0.0,
-                    0,
-                ),
-                (1.00, self.left_home, self.left_home, soft_bag_hover, soft_retreat, 0.0, 0.0, -1),
+                    object_index,
+                )
             )
-        )
-        self.rigid_open_transition_start_time = sum(segment[0] for segment in segments)
-        segments.append((1.20, self.left_home, self.left_home, soft_retreat, self.right_home, 0.0, 0.0, -1))
-        self.rigid_grasp_start_time = sum(segment[0] for segment in segments)
-        segments.extend(
-            (
-                (0.80, self.left_home, self.left_home, self.right_home, rigid_pregrasp, 0.0, 0.0, 1),
-                (1.80, self.left_home, self.left_home, rigid_pregrasp, rigid_approach, 0.0, 1.0, 1),
-                (1.00, self.left_home, self.left_home, rigid_approach, rigid_approach, 1.0, 1.0, 1),
-                (2.00, self.left_home, self.left_home, rigid_approach, rigid_lift, 1.0, 1.0, 1),
-                (0.60, self.left_home, self.left_home, rigid_lift, rigid_lift, 1.0, 1.0, 1),
-                (5.00, self.left_home, self.left_home, rigid_lift, rigid_transport, 1.0, 1.0, 1),
-                (1.50, self.left_home, self.left_home, rigid_transport, rigid_bag_hover, 1.0, 1.0, 1),
-                (0.40, self.left_home, self.left_home, rigid_bag_hover, rigid_bag_hover, 1.0, 1.0, 1),
-            )
-        )
-        self.rigid_release_start_time = sum(segment[0] for segment in segments)
-        segments.extend(
-            (
-                (0.80, self.left_home, self.left_home, rigid_bag_hover, rigid_bag_hover, 1.0, 0.0, 1),
-                (0.20, self.left_home, self.left_home, rigid_bag_hover, rigid_bag_hover, 0.0, 0.0, 1),
-                (1.00, self.left_home, self.left_home, rigid_bag_hover, rigid_retreat, 0.0, 0.0, 1),
-                (1.20, self.left_home, self.left_home, rigid_retreat, self.right_home, 0.0, 0.0, -1),
-                (1.20, self.left_home, self.left_home, self.right_home, self.right_home, 0.0, 0.0, -1),
-            )
-        )
-        return tuple(segments)
-
-    def _phase_at(self, script_time):
-        if script_time < self.soft_contact_start_time:
-            return SOFT_WAIT
-        if script_time < self.soft_release_start_time:
-            return SOFT_GRASP
-        if script_time < self.rigid_grasp_start_time:
-            return SOFT_RELEASE
-        if script_time < self.rigid_release_start_time:
-            return RIGID_GRASP
-        return RIGID_RELEASE
+        return tuple(arm_segments)
 
     def _build_joint_target_cache(self):
-        """Initialize the arm for per-frame IK tracking of the hand reference."""
+        """Initialize the robot at the canonical idle hand and first root pose."""
 
-        approach = self._root_to_tcp(self.approach_root_world)
+        first_root = self.hand_trajectory_segments[0][1]
+        approach = self._root_to_tcp(first_root)
         self.left_obj.set_target_position(0, wp.transform_get_translation(self.left_home))
         self.left_rot.set_target_rotation(0, self._v4(wp.transform_get_rotation(self.left_home)))
         self.right_obj.set_target_position(0, wp.transform_get_translation(approach))
@@ -285,41 +181,16 @@ class Example(recorded_soft.Example):
 
         initial_q = self.model.joint_q.numpy()
         initial_q[: self.ik_model.joint_coord_count] = self.ik_q.numpy()[0]
-        initial_q[self.hand_indices.numpy()] = self.hand_open.numpy()
+        initial_q[self.hand_indices.numpy()] = self.hand_start.numpy()
         self.model.joint_q.assign(initial_q)
         self.state_0.joint_q.assign(initial_q)
         self.state_1.joint_q.assign(initial_q)
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
         newton.eval_fk(self.model, self.state_1.joint_q, self.state_1.joint_qd, self.state_1)
 
-    def _finger_target(self, script_time, grip):
-        """Sample the reference example's exact finger trajectory."""
+    def _set_shape_material(self, shapes, ke, kd, mu, margin=None):
+        """Set effective contact material for selected model shapes."""
 
-        soft_hand_open = self.hand_open.numpy()
-        soft_hand_grasp = self.hand_grasp.numpy()
-        rigid_hand_open = self.rigid_hand_open.numpy()
-        rigid_hand_grasp = self.rigid_hand_grasp.numpy()
-        if script_time >= self.rigid_grasp_start_time:
-            hand_open = rigid_hand_open
-            hand_grasp = rigid_hand_grasp
-        elif script_time >= self.rigid_open_transition_start_time:
-            transition_duration = self.rigid_grasp_start_time - self.rigid_open_transition_start_time
-            alpha = float(
-                np.clip(
-                    (script_time - self.rigid_open_transition_start_time) / transition_duration,
-                    0.0,
-                    1.0,
-                )
-            )
-            alpha = alpha * alpha * (3.0 - 2.0 * alpha)
-            hand_open = soft_hand_open * (1.0 - alpha) + rigid_hand_open * alpha
-            hand_grasp = rigid_hand_grasp
-        else:
-            hand_open = soft_hand_open
-            hand_grasp = soft_hand_grasp
-        return hand_open * (1.0 - grip) + hand_grasp * grip
-
-    def _set_shape_material(self, shapes, ke, kd, mu):
         shape_mu = self.model.shape_material_mu.numpy()
         shape_ke = self.model.shape_material_ke.numpy()
         shape_kd = self.model.shape_material_kd.numpy()
@@ -329,80 +200,100 @@ class Example(recorded_soft.Example):
         self.model.shape_material_mu.assign(shape_mu)
         self.model.shape_material_ke.assign(shape_ke)
         self.model.shape_material_kd.assign(shape_kd)
+        if margin is not None:
+            shape_margin = self.model.shape_margin.numpy()
+            shape_margin[shapes] = margin
+            self.model.shape_margin.assign(shape_margin)
 
     def _set_shape_friction(self, shapes, friction):
+        """Set friction for selected model shapes."""
+
         shape_mu = self.model.shape_material_mu.numpy()
         shape_mu[shapes] = friction
         self.model.shape_material_mu.assign(shape_mu)
 
-    def _set_pad_shape_collision(self, shapes, enabled):
+    def _set_hand_shape_collision(self, enabled):
+        """Gate right-hand rigid contact during the inter-object move."""
+
+        if enabled == self.hand_shape_collision_enabled:
+            return
         flags = self.model.shape_flags.numpy()
         shape_flag = int(newton.ShapeFlags.COLLIDE_SHAPES)
-        particle_flag = int(newton.ShapeFlags.COLLIDE_PARTICLES)
         if enabled:
-            flags[shapes] |= shape_flag
+            flags[self.right_hand_shapes] |= shape_flag
         else:
-            flags[shapes] &= ~shape_flag
-        flags[shapes] &= ~particle_flag
+            flags[self.right_hand_shapes] &= ~shape_flag
         self.model.shape_flags.assign(flags)
+        self.hand_shape_collision_enabled = enabled
 
     def _apply_contact_phase(self, phase):
-        soft_hand_shapes = self.right_hand_shapes
-        rigid_hand_shapes = [*self.right_hand_shapes, *self.rigid_finger_pad_shapes]
-        if phase == SOFT_GRASP:
-            self._set_pad_shape_collision(self.finger_pad_shapes, True)
-            self._set_pad_shape_collision(self.rigid_finger_pad_shapes, False)
+        """Apply the canonical stage-specific contact configuration."""
+
+        soft_active = phase in {"soft_prepare", "soft_grasp", "soft_carry"}
+        rigid_active = phase in {"rigid_prepare", "rigid_grasp", "rigid_carry"}
+        self._set_hand_shape_collision(phase != "rigid_move")
+
+        if soft_active:
             self._set_hand_particle_collision(True)
             self._set_shape_material(
-                soft_hand_shapes,
-                soft0.GRASP_CONTACT_KE,
-                soft0.GRASP_CONTACT_KD,
+                self.right_hand_shapes,
+                hand_reference.SOFT_GRASP_CONTACT[0],
+                hand_reference.SOFT_GRASP_CONTACT[1],
                 soft0.GRASP_FRICTION,
             )
-        elif phase == SOFT_RELEASE:
-            self._set_pad_shape_collision(self.finger_pad_shapes, True)
-            self._set_pad_shape_collision(self.rigid_finger_pad_shapes, False)
+            self.model.soft_contact_ke = hand_reference.SOFT_GRASP_CONTACT[0]
+            self.model.soft_contact_kd = hand_reference.SOFT_GRASP_CONTACT[1]
+            self.model.soft_contact_mu = hand_reference.SOFT_GRASP_CONTACT[2]
+        elif phase == "soft_release":
             self._set_hand_particle_collision(True)
-            self._set_shape_material(
-                soft_hand_shapes,
-                soft0.RELEASE_CONTACT_KE,
-                soft0.RELEASE_CONTACT_KD,
-                soft0.RELEASE_FRICTION,
-            )
-            self.model.soft_contact_ke = soft0.RELEASE_CONTACT_KE
-            self.model.soft_contact_kd = soft0.RELEASE_CONTACT_KD
-            self.model.soft_contact_mu = soft0.RELEASE_FRICTION
-        elif phase == RIGID_GRASP:
+            self._set_shape_friction(self.right_hand_shapes, 0.0)
+            self.model.soft_contact_ke = hand_reference.SOFT_FREE_CONTACT[0]
+            self.model.soft_contact_kd = hand_reference.SOFT_FREE_CONTACT[1]
+            self.model.soft_contact_mu = hand_reference.SOFT_FREE_CONTACT[2]
+        elif rigid_active:
             self._set_hand_particle_collision(False)
-            self._set_pad_shape_collision(self.finger_pad_shapes, False)
-            self._set_pad_shape_collision(self.rigid_finger_pad_shapes, True)
-            rigid_shapes = [*rigid_hand_shapes, self.rigid_cube_shape]
+            rigid_shapes = [*self.right_hand_shapes, self.rigid_cube_shape]
             self._set_shape_material(
                 rigid_shapes,
-                rigid_reference.GRASP_CONTACT_KE,
-                rigid_reference.GRASP_CONTACT_KD,
-                rigid_reference.GRASP_FRICTION,
+                hand_reference.RIGID_GRASP_CONTACT[0],
+                hand_reference.RIGID_GRASP_CONTACT[1],
+                hand_reference.RIGID_GRASP_CONTACT[2],
+                hand_reference.RIGID_CUBE_MARGIN,
             )
-        elif phase == RIGID_RELEASE:
+            self.model.soft_contact_ke = hand_reference.rigid_demo.SOFT_CONTACT_KE
+            self.model.soft_contact_kd = hand_reference.rigid_demo.SOFT_CONTACT_KD
+            self.model.soft_contact_mu = hand_reference.rigid_demo.SOFT_CONTACT_MU
+        elif phase == "rigid_release":
             self._set_hand_particle_collision(False)
-            self._set_pad_shape_collision(self.finger_pad_shapes, False)
-            self._set_pad_shape_collision(self.rigid_finger_pad_shapes, True)
-            rigid_shapes = [*rigid_hand_shapes, self.rigid_cube_shape]
+            rigid_shapes = [*self.right_hand_shapes, self.rigid_cube_shape]
             self._set_shape_material(
                 rigid_shapes,
-                rigid_reference.RELEASE_CONTACT_KE,
-                rigid_reference.RELEASE_CONTACT_KD,
-                rigid_reference.RELEASE_FRICTION,
+                hand_reference.RIGID_RELEASE_CONTACT[0],
+                hand_reference.RIGID_RELEASE_CONTACT[1],
+                hand_reference.RIGID_RELEASE_CONTACT[2],
+                hand_reference.RIGID_CUBE_MARGIN,
             )
+            self.model.soft_contact_ke = hand_reference.RIGID_RELEASE_CONTACT[0]
+            self.model.soft_contact_kd = hand_reference.RIGID_RELEASE_CONTACT[1]
+            self.model.soft_contact_mu = hand_reference.RIGID_RELEASE_CONTACT[2]
         else:
-            self._set_pad_shape_collision(self.finger_pad_shapes, True)
-            self._set_pad_shape_collision(self.rigid_finger_pad_shapes, False)
             self._set_hand_particle_collision(False)
+            self._set_shape_friction(self.right_hand_shapes, 0.0)
+            self.model.soft_contact_ke = hand_reference.SOFT_FREE_CONTACT[0]
+            self.model.soft_contact_kd = hand_reference.SOFT_FREE_CONTACT[1]
+            self.model.soft_contact_mu = hand_reference.SOFT_FREE_CONTACT[2]
         self.contact_phase = phase
 
     def _prepare_frame(self):
+        """Solve arm IK and copy the canonical finger target for one frame."""
+
         script_time = (self.frame_index + 1) * self.frame_dt * self.args.trajectory_time_scale
-        left, right, grip, script_object = self._sample(script_time)
+        left, right, _grip, _script_object = self._sample(script_time)
+        _root, finger_joints, phase = hand_reference._sample_recorded_trajectory(
+            self.hand_trajectory_segments,
+            script_time,
+        )
+
         self.left_obj.set_target_position(0, wp.transform_get_translation(left))
         self.left_rot.set_target_rotation(0, self._v4(wp.transform_get_rotation(left)))
         self.right_obj.set_target_position(0, wp.transform_get_translation(right))
@@ -418,19 +309,22 @@ class Example(recorded_soft.Example):
         wp.copy(self.frame_q_start, self.state_0.joint_q)
         target_q = self.state_0.joint_q.numpy()
         target_q[: self.ik_model.joint_coord_count] = self.ik_q.numpy()[0]
-        target_q[self.hand_indices.numpy()] = self._finger_target(script_time, grip)
+        target_q[self.hand_indices.numpy()] = [
+            np.radians(finger_joints[f"RIGHT_{suffix}"]) for suffix in self.HAND_SUFFIXES
+        ]
         self.frame_q_end.assign(target_q)
 
-        phase = self._phase_at(script_time)
         if phase != self.contact_phase:
             self._apply_contact_phase(phase)
-        if self.previous_grip > 1.0e-4 and grip <= 1.0e-4 and script_object >= 0:
-            self.object_released[script_object] = True
-        self.previous_grip = grip
+        if phase == "soft_release":
+            self.object_released[0] = True
+        elif phase == "rigid_release":
+            self.object_released[1] = True
 
     def test_final(self):
-        """Verify that both dynamic objects are finite, released, and inside the bag."""
+        """Verify finite objects, physical releases, placement, and no pads."""
 
+        assert not any("physical_pad" in label for label in self.model.shape_label)
         body_flags = int(self.model.body_flags.numpy()[self.rigid_cube_body])
         assert not body_flags & int(newton.BodyFlags.KINEMATIC), (
             "The rigid cube must be dynamic when the solver is constructed"
@@ -451,26 +345,30 @@ class Example(recorded_soft.Example):
         bag_q = self.state_0.particle_q.numpy()[self.bag_particle_start : self.bag_particle_end]
         bag_scene_q = np.asarray([self._scene_vec(wp.vec3(*position)) for position in bag_q])
         bag_min_z = float(bag_scene_q[:, 2].min())
+        half_extents = hand_reference.sequential_base.recorder.CUBE_HALF_EXTENTS
         rigid_inside = (
-            abs(float(rigid_position[0]) - float(soft0.BAG_POS[0]))
-            < 0.5 * soft0.BAG_WIDTH + rigid_reference.CUBE_HALF_EXTENTS[0]
-            and abs(float(rigid_position[1]) - float(soft0.BAG_POS[1]))
-            < 0.5 * soft0.BAG_DEPTH + rigid_reference.CUBE_HALF_EXTENTS[1]
-            and bag_min_z - rigid_reference.CUBE_HALF_EXTENTS[2] < float(rigid_position[2]) < soft0.TABLE_TOP_Z + 0.08
+            abs(float(rigid_position[0]) - float(soft0.BAG_POS[0])) < 0.5 * soft0.BAG_WIDTH + half_extents[0]
+            and abs(float(rigid_position[1]) - float(soft0.BAG_POS[1])) < 0.5 * soft0.BAG_DEPTH + half_extents[1]
+            and bag_min_z - half_extents[2] < float(rigid_position[2]) < soft0.TABLE_TOP_Z + 0.08
         )
         assert rigid_inside, f"Rigid cube did not settle in the bag; position={tuple(rigid_position)}"
 
     @staticmethod
     def create_parser():
-        """Create parser options for the full-W1 sequential placement demo."""
+        """Create parser options for both canonical grasp keyframes."""
 
         parser = recorded_soft.Example.create_parser()
-        parser.set_defaults(num_frames=2100, paused=False)
+        parser.set_defaults(num_frames=1900, paused=False)
+        parser.add_argument(
+            "--rigid-grasp-keyframe",
+            default=str(hand_reference.DEFAULT_RIGID_GRASP_KEYFRAME),
+            help="Rigid-cube keyframe used by the canonical isolated-hand trajectory.",
+        )
         return parser
 
 
 def main():
-    """Run the full-W1 sequential soft-and-rigid placement demo."""
+    """Run the full-W1 canonical soft-then-rigid placement trajectory."""
 
     parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
