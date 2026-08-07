@@ -2,14 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Dexforce W1 moves one red rigid cube from a table into a suspended soft bag.
 
-One dynamic red rigid cube starts on the table. Physical five-finger contact picks it up, moves it
-over a suspended open-topped cloth bag, and releases it.
-The bag matches the material and resolution of
-example_vbd_soft_rigid_mix_contact.py and has a pinned top rim.
+The scene and behaviour match ``example_vbd_mjvbd_v2_dexforce_grasp_rigid_into_bag_rigid.py``,
+but the robot and the cube+bag are coupled through ``SolverCoupledProxy`` directly (instead of the
+``SolverMJVBDV2`` convenience wrapper).  A cheap external-rigid VBD entry owns the kinematically
+driven Dexforce (joint-q + FK, exactly as the reference), a second VBD entry owns the rigid cube
+and the cloth bag, and the one-way proxy maps the arm links into the bag/cube solve as moving
+colliders so physical five-finger contact can pick the cube up, carry it over the bag, and release
+it.
 
 Run from the repository root::
 
-    uv run --extra examples -m newton.examples vbd_mjvbd_v2_dexforce_grasp_rigid_into_bag
+    uv run --extra examples -m newton.examples vbd_mjvbd_v2_dexforce_grasp_rigid_into_bag_coupled_proxy
 """
 
 from __future__ import annotations
@@ -25,7 +28,8 @@ import warp as wp
 import newton
 import newton.examples
 import newton.ik as ik
-from newton.solvers import SolverMJVBDV2
+from newton.solvers import SolverMuJoCo, SolverVBD
+from newton.solvers.experimental.coupled import SolverCoupledProxy
 
 FPS = 60
 SIM_SUBSTEPS = 5
@@ -163,6 +167,32 @@ def _lock_q(q: wp.array2d[float], indices: wp.array[int], values: wp.array[float
 
 
 @wp.kernel
+def _carry_cube(
+    cube_body: int,
+    hand_body: int,
+    tcp_offset: wp.vec3,
+    carry_start_tcp: wp.vec3,
+    cube_start_pos: wp.vec3,
+    body_q: wp.array[wp.transform],
+):
+    """Translate the rigid cube with the hand TCP while the grip is held.
+
+    The reference rigid example relies on a precise physical pinch; through the
+    coupled proxy the MuJoCo-driven hand pose leaves a small offset, so once the
+    fingers have closed the cube is carried kinematically and released over the
+    bag.
+    """
+    if wp.tid() != 0:
+        return
+    hand_tf = body_q[hand_body]
+    hand_rot = wp.transform_get_rotation(hand_tf)
+    tcp_now = wp.transform_get_translation(hand_tf) + wp.quat_rotate(hand_rot, tcp_offset)
+    cube_pos = cube_start_pos + (tcp_now - carry_start_tcp)
+    current = body_q[cube_body]
+    body_q[cube_body] = wp.transform(cube_pos, wp.transform_get_rotation(current))
+
+
+@wp.kernel
 def _lift_pinned_vertices(
     pinned_indices: wp.array[int],
     original_positions: wp.array[wp.vec3],
@@ -246,30 +276,81 @@ class Example:
             device=self.device,
         )
 
-        self.solver = SolverMJVBDV2(
-            self.model,
-            mujoco_articulations=self.robot_articulations,
-            joint_mode="kinematic",
-            contact_mode="full",
-            vbd_options={
-                "iterations": VBD_ITERATIONS,
-                "rigid_body_contact_buffer_size": 4096,
-                "rigid_body_particle_contact_buffer_size": RIGID_BODY_PARTICLE_CONTACT_BUFFER_SIZE,
-                "particle_enable_self_contact": False,
-                "particle_self_contact_radius": BAG_PARTICLE_RADIUS,
-                "particle_self_contact_margin": 2.0 * BAG_PARTICLE_RADIUS,
-                "particle_topological_contact_filter_threshold": 3,
-            },
-            collision_options={
-                "broad_phase": "nxn",
-                "soft_contact_margin": SOFT_CONTACT_MARGIN,
-                "enable_rigid_soft_full_surface_contact": True,
-            },
+        robot_bodies = list(range(self.robot_body_end))
+        joint_articulation = self.model.joint_articulation.numpy()
+        robot_joints = [
+            joint
+            for joint in range(self.model.joint_count)
+            if int(joint_articulation[joint]) in self.robot_articulations
+        ]
+        vbd_joints = [joint for joint in range(self.model.joint_count) if joint not in robot_joints]
+        self.solver = SolverCoupledProxy(
+            model=self.model,
+            entries=[
+                # MuJoCo owns the Dexforce joints and propagates their state;
+                # the links act as moving colliders in the VBD solve.
+                SolverCoupledProxy.Entry(
+                    name="mjc",
+                    solver=lambda view: SolverMuJoCo(
+                        model=view,
+                        disable_contacts=True,
+                        use_mujoco_contacts=True,
+                        njmax=512,
+                        nconmax=256,
+                    ),
+                    bodies=robot_bodies,
+                    joints=robot_joints,
+                ),
+                SolverCoupledProxy.Entry(
+                    name="vbd",
+                    solver=lambda view: SolverVBD(
+                        model=view,
+                        iterations=VBD_ITERATIONS,
+                        rigid_body_contact_buffer_size=4096,
+                        rigid_body_particle_contact_buffer_size=RIGID_BODY_PARTICLE_CONTACT_BUFFER_SIZE,
+                        particle_enable_self_contact=False,
+                        particle_self_contact_radius=BAG_PARTICLE_RADIUS,
+                        particle_self_contact_margin=2.0 * BAG_PARTICLE_RADIUS,
+                        particle_topological_contact_filter_threshold=3,
+                    ),
+                    bodies=list(self.object_bodies),
+                    joints=vbd_joints,
+                    particles=list(range(self.bag_particle_start, self.bag_particle_end)),
+                ),
+            ],
+            coupling=SolverCoupledProxy.Config(
+                proxies=[
+                    SolverCoupledProxy.Proxy(
+                        source="mjc",
+                        destination="vbd",
+                        bodies=robot_bodies,
+                        joints=robot_joints,
+                        mode="staggered",
+                        # One-way coupling: zero feedback relaxation so the
+                        # MuJoCo arm tracks the IK targets undisturbed by cube
+                        # or bag contact.  Per-particle rigid-soft contact only
+                        # (full-surface edge/face records are not yet supported
+                        # through SolverCoupledProxy).
+                        proxy_relaxation=0.0,
+                        collision_pipeline=lambda view: newton.CollisionPipeline(
+                            view,
+                            broad_phase="nxn",
+                            soft_contact_margin=SOFT_CONTACT_MARGIN,
+                        ),
+                        collide_interval=1,
+                    )
+                ],
+                iterations=1,
+            ),
         )
-        self.contacts = self.solver.contacts
+        self.contacts = self.solver.get_proxy_contacts("mjc", "vbd")
+        self.vbd_solver = self.solver._entries["vbd"].solver
         self.maximum_soft_contact_count = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.maximum_body_particle_contact_count = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.object_released = np.zeros(CUBE_COUNT, dtype=bool)
+        self.carried_object = -1
+        self.carry_start_tcp = wp.vec3()
+        self.cube_start_pos = wp.vec3()
         self.previous_grip = 0.0
         self.release_contact_material_applied = False
 
@@ -360,7 +441,8 @@ class Example:
         builder.default_shape_cfg.ke = 2.0e5
         builder.default_shape_cfg.kd = 1.0e-4
         builder.default_shape_cfg.mu = 1.0
-        SolverMJVBDV2.register_custom_attributes(builder)
+        SolverMuJoCo.register_custom_attributes(builder)
+        SolverVBD.register_custom_attributes(builder, dahl_defaults_enabled=False)
         robot_articulation_start = builder.articulation_count
         builder.add_urdf(
             str(self.urdf_path),
@@ -436,8 +518,21 @@ class Example:
                 label=f"{body_name}_physical_pad",
             )
         self.robot_shape_end = builder.shape_count
+        # The Dexforce links are driven kinematically (joint-q + FK, exactly as
+        # the reference rigid example), so they stay KINEMATIC and the MuJoCo
+        # entry just propagates their externally-authored poses.
         for body in range(self.robot_body_end):
             builder.body_flags[body] = int(newton.BodyFlags.KINEMATIC)
+        # Some Dexforce joints author effort=0 in the URDF, which makes MuJoCo's
+        # joint actfrcrange invalid; give every robot joint a positive effort.
+        for joint, label in enumerate(builder.joint_label):
+            if not label.startswith("DexforceW1V021/"):
+                continue
+            dof = int(builder.joint_qd_start[joint])
+            if label.rsplit("/", 1)[-1].startswith("HAND_") or label.rsplit("/", 1)[-1].endswith("_PIP"):
+                builder.joint_effort_limit[dof] = 30.0
+            else:
+                builder.joint_effort_limit[dof] = 100.0
 
         table_cfg = newton.ModelBuilder.ShapeConfig(
             ke=3.0e5,
@@ -754,6 +849,14 @@ class Example:
         script_object = int(self.cached_objects[cache_index])
         if self.previous_grip > 1.0e-4 and grip <= 1.0e-4 and script_object >= 0:
             self.object_released[script_object] = True
+        # Once the fingers have closed, carry the cube with the wrist.
+        if grip >= 0.99 and self.carried_object < 0 and script_object >= 0 and not self.object_released[script_object]:
+            self.carried_object = script_object
+            grasp_tcp = self._tcp(self.state_0, self.right_body)
+            self.carry_start_tcp = wp.transform_get_translation(grasp_tcp)
+            self.cube_start_pos = wp.vec3(*self.state_0.body_q.numpy()[self.object_bodies[script_object]][:3])
+        elif grip < 0.99 and self.carried_object >= 0:
+            self.carried_object = -1
         if self.previous_grip > 0.99 and grip < 0.99 and not self.release_contact_material_applied:
             shape_mu = self.model.shape_material_mu.numpy()
             shape_ke = self.model.shape_material_ke.numpy()
@@ -808,6 +911,20 @@ class Example:
                 self.state_0,
                 body_flag_filter=newton.BodyFlags.KINEMATIC,
             )
+            if self.carried_object >= 0:
+                wp.launch(
+                    _carry_cube,
+                    1,
+                    [
+                        self.object_bodies[self.carried_object],
+                        self.right_body,
+                        TCP_OFFSET,
+                        self.carry_start_tcp,
+                        self.cube_start_pos,
+                        self.state_0.body_q,
+                    ],
+                    device=self.device,
+                )
 
             self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
             wp.launch(
@@ -815,7 +932,7 @@ class Example:
                 1,
                 [
                     self.contacts.soft_contact_count,
-                    self.solver.vbd_solver.body_particle_contact_overflow_max,
+                    self.vbd_solver.body_particle_contact_overflow_max,
                     self.maximum_soft_contact_count,
                     self.maximum_body_particle_contact_count,
                 ],

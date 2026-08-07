@@ -1,0 +1,93 @@
+{
+  "format": "newton_w1_right_hand_keyframe_v1",
+  "keyframe": {
+    "frame": 1107,
+    "time_s": 18.450000000000234,
+    "gizmo_world": {
+      "position_m": [
+        -0.14114204049110413,
+        -2.841686964035034,
+        1.3409454822540283
+      ],
+      "quaternion_xyzw": [
+        0.09465623646974564,
+        0.9546480774879456,
+        -0.2820824682712555,
+        0.010803722776472569
+      ]
+    },
+    "position_offset_mm": [
+      -21.0,
+      3.0,
+      0.0
+    ],
+    "rotation_offset_deg": [
+      -9.0,
+      0.0,
+      0.0
+    ],
+    "target_root_pose": {
+      "position_m": [
+        -0.16214203834533691,
+        -2.838686943054199,
+        1.3409454822540283
+      ],
+      "quaternion_xyzw": [
+        0.09351678937673569,
+        0.9295732378959656,
+        -0.3561137318611145,
+        0.018197061493992805
+      ]
+    },
+    "target_finger_joints_degrees": {
+      "RIGHT_HAND_THUMB1": 26.0,
+      "RIGHT_HAND_THUMB2": 90.0,
+      "RIGHT_HAND_INDEX": 33.0,
+      "RIGHT_INDEX_PIP": 21.0,
+      "RIGHT_HAND_MIDDLE": 40.0,
+      "RIGHT_MIDDLE_PIP": 10.0,
+      "RIGHT_HAND_RING": 42.0,
+      "RIGHT_RING_PIP": 6.0,
+      "RIGHT_HAND_PINKY": 7.0,
+      "RIGHT_PINKY_PIP": 12.0
+    },
+    "root_pose": {
+      "position_m": [
+        -0.16214203834533691,
+        -2.838686943054199,
+        1.3409454822540283
+      ],
+      "quaternion_xyzw": [
+        0.09351678937673569,
+        0.9295732378959656,
+        -0.3561137318611145,
+        0.018197061493992805
+      ]
+    },
+    "finger_joints_radians": {
+      "RIGHT_HAND_THUMB1": 0.45378559827804565,
+      "RIGHT_HAND_THUMB2": 1.5707963705062866,
+      "RIGHT_HAND_INDEX": 0.5759586691856384,
+      "RIGHT_INDEX_PIP": 0.36651915311813354,
+      "RIGHT_HAND_MIDDLE": 0.6981316804885864,
+      "RIGHT_MIDDLE_PIP": 0.1745329201221466,
+      "RIGHT_HAND_RING": 0.7330383062362671,
+      "RIGHT_RING_PIP": 0.10471975803375244,
+      "RIGHT_HAND_PINKY": 0.12217304855585098,
+      "RIGHT_PINKY_PIP": 0.20943951606750488
+    },
+    "finger_joints_degrees": {
+      "RIGHT_HAND_THUMB1": 25.999998092651367,
+      "RIGHT_HAND_THUMB2": 90.0,
+      "RIGHT_HAND_INDEX": 33.0,
+      "RIGHT_INDEX_PIP": 21.0,
+      "RIGHT_HAND_MIDDLE": 39.999996185302734,
+      "RIGHT_MIDDLE_PIP": 9.999999046325684,
+      "RIGHT_HAND_RING": 42.0,
+      "RIGHT_RING_PIP": 6.0,
+      "RIGHT_HAND_PINKY": 6.999999523162842,
+      "RIGHT_PINKY_PIP": 12.0
+    },
+    "soft_cube_particles": 847
+  }
+}

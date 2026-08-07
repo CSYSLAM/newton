@@ -4,6 +4,8 @@
 
 ### Added
 
+- Add a physical MJVBDV2 Dexforce hand-pose recorder with five-finger TCP tuning and JSON trajectory export.
+- Add ViewerGL TCP gizmos for coarse hand-arm placement before fine pose adjustment.
 - Add an MJVBDV2 dynamic Dexforce bimanual T-shirt folding example.
 - Add a VBD example of a standalone Dexforce W1 left hand holding a stiff C-bent card packet.
 - Add `genesis_w1_card_shuffle_replay` and `genesis_w1_card_shuffle_square_replay` examples that replay Genesis-IPC-baked complete-W1 card-shuffle caches (robot link poses and deforming card vertices) without re-solving the IPC scene.
@@ -69,6 +71,10 @@
 
 ### Changed
 
+- Change the MJVBDV2 hand-pose recorder to use the asset finger pose and enable hand-shape collisions with dynamic cubes.
+- Change the MJVBDV2 grasp demo to use the recorded hand pose for one-cube bag placement.
+- Change the MJVBDV2 Dexforce grasp-into-bag example to pick one red cube instead of mixed rigid shapes.
+- Change the MJVBDV2 Dexforce grasp-into-bag example to pick up a soft FEM cube (tetrahedral grid) and carry it into the suspended bag instead of a rigid cube.
 - Compile tiled camera render kernels with CUDA fast math by default for faster rendering; set `SensorTiledCamera.render_config.enable_fast_math = False` for bit-exact, IEEE-precise output.
 - Optimize raycast/raytrace queries by restructuring ray-shape intersection into local-space primitives and compile specialized depth/shadow variants that skip unused surface-normal work (mesh shadows also use any-hit queries).
 - Change experimental `SolverVBD` cable constraint slots from `[STRETCH=0, BEND=1]` to `[STRETCH=0, SHEAR=1, BEND=2, TWIST=3]`, allowing each stiffness and constraint mode to be configured independently. Existing cable calls using raw `slot=1` or `JointSlot.ANGULAR` now select shear; use `JointSlot.BEND` (now slot 2) to select bending.
