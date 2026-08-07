@@ -124,6 +124,7 @@ class MJVBDV2SoftContactPipeline:
                 model.shape_type,
                 model.shape_scale,
                 model.shape_source_ptr,
+                model._shape_mesh_properties,
                 model.shape_world,
                 self.margin,
                 model.shape_margin,

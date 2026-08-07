@@ -4,11 +4,10 @@
 
 The scene and behaviour match ``example_vbd_mjvbd_v2_dexforce_grasp_rigid_into_bag_rigid.py``,
 but the robot and the cube+bag are coupled through ``SolverCoupledProxy`` directly (instead of the
-``SolverMJVBDV2`` convenience wrapper).  A cheap external-rigid VBD entry owns the kinematically
-driven Dexforce (joint-q + FK, exactly as the reference), a second VBD entry owns the rigid cube
-and the cloth bag, and the one-way proxy maps the arm links into the bag/cube solve as moving
-colliders so physical five-finger contact can pick the cube up, carry it over the bag, and release
-it.
+``SolverMJVBDV2`` convenience wrapper). MuJoCo owns the kinematically driven Dexforce, VBD owns the
+rigid cube and cloth bag, and a one-way proxy maps the right-hand contact bodies into the VBD solve
+as moving colliders. Physical five-finger contact picks up and transports the cube; the generic
+proxy path currently uses per-particle rather than full-surface rigid-soft contact for the bag.
 
 Run from the repository root::
 
@@ -167,32 +166,6 @@ def _lock_q(q: wp.array2d[float], indices: wp.array[int], values: wp.array[float
 
 
 @wp.kernel
-def _carry_cube(
-    cube_body: int,
-    hand_body: int,
-    tcp_offset: wp.vec3,
-    carry_start_tcp: wp.vec3,
-    cube_start_pos: wp.vec3,
-    body_q: wp.array[wp.transform],
-):
-    """Translate the rigid cube with the hand TCP while the grip is held.
-
-    The reference rigid example relies on a precise physical pinch; through the
-    coupled proxy the MuJoCo-driven hand pose leaves a small offset, so once the
-    fingers have closed the cube is carried kinematically and released over the
-    bag.
-    """
-    if wp.tid() != 0:
-        return
-    hand_tf = body_q[hand_body]
-    hand_rot = wp.transform_get_rotation(hand_tf)
-    tcp_now = wp.transform_get_translation(hand_tf) + wp.quat_rotate(hand_rot, tcp_offset)
-    cube_pos = cube_start_pos + (tcp_now - carry_start_tcp)
-    current = body_q[cube_body]
-    body_q[cube_body] = wp.transform(cube_pos, wp.transform_get_rotation(current))
-
-
-@wp.kernel
 def _lift_pinned_vertices(
     pinned_indices: wp.array[int],
     original_positions: wp.array[wp.vec3],
@@ -220,6 +193,29 @@ def _accumulate_contact_diagnostics(
         maximum_body_particle_contact_count[0] = wp.max(
             maximum_body_particle_contact_count[0], body_particle_contact_overflow[0]
         )
+
+
+@wp.kernel
+def _accumulate_grasp_contacts(
+    rigid_contact_count: wp.array[int],
+    rigid_contact_shape0: wp.array[int],
+    rigid_contact_shape1: wp.array[int],
+    hand_shape_mask: wp.array[int],
+    object_shape_mask: wp.array[int],
+    grasp_contact_count: wp.array[int],
+):
+    contact = wp.tid()
+    if contact >= rigid_contact_count[0]:
+        return
+
+    shape0 = rigid_contact_shape0[contact]
+    shape1 = rigid_contact_shape1[contact]
+    if shape0 < 0 or shape1 < 0:
+        return
+    if (hand_shape_mask[shape0] != 0 and object_shape_mask[shape1] != 0) or (
+        hand_shape_mask[shape1] != 0 and object_shape_mask[shape0] != 0
+    ):
+        wp.atomic_add(grasp_contact_count, 0, 1)
 
 
 class Example:
@@ -283,7 +279,22 @@ class Example:
             for joint in range(self.model.joint_count)
             if int(joint_articulation[joint]) in self.robot_articulations
         ]
-        vbd_joints = [joint for joint in range(self.model.joint_count) if joint not in robot_joints]
+        shape_body = self.model.shape_body.numpy()
+        proxy_bodies = sorted({int(shape_body[shape]) for shape in self.right_hand_shapes})
+
+        def make_vbd_solver(view):
+            self.vbd_solver = SolverVBD(
+                model=view,
+                iterations=VBD_ITERATIONS,
+                rigid_body_contact_buffer_size=4096,
+                rigid_body_particle_contact_buffer_size=RIGID_BODY_PARTICLE_CONTACT_BUFFER_SIZE,
+                particle_enable_self_contact=False,
+                particle_self_contact_radius=BAG_PARTICLE_RADIUS,
+                particle_self_contact_margin=2.0 * BAG_PARTICLE_RADIUS,
+                particle_topological_contact_filter_threshold=3,
+            )
+            return self.vbd_solver
+
         self.solver = SolverCoupledProxy(
             model=self.model,
             entries=[
@@ -295,6 +306,7 @@ class Example:
                         model=view,
                         disable_contacts=True,
                         use_mujoco_contacts=True,
+                        update_data_interval=1,
                         njmax=512,
                         nconmax=256,
                     ),
@@ -303,18 +315,8 @@ class Example:
                 ),
                 SolverCoupledProxy.Entry(
                     name="vbd",
-                    solver=lambda view: SolverVBD(
-                        model=view,
-                        iterations=VBD_ITERATIONS,
-                        rigid_body_contact_buffer_size=4096,
-                        rigid_body_particle_contact_buffer_size=RIGID_BODY_PARTICLE_CONTACT_BUFFER_SIZE,
-                        particle_enable_self_contact=False,
-                        particle_self_contact_radius=BAG_PARTICLE_RADIUS,
-                        particle_self_contact_margin=2.0 * BAG_PARTICLE_RADIUS,
-                        particle_topological_contact_filter_threshold=3,
-                    ),
+                    solver=make_vbd_solver,
                     bodies=list(self.object_bodies),
-                    joints=vbd_joints,
                     particles=list(range(self.bag_particle_start, self.bag_particle_end)),
                 ),
             ],
@@ -323,8 +325,7 @@ class Example:
                     SolverCoupledProxy.Proxy(
                         source="mjc",
                         destination="vbd",
-                        bodies=robot_bodies,
-                        joints=robot_joints,
+                        bodies=proxy_bodies,
                         mode="staggered",
                         # One-way coupling: zero feedback relaxation so the
                         # MuJoCo arm tracks the IK targets undisturbed by cube
@@ -334,7 +335,10 @@ class Example:
                         proxy_relaxation=0.0,
                         collision_pipeline=lambda view: newton.CollisionPipeline(
                             view,
-                            broad_phase="nxn",
+                            # The compact proxy view already owns a precomputed
+                            # set of allowed shape pairs. Avoid the all-pairs
+                            # mesh/SDF work performed by the NXN broad phase.
+                            broad_phase="explicit",
                             soft_contact_margin=SOFT_CONTACT_MARGIN,
                         ),
                         collide_interval=1,
@@ -344,13 +348,16 @@ class Example:
             ),
         )
         self.contacts = self.solver.get_proxy_contacts("mjc", "vbd")
-        self.vbd_solver = self.solver._entries["vbd"].solver
         self.maximum_soft_contact_count = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.maximum_body_particle_contact_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+        hand_shape_mask = np.zeros(self.model.shape_count, dtype=np.int32)
+        object_shape_mask = np.zeros(self.model.shape_count, dtype=np.int32)
+        hand_shape_mask[self.right_hand_shapes] = 1
+        object_shape_mask[self.object_shapes] = 1
+        self.hand_shape_mask = wp.array(hand_shape_mask, dtype=wp.int32, device=self.device)
+        self.object_shape_mask = wp.array(object_shape_mask, dtype=wp.int32, device=self.device)
+        self.grasp_contact_count = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.object_released = np.zeros(CUBE_COUNT, dtype=bool)
-        self.carried_object = -1
-        self.carry_start_tcp = wp.vec3()
-        self.cube_start_pos = wp.vec3()
         self.previous_grip = 0.0
         self.release_contact_material_applied = False
 
@@ -380,12 +387,7 @@ class Example:
             if not path.is_file():
                 raise FileNotFoundError(f"--robot-urdf does not exist: {path}")
             return path
-        path = (
-            Path(__file__).resolve().parents[3]
-            / "assets"
-            / "DexforceW1V021"
-            / "DexforceW1V021.urdf"
-        )
+        path = Path(__file__).resolve().parents[3] / "assets" / "DexforceW1V021" / "DexforceW1V021.urdf"
         if path.is_file():
             return path
         raise FileNotFoundError("Dexforce W1 URDF is unavailable; pass --robot-urdf PATH.")
@@ -585,7 +587,7 @@ class Example:
             mu=SOFT_CONTACT_MU,
             margin=CUBE_MARGIN,
         )
-        # Keep the full-surface particle contact path enabled for the cubes.
+        # Build the cube SDF used by its per-particle contacts with the bag.
         cfg.configure_sdf(force_sdf=True)
         cfg.has_particle_collision = True
         self.object_bodies = []
@@ -848,14 +850,6 @@ class Example:
         script_object = int(self.cached_objects[cache_index])
         if self.previous_grip > 1.0e-4 and grip <= 1.0e-4 and script_object >= 0:
             self.object_released[script_object] = True
-        # Once the fingers have closed, carry the cube with the wrist.
-        if grip >= 0.99 and self.carried_object < 0 and script_object >= 0 and not self.object_released[script_object]:
-            self.carried_object = script_object
-            grasp_tcp = self._tcp(self.state_0, self.right_body)
-            self.carry_start_tcp = wp.transform_get_translation(grasp_tcp)
-            self.cube_start_pos = wp.vec3(*self.state_0.body_q.numpy()[self.object_bodies[script_object]][:3])
-        elif grip < 0.99 and self.carried_object >= 0:
-            self.carried_object = -1
         if self.previous_grip > 0.99 and grip < 0.99 and not self.release_contact_material_applied:
             shape_mu = self.model.shape_material_mu.numpy()
             shape_ke = self.model.shape_material_ke.numpy()
@@ -890,6 +884,8 @@ class Example:
             )
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
+            # MuJoCo passes externally authored KINEMATIC joint state through
+            # to its output, which STAGGERED then synchronizes into VBD.
             alpha = (substep + 1) / self.sim_substeps
             wp.launch(
                 _interpolate_q,
@@ -910,20 +906,6 @@ class Example:
                 self.state_0,
                 body_flag_filter=newton.BodyFlags.KINEMATIC,
             )
-            if self.carried_object >= 0:
-                wp.launch(
-                    _carry_cube,
-                    1,
-                    [
-                        self.object_bodies[self.carried_object],
-                        self.right_body,
-                        TCP_OFFSET,
-                        self.carry_start_tcp,
-                        self.cube_start_pos,
-                        self.state_0.body_q,
-                    ],
-                    device=self.device,
-                )
 
             self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
             wp.launch(
@@ -934,6 +916,19 @@ class Example:
                     self.vbd_solver.body_particle_contact_overflow_max,
                     self.maximum_soft_contact_count,
                     self.maximum_body_particle_contact_count,
+                ],
+                device=self.device,
+            )
+            wp.launch(
+                _accumulate_grasp_contacts,
+                self.contacts.rigid_contact_max,
+                [
+                    self.contacts.rigid_contact_count,
+                    self.contacts.rigid_contact_shape0,
+                    self.contacts.rigid_contact_shape1,
+                    self.hand_shape_mask,
+                    self.object_shape_mask,
+                    self.grasp_contact_count,
                 ],
                 device=self.device,
             )
@@ -967,6 +962,8 @@ class Example:
 
         released = self.object_released
         assert np.all(released == 1), f"Not all rigid objects were released: {released.tolist()}"
+        grasp_contacts = int(self.grasp_contact_count.numpy()[0])
+        assert grasp_contacts > 0, "The right hand never made rigid contact with the cube"
         maximum_soft_contacts = int(self.maximum_soft_contact_count.numpy()[0])
         assert maximum_soft_contacts <= self.contacts.soft_contact_max, (
             f"Soft-contact buffer overflowed: {maximum_soft_contacts} > {self.contacts.soft_contact_max}"

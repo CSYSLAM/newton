@@ -197,6 +197,8 @@ def _pin_bag_particles(
 class Example:
     """Interactive right-hand physical recorder for a soft-cube grasp."""
 
+    RIGID_BODY_CONTACT_BUFFER_SIZE = 64
+
     def __init__(self, viewer, args):
         self.viewer = viewer
         self.args = args
@@ -227,6 +229,7 @@ class Example:
             contact_mode="full",
             vbd_options={
                 "iterations": VBD_ITERATIONS,
+                "rigid_body_contact_buffer_size": self.RIGID_BODY_CONTACT_BUFFER_SIZE,
                 "rigid_body_particle_contact_buffer_size": RIGID_BODY_PARTICLE_CONTACT_BUFFER_SIZE,
                 "particle_enable_self_contact": self.particle_self_contact_enabled,
                 "particle_self_contact_radius": CUBE_SELF_CONTACT_RADIUS,

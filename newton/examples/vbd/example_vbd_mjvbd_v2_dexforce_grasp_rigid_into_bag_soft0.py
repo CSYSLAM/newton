@@ -1,4 +1,4 @@
-﻿# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 """Dexforce W1 moves one volumetric soft cube from a table into a suspended soft bag.
 
@@ -259,15 +259,7 @@ class Example:
             mujoco_articulations=self.robot_articulations,
             joint_mode="kinematic",
             contact_mode="full",
-            vbd_options={
-                "iterations": VBD_ITERATIONS,
-                "rigid_body_contact_buffer_size": 4096,
-                "rigid_body_particle_contact_buffer_size": RIGID_BODY_PARTICLE_CONTACT_BUFFER_SIZE,
-                "particle_enable_self_contact": True,
-                "particle_self_contact_radius": max(BAG_PARTICLE_RADIUS, SOFT_CUBE_PARTICLE_RADIUS),
-                "particle_self_contact_margin": 2.0 * max(BAG_PARTICLE_RADIUS, SOFT_CUBE_PARTICLE_RADIUS),
-                "particle_topological_contact_filter_threshold": 3,
-            },
+            vbd_options=self._solver_vbd_options(),
             collision_options={
                 "broad_phase": "nxn",
                 "soft_contact_margin": SOFT_CONTACT_MARGIN,
@@ -311,12 +303,7 @@ class Example:
             if not path.is_file():
                 raise FileNotFoundError(f"--robot-urdf does not exist: {path}")
             return path
-        path = (
-            Path(__file__).resolve().parents[3]
-            / "assets"
-            / "DexforceW1V021"
-            / "DexforceW1V021.urdf"
-        )
+        path = Path(__file__).resolve().parents[3] / "assets" / "DexforceW1V021" / "DexforceW1V021.urdf"
         if path.is_file():
             return path
         raise FileNotFoundError("Dexforce W1 URDF is unavailable; pass --robot-urdf PATH.")
@@ -365,40 +352,10 @@ class Example:
         rotation = wp.transform_get_rotation(self.recorded_grasp_tf)
         return wp.transform(position, rotation)
 
-    def _build_scene(self):
-        self.urdf_path = self._robot_urdf()
-        builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.8))
-        builder.default_shape_cfg.ke = 2.0e5
-        builder.default_shape_cfg.kd = 1.0e-4
-        builder.default_shape_cfg.mu = 1.0
-        # The soft-contact path samples SDFs for all rigid hand meshes.
-        builder.default_shape_cfg.configure_sdf(force_sdf=True)
-        SolverMJVBDV2.register_custom_attributes(builder)
-        robot_articulation_start = builder.articulation_count
-        builder.add_urdf(
-            str(self.urdf_path),
-            xform=wp.transform(self.base_pos, self.base_rot),
-            floating=False,
-            enable_self_collisions=False,
-            collapse_fixed_joints=True,
-            parse_visuals_as_colliders=False,
-            force_show_colliders=False,
-        )
-        self.robot_articulations = tuple(range(robot_articulation_start, builder.articulation_count))
-        if not self.robot_articulations:
-            raise RuntimeError("Dexforce URDF did not create an articulation")
-        self.robot_body_end = builder.body_count
-        self.robot_urdf_shape_end = builder.shape_count
-        # The URDF fingertip meshes are too sparse for a stable rigid-cube pinch;
-        # these invisible pads remain kinematic hand geometry and carry no object state.
-        finger_pad_cfg = newton.ModelBuilder.ShapeConfig(
-            ke=GRASP_CONTACT_KE,
-            kd=GRASP_CONTACT_KD,
-            mu=GRASP_FRICTION,
-            is_visible=False,
-        )
-        finger_pad_cfg.configure_sdf(force_sdf=True)
-        for body_name, half_extents, pad_xform in (
+    def _finger_pad_specs(self):
+        """Return the invisible rigid-contact pads attached to the right fingertips."""
+
+        return (
             (
                 "right_thumb_dist",
                 (0.018, 0.004, 0.008),
@@ -439,17 +396,75 @@ class Example:
                     wp.quat(0.0746882, -0.9661100, 0.2468487, -0.0108671),
                 ),
             ),
-        ):
+        )
+
+    def _add_additional_scene_objects(self, builder):
+        """Add optional objects before finalizing the coupled scene."""
+
+    def _add_additional_finger_pads(self, builder):
+        """Add optional stage-specific finger pads before shape filtering."""
+
+    def _solver_vbd_options(self):
+        """Return the VBD options for the coupled scene."""
+
+        return {
+            "iterations": VBD_ITERATIONS,
+            "rigid_body_contact_buffer_size": 4096,
+            "rigid_body_particle_contact_buffer_size": RIGID_BODY_PARTICLE_CONTACT_BUFFER_SIZE,
+            "particle_enable_self_contact": True,
+            "particle_self_contact_radius": max(BAG_PARTICLE_RADIUS, SOFT_CUBE_PARTICLE_RADIUS),
+            "particle_self_contact_margin": 2.0 * max(BAG_PARTICLE_RADIUS, SOFT_CUBE_PARTICLE_RADIUS),
+            "particle_topological_contact_filter_threshold": 3,
+        }
+
+    def _build_scene(self):
+        self.urdf_path = self._robot_urdf()
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.8))
+        builder.default_shape_cfg.ke = 2.0e5
+        builder.default_shape_cfg.kd = 1.0e-4
+        builder.default_shape_cfg.mu = 1.0
+        # The soft-contact path samples SDFs for all rigid hand meshes.
+        builder.default_shape_cfg.configure_sdf(force_sdf=True)
+        SolverMJVBDV2.register_custom_attributes(builder)
+        robot_articulation_start = builder.articulation_count
+        builder.add_urdf(
+            str(self.urdf_path),
+            xform=wp.transform(self.base_pos, self.base_rot),
+            floating=False,
+            enable_self_collisions=False,
+            collapse_fixed_joints=True,
+            parse_visuals_as_colliders=False,
+            force_show_colliders=False,
+        )
+        self.robot_articulations = tuple(range(robot_articulation_start, builder.articulation_count))
+        if not self.robot_articulations:
+            raise RuntimeError("Dexforce URDF did not create an articulation")
+        self.robot_body_end = builder.body_count
+        self.robot_urdf_shape_end = builder.shape_count
+        # The URDF fingertip meshes are too sparse for a stable rigid-cube pinch;
+        # these invisible pads remain kinematic hand geometry and carry no object state.
+        finger_pad_cfg = newton.ModelBuilder.ShapeConfig(
+            ke=GRASP_CONTACT_KE,
+            kd=GRASP_CONTACT_KD,
+            mu=GRASP_FRICTION,
+            is_visible=False,
+        )
+        finger_pad_cfg.configure_sdf(force_sdf=True)
+        self.finger_pad_shapes = []
+        for body_name, half_extents, pad_xform in self._finger_pad_specs():
             body = self._body_index(builder.body_label, body_name)
-            builder.add_shape_box(
-                body,
-                hx=half_extents[0],
-                hy=half_extents[1],
-                hz=half_extents[2],
-                cfg=finger_pad_cfg,
-                xform=pad_xform,
-                label=f"{body_name}_physical_pad",
+            self.finger_pad_shapes.append(
+                builder.add_shape_box(
+                    body,
+                    hx=half_extents[0],
+                    hy=half_extents[1],
+                    hz=half_extents[2],
+                    cfg=finger_pad_cfg,
+                    xform=pad_xform,
+                    label=f"{body_name}_physical_pad",
+                )
             )
+        self._add_additional_finger_pads(builder)
         self.robot_shape_end = builder.shape_count
         for body in range(self.robot_body_end):
             builder.body_flags[body] = int(newton.BodyFlags.KINEMATIC)
@@ -523,6 +538,8 @@ class Example:
             label="pick_soft_cube",
         )
         self.soft_cube_particle_end = builder.particle_count
+
+        self._add_additional_scene_objects(builder)
 
         collide_shapes = int(newton.ShapeFlags.COLLIDE_SHAPES)
         self.hand_shapes = []
