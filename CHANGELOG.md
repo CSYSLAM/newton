@@ -4,12 +4,15 @@
 
 ### Added
 
+- Add a real-time OpenGL viewer mode to the Kamino carton demo.
 - Add experimental `SolverMuJoCoVBD` for direct reduced-coordinate MuJoCo and VBD coupling.
 - Add experimental `SolverMJVBD` for one-way MuJoCo/FK-to-VBD coupling, with a Dexforce W1 T-shirt folding example.
 - Add `forward_depth_image` output support to `SensorTiledCamera.update()` and `SensorTiledCamera.utils.create_forward_depth_image_output()` for native forward-depth rendering without post-processing `depth_image`.
 
 ### Changed
 
+- Align the Kamino carton closure-flap revolute joints with the wall edges.
+- Change the Kamino carton demo to simulate pick-and-place assembly with passive bottom flaps and primitive collision detection.
 - Compile tiled camera render kernels with CUDA fast math by default for faster rendering; set `SensorTiledCamera.render_config.enable_fast_math = False` for bit-exact, IEEE-precise output.
 - Optimize raycast/raytrace queries by restructuring ray-shape intersection into local-space primitives and compile specialized depth/shadow variants that skip unused surface-normal work (mesh shadows also use any-hit queries).
 - Speed up `ModelBuilder.replicate()` for large world counts by merging all copies in one pass; it no longer calls `add_world()` or `add_builder()` per copy, so `ModelBuilder` subclass overrides of those methods are not invoked during replication.

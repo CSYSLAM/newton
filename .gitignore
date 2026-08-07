@@ -91,3 +91,6 @@ newton/examples/vbd/gear_crusher_newton_v2/*
 # Dexforce W1 hand URDF assets
 newton/examples/cloth/assets/DexforceW1V021/
 newton/examples/multiphysics/newton_cloth_dexforce_place_tablecloth/DexforceW1V021/
+
+# MPM WAIC example assets (USD/URDF/OBJ meshes)
+newton/examples/mpm/assets/

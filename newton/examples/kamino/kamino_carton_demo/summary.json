@@ -1,0 +1,17 @@
+{
+  "solver": "newton.solvers.SolverKamino",
+  "newton_version": "1.5.0.dev0",
+  "warp_version": "1.16.0",
+  "device": "cpu",
+  "robot_present": false,
+  "panel_count": 4,
+  "closed_loop_hinge_count": 4,
+  "initial_angle_deg": 12.0,
+  "final_measured_angle_deg": 89.99957312040169,
+  "final_closure_gap_mm": 0.12007564152055367,
+  "side_m": 0.24,
+  "height_m": 0.24,
+  "thickness_m": 0.004,
+  "sim_dt_s": 0.01,
+  "duration_s": 3.2
+}
