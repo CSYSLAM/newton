@@ -246,14 +246,13 @@ def _smoothstep(u: float) -> float:
 
 
 def _resolve_robot_urdf(cli_override: str | None = None) -> Path:
-    """Locate the DexforceW1V021 URDF outside of git-tracked content.
+    """Locate the DexforceW1V021 URDF under the repo ``assets/`` folder.
 
-    The bundled robot assets are git-ignored local scratch, so the path may be
-    supplied via env var or CLI; it otherwise falls back to the local copy next
-    to this file if present. Resolution order:
+    The robot assets live in the repository ``assets/`` directory and may also
+    be overridden via env var or CLI. Resolution order:
       1. ``--robot-urdf`` CLI arg (a .urdf file or its parent directory)
       2. ``DEXFORCE_W1_URDF`` env var (same)
-      3. ``./DexforceW1V021/DexforceW1V021.urdf`` relative to this file
+      3. ``<repo>/assets/DexforceW1V021/DexforceW1V021.urdf``
     """
     import os
 
@@ -263,7 +262,12 @@ def _resolve_robot_urdf(cli_override: str | None = None) -> Path:
         if p.is_dir():
             p = p / "DexforceW1V021.urdf"
         return p
-    return Path(__file__).with_name("DexforceW1V021") / "DexforceW1V021.urdf"
+    return (
+        Path(__file__).resolve().parents[4]
+        / "assets"
+        / "DexforceW1V021"
+        / "DexforceW1V021.urdf"
+    )
 
 
 class Example:

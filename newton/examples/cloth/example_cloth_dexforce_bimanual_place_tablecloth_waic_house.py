@@ -273,9 +273,8 @@ class Example:
                 raise FileNotFoundError(f"--robot-urdf does not exist: {path}")
             return path
         path = (
-            Path(__file__).parents[1]
-            / "multiphysics"
-            / "newton_cloth_dexforce_place_tablecloth"
+            Path(__file__).resolve().parents[3]
+            / "assets"
             / "DexforceW1V021"
             / "DexforceW1V021.urdf"
         )

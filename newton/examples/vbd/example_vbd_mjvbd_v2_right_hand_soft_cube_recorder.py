@@ -30,8 +30,11 @@ FPS = 60
 SIM_SUBSTEPS = 5
 VBD_ITERATIONS = 24
 
-RIGHT_HAND_URDF = Path(
-    "E:/csy_work/CG/assets/W1-hand-obj/W1-hands-blender/urdf/W1_right_hand/DexforceW1_right_hand.urdf"
+RIGHT_HAND_URDF = (
+    Path(__file__).resolve().parents[3]
+    / "assets"
+    / "W1_right_hand"
+    / "DexforceW1_right_hand.urdf"
 )
 # Keep the existing grasp scene's world layout after removing the robot.
 HAND_HOME = wp.transform(
