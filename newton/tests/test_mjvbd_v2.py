@@ -143,8 +143,35 @@ def _build_particle_module_model(device, element):
     return builder.finalize(device=device)
 
 
+def _build_joint_chain_model(device):
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverMJVBDV2.register_custom_attributes(builder)
+    parent = builder.add_link(label="parent_link")
+    child = builder.add_link(label="child_link")
+    builder.add_shape_box(parent, hx=0.1, hy=0.03, hz=0.03)
+    builder.add_shape_box(child, hx=0.1, hy=0.03, hz=0.03)
+    root_joint = builder.add_joint_revolute(
+        parent=-1,
+        child=parent,
+        axis=wp.vec3(0.0, 1.0, 0.0),
+        parent_xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()),
+    )
+    child_joint = builder.add_joint_revolute(
+        parent=parent,
+        child=child,
+        axis=wp.vec3(0.0, 1.0, 0.0),
+        parent_xform=wp.transform(wp.vec3(0.2, 0.0, 0.0), wp.quat_identity()),
+        child_xform=wp.transform(wp.vec3(-0.1, 0.0, 0.0), wp.quat_identity()),
+    )
+    articulation = builder.articulation_count
+    builder.add_articulation([root_joint, child_joint], label="joint_chain")
+    builder.color()
+    return builder.finalize(device=device), root_joint, child_joint, articulation
+
+
 class TestMJVBDV2(unittest.TestCase):
     def test_ownership_partition(self):
+        """Partition selected articulation links away from VBD bodies."""
         model, free_body, link, joint, articulation = _build_partition_model("cpu")
         ownership = resolve_ownership(
             model,
@@ -156,7 +183,17 @@ class TestMJVBDV2(unittest.TestCase):
         self.assertIn(free_body, ownership.vbd_bodies)
         self.assertTrue(ownership.has_vbd_dynamic_bodies)
 
+    def test_partial_joint_tree_is_rejected(self):
+        """Reject ancestor- or descendant-incomplete MuJoCo joint trees."""
+        model, root_joint, child_joint, _ = _build_joint_chain_model("cpu")
+
+        with self.assertRaisesRegex(ValueError, "closed joint tree"):
+            resolve_ownership(model, mujoco_joints=[root_joint])
+        with self.assertRaisesRegex(ValueError, "ancestor-closed"):
+            resolve_ownership(model, mujoco_joints=[child_joint])
+
     def test_cpu_step_keeps_free_body_in_vbd(self):
+        """Keep an unselected free body dynamic in VBD during a CPU step."""
         try:
             model, free_body, link, _, articulation = _build_partition_model("cpu")
             state_0 = model.state()
@@ -185,7 +222,66 @@ class TestMJVBDV2(unittest.TestCase):
         self.assertLess(float(body_q[free_body, 2]), initial_z)
         self.assertTrue(np.all(np.isfinite(body_q[link])))
 
+    def test_dynamic_joint_only_model_dispatches_to_pure_mujoco(self):
+        """Dispatch a dynamic articulation-only model without constructing VBD."""
+        model, _, _, articulation = _build_joint_chain_model("cpu")
+        state_0 = model.state()
+        state_1 = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_1)
+        try:
+            solver = SolverMJVBDV2(
+                model,
+                mujoco_articulations=[articulation],
+                vbd_options={"iterations": 7},
+                mujoco_options={"use_mujoco_cpu": True},
+                collision_options={"broad_phase": "nxn"},
+            )
+        except (ImportError, ModuleNotFoundError) as error:
+            self.skipTest(f"MuJoCo is unavailable: {error}")
+
+        self.assertEqual(solver.features.backend, "pure_mujoco")
+        self.assertTrue(solver.features.mujoco_solve_enabled)
+        self.assertFalse(solver.features.vbd_solve_enabled)
+        self.assertIsNone(solver.vbd_solver)
+        self.assertIsNotNone(solver.mujoco_solver)
+        self.assertEqual(solver.backend.coupled_solver.entry_names(), ("mujoco",))
+        self.assertEqual(solver.backend.coupled_solver.view("mujoco").particle_count, 0)
+
+        solver.step(state_0, state_1, model.control(), solver.contacts, 1.0 / 120.0)
+        self.assertTrue(np.all(np.isfinite(state_1.joint_q.numpy())))
+        self.assertTrue(np.all(np.isfinite(state_1.body_q.numpy())))
+
+    def test_kinematic_joint_only_model_dispatches_to_passthrough(self):
+        """Preserve externally authored output in a kinematic joint-only scene."""
+        model, _, _, articulation = _build_joint_chain_model("cpu")
+        state_in = model.state()
+        state_out = model.state()
+        target_q = state_out.joint_q.numpy()
+        target_q[:] = (0.15, -0.25)
+        state_out.joint_q.assign(target_q)
+        newton.eval_fk(model, state_out.joint_q, state_out.joint_qd, state_out)
+        expected_joint_q = state_out.joint_q.numpy().copy()
+        expected_body_q = state_out.body_q.numpy().copy()
+        solver = SolverMJVBDV2(
+            model,
+            mujoco_articulations=[articulation],
+            joint_mode="kinematic",
+            vbd_options={"iterations": 7},
+            collision_options={"broad_phase": "nxn"},
+        )
+
+        self.assertEqual(solver.features.backend, "kinematic_passthrough")
+        self.assertFalse(solver.features.mujoco_solve_enabled)
+        self.assertFalse(solver.features.vbd_solve_enabled)
+        self.assertIsNone(solver.mujoco_solver)
+        self.assertIsNone(solver.vbd_solver)
+        solver.step(state_in, state_out, model.control(), solver.contacts, 1.0 / 120.0)
+        np.testing.assert_array_equal(state_out.joint_q.numpy(), expected_joint_q)
+        np.testing.assert_array_equal(state_out.body_q.numpy(), expected_body_q)
+
     def test_no_joint_model_dispatches_to_pure_vbd(self):
+        """Dispatch a joint-free rigid model directly to VBD."""
         model, body = _build_pure_vbd_model("cpu")
         state_0 = model.state()
         state_1 = model.state()
@@ -196,6 +292,8 @@ class TestMJVBDV2(unittest.TestCase):
         )
 
         self.assertEqual(solver.features.backend, "pure_vbd")
+        self.assertFalse(solver.features.mujoco_solve_enabled)
+        self.assertTrue(solver.features.vbd_solve_enabled)
         self.assertEqual(solver.features.mujoco_joint_count, 0)
         self.assertIsNone(solver.mujoco_solver)
         initial_z = float(state_0.body_q.numpy()[body, 2])
@@ -203,6 +301,7 @@ class TestMJVBDV2(unittest.TestCase):
         self.assertLess(float(state_1.body_q.numpy()[body, 2]), initial_z)
 
     def test_kinematic_particle_model_dispatches_to_mjvbd_fast_path(self):
+        """Dispatch kinematic links and particles to the optimized soft path."""
         model, articulation = _build_kinematic_particle_model("cpu")
         solver = SolverMJVBDV2(
             model,
@@ -217,6 +316,7 @@ class TestMJVBDV2(unittest.TestCase):
         self.assertIsNone(solver.mujoco_solver)
 
     def test_dynamic_particle_model_uses_optimized_external_vbd(self):
+        """Use optimized external-rigid VBD for dynamic joints and particles."""
         model, articulation = _build_kinematic_particle_model("cpu")
         state_in = model.state()
         state_out = model.state()
@@ -240,6 +340,7 @@ class TestMJVBDV2(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(state_out.particle_q.numpy())))
 
     def test_kinematic_soft_backend_matches_original_mjvbd(self):
+        """Match the original MJVBD particle result on the kinematic soft path."""
         model, articulation = _build_kinematic_particle_model("cpu")
         reference_in = model.state()
         reference_out = model.state()
@@ -274,6 +375,7 @@ class TestMJVBDV2(unittest.TestCase):
         np.testing.assert_allclose(v2_out.particle_qd.numpy(), reference_out.particle_qd.numpy(), atol=1.0e-7)
 
     def test_kinematic_tetrahedron_uses_optimized_soft_backend(self):
+        """Retain tetrahedron solving on the optimized kinematic soft path."""
         model, articulation = _build_kinematic_tet_model("cpu")
         state_in = model.state()
         state_out = model.state()
@@ -295,6 +397,7 @@ class TestMJVBDV2(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(state_out.particle_q.numpy())))
 
     def test_kinematic_model_with_free_body_uses_full_vbd_without_mujoco(self):
+        """Use full VBD for kinematic links plus a dynamic free body."""
         model, free_body, link, _, articulation = _build_partition_model("cpu")
         state_0 = model.state()
         state_1 = model.state()
@@ -317,6 +420,7 @@ class TestMJVBDV2(unittest.TestCase):
         np.testing.assert_allclose(state_1.joint_q.numpy(), state_0.joint_q.numpy(), atol=0.0, rtol=0.0)
 
     def test_dynamic_joint_receives_no_vbd_contact_feedback(self):
+        """Prevent VBD contacts from feeding back into dynamic joints."""
         try:
             model, free_body, link, _, articulation = _build_partition_model("cpu")
             near_0 = model.state()
@@ -369,6 +473,7 @@ class TestMJVBDV2(unittest.TestCase):
             self.assertTrue(np.all(mapping.coupling_forces.numpy() == 0.0))
 
     def test_vbd_rigid_contact_changes_both_bodies(self):
+        """Change both VBD rigid bodies during a bidirectional collision."""
         model, left, right = _build_two_rigid_body_model("cpu")
         state_0 = model.state()
         state_1 = model.state()
@@ -390,6 +495,7 @@ class TestMJVBDV2(unittest.TestCase):
         self.assertGreater(float(solved_velocity[right, 0] - solved_velocity[left, 0]), 0.0)
 
     def test_rigid_only_model_prunes_particle_modules(self):
+        """Prune all particle constraint modules from a rigid-only model."""
         model, _ = _build_pure_vbd_model("cpu")
         solver = SolverMJVBDV2(model, vbd_options={"iterations": 1})
 
@@ -403,6 +509,7 @@ class TestMJVBDV2(unittest.TestCase):
         self.assertTrue(hasattr(solver.vbd_solver, "body_forces"))
 
     def test_particle_constraint_modules_are_pruned_by_scene(self):
+        """Enable only particle constraint modules present in each scene."""
         expected = {
             "triangle": (True, False),
             "tetrahedron": (False, True),

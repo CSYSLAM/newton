@@ -109,9 +109,9 @@ def _validate_closed_joint_selection(model: Model, joints: tuple[int, ...]) -> t
             continue
         parent_body = int(parent[joint])
         child_body = int(child[joint])
-        if parent_body in bodies and child_body in bodies:
+        if parent_body in bodies or child_body in bodies:
             raise ValueError(
-                f"Joint {joint} connects two MuJoCo-owned bodies but is not selected; "
+                f"Joint {joint} touches a MuJoCo-owned body but is not selected; "
                 "select a complete articulation or a closed joint tree"
             )
 

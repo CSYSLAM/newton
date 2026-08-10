@@ -26,8 +26,10 @@ from ...sim import (
     State,
     StateFlags,
 )
+from ..coupled.solver_coupled import SolverCoupled
 from ..solver import SolverBase
 from .collision_pipeline import MJVBDV2SoftContactPipeline
+from .mujoco.solver_mujoco import SolverMuJoCo
 from .ownership import MJVBDV2Ownership, resolve_ownership
 from .soft_contact_pipeline import MJVBDSoftContactPipeline
 from .solver_mjvbd_v2 import SolverMJVBDV2 as _SolverMJVBDV2Coupled
@@ -35,6 +37,103 @@ from .vbd.solver_vbd import SolverVBD
 from .vbd_soft.solver_vbd import SolverVBD as SolverVBDSoft
 
 __all__ = ["SolverMJVBDV2"]
+
+
+class _PureMuJoCoBackend(SolverBase):
+    """Compact MuJoCo-only backend for dynamic articulation-only scenes."""
+
+    def __init__(
+        self,
+        model: Model,
+        ownership: MJVBDV2Ownership,
+        *,
+        mujoco_options: Mapping[str, object] | None,
+    ) -> None:
+        super().__init__(model)
+        mujoco_kwargs = dict(mujoco_options or {})
+        requested_disable_contacts = mujoco_kwargs.pop("disable_contacts", True)
+        if requested_disable_contacts is not True:
+            raise ValueError("MJVBDV2 requires mujoco_options['disable_contacts']=True")
+        requested_mujoco_contacts = mujoco_kwargs.pop("use_mujoco_contacts", True)
+        if requested_mujoco_contacts is not True:
+            raise ValueError("MJVBDV2 currently requires mujoco_options['use_mujoco_contacts']=True")
+        mujoco_kwargs["disable_contacts"] = True
+        mujoco_kwargs["use_mujoco_contacts"] = True
+
+        selected_shapes = tuple(shape for body in ownership.mujoco_bodies for shape in model.body_shapes.get(body, ()))
+        self.coupled_solver = SolverCoupled(
+            model=model,
+            entries=[
+                SolverCoupled.Entry(
+                    name="mujoco",
+                    solver=lambda view: SolverMuJoCo(view, **mujoco_kwargs),
+                    bodies=ownership.mujoco_bodies,
+                    joints=ownership.mujoco_joints,
+                    shapes=selected_shapes,
+                )
+            ],
+        )
+        self.contacts = None
+        self.vbd_solver = None
+
+    @property
+    def mujoco_solver(self) -> SolverMuJoCo:
+        """Private MuJoCo joint solver."""
+        return self.coupled_solver.solver("mujoco")
+
+    @override
+    def step(
+        self,
+        state_in: State,
+        state_out: State,
+        control: Control | None,
+        contacts: Contacts | None,
+        dt: float,
+    ) -> None:
+        del contacts
+        self.coupled_solver.step(state_in, state_out, control, None, dt)
+
+    @override
+    def reset(
+        self,
+        state: State,
+        world_mask=None,
+        flags: StateFlags | int | None = None,
+    ) -> None:
+        self.coupled_solver.reset(state, world_mask=world_mask, flags=flags)
+
+    @override
+    def notify_model_changed(self, flags: ModelFlags | int) -> None:
+        self.coupled_solver.notify_model_changed(flags)
+
+    def rebuild_bvh(self, state: State) -> None:
+        del state
+
+
+class _KinematicPassthroughBackend(SolverBase):
+    """No-op backend for externally prescribed articulation-only scenes."""
+
+    def __init__(self, model: Model) -> None:
+        super().__init__(model)
+        self.contacts = None
+        self.mujoco_solver = None
+        self.vbd_solver = None
+
+    @override
+    def step(
+        self,
+        state_in: State,
+        state_out: State,
+        control: Control | None,
+        contacts: Contacts | None,
+        dt: float,
+    ) -> None:
+        del state_in, state_out, control, contacts
+        if dt <= 0.0:
+            raise ValueError("MJVBDV2 timestep dt must be positive")
+
+    def rebuild_bvh(self, state: State) -> None:
+        del state
 
 
 class _PureVBDBackend(SolverBase):
@@ -277,7 +376,14 @@ class SolverMJVBDV2(SolverBase):
     class Features:
         """Scene features used to select and audit the V2 backend."""
 
-        backend: Literal["pure_vbd", "mjvbd_kinematic_soft", "vbd_kinematic_full", "coupled"]
+        backend: Literal[
+            "pure_mujoco",
+            "kinematic_passthrough",
+            "pure_vbd",
+            "mjvbd_kinematic_soft",
+            "vbd_kinematic_full",
+            "coupled",
+        ]
         mujoco_joint_count: int
         vbd_body_count: int
         vbd_dynamic_body_count: int
@@ -286,6 +392,8 @@ class SolverMJVBDV2(SolverBase):
         edge_count: int
         tetrahedron_count: int
         spring_count: int
+        mujoco_solve_enabled: bool
+        vbd_solve_enabled: bool
         rigid_solve_enabled: bool
         particle_solve_enabled: bool
         triangle_solve_enabled: bool
@@ -325,6 +433,8 @@ class SolverMJVBDV2(SolverBase):
             for index in self.ownership.vbd_bodies
         )
 
+        has_vbd_dynamics = self.ownership.has_vbd_dynamic_bodies or model.particle_count > 0
+
         if not self.ownership.mujoco_joints:
             if mujoco_options:
                 raise ValueError("mujoco_options are not used when no joints are assigned to MuJoCo")
@@ -335,6 +445,18 @@ class SolverMJVBDV2(SolverBase):
                 contact_mode=contact_mode,
                 vbd_options=vbd_options,
                 collision_options=collision_options,
+            )
+        elif not has_vbd_dynamics and joint_mode == "kinematic":
+            if mujoco_options:
+                raise ValueError("mujoco_options are not used by the kinematic passthrough MJVBDV2 backend")
+            backend_name = "kinematic_passthrough"
+            backend = _KinematicPassthroughBackend(model)
+        elif not has_vbd_dynamics:
+            backend_name = "pure_mujoco"
+            backend = _PureMuJoCoBackend(
+                model,
+                self.ownership,
+                mujoco_options=mujoco_options,
             )
         elif (
             joint_mode == "kinematic" and not self.ownership.has_vbd_dynamic_bodies and contact_mode in ("auto", "soft")
@@ -381,6 +503,8 @@ class SolverMJVBDV2(SolverBase):
             edge_count=int(model.edge_count),
             tetrahedron_count=int(model.tet_count),
             spring_count=int(model.spring_count),
+            mujoco_solve_enabled=backend_name in ("pure_mujoco", "coupled"),
+            vbd_solve_enabled=backend_name in ("pure_vbd", "mjvbd_kinematic_soft", "vbd_kinematic_full", "coupled"),
             rigid_solve_enabled=dynamic_body_count > 0,
             particle_solve_enabled=model.particle_count > 0,
             triangle_solve_enabled=model.tri_count > 0,
@@ -395,14 +519,14 @@ class SolverMJVBDV2(SolverBase):
         _SolverMJVBDV2Coupled.register_custom_attributes(builder)
 
     @property
-    def contacts(self) -> Contacts:
+    def contacts(self) -> Contacts | None:
         """Contact buffer owned by the selected backend."""
         return self.backend.contacts
 
     @property
     def vbd_solver(self):
         """VBD implementation owned by the selected backend."""
-        return self.backend.vbd_solver
+        return getattr(self.backend, "vbd_solver", None)
 
     @property
     def mujoco_solver(self):

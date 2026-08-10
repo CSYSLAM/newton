@@ -76,6 +76,7 @@
 - Soften the sequential MJVBDV2 pick-and-place example's bag to show impact deformation and rebound.
 - Change the MJVBDV2 grasp demo to use the recorded hand pose for one-cube bag placement.
 - Change the MJVBDV2 Dexforce grasp-into-bag example to pick one red cube instead of mixed rigid shapes.
+- Dispatch articulation-only MJVBDV2 scenes without constructing VBD, soft-contact, or proxy-coupling modules.
 - Change the MJVBDV2 Dexforce grasp-into-bag example to pick up a soft FEM cube (tetrahedral grid) and carry it into the suspended bag instead of a rigid cube.
 - Compile tiled camera render kernels with CUDA fast math by default for faster rendering; set `SensorTiledCamera.render_config.enable_fast_math = False` for bit-exact, IEEE-precise output.
 - Optimize raycast/raytrace queries by restructuring ray-shape intersection into local-space primitives and compile specialized depth/shadow variants that skip unused surface-normal work (mesh shadows also use any-hit queries).
