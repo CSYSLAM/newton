@@ -22,7 +22,7 @@ from newton.examples.vbd import example_vbd_mjvbd_v2_dexforce_grasp_rigid_into_b
 from newton.examples.vbd import example_vbd_mjvbd_v2_right_hand_soft_cube_recorder as recorder
 from newton.solvers import SolverMJVBDV2
 
-DEFAULT_GRASP_KEYFRAME = Path("vbd_w1_right_hand_last_keyframe.json")
+DEFAULT_GRASP_KEYFRAME = Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_w1_right_hand_last_keyframe.json"
 
 # Previously recorded pose at the target pick point, before final closure.
 APPROACH_ROOT = wp.transform(

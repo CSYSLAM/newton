@@ -27,7 +27,7 @@ from newton.examples.vbd import example_vbd_mjvbd_v2_dexforce_recorded_soft_cube
 from newton.examples.vbd import example_vbd_mjvbd_v2_right_hand_soft_cube_recorder as recorder
 from newton.solvers import SolverMJVBDV2
 
-DEFAULT_GRASP_KEYFRAME = Path("vbd_w1_right_hand_last_keyframe.json")
+DEFAULT_GRASP_KEYFRAME = Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_w1_right_hand_last_keyframe.json"
 FREE_SOFT_CONTACT = (
     soft_reference.soft0.SOFT_CONTACT_KE,
     soft_reference.soft0.SOFT_CONTACT_KD,

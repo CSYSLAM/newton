@@ -21,7 +21,7 @@ import numpy as np
 import newton.examples
 from newton.examples.vbd import example_vbd_mjvbd_v2_dexforce_recorded_soft_then_rigid_cube_into_bag as simulation
 
-DEFAULT_RECORDING = Path("vbd_mjvbd_v2_dexforce_soft_then_rigid_cube_into_bag.npz")
+DEFAULT_RECORDING = Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_mjvbd_v2_dexforce_soft_then_rigid_cube_into_bag.npz"
 CACHE_FORMAT = "newton_dexforce_soft_then_rigid_replay_v1"
 CACHE_STATE_FIELDS = (
     "joint_q",
@@ -89,8 +89,8 @@ def _save_cache(path: Path, args, cache: dict[str, np.ndarray]) -> None:
         "format": np.asarray(CACHE_FORMAT),
         "fps": np.asarray(simulation.soft0.FPS, dtype=np.float32),
         "frame_count": np.asarray(args.num_frames, dtype=np.int32),
-        "recorded_grasp_keyframe": np.asarray(str(Path(args.recorded_grasp_keyframe).expanduser().resolve())),
-        "rigid_grasp_keyframe": np.asarray(str(Path(args.rigid_grasp_keyframe).expanduser().resolve())),
+        "recorded_grasp_keyframe": np.asarray(str(Path(args.recorded_grasp_keyframe).expanduser())),
+        "rigid_grasp_keyframe": np.asarray(str(Path(args.rigid_grasp_keyframe).expanduser())),
     }
     try:
         with temporary_path.open("wb") as output:

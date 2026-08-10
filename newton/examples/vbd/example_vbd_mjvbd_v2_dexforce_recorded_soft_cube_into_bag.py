@@ -29,7 +29,7 @@ from newton.examples.vbd import example_vbd_mjvbd_v2_dexforce_grasp_rigid_into_b
 soft0.SOFT_CUBE_DENSITY = 100.0
 soft0.SOFT_CUBE_DIMS = (6, 4, 6)
 
-DEFAULT_GRASP_KEYFRAME = Path("vbd_w1_right_hand_last_keyframe.json")
+DEFAULT_GRASP_KEYFRAME = Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_w1_right_hand_last_keyframe.json"
 INITIAL_IK_ITERATIONS = 240
 
 # Fixed mount from the full W1 URDF:

@@ -106,7 +106,7 @@ DEFAULT_HOUSE_USD = (
     "/home/oem/code/engine/newton/newton/examples/cloth/assets/house_background/"
     "House5_Simple2_visual_table01_table02_box_top_aligned_table02_w1_edge_translated.usd"
 )
-DEFAULT_RECORDED_HAND_POSE = Path(__file__).resolve().parents[3] / "vbd_mjvbd_v2_hand_pose.json"
+DEFAULT_RECORDED_HAND_POSE = Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_mjvbd_v2_hand_pose.json"
 
 
 def _generate_box_bag(half_x: float, half_y: float, height: float, resolution: int):

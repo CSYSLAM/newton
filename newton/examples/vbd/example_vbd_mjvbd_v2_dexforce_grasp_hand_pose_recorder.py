@@ -141,12 +141,12 @@ class Example(grasp_example.Example):
         parser.set_defaults(num_frames=1, paused=True)
         parser.add_argument(
             "--pose-output",
-            default="vbd_mjvbd_v2_hand_pose.json",
+            default=str(Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_mjvbd_v2_hand_pose.json"),
             help="Path for the JSON file written by Save pose JSON.",
         )
         parser.add_argument(
             "--trajectory-output",
-            default="vbd_mjvbd_v2_hand_trajectory.json",
+            default=str(Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_mjvbd_v2_hand_trajectory.json"),
             help="Path for the JSON file written by Save trajectory.",
         )
         parser.add_argument(

@@ -28,7 +28,7 @@ from newton.examples.vbd import example_vbd_mjvbd_v2_right_hand_recorded_soft_cu
 from newton.examples.vbd import example_vbd_mjvbd_v2_right_hand_soft_then_rigid_cube_into_bag as sequential_base
 from newton.solvers import SolverMJVBDV2
 
-DEFAULT_RIGID_GRASP_KEYFRAME = Path("vbd_w1_right_hand_rigid_cube_last_keyframe.json")
+DEFAULT_RIGID_GRASP_KEYFRAME = Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_w1_right_hand_rigid_cube_last_keyframe.json"
 
 HAND_JOINTS = sequential_base.recorder.HAND_JOINTS
 IDLE_JOINTS = dict.fromkeys(HAND_JOINTS, 0.0)

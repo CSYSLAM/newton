@@ -727,9 +727,9 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         parser.set_defaults(num_frames=1, paused=True)
-        parser.add_argument("--pose-output", default="vbd_w1_right_hand_rigid_cube_pose.json")
-        parser.add_argument("--trajectory-output", default="vbd_w1_right_hand_rigid_cube_trajectory.json")
-        parser.add_argument("--keyframe-output", default="vbd_w1_right_hand_rigid_cube_last_keyframe.json")
+        parser.add_argument("--pose-output", default=str(Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_w1_right_hand_rigid_cube_pose.json"))
+        parser.add_argument("--trajectory-output", default=str(Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_w1_right_hand_rigid_cube_trajectory.json"))
+        parser.add_argument("--keyframe-output", default=str(Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_w1_right_hand_rigid_cube_last_keyframe.json"))
         parser.add_argument("--recorder-no-gui", action="store_true")
         return parser
 

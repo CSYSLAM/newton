@@ -34,8 +34,12 @@ class Example:
 
         # Reconstruct the same model once. Physics, collision detection, and IK
         # are never called by this replay object's step().
-        args.recorded_grasp_keyframe = metadata["recorded_grasp_keyframe"]
-        args.rigid_grasp_keyframe = metadata["rigid_grasp_keyframe"]
+        args.recorded_grasp_keyframe = self._resolve_keyframe(
+            metadata["recorded_grasp_keyframe"], args.recorded_grasp_keyframe
+        )
+        args.rigid_grasp_keyframe = self._resolve_keyframe(
+            metadata["rigid_grasp_keyframe"], args.rigid_grasp_keyframe
+        )
         self.source = simulation.Example(viewer, args)
         self.model = self.source.model
         self.state_0 = self.source.state_0
@@ -45,6 +49,19 @@ class Example:
         self.displayed_frame = args.start_frame
         self.sim_time = self.displayed_frame / self.recorded_fps
         self._restore_state(self.frame_index)
+
+    @staticmethod
+    def _resolve_keyframe(stored: str, fallback: str) -> str:
+        """Prefer the recording's keyframe path when readable on this machine.
+
+        Recordings embed the absolute path used at record time, which may match
+        a different machine's layout (e.g. a Linux path replayed on Windows).
+        Fall back to the parser default (repo-relative) when the stored path
+        is not present, so the cached recording still reconstructs the model.
+        """
+        if stored and Path(stored).expanduser().is_file():
+            return stored
+        return fallback
 
     @staticmethod
     def _load_cache(path: Path) -> tuple[dict[str, np.ndarray], dict[str, int | float | str]]:
