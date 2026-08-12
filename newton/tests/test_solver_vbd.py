@@ -3033,10 +3033,130 @@ class TestSolverVBD(unittest.TestCase):
     pass
 
 
+def _build_pneumatic_tetrahedron(device, *, config):
+    """Build a small closed shell whose positive volume is easy to verify."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    positions = (
+        wp.vec3(0.0, 0.0, 0.0),
+        wp.vec3(1.0, 0.0, 0.0),
+        wp.vec3(0.0, 1.0, 0.0),
+        wp.vec3(0.0, 0.0, 1.0),
+    )
+    for position in positions:
+        builder.add_particle(position, wp.vec3(), 1.0)
+    for triangle in ((0, 2, 1), (0, 1, 3), (1, 2, 3), (2, 0, 3)):
+        builder.add_triangle(*triangle, tri_ke=2.0e3, tri_ka=2.0e3, tri_kd=5.0)
+
+    handle = newton.solvers.add_pneumatic_cavity(builder, range(4), config=config)
+    builder.color()
+    return builder.finalize(device=device), handle
+
+
+def _test_pneumatic_pressure_expands_closed_shell(test, device):
+    """Verify prescribed positive pressure expands a sealed shell."""
+    config = newton.solvers.PneumaticConfig(
+        mode=newton.solvers.PneumaticMode.PRESCRIBED_GAUGE_PRESSURE,
+        ambient_pressure=100_000.0,
+        prescribed_gauge_pressure=2_000.0,
+    )
+    model, handle = _build_pneumatic_tetrahedron(device, config=config)
+    state_in = model.state()
+    state_out = model.state()
+    solver = newton.solvers.SolverVBD(model, iterations=4)
+
+    solver.step(state_in, state_out, model.control(), None, 1.0e-3)
+
+    volume = state_out.pneumatic.volume.numpy()[handle.cavity_index]
+    pressure = state_out.pneumatic.absolute_pressure.numpy()[handle.cavity_index]
+    test.assertGreater(volume, handle.rest_volume)
+    test.assertAlmostEqual(pressure, 102_000.0, places=2)
+    test.assertTrue(np.isfinite(state_out.particle_q.numpy()).all())
+
+
+def _test_pneumatic_shell_deforms_under_external_force(test, device):
+    """Verify external particle loading changes a cavity's measured volume."""
+    config = newton.solvers.PneumaticConfig(
+        mode=newton.solvers.PneumaticMode.PRESCRIBED_GAUGE_PRESSURE,
+        ambient_pressure=100_000.0,
+        prescribed_gauge_pressure=0.0,
+    )
+    model, handle = _build_pneumatic_tetrahedron(device, config=config)
+    state_in = model.state()
+    state_out = model.state()
+    force = state_in.particle_f.numpy()
+    force[3, 2] = -5_000.0
+    state_in.particle_f.assign(force)
+    solver = newton.solvers.SolverVBD(model, iterations=8)
+
+    solver.step(state_in, state_out, model.control(), None, 1.0e-3)
+
+    volume = state_out.pneumatic.volume.numpy()[handle.cavity_index]
+    position = state_out.particle_q.numpy()[3]
+    test.assertLess(volume, handle.rest_volume)
+    test.assertLess(position[2], 1.0)
+
+
+def _test_pneumatic_reset_restores_observables(test, device):
+    """Verify reset restores cavity state alongside particle positions."""
+    config = newton.solvers.PneumaticConfig(
+        mode=newton.solvers.PneumaticMode.PRESCRIBED_GAUGE_PRESSURE,
+        prescribed_gauge_pressure=1_000.0,
+    )
+    model, handle = _build_pneumatic_tetrahedron(device, config=config)
+    state_in = model.state()
+    state_out = model.state()
+    solver = newton.solvers.SolverVBD(model, iterations=4)
+    solver.step(state_in, state_out, model.control(), None, 1.0e-3)
+
+    solver.reset(state_out, flags=newton.StateFlags.PARTICLE_Q)
+
+    volume = state_out.pneumatic.volume.numpy()[handle.cavity_index]
+    pressure = state_out.pneumatic.absolute_pressure.numpy()[handle.cavity_index]
+    test.assertAlmostEqual(volume, handle.rest_volume, places=6)
+    test.assertAlmostEqual(pressure, config.reference_absolute_pressure, places=3)
+
+
+class TestPneumaticCavities(unittest.TestCase):
+    def test_open_surface_is_rejected(self):
+        """Reject a cavity selection that does not form a closed surface."""
+        builder = newton.ModelBuilder()
+        for position in (
+            wp.vec3(),
+            wp.vec3(1.0, 0.0, 0.0),
+            wp.vec3(0.0, 1.0, 0.0),
+            wp.vec3(-1.0, 0.0, 0.0),
+            wp.vec3(0.0, -1.0, 0.0),
+        ):
+            builder.add_particle(position, wp.vec3(), 1.0)
+        for triangle in ((0, 1, 2), (0, 2, 3), (0, 3, 4), (0, 4, 1)):
+            builder.add_triangle(*triangle)
+
+        with self.assertRaisesRegex(ValueError, "closed two-manifold"):
+            newton.solvers.add_pneumatic_cavity(builder, range(4))
+
+
 add_function_test(
     TestSolverVBD,
     "test_body_body_contact_lists_skip_static_kinematic",
     _body_body_contact_lists_skip_static_kinematic,
+    devices=devices,
+)
+add_function_test(
+    TestPneumaticCavities,
+    "test_pneumatic_pressure_expands_closed_shell",
+    _test_pneumatic_pressure_expands_closed_shell,
+    devices=devices,
+)
+add_function_test(
+    TestPneumaticCavities,
+    "test_pneumatic_shell_deforms_under_external_force",
+    _test_pneumatic_shell_deforms_under_external_force,
+    devices=devices,
+)
+add_function_test(
+    TestPneumaticCavities,
+    "test_pneumatic_reset_restores_observables",
+    _test_pneumatic_reset_restores_observables,
     devices=devices,
 )
 add_function_test(

@@ -389,6 +389,31 @@ If you run the examples from a source checkout with uv, use
     </td>
   </tr>
   <tr>
+    <td colspan="3"><h3>VBD Examples</h3></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/vbd/example_vbd_inflatable_bag.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_inflatable_bag.jpg" alt="Falling Block on Inflatable Bag">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/vbd/example_vbd_inflatable_robot_grasp.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_inflatable_robot_grasp.jpg" alt="Inflatable Robot Grasp">
+      </a>
+    </td>
+    <td></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <code>python -m newton.examples vbd_inflatable_bag</code>
+    </td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples vbd_inflatable_robot_grasp</code>
+    </td>
+    <td></td>
+  </tr>
+  <tr>
     <td colspan="3"><h3>Inverse Kinematics Examples</h3></td>
   </tr>
   <tr>

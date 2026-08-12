@@ -29,7 +29,7 @@ from ..coupled.interface import CouplingInterface
 from ..solver import SolverBase
 from ..xpbd import kernels as xpbd_kernels
 from ..xpbd.kernels import apply_joint_forces
-from . import particle_vbd_kernels, rigid_vbd_kernels, vbd_coupling_kernels
+from . import particle_vbd_kernels, pneumatic_kernels, rigid_vbd_kernels, vbd_coupling_kernels
 from .particle_vbd_kernels import (
     NUM_THREADS_PER_COLLISION_PRIMITIVE,
     TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
@@ -455,6 +455,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                 module=particle_vbd_kernels,
             )
         self._set_module_options(
+            {"deterministic": effective_deterministic, "deterministic_max_records": 0},
+            module=pneumatic_kernels,
+        )
+        self._set_module_options(
             {
                 "deterministic": effective_deterministic,
                 "deterministic_max_records": coupling_deterministic_max_records,
@@ -497,6 +501,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             particle_external_vertex_contact_filtering_map,
             particle_external_edge_contact_filtering_map,
         )
+        self._init_pneumatic_system(model)
 
         # Initialize rigid body system and rigid-particle (body-particle) interaction state
         self._init_rigid_system(
@@ -622,6 +627,156 @@ class SolverVBD(SolverBase, CouplingInterface):
         self.pos_prev_collision_detection = wp.zeros_like(model.particle_q, device=self.device)
         self.particle_displacements = wp.zeros(self.model.particle_count, dtype=wp.vec3, device=self.device)
         self.truncation_ts = wp.zeros(self.model.particle_count, dtype=float, device=self.device)
+
+    def _init_pneumatic_system(self, model: Model) -> None:
+        """Initialize optional closed-cavity pressure state."""
+        self._pneumatic_enabled = False
+        self._pneumatic_cavity_count = 0
+        self._pneumatic_face_count = 0
+
+        try:
+            cavity_count = model.get_custom_frequency_count("pneumatic:cavity")
+            face_count = model.get_custom_frequency_count("pneumatic:face")
+        except KeyError:
+            return
+        if cavity_count == 0:
+            return
+        if model.particle_count == 0 or face_count == 0:
+            raise ValueError("Pneumatic cavities require at least one particle and one cavity face.")
+
+        required_model_fields = (
+            "mode",
+            "world",
+            "anchor_particle",
+            "rest_volume",
+            "reference_absolute_pressure",
+            "ambient_pressure",
+            "heat_capacity_ratio",
+            "target_volume",
+            "volume_stiffness",
+            "bulk_damping",
+            "min_volume",
+            "max_absolute_pressure",
+            "face_cavity",
+            "face_triangle",
+            "face_sign",
+        )
+        namespace = getattr(model, "pneumatic", None)
+        if namespace is None or any(not hasattr(namespace, field) for field in required_model_fields):
+            raise ValueError(
+                "Model contains pneumatic cavity frequencies but not the complete VBD pneumatic attribute schema. "
+                "Use register_pneumatic_attributes() before authoring cavity rows."
+            )
+
+        self._pneumatic_enabled = True
+        self._pneumatic_cavity_count = int(cavity_count)
+        self._pneumatic_face_count = int(face_count)
+        self._pneumatic_volume = wp.zeros(cavity_count, dtype=float, device=self.device)
+        self._pneumatic_previous_volume = wp.zeros(cavity_count, dtype=float, device=self.device)
+        self._pneumatic_absolute_pressure = wp.zeros(cavity_count, dtype=float, device=self.device)
+        self._pneumatic_gauge_pressure = wp.zeros(cavity_count, dtype=float, device=self.device)
+        self._pneumatic_curvature = wp.zeros(cavity_count, dtype=float, device=self.device)
+        self._pneumatic_volume_rate = wp.zeros(cavity_count, dtype=float, device=self.device)
+        self._pneumatic_clamp_flags = wp.zeros(cavity_count, dtype=wp.int32, device=self.device)
+
+    def _evaluate_pneumatic_cavities(self, particle_q: wp.array[wp.vec3], control: Control, dt: float) -> None:
+        """Evaluate cavity volume and pressure at the current VBD iterate."""
+        if not self._pneumatic_enabled:
+            return
+        pneumatic = self.model.pneumatic
+        control_pneumatic = getattr(control, "pneumatic", None)
+        if control_pneumatic is None:
+            raise ValueError("Control is missing pneumatic inputs; create it with model.control().")
+
+        self._pneumatic_volume.zero_()
+        wp.launch(
+            kernel=pneumatic_kernels.accumulate_cavity_volume,
+            dim=self._pneumatic_face_count,
+            inputs=[
+                particle_q,
+                self.model.tri_indices,
+                pneumatic.face_cavity,
+                pneumatic.face_triangle,
+                pneumatic.face_sign,
+                pneumatic.anchor_particle,
+                self._pneumatic_volume,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            kernel=pneumatic_kernels.evaluate_pressure,
+            dim=self._pneumatic_cavity_count,
+            inputs=[
+                dt,
+                pneumatic.mode,
+                pneumatic.rest_volume,
+                pneumatic.reference_absolute_pressure,
+                pneumatic.ambient_pressure,
+                pneumatic.heat_capacity_ratio,
+                pneumatic.target_volume,
+                pneumatic.volume_stiffness,
+                pneumatic.bulk_damping,
+                pneumatic.min_volume,
+                pneumatic.max_absolute_pressure,
+                self._pneumatic_volume,
+                self._pneumatic_previous_volume,
+                control_pneumatic.pressure_scale,
+                control_pneumatic.prescribed_gauge_pressure,
+                control_pneumatic.target_volume_scale,
+                self._pneumatic_absolute_pressure,
+                self._pneumatic_gauge_pressure,
+                self._pneumatic_curvature,
+                self._pneumatic_volume_rate,
+                self._pneumatic_clamp_flags,
+            ],
+            device=self.device,
+        )
+
+    def _accumulate_pneumatic_forces(self, particle_q: wp.array[wp.vec3], color: int) -> None:
+        """Add cavity pressure terms to the particle VBD system."""
+        if not self._pneumatic_enabled:
+            return
+        pneumatic = self.model.pneumatic
+        wp.launch(
+            kernel=pneumatic_kernels.accumulate_pressure_force_and_hessian,
+            dim=self._pneumatic_face_count,
+            inputs=[
+                color,
+                particle_q,
+                self.model.particle_colors,
+                self.model.tri_indices,
+                pneumatic.face_cavity,
+                pneumatic.face_triangle,
+                pneumatic.face_sign,
+                self._pneumatic_gauge_pressure,
+                self._pneumatic_curvature,
+                self.particle_forces,
+                self.particle_hessians,
+            ],
+            device=self.device,
+        )
+
+    def _finalize_pneumatic_state(self, state_in: State, state_out: State, control: Control, dt: float) -> None:
+        """Publish final cavity observables to the output state."""
+        if not self._pneumatic_enabled:
+            return
+        state_pneumatic = getattr(state_out, "pneumatic", None)
+        if state_pneumatic is None:
+            raise ValueError("State is missing pneumatic observables; create states with model.state().")
+        self._evaluate_pneumatic_cavities(state_out.particle_q, control, dt)
+        wp.copy(state_pneumatic.volume, self._pneumatic_volume)
+        wp.copy(state_pneumatic.absolute_pressure, self._pneumatic_absolute_pressure)
+        wp.copy(state_pneumatic.volume_rate, self._pneumatic_volume_rate)
+        wp.copy(state_pneumatic.clamp_flags, self._pneumatic_clamp_flags)
+
+    def _prepare_pneumatic_step(self, state_in: State) -> None:
+        """Snapshot previous cavity volume before VBD updates particle positions."""
+        if not self._pneumatic_enabled:
+            return
+        state_pneumatic = getattr(state_in, "pneumatic", None)
+        if state_pneumatic is None:
+            raise ValueError("State is missing pneumatic observables; create states with model.state().")
+        wp.copy(self._pneumatic_previous_volume, state_pneumatic.volume)
 
     def _init_rigid_system(
         self,
@@ -1817,17 +1972,19 @@ class SolverVBD(SolverBase, CouplingInterface):
         if control is None:
             control = self.model.control(clone_variables=False)
 
+        self._prepare_pneumatic_step(state_in)
         self._initialize_rigid_bodies(state_in, control, contacts, dt, update_rigid)
         self._initialize_particles(state_in, state_out, dt)
 
         for iter_num in range(self.iterations):
             self._solve_rigid_body_iteration(state_in, state_out, control, contacts, dt)
-            self._solve_particle_iteration(state_in, state_out, contacts, dt, iter_num)
+            self._solve_particle_iteration(state_in, state_out, control, contacts, dt, iter_num)
 
         # Snapshot solved rigid contact state for next-frame warm-start.
         self._snapshot_rigid_contact_history(contacts)
         self._finalize_rigid_bodies(state_in, state_out, dt)
         self._finalize_particles(state_out, dt)
+        self._finalize_pneumatic_state(state_in, state_out, control, dt)
 
     @override
     def reset(
@@ -1974,6 +2131,28 @@ class SolverVBD(SolverBase, CouplingInterface):
                     outputs=[particle_q, particle_qd],
                     device=self.device,
                 )
+
+        if self._pneumatic_enabled and flags_value & int(StateFlags.PARTICLE_Q):
+            state_pneumatic = getattr(state, "pneumatic", None)
+            if state_pneumatic is None:
+                raise ValueError("State is missing pneumatic observables; create it with model.state().")
+            wp.launch(
+                kernel=pneumatic_kernels.reset_pneumatic_state,
+                dim=self._pneumatic_cavity_count,
+                inputs=[
+                    world_mask,
+                    world_mask is None,
+                    model.world_count,
+                    model.pneumatic.world,
+                    model.pneumatic.rest_volume,
+                    model.pneumatic.reference_absolute_pressure,
+                    state_pneumatic.volume,
+                    state_pneumatic.absolute_pressure,
+                    state_pneumatic.volume_rate,
+                    state_pneumatic.clamp_flags,
+                ],
+                device=self.device,
+            )
 
         if not internal_body_reset:
             return
@@ -2565,7 +2744,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             )
 
     def _solve_particle_iteration(
-        self, state_in: State, state_out: State, contacts: Contacts | None, dt: float, iter_num: int
+        self, state_in: State, state_out: State, control: Control, contacts: Contacts | None, dt: float, iter_num: int
     ):
         """Solve one VBD iteration for particles."""
         model = self.model
@@ -2601,6 +2780,8 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         # Iterate over color groups
         for color in range(len(self.model.particle_color_groups)):
+            self._evaluate_pneumatic_cavities(state_in.particle_q, control, dt)
+            self._accumulate_pneumatic_forces(state_in.particle_q, color)
             if contacts is not None:
                 wp.launch(
                     kernel=accumulate_particle_body_contact_force_and_hessian,

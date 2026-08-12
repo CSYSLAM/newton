@@ -13,10 +13,21 @@ if TYPE_CHECKING:
     from .semi_implicit import SolverSemiImplicit
     from .solver import SolverBase
     from .style3d.solver_style3d import SolverStyle3D
-    from .vbd import SolverVBD
+    from .vbd import (
+        PneumaticCavityHandle,
+        PneumaticConfig,
+        PneumaticMode,
+        SolverVBD,
+        add_inflatable_mesh,
+        add_pneumatic_cavity,
+        register_pneumatic_attributes,
+    )
     from .xpbd import SolverXPBD
 
 __all__ = [
+    "PneumaticCavityHandle",
+    "PneumaticConfig",
+    "PneumaticMode",
     "SolverBase",
     "SolverFeatherstone",
     "SolverImplicitMPM",
@@ -26,6 +37,9 @@ __all__ = [
     "SolverStyle3D",
     "SolverVBD",
     "SolverXPBD",
+    "add_inflatable_mesh",
+    "add_pneumatic_cavity",
+    "register_pneumatic_attributes",
     "style3d",
 ]
 
@@ -42,6 +56,12 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "SolverSemiImplicit": (".semi_implicit", "SolverSemiImplicit"),
     "SolverStyle3D": (".style3d.solver_style3d", "SolverStyle3D"),
     "SolverVBD": (".vbd", "SolverVBD"),
+    "PneumaticCavityHandle": (".vbd", "PneumaticCavityHandle"),
+    "PneumaticConfig": (".vbd", "PneumaticConfig"),
+    "PneumaticMode": (".vbd", "PneumaticMode"),
+    "add_inflatable_mesh": (".vbd", "add_inflatable_mesh"),
+    "add_pneumatic_cavity": (".vbd", "add_pneumatic_cavity"),
+    "register_pneumatic_attributes": (".vbd", "register_pneumatic_attributes"),
     "SolverXPBD": (".xpbd", "SolverXPBD"),
     "style3d": (".style3d", None),
 }

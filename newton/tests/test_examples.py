@@ -605,6 +605,20 @@ add_example_test(
     test_options={"num-frames": 360},
     use_viewer=True,
 )
+add_example_test(
+    TestClothExamples,
+    name="vbd.example_vbd_inflatable_bag",
+    devices=test_devices,
+    test_options={"num-frames": 120},
+    use_viewer=True,
+)
+add_example_test(
+    TestClothExamples,
+    name="vbd.example_vbd_inflatable_robot_grasp",
+    devices=test_devices,
+    test_options={"num-frames": 120},
+    use_viewer=True,
+)
 
 
 class TestRobotExamples(unittest.TestCase):
