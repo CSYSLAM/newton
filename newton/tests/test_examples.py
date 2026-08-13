@@ -543,6 +543,13 @@ add_example_test(
 )
 add_example_test(
     TestClothExamples,
+    name="mjvbdv2.example_mjvbd_v2_cloth_twist",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 100},
+    use_viewer=True,
+)
+add_example_test(
+    TestClothExamples,
     name="cloth.example_cloth_rollers",
     devices=cuda_test_devices,
     test_options={"num-frames": 200},

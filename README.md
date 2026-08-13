@@ -721,7 +721,11 @@ If you run the examples from a source checkout with uv, use
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_rigid_soft_cloth.jpg" alt="MJVBDV2 Rigid Soft Cloth">
       </a>
     </td>
-    <td></td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_cloth_twist.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_twist.jpg" alt="MJVBDV2 Cloth Twist">
+      </a>
+    </td>
   </tr>
   <tr>
     <td align="center" width="33%">
@@ -732,7 +736,9 @@ If you run the examples from a source checkout with uv, use
       <code>python -m newton.examples mjvbd_v2_rigid_soft_cloth</code><br>
       <small>Use <code>--solver vbd</code> for the native VBD comparison.</small>
     </td>
-    <td></td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples mjvbd_v2_cloth_twist</code>
+    </td>
   </tr>
   <tr>
     <td colspan="3"><h3>Multi-Physics Examples</h3></td>
