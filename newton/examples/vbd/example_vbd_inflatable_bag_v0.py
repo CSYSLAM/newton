@@ -1,19 +1,62 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""One-way kinematic robot grasp of a sealed pneumatic chip bag.
+"""Drop a rigid cube onto a Blender-authored closed pneumatic chip bag.
 
-Run with ``python -m newton.examples vbd_inflatable_robot_grasp``.
+Run with ``python -m newton.examples vbd_inflatable_bag``.
 """
 
 from __future__ import annotations
+
+from collections import Counter
 
 import numpy as np
 import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.vbd.example_vbd_inflatable_bag import _BAG_ROTATION, _load_chip_bag_mesh
+
+
+def _load_chip_bag_mesh() -> tuple[list[list[float]], list[int]]:
+    """Load the closed Blender-authored bag mesh."""
+    path = newton.examples.get_asset("newton_chip_bag_sealed_cylinder.obj")
+    vertices: list[list[float]] = []
+    faces: list[list[int]] = []
+    with open(path, encoding="utf-8") as obj_file:
+        for line in obj_file:
+            fields = line.split()
+            if not fields:
+                continue
+            if fields[0] == "v":
+                vertices.append([float(value) for value in fields[1:4]])
+            elif fields[0] == "f":
+                faces.append([int(value.split("/", maxsplit=1)[0]) - 1 for value in fields[1:]])
+
+    if not vertices or not faces:
+        raise ValueError(f"{path} does not contain a mesh.")
+
+    triangles = [
+        (face[0], face[vertex_index], face[vertex_index + 1])
+        for face in faces
+        for vertex_index in range(1, len(face) - 1)
+    ]
+    if not triangles:
+        raise ValueError(f"{path} does not contain any triangle faces.")
+
+    edge_counts = Counter(
+        tuple(sorted((vertex0, vertex1)))
+        for triangle in triangles
+        for vertex0, vertex1 in ((triangle[0], triangle[1]), (triangle[1], triangle[2]), (triangle[2], triangle[0]))
+    )
+    if any(count != 2 for count in edge_counts.values()):
+        raise ValueError(f"{path} must be a closed two-manifold surface after triangulation.")
+
+    return vertices, [vertex for triangle in triangles for vertex in triangle]
+
+
+# The source asset is an upright cylindrical shell with compressed axial ends.
+# Rotate its broad membrane faces horizontal for the falling-block contact case.
+_BAG_ROTATION = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), wp.pi * 0.5)
 
 PARAMS = {
     "fps": 60,
@@ -24,26 +67,14 @@ PARAMS = {
     "bag_density": 0.12,
     "bag_reference_absolute_pressure": 108_000.0,
     "particle_radius": 0.004,
-    "finger_half_x": 0.11,
-    "finger_half_y": 0.012,
-    "finger_half_z": 0.10,
-    "open_half_gap": 0.22,
-    "closed_half_gap": 0.060,
-    "grab_z": 0.065,
-    "lift_height": 0.20,
-    "close_duration": 0.8,
-    "lift_duration": 1.2,
+    "block_half_extent": 0.015,
+    "block_initial_z": 0.48,
+    "block_density": 1.25e6,
 }
 
 
-def _smoothstep(value: float) -> float:
-    """Interpolate a clamped scalar with zero endpoint velocity."""
-    value = min(max(value, 0.0), 1.0)
-    return value * value * (3.0 - 2.0 * value)
-
-
 class Example:
-    """Drive a kinematic parallel gripper without feeding bag forces back."""
+    """Demonstrate a sealed cylindrical bag deforming under a falling cube."""
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -79,45 +110,37 @@ class Example:
             ),
         )
 
-        finger_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, ke=5.0e4, kd=150.0, mu=1.0)
-        self.left_finger = builder.add_link(
-            xform=wp.transform(wp.vec3(0.0, -PARAMS["open_half_gap"], PARAMS["grab_z"]), wp.quat_identity()),
-            is_kinematic=True,
-            label="robot_left_finger",
+        contact_cfg = newton.ModelBuilder.ShapeConfig(density=PARAMS["block_density"], ke=4.0e4, kd=100.0, mu=0.7)
+        self.block_body = builder.add_body(
+            xform=wp.transform(wp.vec3(0.0, 0.0, PARAMS["block_initial_z"]), wp.quat_identity()),
+            label="falling_block",
         )
-        self.right_finger = builder.add_link(
-            xform=wp.transform(wp.vec3(0.0, PARAMS["open_half_gap"], PARAMS["grab_z"]), wp.quat_identity()),
-            is_kinematic=True,
-            label="robot_right_finger",
+        builder.add_shape_box(
+            self.block_body,
+            hx=PARAMS["block_half_extent"],
+            hy=PARAMS["block_half_extent"],
+            hz=PARAMS["block_half_extent"],
+            cfg=contact_cfg,
+            color=(0.8, 0.3, 0.2),
         )
-        for finger, color in ((self.left_finger, (0.85, 0.25, 0.2)), (self.right_finger, (0.2, 0.35, 0.85))):
-            builder.add_shape_box(
-                finger,
-                hx=PARAMS["finger_half_x"],
-                hy=PARAMS["finger_half_y"],
-                hz=PARAMS["finger_half_z"],
-                cfg=finger_cfg,
-                color=color,
-            )
         builder.add_shape_box(
             -1,
             xform=wp.transform(wp.vec3(0.0, 0.0, -0.025), wp.quat_identity()),
             hx=0.7,
             hy=0.7,
             hz=0.025,
-            cfg=finger_cfg,
+            cfg=contact_cfg,
             color=(0.35, 0.35, 0.35),
         )
 
         builder.color()
         self.model = builder.finalize()
-        self.model.soft_contact_ke = 5.0e4
-        self.model.soft_contact_kd = 150.0
-        self.model.soft_contact_mu = 1.0
+        self.model.soft_contact_ke = 4.0e4
+        self.model.soft_contact_kd = 100.0
+        self.model.soft_contact_mu = 0.7
         self.solver = newton.solvers.SolverVBD(
             self.model,
             iterations=PARAMS["solver_iterations"],
-            integrate_with_external_rigid_solver=True,
             rigid_body_particle_contact_buffer_size=8192,
         )
         self.pipeline = newton.CollisionPipeline(
@@ -129,66 +152,40 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.initial_mean_bag_height = float(self.state_0.particle_q.numpy()[:, 2].mean())
 
         self.viewer.set_model(self.model)
         if hasattr(self.viewer, "renderer"):
             self.viewer.renderer.draw_wireframe = False
             self.viewer.renderer.draw_edges = False
         if hasattr(self.viewer, "set_camera"):
-            self.viewer.set_camera(wp.vec3(0.0, -0.52, 0.36), -28.0, 90.0)
-
-    def _gripper_pose(self, time: float) -> tuple[float, float]:
-        """Return half jaw spacing and lift height for the robot trajectory."""
-        close = _smoothstep(time / PARAMS["close_duration"])
-        lift = _smoothstep((time - PARAMS["close_duration"]) / PARAMS["lift_duration"])
-        gap = PARAMS["open_half_gap"] + (PARAMS["closed_half_gap"] - PARAMS["open_half_gap"]) * close
-        z = PARAMS["grab_z"] + PARAMS["lift_height"] * lift
-        return gap, z
-
-    def _advance_robot_kinematics(self, next_time: float) -> None:
-        """Write externally prescribed robot state without applying bag reactions."""
-        current_q = self.state_0.body_q.numpy()
-        next_q = current_q.copy()
-        gap, z = self._gripper_pose(next_time)
-        next_q[self.left_finger, 1] = -gap
-        next_q[self.right_finger, 1] = gap
-        next_q[self.left_finger, 2] = z
-        next_q[self.right_finger, 2] = z
-        self.state_1.body_q.assign(next_q)
-
-        body_qd = self.state_1.body_qd.numpy()
-        body_qd[:] = 0.0
-        body_qd[:, :3] = (next_q[:, :3] - current_q[:, :3]) / self.sim_dt
-        self.state_1.body_qd.assign(body_qd)
+            self.viewer.set_camera(wp.vec3(0.0, -0.42, 0.40), -37.5, 90.0)
 
     def step(self):
-        """Advance one-way robot kinematics followed by VBD bag deformation."""
+        """Advance the falling cube, contact solve, and deformable bag."""
         for _ in range(PARAMS["sim_substeps"]):
             self.state_0.clear_forces()
             self.state_1.clear_forces()
             if hasattr(self.viewer, "apply_forces"):
                 self.viewer.apply_forces(self.state_0)
-            self._advance_robot_kinematics(self.sim_time + self.sim_dt)
-            wp.copy(self.state_1.particle_q, self.state_0.particle_q)
-            self.pipeline.collide(self.state_1, self.contacts)
+            self.pipeline.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
             self.sim_time += self.sim_dt
 
     def render(self):
-        """Render the externally driven robot and deformable bag."""
+        """Render the current pneumatic state."""
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
         self.viewer.end_frame()
 
     def test_final(self):
-        """Verify the one-way robot lifts a finite, non-collapsed bag."""
+        """Verify the cube deforms a finite sealed bag."""
         volume = self.state_0.pneumatic.volume.numpy()[self.cavity.cavity_index]
         positions = self.state_0.particle_q.numpy()
+        block_z = self.state_0.body_q.numpy()[self.block_body, 2]
         assert np.isfinite(positions).all()
+        assert block_z < PARAMS["block_initial_z"]
         assert volume > self.cavity.rest_volume * 0.2
-        assert positions[:, 2].mean() > self.initial_mean_bag_height + PARAMS["lift_height"] * 0.5
 
 
 if __name__ == "__main__":
