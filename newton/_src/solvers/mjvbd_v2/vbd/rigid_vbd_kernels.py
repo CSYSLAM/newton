@@ -368,6 +368,22 @@ def build_joint_projectors(
 
 
 @wp.func
+def _select_soft_contact_material(
+    soft_contact_ke: float,
+    soft_contact_kd: float,
+    soft_contact_mu: float,
+    soft_contact_materials: wp.array[wp.vec3],
+    soft_contact_material_index: wp.array[int],
+    use_soft_contact_material_source: bool,
+):
+    """Select scalar model material or a graph-safe device table row."""
+    material = wp.vec3(soft_contact_ke, soft_contact_kd, soft_contact_mu)
+    if use_soft_contact_material_source:
+        material = soft_contact_materials[soft_contact_material_index[0]]
+    return material
+
+
+@wp.func
 def _average_contact_material(
     ke0: float,
     kd0: float,
@@ -2620,6 +2636,9 @@ def init_body_particle_contacts(
     soft_contact_ke: float,
     soft_contact_kd: float,
     soft_contact_mu: float,
+    soft_contact_materials: wp.array[wp.vec3],
+    soft_contact_material_index: wp.array[int],
+    use_soft_contact_material_source: bool,
     shape_material_ke: wp.array[float],
     shape_material_kd: wp.array[float],
     shape_material_mu: wp.array[float],
@@ -2643,11 +2662,19 @@ def init_body_particle_contacts(
         return
 
     shape_idx = body_particle_contact_shape[i]
-
-    avg_ke, avg_kd, avg_mu = _average_contact_material(
+    soft_material = _select_soft_contact_material(
         soft_contact_ke,
         soft_contact_kd,
         soft_contact_mu,
+        soft_contact_materials,
+        soft_contact_material_index,
+        use_soft_contact_material_source,
+    )
+
+    avg_ke, avg_kd, avg_mu = _average_contact_material(
+        soft_material[0],
+        soft_material[1],
+        soft_material[2],
         shape_material_ke[shape_idx],
         shape_material_kd[shape_idx],
         shape_material_mu[shape_idx],

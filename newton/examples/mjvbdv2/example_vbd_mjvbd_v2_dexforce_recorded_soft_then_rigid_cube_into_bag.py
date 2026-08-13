@@ -15,6 +15,8 @@ Run from the repository root::
 
 from __future__ import annotations
 
+import argparse
+
 import numpy as np
 import warp as wp
 
@@ -49,6 +51,15 @@ soft0.BAG_TRI_KD = hand_reference.BAG_TRI_KD
 soft0.BAG_EDGE_KE = hand_reference.BAG_EDGE_KE
 soft0.BAG_EDGE_KD = hand_reference.BAG_EDGE_KD
 
+_SOFT_MATERIAL_FREE = 0
+_SOFT_MATERIAL_GRASP = 1
+_SOFT_MATERIAL_RIGID_RELEASE = 2
+_SOFT_CONTACT_MATERIALS = (
+    tuple(float(value) for value in hand_reference.SOFT_FREE_CONTACT),
+    tuple(float(value) for value in hand_reference.SOFT_GRASP_CONTACT),
+    tuple(float(value) for value in hand_reference.RIGID_RELEASE_CONTACT),
+)
+
 
 class Example(recorded_soft.Example):
     """Track the canonical two-pick trajectory with the full Dexforce W1."""
@@ -65,6 +76,20 @@ class Example(recorded_soft.Example):
         self.contact_phase = None
         self.hand_shape_collision_enabled = True
         super().__init__(viewer, args)
+        self.graph = None
+        self.use_graph = bool(args.graph_capture) and self.device.is_cuda
+        if self.use_graph and self.sim_substeps % 2 != 0:
+            raise ValueError("--graph-capture requires an even simulation substep count")
+        self.soft_contact_materials = wp.array(
+            np.asarray(_SOFT_CONTACT_MATERIALS, dtype=np.float32),
+            dtype=wp.vec3,
+            device=self.device,
+        )
+        self.soft_contact_material_index = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self.solver.vbd_solver.set_soft_contact_material_source(
+            self.soft_contact_materials,
+            self.soft_contact_material_index,
+        )
         self.object_released = np.zeros(2, dtype=bool)
         self._apply_contact_phase("soft_wait")
 
@@ -233,9 +258,11 @@ class Example(recorded_soft.Example):
 
         soft_active = phase in {"soft_prepare", "soft_grasp", "soft_carry"}
         rigid_active = phase in {"rigid_prepare", "rigid_grasp", "rigid_carry"}
+        soft_material_index = _SOFT_MATERIAL_FREE
         self._set_hand_shape_collision(phase != "rigid_move")
 
         if soft_active:
+            soft_material_index = _SOFT_MATERIAL_GRASP
             self._set_hand_particle_collision(True)
             self._set_shape_material(
                 self.right_hand_shapes,
@@ -266,6 +293,7 @@ class Example(recorded_soft.Example):
             self.model.soft_contact_kd = hand_reference.rigid_demo.SOFT_CONTACT_KD
             self.model.soft_contact_mu = hand_reference.rigid_demo.SOFT_CONTACT_MU
         elif phase == "rigid_release":
+            soft_material_index = _SOFT_MATERIAL_RIGID_RELEASE
             self._set_hand_particle_collision(False)
             rigid_shapes = [*self.right_hand_shapes, self.rigid_cube_shape]
             self._set_shape_material(
@@ -284,7 +312,23 @@ class Example(recorded_soft.Example):
             self.model.soft_contact_ke = hand_reference.SOFT_FREE_CONTACT[0]
             self.model.soft_contact_kd = hand_reference.SOFT_FREE_CONTACT[1]
             self.model.soft_contact_mu = hand_reference.SOFT_FREE_CONTACT[2]
+        self.soft_contact_material_index.fill_(soft_material_index)
         self.contact_phase = phase
+
+    def _capture_simulation_graph(self):
+        """Capture the warmed physics frame as one reusable CUDA graph."""
+
+        state_0_backup = self.model.state()
+        state_1_backup = self.model.state()
+        state_0_backup.assign(self.state_0)
+        state_1_backup.assign(self.state_1)
+
+        with wp.ScopedCapture() as capture:
+            self._simulate_substeps()
+
+        self.state_0.assign(state_0_backup)
+        self.state_1.assign(state_1_backup)
+        self.graph = capture.graph
 
     def _prepare_frame(self):
         """Solve arm IK and copy the canonical finger target for one frame."""
@@ -322,6 +366,19 @@ class Example(recorded_soft.Example):
             self.object_released[0] = True
         elif phase == "rigid_release":
             self.object_released[1] = True
+
+    def step(self):
+        """Advance with one warmed CUDA graph when available."""
+
+        self._prepare_frame()
+        if self.graph is None:
+            self._simulate_substeps()
+            if self.use_graph:
+                self._capture_simulation_graph()
+        else:
+            wp.capture_launch(self.graph)
+        self.sim_time += self.frame_dt
+        self.frame_index += 1
 
     def test_final(self):
         """Verify finite objects, physical releases, placement, and no pads."""
@@ -361,6 +418,12 @@ class Example(recorded_soft.Example):
 
         parser = recorded_soft.Example.create_parser()
         parser.set_defaults(num_frames=1900, paused=False)
+        parser.add_argument(
+            "--graph-capture",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Capture the warmed physics frame as one CUDA graph.",
+        )
         parser.add_argument(
             "--rigid-grasp-keyframe",
             default=str(hand_reference.DEFAULT_RIGID_GRASP_KEYFRAME),

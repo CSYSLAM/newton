@@ -930,8 +930,8 @@ class Example:
             self.release_contact_material_applied = True
         self.previous_grip = grip
 
-    def simulate(self):
-        self._prepare_frame()
+    def _simulate_substeps(self):
+        """Advance one display frame after its joint targets are prepared."""
         bag_dz = 0.0
         for substep in range(self.sim_substeps):
             wp.launch(
@@ -982,6 +982,10 @@ class Example:
                 device=self.device,
             )
             self.state_0, self.state_1 = self.state_1, self.state_0
+
+    def simulate(self):
+        self._prepare_frame()
+        self._simulate_substeps()
 
     def step(self):
         self.simulate()

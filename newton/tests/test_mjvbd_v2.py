@@ -779,6 +779,83 @@ class TestMJVBDV2(unittest.TestCase):
         self.assertEqual(int(solver.contacts.soft_contact_count.numpy()[0]), 1)
         self.assertTrue(np.all(np.isfinite(state_1.particle_q.numpy())))
 
+    def test_device_soft_contact_material_source_selects_runtime_row(self):
+        """Select cached soft-contact materials through a device row index."""
+        model = _build_static_ground_particle_model("cpu")
+        state_0 = model.state()
+        state_1 = model.state()
+        solver = SolverMJVBDV2(model, vbd_options={"iterations": 1})
+        materials = wp.array(
+            [wp.vec3(100.0, 1.0, 0.1), wp.vec3(900.0, 3.0, 0.9)],
+            dtype=wp.vec3,
+            device=model.device,
+        )
+        material_index = wp.zeros(1, dtype=wp.int32, device=model.device)
+        solver.vbd_solver.set_soft_contact_material_source(materials, material_index)
+
+        solver.step(state_0, state_1, model.control(), None, 1.0 / 120.0)
+        shape = int(solver.contacts.soft_contact_shape.numpy()[0])
+        shape_ke = float(model.shape_material_ke.numpy()[shape])
+        shape_kd = float(model.shape_material_kd.numpy()[shape])
+        shape_mu = float(model.shape_material_mu.numpy()[shape])
+        self.assertAlmostEqual(
+            float(solver.vbd_solver.body_particle_contact_material_ke.numpy()[0]), 0.5 * (100.0 + shape_ke)
+        )
+        self.assertAlmostEqual(
+            float(solver.vbd_solver.body_particle_contact_material_kd.numpy()[0]), 0.5 * (1.0 + shape_kd)
+        )
+        self.assertAlmostEqual(
+            float(solver.vbd_solver.body_particle_contact_material_mu.numpy()[0]), np.sqrt(0.1 * shape_mu)
+        )
+
+        material_index.fill_(1)
+        solver.step(state_1, state_0, model.control(), None, 1.0 / 120.0)
+        self.assertAlmostEqual(
+            float(solver.vbd_solver.body_particle_contact_material_ke.numpy()[0]), 0.5 * (900.0 + shape_ke)
+        )
+        self.assertAlmostEqual(
+            float(solver.vbd_solver.body_particle_contact_material_kd.numpy()[0]), 0.5 * (3.0 + shape_kd)
+        )
+        self.assertAlmostEqual(
+            float(solver.vbd_solver.body_particle_contact_material_mu.numpy()[0]), np.sqrt(0.9 * shape_mu)
+        )
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA graph capture requires CUDA")
+    def test_device_soft_contact_material_source_updates_one_cuda_graph(self):
+        """Update cached soft-contact materials while replaying one CUDA graph."""
+        model = _build_static_ground_particle_model("cuda:0")
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        solver = SolverMJVBDV2(model, vbd_options={"iterations": 1})
+        materials = wp.array(
+            [wp.vec3(100.0, 1.0, 0.1), wp.vec3(900.0, 3.0, 0.9)],
+            dtype=wp.vec3,
+            device=model.device,
+        )
+        material_index = wp.zeros(1, dtype=wp.int32, device=model.device)
+        solver.vbd_solver.set_soft_contact_material_source(materials, material_index)
+
+        solver.step(state_0, state_1, control, None, 1.0 / 120.0)
+        with wp.ScopedCapture(device=model.device) as capture:
+            solver.step(state_1, state_0, control, None, 1.0 / 120.0)
+
+        shape = int(solver.contacts.soft_contact_shape.numpy()[0])
+        shape_ke = float(model.shape_material_ke.numpy()[shape])
+        material_index.fill_(1)
+        wp.capture_launch(capture.graph)
+        self.assertAlmostEqual(
+            float(solver.vbd_solver.body_particle_contact_material_ke.numpy()[0]),
+            0.5 * (900.0 + shape_ke),
+        )
+
+        material_index.fill_(0)
+        wp.capture_launch(capture.graph)
+        self.assertAlmostEqual(
+            float(solver.vbd_solver.body_particle_contact_material_ke.numpy()[0]),
+            0.5 * (100.0 + shape_ke),
+        )
+
     @unittest.skipUnless(wp.is_cuda_available(), "Tiled VBD requires CUDA")
     def test_small_particle_color_groups_use_scalar_solve(self):
         """Use the scalar elasticity kernel for undersubscribed CUDA color groups."""

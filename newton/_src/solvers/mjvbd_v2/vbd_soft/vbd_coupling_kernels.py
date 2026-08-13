@@ -13,7 +13,7 @@ from .particle_vbd_kernels import (
     evaluate_edge_edge_contact_2_vertices,
     evaluate_vertex_triangle_collision_force_hessian_4_vertices,
 )
-from .rigid_vbd_kernels import _eval_body_particle_contact
+from .rigid_vbd_kernels import _eval_body_particle_contact, _select_soft_contact_material
 from .tri_mesh_collision import TriMeshCollisionInfo
 
 wp.set_module_options({"enable_backward": False})
@@ -380,6 +380,9 @@ def _harvest_vbd_proxy_particle_self_contact_forces_kernel(
     soft_contact_ke: float,
     soft_contact_kd: float,
     soft_contact_mu: float,
+    soft_contact_materials: wp.array[wp.vec3],
+    soft_contact_material_index: wp.array[int],
+    use_soft_contact_material_source: bool,
     friction_epsilon: float,
     edge_edge_parallel_epsilon: float,
     out_particle_f: wp.array[wp.vec3],
@@ -415,6 +418,14 @@ def _harvest_vbd_proxy_particle_self_contact_forces_kernel(
                 )
 
                 if e1_proxy and e2_dynamic:
+                    soft_material = _select_soft_contact_material(
+                        soft_contact_ke,
+                        soft_contact_kd,
+                        soft_contact_mu,
+                        soft_contact_materials,
+                        soft_contact_material_index,
+                        use_soft_contact_material_source,
+                    )
                     has_contact, collision_force_0, collision_force_1, _hessian_0, _hessian_1 = (
                         evaluate_edge_edge_contact_2_vertices(
                             e1_idx,
@@ -423,9 +434,9 @@ def _harvest_vbd_proxy_particle_self_contact_forces_kernel(
                             particle_q_prev,
                             edge_indices,
                             collision_radius,
-                            soft_contact_ke,
-                            soft_contact_kd,
-                            soft_contact_mu,
+                            soft_material[0],
+                            soft_material[1],
+                            soft_material[2],
                             friction_epsilon,
                             dt,
                             edge_edge_parallel_epsilon,
@@ -485,6 +496,14 @@ def _harvest_vbd_proxy_particle_self_contact_forces_kernel(
                 )
 
                 if (vertex_proxy and tri_dynamic) or (tri_proxy and vertex_dynamic):
+                    soft_material = _select_soft_contact_material(
+                        soft_contact_ke,
+                        soft_contact_kd,
+                        soft_contact_mu,
+                        soft_contact_materials,
+                        soft_contact_material_index,
+                        use_soft_contact_material_source,
+                    )
                     (
                         has_contact,
                         collision_force_0,
@@ -502,9 +521,9 @@ def _harvest_vbd_proxy_particle_self_contact_forces_kernel(
                         particle_q_prev,
                         tri_indices,
                         collision_radius,
-                        soft_contact_ke,
-                        soft_contact_kd,
-                        soft_contact_mu,
+                        soft_material[0],
+                        soft_material[1],
+                        soft_material[2],
                         friction_epsilon,
                         dt,
                     )

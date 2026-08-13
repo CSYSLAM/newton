@@ -32,6 +32,7 @@ from ....utils.mesh import (
     get_vertex_num_adjacent_faces,
     get_vertex_num_adjacent_tets,
 )
+from .rigid_vbd_kernels import _select_soft_contact_material
 from .tri_mesh_collision import TriMeshCollisionInfo
 
 # TODO: Grab changes from Warp that has fixed the backward pass
@@ -1511,6 +1512,9 @@ def accumulate_self_contact_force_and_hessian(
     soft_contact_ke: float,
     soft_contact_kd: float,
     friction_mu: float,
+    soft_contact_materials: wp.array[wp.vec3],
+    soft_contact_material_index: wp.array[int],
+    use_soft_contact_material_source: bool,
     friction_epsilon: float,
     edge_edge_parallel_epsilon: float,
     # outputs: particle force and hessian
@@ -1539,6 +1543,14 @@ def accumulate_self_contact_force_and_hessian(
                 c_e1_v1 = particle_colors[e1_v1]
                 c_e1_v2 = particle_colors[e1_v2]
                 if c_e1_v1 == current_color or c_e1_v2 == current_color:
+                    soft_material = _select_soft_contact_material(
+                        soft_contact_ke,
+                        soft_contact_kd,
+                        friction_mu,
+                        soft_contact_materials,
+                        soft_contact_material_index,
+                        use_soft_contact_material_source,
+                    )
                     has_contact, collision_force_0, collision_force_1, collision_hessian_0, collision_hessian_1 = (
                         evaluate_edge_edge_contact_2_vertices(
                             e1_idx,
@@ -1547,9 +1559,9 @@ def accumulate_self_contact_force_and_hessian(
                             pos_prev,
                             edge_indices,
                             collision_radius,
-                            soft_contact_ke,
-                            soft_contact_kd,
-                            friction_mu,
+                            soft_material[0],
+                            soft_material[1],
+                            soft_material[2],
                             friction_epsilon,
                             dt,
                             edge_edge_parallel_epsilon,
@@ -1592,6 +1604,14 @@ def accumulate_self_contact_force_and_hessian(
                     or c_tri_b == current_color
                     or c_tri_c == current_color
                 ):
+                    soft_material = _select_soft_contact_material(
+                        soft_contact_ke,
+                        soft_contact_kd,
+                        friction_mu,
+                        soft_contact_materials,
+                        soft_contact_material_index,
+                        use_soft_contact_material_source,
+                    )
                     (
                         has_contact,
                         collision_force_0,
@@ -1609,9 +1629,9 @@ def accumulate_self_contact_force_and_hessian(
                         pos_prev,
                         tri_indices,
                         collision_radius,
-                        soft_contact_ke,
-                        soft_contact_kd,
-                        friction_mu,
+                        soft_material[0],
+                        soft_material[1],
+                        soft_material[2],
                         friction_epsilon,
                         dt,
                     )

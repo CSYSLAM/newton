@@ -441,6 +441,9 @@ class SolverVBD(SolverBase, CouplingInterface):
         # Common parameters
         self.iterations = iterations
         self.friction_epsilon = friction_epsilon
+        self._soft_contact_materials = wp.empty(0, dtype=wp.vec3, device=self.device)
+        self._soft_contact_material_index = wp.empty(0, dtype=wp.int32, device=self.device)
+        self._use_soft_contact_material_source = False
 
         # Rigid integration mode: when True, rigid bodies are integrated by an external
         # solver (one-way coupling). SolverVBD will not move rigid bodies, but can still
@@ -1218,6 +1221,9 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self.model.soft_contact_ke,
                     self.model.soft_contact_kd,
                     self.model.soft_contact_mu,
+                    self._soft_contact_materials,
+                    self._soft_contact_material_index,
+                    self._use_soft_contact_material_source,
                     self.friction_epsilon,
                     self.trimesh_collision_detector.edge_edge_parallel_epsilon,
                     out_particle_f,
@@ -1698,6 +1704,56 @@ class SolverVBD(SolverBase, CouplingInterface):
     # =====================================================
     # Main Solver Methods
     # =====================================================
+
+    def set_soft_contact_material_source(
+        self,
+        materials: wp.array[wp.vec3] | None,
+        material_index: wp.array[wp.int32] | None,
+    ) -> None:
+        """Bind a device material table for graph-compatible phase changes.
+
+        Each material row stores ``[ke, kd, mu]`` with components
+        ``[N/m, N·s/m, dimensionless]``. Bind the arrays before CUDA graph
+        capture, then update ``material_index[0]`` in stream order before graph
+        replay. Passing ``None`` for both arguments restores the scalar material
+        fields on :class:`~newton.Model`.
+
+        Args:
+            materials: Device material table, shape ``(material_count,)``.
+            material_index: Device row selector, shape ``(1,)``.
+
+        Raises:
+            ValueError: If only one argument is ``None``, or an array has the
+                wrong shape, dtype, or device.
+        """
+        if materials is None or material_index is None:
+            if materials is not None or material_index is not None:
+                raise ValueError("materials and material_index must either both be arrays or both be None")
+            self._soft_contact_materials = wp.empty(0, dtype=wp.vec3, device=self.device)
+            self._soft_contact_material_index = wp.empty(0, dtype=wp.int32, device=self.device)
+            self._use_soft_contact_material_source = False
+            return
+
+        if (
+            not isinstance(materials, wp.array)
+            or materials.ndim != 1
+            or materials.dtype != wp.vec3
+            or materials.shape[0] == 0
+            or materials.device != self.device
+        ):
+            raise ValueError(f"materials must be a non-empty wp.array[wp.vec3] on device {self.device}")
+        if (
+            not isinstance(material_index, wp.array)
+            or material_index.ndim != 1
+            or material_index.dtype != wp.int32
+            or material_index.shape[0] != 1
+            or material_index.device != self.device
+        ):
+            raise ValueError(f"material_index must be a wp.array[wp.int32] of shape (1,) on device {self.device}")
+
+        self._soft_contact_materials = materials
+        self._soft_contact_material_index = material_index
+        self._use_soft_contact_material_source = True
 
     def set_rigid_history_update(self, update: bool):
         """Set whether the next step() should update rigid solver history.
@@ -2621,6 +2677,9 @@ class SolverVBD(SolverBase, CouplingInterface):
                         model.soft_contact_ke,
                         model.soft_contact_kd,
                         model.soft_contact_mu,
+                        self._soft_contact_materials,
+                        self._soft_contact_material_index,
+                        self._use_soft_contact_material_source,
                         model.shape_material_ke,
                         model.shape_material_kd,
                         model.shape_material_mu,
@@ -2752,6 +2811,9 @@ class SolverVBD(SolverBase, CouplingInterface):
                         self.model.soft_contact_ke,
                         self.model.soft_contact_kd,
                         self.model.soft_contact_mu,
+                        self._soft_contact_materials,
+                        self._soft_contact_material_index,
+                        self._use_soft_contact_material_source,
                         self.friction_epsilon,
                         self.trimesh_collision_detector.edge_edge_parallel_epsilon,
                         self.has_active_self_contact,
