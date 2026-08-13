@@ -11,7 +11,7 @@ from typing import Literal
 import numpy as np
 import warp as wp
 
-from ...sim import BodyFlags, CollisionPipeline, Model, ModelBuilder, ModelFlags
+from ...sim import BodyFlags, CollisionPipeline, Model, ModelBuilder, ModelFlags, State
 from ..coupled.solver_coupled_proxy import SolverCoupledProxy
 from .collision_pipeline import MJVBDV2SoftContactPipeline
 from .mujoco.solver_mujoco import SolverMuJoCo
@@ -21,9 +21,41 @@ from .vbd_soft.solver_vbd import SolverVBD as SolverVBDSoft
 
 __all__ = ["SolverMJVBDV2"]
 
+_PNEUMATIC_STATE_FIELDS = ("volume", "absolute_pressure", "volume_rate", "clamp_flags")
+
+
+@wp.kernel
+def _copy_pneumatic_state_kernel(
+    local_to_global: wp.array[wp.int32],
+    source_volume: wp.array[float],
+    source_absolute_pressure: wp.array[float],
+    source_volume_rate: wp.array[float],
+    source_clamp_flags: wp.array[wp.int32],
+    destination_volume: wp.array[float],
+    destination_absolute_pressure: wp.array[float],
+    destination_volume_rate: wp.array[float],
+    destination_clamp_flags: wp.array[wp.int32],
+    scatter: bool,
+):
+    """Gather or scatter all persistent fields for one cavity row."""
+    local = wp.tid()
+    global_index = local_to_global[local]
+    source_index = local
+    destination_index = global_index
+    if not scatter:
+        source_index = global_index
+        destination_index = local
+    destination_volume[destination_index] = source_volume[source_index]
+    destination_absolute_pressure[destination_index] = source_absolute_pressure[source_index]
+    destination_volume_rate[destination_index] = source_volume_rate[source_index]
+    destination_clamp_flags[destination_index] = source_clamp_flags[source_index]
+
 
 class _OneWayCoupledProxy(SolverCoupledProxy):
     """Proxy composition whose source never receives destination feedback."""
+
+    def _proxy_feedback_enabled(self) -> bool:
+        return False
 
     def _apply_proxy_body_effective_masses(self) -> None:
         for mapping in self._proxy_mappings:
@@ -76,6 +108,19 @@ class SolverMJVBDV2(_OneWayCoupledProxy):
         )
 
         mujoco_kwargs = dict(mujoco_options or {})
+        requested_sleeping = mujoco_kwargs.get("enable_sleeping")
+        if requested_sleeping is None:
+            mujoco_namespace = getattr(model, "mujoco", None)
+            sleeping_attribute = (
+                None if mujoco_namespace is None else getattr(mujoco_namespace, "enable_sleeping", None)
+            )
+            requested_sleeping = False if sleeping_attribute is None else bool(sleeping_attribute.numpy()[0])
+        if requested_sleeping:
+            raise ValueError(
+                "enable_sleeping=True is unsupported by the one-way coupled MJVBDV2 backend because "
+                "VBD contacts cannot wake MuJoCo bodies"
+            )
+        mujoco_kwargs["enable_sleeping"] = False
         requested_disable_contacts = mujoco_kwargs.pop("disable_contacts", True)
         if requested_disable_contacts is not True:
             raise ValueError("MJVBDV2 requires mujoco_options['disable_contacts']=True")
@@ -182,3 +227,51 @@ class SolverMJVBDV2(_OneWayCoupledProxy):
         rebuild = getattr(vbd_entry.solver, "rebuild_bvh", None)
         if callable(rebuild):
             rebuild(vbd_entry.state_0)
+
+
+class _SolverMJVBDV2Pneumatic(SolverMJVBDV2):
+    """Coupled backend that additionally owns pneumatic state transfer."""
+
+    def _copy_pneumatic_state(
+        self,
+        source: State,
+        destination: State,
+        *,
+        scatter: bool,
+    ) -> None:
+        """Copy VBD-owned cavity state through the compact entry mapping."""
+        entry = self._entries["vbd"]
+        local_to_global = entry.attribute_local_to_global["pneumatic:cavity"]
+        source_namespace = getattr(source, "pneumatic", None)
+        destination_namespace = getattr(destination, "pneumatic", None)
+        if source_namespace is None or destination_namespace is None:
+            raise ValueError("Pneumatic MJVBDV2 state must be created with model.state().")
+        wp.launch(
+            kernel=_copy_pneumatic_state_kernel,
+            dim=local_to_global.shape[0],
+            inputs=[
+                local_to_global,
+                *(getattr(source_namespace, field) for field in _PNEUMATIC_STATE_FIELDS),
+                *(getattr(destination_namespace, field) for field in _PNEUMATIC_STATE_FIELDS),
+                scatter,
+            ],
+            device=self.model.device,
+        )
+
+    def _distribute_state(
+        self,
+        state_in: State,
+        *,
+        dt: float = 0.0,
+        iteration_restart: bool = False,
+    ) -> None:
+        """Distribute core state and VBD-owned pneumatic history."""
+        super()._distribute_state(state_in, dt=dt, iteration_restart=iteration_restart)
+        self._copy_pneumatic_state(state_in, self._entries["vbd"].state_0, scatter=False)
+
+    def _reconcile_state(self, state_out: State) -> None:
+        """Reconcile core state and VBD-owned pneumatic observables."""
+        super()._reconcile_state(state_out)
+        entry_output = self._entries["vbd"].state_1
+        if entry_output is not None:
+            self._copy_pneumatic_state(entry_output, state_out, scatter=True)

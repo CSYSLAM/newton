@@ -167,8 +167,13 @@ def reset_pneumatic_state(
     if not reset_all:
         world_index = world
         if world_index < 0:
-            world_index = world_count
-        selected = world_mask[world_index]
+            if world_mask.shape[0] == world_count:
+                selected = False
+            else:
+                world_index = world_count
+                selected = world_mask[world_index]
+        else:
+            selected = world_mask[world_index]
     if selected:
         volume[cavity] = rest_volume[cavity]
         absolute_pressure[cavity] = reference_absolute_pressure[cavity]

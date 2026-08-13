@@ -20,6 +20,27 @@ wp.set_module_options({"enable_backward": False})
 
 
 @wp.kernel(enable_backward=False)
+def _copy_external_body_history_kernel(
+    body_world: wp.array[wp.int32],
+    world_mask: wp.array[wp.bool],
+    world_count: int,
+    source_body_q: wp.array[wp.transform],
+    destination_body_q: wp.array[wp.transform],
+):
+    """Copy body poses selected by a public reset world mask."""
+    body = wp.tid()
+    world = body_world[body]
+    selected = False
+    if world < 0:
+        if world_mask.shape[0] > world_count:
+            selected = world_mask[world_count]
+    else:
+        selected = world_mask[world]
+    if selected:
+        destination_body_q[body] = source_body_q[body]
+
+
+@wp.kernel(enable_backward=False)
 def _update_vbd_body_input_state_kernel(
     dt: float,
     body_flags: wp.array[wp.int32],

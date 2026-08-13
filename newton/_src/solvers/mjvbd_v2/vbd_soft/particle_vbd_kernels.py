@@ -1513,11 +1513,14 @@ def accumulate_self_contact_force_and_hessian(
     friction_mu: float,
     friction_epsilon: float,
     edge_edge_parallel_epsilon: float,
+    has_active_self_contact: wp.array[wp.int32],
     # outputs: particle force and hessian
     particle_forces: wp.array[wp.vec3],
     particle_hessians: wp.array[wp.mat33],
 ):
     t_id = wp.tid()
+    if has_active_self_contact[0] == 0:
+        return
     collision_info = collision_info_array[0]
 
     primitive_id = t_id // NUM_THREADS_PER_COLLISION_PRIMITIVE
@@ -2154,9 +2157,12 @@ def apply_planar_truncation_parallel_by_collision(
     collision_info_array: wp.array[TriMeshCollisionInfo],
     parallel_eps: float,
     gamma: float,
+    has_active_self_contact: wp.array[wp.int32],
     truncation_t_out: wp.array[float],
 ):
     t_id = wp.tid()
+    if has_active_self_contact[0] == 0:
+        return
     collision_info = collision_info_array[0]
 
     primitive_id = t_id // NUM_THREADS_PER_COLLISION_PRIMITIVE
@@ -2310,6 +2316,55 @@ def apply_truncation_identity_selected(
     pos_out: wp.array[wp.vec3],
 ):
     tid = wp.tid()
+    particle = particle_ids[tid]
+    displacement = displacement_in[particle]
+    length = wp.length(displacement)
+    if length > max_displacement:
+        displacement = displacement * max_displacement / length
+    displacement_out[particle] = displacement
+    if pos_out:
+        pos_out[particle] = pos[particle] + displacement
+
+
+@wp.kernel
+def apply_truncation_ts_if_active(
+    pos: wp.array[wp.vec3],
+    displacement_in: wp.array[wp.vec3],
+    truncation_ts: wp.array[float],
+    max_displacement: float,
+    has_active_self_contact: wp.array[wp.int32],
+    displacement_out: wp.array[wp.vec3],
+    pos_out: wp.array[wp.vec3],
+):
+    i = wp.tid()
+    if has_active_self_contact[0] == 0:
+        return
+
+    t = truncation_ts[i]
+    particle_displacement = displacement_in[i] * t
+    length = wp.length(particle_displacement)
+    if length > max_displacement:
+        particle_displacement = particle_displacement * max_displacement / length
+
+    displacement_out[i] = particle_displacement
+    if pos_out:
+        pos_out[i] = pos[i] + particle_displacement
+
+
+@wp.kernel
+def apply_truncation_identity_selected_if_inactive(
+    particle_ids: wp.array[wp.int32],
+    pos: wp.array[wp.vec3],
+    displacement_in: wp.array[wp.vec3],
+    max_displacement: float,
+    has_active_self_contact: wp.array[wp.int32],
+    displacement_out: wp.array[wp.vec3],
+    pos_out: wp.array[wp.vec3],
+):
+    tid = wp.tid()
+    if has_active_self_contact[0] != 0:
+        return
+
     particle = particle_ids[tid]
     displacement = displacement_in[particle]
     length = wp.length(displacement)

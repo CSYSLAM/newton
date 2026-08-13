@@ -3477,6 +3477,10 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             raise ValueError(
                 "enable_sleeping=True requires use_mujoco_contacts=True so contacts can wake sleeping bodies."
             )
+        if enable_sleeping and disable_contacts:
+            raise ValueError(
+                "enable_sleeping=True requires disable_contacts=False so contacts can wake sleeping bodies."
+            )
         if nvmax is not None:
             if isinstance(nvmax, bool) or not isinstance(nvmax, (int, np.integer)):
                 raise TypeError(f"nvmax must be an integer or None, got {type(nvmax).__name__}.")

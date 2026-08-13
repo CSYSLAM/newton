@@ -33,6 +33,7 @@ from .mujoco.solver_mujoco import SolverMuJoCo
 from .ownership import MJVBDV2Ownership, resolve_ownership
 from .soft_contact_pipeline import MJVBDSoftContactPipeline
 from .solver_mjvbd_v2 import SolverMJVBDV2 as _SolverMJVBDV2Coupled
+from .solver_mjvbd_v2 import _SolverMJVBDV2Pneumatic
 from .vbd.solver_vbd import SolverVBD, _get_pneumatic_counts
 from .vbd_soft.solver_vbd import SolverVBD as SolverVBDSoft
 
@@ -51,16 +52,17 @@ class _PureMuJoCoBackend(SolverBase):
     ) -> None:
         super().__init__(model)
         mujoco_kwargs = dict(mujoco_options or {})
-        requested_disable_contacts = mujoco_kwargs.pop("disable_contacts", True)
-        if requested_disable_contacts is not True:
-            raise ValueError("MJVBDV2 requires mujoco_options['disable_contacts']=True")
+        requested_disable_contacts = mujoco_kwargs.pop("disable_contacts", False)
         requested_mujoco_contacts = mujoco_kwargs.pop("use_mujoco_contacts", True)
         if requested_mujoco_contacts is not True:
-            raise ValueError("MJVBDV2 currently requires mujoco_options['use_mujoco_contacts']=True")
-        mujoco_kwargs["disable_contacts"] = True
+            raise ValueError("The pure-MuJoCo MJVBDV2 backend requires use_mujoco_contacts=True")
+        mujoco_kwargs["disable_contacts"] = requested_disable_contacts
         mujoco_kwargs["use_mujoco_contacts"] = True
 
-        selected_shapes = tuple(shape for body in ownership.mujoco_bodies for shape in model.body_shapes.get(body, ()))
+        selected_shapes = tuple(
+            [*model.body_shapes.get(-1, ())]
+            + [shape for body in ownership.mujoco_bodies for shape in model.body_shapes.get(body, ())]
+        )
         self.coupled_solver = SolverCoupled(
             model=model,
             entries=[
@@ -137,7 +139,7 @@ class _KinematicPassthroughBackend(SolverBase):
 
 
 class _PureVBDBackend(SolverBase):
-    """Full VBD backend used when no joints are assigned to MuJoCo."""
+    """Scene-specialized VBD backend used when MuJoCo owns no joints."""
 
     def __init__(
         self,
@@ -162,7 +164,10 @@ class _PureVBDBackend(SolverBase):
                 "MJVBDV2 pure-VBD mode derives rigid integration from the model; "
                 f"integrate_with_external_rigid_solver must be {required}"
             )
-        self.vbd_solver = SolverVBD(
+        pneumatic_cavity_count, _ = _get_pneumatic_counts(model)
+        use_full_vbd = ownership.has_vbd_dynamic_bodies or pneumatic_cavity_count > 0 or model.particle_count == 0
+        vbd_solver_type = SolverVBD if use_full_vbd else SolverVBDSoft
+        self.vbd_solver = vbd_solver_type(
             model,
             integrate_with_external_rigid_solver=external_rigid,
             **vbd_kwargs,
@@ -488,7 +493,8 @@ class SolverMJVBDV2(SolverBase):
             )
         else:
             backend_name = "coupled"
-            backend = _SolverMJVBDV2Coupled(
+            coupled_backend_type = _SolverMJVBDV2Pneumatic if pneumatic_cavity_count > 0 else _SolverMJVBDV2Coupled
+            backend = coupled_backend_type(
                 model,
                 mujoco_articulations=mujoco_articulations,
                 mujoco_joints=mujoco_joints,

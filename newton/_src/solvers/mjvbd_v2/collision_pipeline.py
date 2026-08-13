@@ -72,6 +72,7 @@ class MJVBDV2SoftContactPipeline:
         self.model = model
         self.margin = float(margin)
         self.pairs = _build_particle_shape_pairs(model)
+        self._empty_body_q = wp.empty(0, dtype=wp.transform, device=model.device)
 
     @property
     def pair_count(self) -> int:
@@ -105,8 +106,11 @@ class MJVBDV2SoftContactPipeline:
             return
         if state.particle_q is None:
             raise ValueError("MJVBDV2 soft-only collision requires state.particle_q")
-        if state.body_q is None:
+        body_q = state.body_q
+        if body_q is None and self.model.body_count > 0:
             raise ValueError("MJVBDV2 soft-only collision requires state.body_q")
+        if body_q is None:
+            body_q = self._empty_body_q
 
         model = self.model
         wp.launch(
@@ -118,7 +122,7 @@ class MJVBDV2SoftContactPipeline:
                 model.particle_radius,
                 model.particle_flags,
                 model.particle_world,
-                state.body_q,
+                body_q,
                 model.shape_transform,
                 model.shape_body,
                 model.shape_type,

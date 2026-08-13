@@ -15,9 +15,10 @@ MJVBDV2 的状态所有权如下：
 | 布料 | VBD | 动态粒子/三角形 | 与 VBD 对象双向 |
 | 静态环境 | 不积分 | 静态碰撞体 | 对动态对象施加约束 |
 
-MuJoCo 只负责选定关节树的约化坐标动力学、运动学和 link 状态，不负责
-自由刚体、软体、布料或场景接触。MuJoCo 必须保留关节树 link 的质量和
-惯量，因为关节动力学仍依赖这些数据。
+在包含 VBD 动力学对象的耦合路径中，MuJoCo 只负责选定关节树的约化坐标
+动力学、运动学和 link 状态，不负责自由刚体、软体、布料或场景接触。
+没有 VBD 动力学对象的纯 MuJoCo 路径由 MuJoCo 同时负责关节树和场景接触。
+MuJoCo 必须保留关节树 link 的质量和惯量，因为关节动力学仍依赖这些数据。
 
 MJVBDV2 必须同时支持：
 
@@ -81,6 +82,17 @@ MJVBD 中下列优化可以参考，但必须逐项移植、逐项做数值等�
 
 未经 A/B 验证，不把这些优化直接整体复制到 V2。任何优化只要造成 box-bag
 刚体结果或叠衣服结果退化，就保留公共 VBD 原实现。
+
+当前已验证的选择如下：
+
+- 无动态 VBD 刚体、无气腔的纯粒子场景直接选择 `vbd_soft`；存在自由刚体或
+  气腔时仍选择完整 VBD，因而普通布料不会加载气腔或 AVBD 分支。
+- VT/EE 是否存在活动自接触由 device flag 控制；非 graph 模式不再为该标志
+  做 GPU 到 CPU 的同步，无接触时仍只更新当前颜色组。
+- soft contact 在非 graph 模式保留活动数量读回。实测稀疏场景中，跳过整段
+  contact stage 的收益大于同步成本；graph capture 继续使用容量路径。
+- CUDA 颜色组不足一个 tile 时使用 scalar elasticity kernel，避免低占用的小
+  网格进入 tiled kernel；正常衣物网格继续使用 tiled fast path。
 
 ### 3.3 MuJoCo 基线
 
@@ -176,6 +188,7 @@ FREE joint 表示，但它们必须由 VBD/AVBD 推进。
   `-- 5. 合并 state_out
          joint/link <- MuJoCo
          自由刚体/粒子 <- VBD
+         气腔体积、压力和历史 <- VBD
 ```
 
 VBD 当前可能在刚体求解期间原地修改输入 `body_q`。V2 必须使用内部 scratch
@@ -185,15 +198,25 @@ MuJoCo-owned link。
 需要同时保存 MuJoCo link 的 `n` 和 `n+1` 位姿，供摩擦速度、CCD、接触历史
 和 reset/rebaseline 使用。机器人瞬移、IK 重定位和 reset 后必须重建相应历史。
 
-## 7. 接触所有权与两条运行路径
+V2 的 MuJoCo 到 VBD proxy 是严格单向的，因此不分配反馈历史和 solve 前速度
+快照，也不执行 source force 重建、rewind、wrench harvest 或 relaxation。
+通用 `SolverCoupledProxy` 的双向反馈默认行为保持不变。
 
-MuJoCo 场景接触关闭，VBD 是唯一接触求解器，避免重复接触力：
+## 7. 接触所有权与运行路径
+
+耦合路径关闭 MuJoCo 场景接触，由 VBD 作为唯一接触求解器，避免重复接触力：
 
 ```python
 disable_contacts=True
 ```
 
-根据场景拓扑使用两条路径。
+纯 MuJoCo 路径没有 VBD 接触求解器，因此默认启用 MuJoCo 接触，并将静态
+环境 shape 一并加入 MuJoCo 视图。Sleeping 只允许用于这条路径；单向耦合
+路径中的 VBD 接触不能唤醒 MuJoCo 关节树。
+
+包含 VBD 动力学对象时，根据场景拓扑使用以下两条路径。
+只有模型包含气腔行时才实例化 pneumatic coupled 后端并分发气腔 State；
+无气腔场景不进入该状态同步路径，也不编译 pneumatic 状态同步 kernel。
 
 ### 7.1 Soft-only fast path
 

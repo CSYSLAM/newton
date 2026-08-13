@@ -38,7 +38,9 @@ from .particle_vbd_kernels import (
     # Planar DAT (Divide and Truncate) kernels
     apply_planar_truncation_parallel_by_collision,
     apply_truncation_identity_selected,
+    apply_truncation_identity_selected_if_inactive,
     apply_truncation_ts,
+    apply_truncation_ts_if_active,
     detect_any_active_self_contacts,
     # Solver kernels (particle VBD)
     forward_step,
@@ -80,6 +82,7 @@ from .tri_mesh_collision import (
     TriMeshCollisionInfo,
 )
 from .vbd_coupling_kernels import (
+    _copy_external_body_history_kernel,
     _harvest_vbd_body_particle_contact_forces_on_proxy_bodies_kernel,
     _harvest_vbd_proxy_particle_body_contact_forces_kernel,
     _harvest_vbd_proxy_particle_self_contact_forces_kernel,
@@ -559,7 +562,16 @@ class SolverVBD(SolverBase, CouplingInterface):
         if model.device.is_cpu and particle_enable_tile_solve and wp.config.log_level <= wp.LOG_DEBUG:
             print("Info: Tiled solve requires model.device='cuda'. Tiled solve is disabled.")
 
-        self.use_particle_tile_solve = particle_enable_tile_solve and model.device.is_cuda
+        elasticity_groups = [
+            group
+            for group in (*self.surface_particle_color_groups, *self.volumetric_particle_color_groups)
+            if group.size > 0
+        ]
+        self.use_particle_tile_solve = (
+            particle_enable_tile_solve
+            and model.device.is_cuda
+            and all(group.size >= TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE for group in elasticity_groups)
+        )
 
         if particle_enable_self_contact:
             if particle_self_contact_margin < particle_self_contact_radius:
@@ -591,12 +603,10 @@ class SolverVBD(SolverBase, CouplingInterface):
             )
             self.active_self_contact_scan_dim = max(self.model.particle_count, self.model.edge_count)
             self.has_active_self_contact = wp.zeros(1, dtype=wp.int32, device=self.device)
-            self._has_active_self_contact_host = True
         else:
             self.particle_self_contact_evaluation_kernel_launch_size = None
             self.active_self_contact_scan_dim = None
             self.has_active_self_contact = None
-            self._has_active_self_contact_host = False
 
         # Particle force and hessian storage
         self.particle_forces = wp.zeros(self.model.particle_count, dtype=wp.vec3, device=self.device)
@@ -1240,10 +1250,9 @@ class SolverVBD(SolverBase, CouplingInterface):
     def _active_soft_contact_launch_dim(self, contacts: Contacts | None) -> int:
         """Return the active soft-contact launch width for this VBD step.
 
-        MJVBD owns a sparse particle-shape contact pass, so launching every
-        kernel at the contact-buffer capacity is wasteful for hand-cloth scenes.
-        Graph capture cannot read back the counter, and therefore conservatively
-        retains the capacity-sized launch in that mode.
+        Sparse uncaptured scenes benefit from skipping all contact-stage
+        launches when the active count is small. Graph capture cannot read the
+        counter and therefore uses the capacity-sized, device-guarded path.
         """
         if contacts is None or contacts.soft_contact_max == 0:
             return 0
@@ -1881,8 +1890,8 @@ class SolverVBD(SolverBase, CouplingInterface):
         Selected-world contact warm-start is cold-started when fresh rigid contacts
         are next processed. Internal rigid history is reset regardless of *flags*.
         When an external solver integrates the bodies, reset performs no rigid
-        mutation; ``state`` and ``world_mask`` validation and particle warnings still
-        apply, but body State arrays are not accessed or validated.
+        State mutation. With ``external_rigid_state_from_input=True``, it reads
+        ``state.body_q`` to rebaseline selected-world contact motion history.
 
         ``BODY_Q`` / ``BODY_QD`` copy ``model.body_q`` / ``model.body_qd`` into
         *state*; they do not restore a previously supplied state. A requested field
@@ -1964,7 +1973,25 @@ class SolverVBD(SolverBase, CouplingInterface):
             )
 
         if self._external_body_q_prev is not None and state.body_q is not None:
-            wp.copy(self._external_body_q_prev, state.body_q)
+            if state.body_q.device != self.device:
+                raise ValueError(
+                    f"state.body_q is on device {state.body_q.device}, expected solver device {self.device}."
+                )
+            if world_mask is None:
+                wp.copy(self._external_body_q_prev, state.body_q)
+            else:
+                wp.launch(
+                    kernel=_copy_external_body_history_kernel,
+                    dim=model.body_count,
+                    inputs=[
+                        model.body_world,
+                        world_mask,
+                        model.world_count,
+                        state.body_q,
+                        self._external_body_q_prev,
+                    ],
+                    device=self.device,
+                )
 
         if not internal_body_reset:
             return
@@ -2056,10 +2083,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         Modify displacements_in in-place, also modify particle_q if its not None
 
         """
-        if not self.particle_enable_self_contact or not self._has_active_self_contact_host:
-            # Without active VT/EE contacts a color group is independent of
-            # every other group.  Update only its vertices instead of scanning
-            # all particles after every color solve.
+        if not self.particle_enable_self_contact:
             if selected_particles is not None:
                 wp.launch(
                     kernel=apply_truncation_identity_selected,
@@ -2068,9 +2092,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         selected_particles,
                         self.pos_prev_collision_detection,
                         self.particle_displacements,
-                        wp.inf
-                        if not self.particle_enable_self_contact
-                        else self.particle_self_contact_margin * self.particle_conservative_bound_relaxation * 0.5,
+                        wp.inf,
                     ],
                     outputs=[self.particle_displacements, particle_q_out],
                     device=self.device,
@@ -2094,27 +2116,31 @@ class SolverVBD(SolverBase, CouplingInterface):
                 device=self.device,
             )
 
-        else:
-            ##  parallel by collision and atomic operation
-            self.truncation_ts.fill_(1.0)
-            wp.launch(
-                kernel=apply_planar_truncation_parallel_by_collision,
-                inputs=[
-                    self.pos_prev_collision_detection,  # pos_prev_collision_detection: wp.array[wp.vec3],
-                    self.particle_displacements,  # particle_displacements: wp.array[wp.vec3],
-                    self.model.tri_indices,
-                    self.model.edge_indices,
-                    self.trimesh_collision_info,
-                    self.trimesh_collision_detector.edge_edge_parallel_epsilon,
-                    self.particle_conservative_bound_relaxation,
-                ],
-                outputs=[
-                    self.truncation_ts,
-                ],
-                dim=self.particle_self_contact_evaluation_kernel_launch_size,
-                device=self.device,
-            )
+            return
 
+        # Keep the active-contact decision on-device. The planar kernel exits
+        # immediately when no VT/EE candidates exist, while the inactive
+        # color path still touches only the selected particles.
+        self.truncation_ts.fill_(1.0)
+        wp.launch(
+            kernel=apply_planar_truncation_parallel_by_collision,
+            inputs=[
+                self.pos_prev_collision_detection,
+                self.particle_displacements,
+                self.model.tri_indices,
+                self.model.edge_indices,
+                self.trimesh_collision_info,
+                self.trimesh_collision_detector.edge_edge_parallel_epsilon,
+                self.particle_conservative_bound_relaxation,
+                self.has_active_self_contact,
+            ],
+            outputs=[self.truncation_ts],
+            dim=self.particle_self_contact_evaluation_kernel_launch_size,
+            device=self.device,
+        )
+
+        max_displacement = self.particle_self_contact_margin * self.particle_conservative_bound_relaxation * 0.5
+        if selected_particles is None:
             wp.launch(
                 kernel=apply_truncation_ts,
                 dim=self.model.particle_count,
@@ -2122,9 +2148,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self.pos_prev_collision_detection,
                     self.particle_displacements,
                     self.truncation_ts,
-                    self.particle_self_contact_margin
-                    * self.particle_conservative_bound_relaxation
-                    * 0.5,  # max_displacement: degenerate to isotropic truncation
+                    max_displacement,
                 ],
                 outputs=[
                     self.particle_displacements,
@@ -2132,6 +2156,34 @@ class SolverVBD(SolverBase, CouplingInterface):
                 ],
                 device=self.device,
             )
+            return
+
+        wp.launch(
+            kernel=apply_truncation_ts_if_active,
+            dim=self.model.particle_count,
+            inputs=[
+                self.pos_prev_collision_detection,
+                self.particle_displacements,
+                self.truncation_ts,
+                max_displacement,
+                self.has_active_self_contact,
+            ],
+            outputs=[self.particle_displacements, particle_q_out],
+            device=self.device,
+        )
+        wp.launch(
+            kernel=apply_truncation_identity_selected_if_inactive,
+            dim=selected_particles.size,
+            inputs=[
+                selected_particles,
+                self.pos_prev_collision_detection,
+                self.particle_displacements,
+                max_displacement,
+                self.has_active_self_contact,
+            ],
+            outputs=[self.particle_displacements, particle_q_out],
+            device=self.device,
+        )
 
     def _initialize_particles(self, state_in: State, state_out: State, dt: float):
         """Initialize particle positions for the VBD iteration."""
@@ -2682,7 +2734,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     device=self.device,
                 )
 
-            if self.particle_enable_self_contact and self._has_active_self_contact_host:
+            if self.particle_enable_self_contact:
                 wp.launch(
                     kernel=accumulate_self_contact_force_and_hessian,
                     dim=self.particle_self_contact_evaluation_kernel_launch_size,
@@ -2702,6 +2754,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         self.model.soft_contact_mu,
                         self.friction_epsilon,
                         self.trimesh_collision_detector.edge_edge_parallel_epsilon,
+                        self.has_active_self_contact,
                     ],
                     outputs=[self.particle_forces, self.particle_hessians],
                     device=self.device,
@@ -3346,9 +3399,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             min_distance_filtering_ref_pos=self.particle_q_rest,
         )
 
-        # The detector owns device-side contact counters.  Read a single flag
-        # only outside graph capture, so the no-contact path can skip costly
-        # self-contact force and full-array truncation work.
+        # Reduce detector counters without synchronizing them back to Python.
         self.has_active_self_contact.zero_()
         wp.launch(
             kernel=detect_any_active_self_contacts,
@@ -3356,9 +3407,6 @@ class SolverVBD(SolverBase, CouplingInterface):
             inputs=[self.trimesh_collision_info],
             outputs=[self.has_active_self_contact],
             device=self.device,
-        )
-        self._has_active_self_contact_host = (
-            True if self.device.is_capturing else bool(int(self.has_active_self_contact.numpy()[0]))
         )
 
     def rebuild_bvh(self, state: State):

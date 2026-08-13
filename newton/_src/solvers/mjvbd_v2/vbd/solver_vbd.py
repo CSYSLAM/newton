@@ -77,6 +77,7 @@ from .tri_mesh_collision import (
     TriMeshCollisionInfo,
 )
 from .vbd_coupling_kernels import (
+    _copy_external_body_history_kernel,
     _harvest_vbd_body_particle_contact_forces_on_proxy_bodies_kernel,
     _harvest_vbd_proxy_particle_body_contact_forces_kernel,
     _harvest_vbd_proxy_particle_self_contact_forces_kernel,
@@ -450,6 +451,11 @@ class SolverVBD(SolverBase, CouplingInterface):
         self.integrate_with_external_rigid_solver = integrate_with_external_rigid_solver
         self.external_rigid_state_from_input = bool(external_rigid_state_from_input)
         self.one_way_proxy_bodies = bool(one_way_proxy_bodies)
+        self._external_body_q_prev = (
+            wp.clone(model.body_q, device=self.device)
+            if self.integrate_with_external_rigid_solver and self.external_rigid_state_from_input
+            else None
+        )
 
         # Initialize particle system
         self._init_particle_system(
@@ -777,6 +783,40 @@ class SolverVBD(SolverBase, CouplingInterface):
         wp.copy(state_pneumatic.absolute_pressure, self._pneumatic_absolute_pressure)
         wp.copy(state_pneumatic.volume_rate, self._pneumatic_volume_rate)
         wp.copy(state_pneumatic.clamp_flags, self._pneumatic_clamp_flags)
+
+    def _reset_pneumatic_state(self, state: State, world_mask: wp.array[wp.bool] | None) -> None:
+        """Reset selected cavity observables and temporal volume history."""
+        state_pneumatic = getattr(state, "pneumatic", None)
+        if state_pneumatic is None:
+            raise ValueError("State is missing pneumatic observables; create it with model.state().")
+        for field in ("volume", "absolute_pressure", "volume_rate", "clamp_flags"):
+            array = getattr(state_pneumatic, field, None)
+            if not isinstance(array, wp.array) or array.device != self.device:
+                raise ValueError(f"state.pneumatic.{field} must be a Warp array on device {self.device}.")
+
+        pneumatic = self.model.pneumatic
+        wp.launch(
+            kernel=self._pneumatic_kernels.reset_pneumatic_state,
+            dim=self._pneumatic_cavity_count,
+            inputs=[
+                world_mask,
+                world_mask is None,
+                self.model.world_count,
+                pneumatic.world,
+                pneumatic.rest_volume,
+                pneumatic.reference_absolute_pressure,
+                state_pneumatic.volume,
+                state_pneumatic.absolute_pressure,
+                state_pneumatic.volume_rate,
+                state_pneumatic.clamp_flags,
+            ],
+            device=self.device,
+        )
+        wp.copy(self._pneumatic_volume, state_pneumatic.volume)
+        wp.copy(self._pneumatic_previous_volume, state_pneumatic.volume)
+        wp.copy(self._pneumatic_absolute_pressure, state_pneumatic.absolute_pressure)
+        wp.copy(self._pneumatic_volume_rate, state_pneumatic.volume_rate)
+        wp.copy(self._pneumatic_clamp_flags, state_pneumatic.clamp_flags)
 
     def _init_rigid_system(
         self,
@@ -1959,6 +1999,8 @@ class SolverVBD(SolverBase, CouplingInterface):
         self._finalize_particles(state_out, dt)
         if self._pneumatic_enabled:
             self._finalize_pneumatic_state(state_out, control, dt)
+        if self._external_body_q_prev is not None and state_in.body_q is not None:
+            wp.copy(self._external_body_q_prev, state_in.body_q)
 
     @override
     def reset(
@@ -1977,8 +2019,8 @@ class SolverVBD(SolverBase, CouplingInterface):
         Selected-world contact warm-start is cold-started when fresh rigid contacts
         are next processed. Internal rigid history is reset regardless of *flags*.
         When an external solver integrates the bodies, reset performs no rigid
-        mutation; ``state`` and ``world_mask`` validation and particle warnings still
-        apply, but body State arrays are not accessed or validated.
+        State mutation. With ``external_rigid_state_from_input=True``, it reads
+        ``state.body_q`` to rebaseline selected-world contact motion history.
 
         ``BODY_Q`` / ``BODY_QD`` copy ``model.body_q`` / ``model.body_qd`` into
         *state*; they do not restore a previously supplied state. A requested field
@@ -2058,6 +2100,32 @@ class SolverVBD(SolverBase, CouplingInterface):
                 "StateFlags.PARTICLE_QD are ignored; particle and body-particle solver history is unchanged.",
                 stacklevel=2,
             )
+
+        if self._external_body_q_prev is not None and state.body_q is not None:
+            if state.body_q.device != self.device:
+                raise ValueError(
+                    f"state.body_q is on device {state.body_q.device}, expected solver device {self.device}."
+                )
+
+        if self._pneumatic_enabled:
+            self._reset_pneumatic_state(state, world_mask)
+
+        if self._external_body_q_prev is not None and state.body_q is not None:
+            if world_mask is None:
+                wp.copy(self._external_body_q_prev, state.body_q)
+            else:
+                wp.launch(
+                    kernel=_copy_external_body_history_kernel,
+                    dim=model.body_count,
+                    inputs=[
+                        model.body_world,
+                        world_mask,
+                        model.world_count,
+                        state.body_q,
+                        self._external_body_q_prev,
+                    ],
+                    device=self.device,
+                )
 
         if not internal_body_reset:
             return
@@ -2671,7 +2739,9 @@ class SolverVBD(SolverBase, CouplingInterface):
         # Select rigid-body poses for particle-rigid contact evaluation
         if self.integrate_with_external_rigid_solver:
             body_q_for_particles = state_out.body_q
-            body_q_prev_for_particles = state_in.body_q
+            body_q_prev_for_particles = (
+                self._external_body_q_prev if self._external_body_q_prev is not None else state_in.body_q
+            )
             body_qd_for_particles = state_out.body_qd
         else:
             body_q_for_particles = state_in.body_q
