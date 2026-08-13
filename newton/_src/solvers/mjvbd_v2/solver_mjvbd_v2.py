@@ -16,7 +16,7 @@ from ..coupled.solver_coupled_proxy import SolverCoupledProxy
 from .collision_pipeline import MJVBDV2SoftContactPipeline
 from .mujoco.solver_mujoco import SolverMuJoCo
 from .ownership import MJVBDV2Ownership, resolve_ownership
-from .vbd.solver_vbd import SolverVBD
+from .vbd.solver_vbd import SolverVBD, _get_pneumatic_counts
 from .vbd_soft.solver_vbd import SolverVBD as SolverVBDSoft
 
 __all__ = ["SolverMJVBDV2"]
@@ -97,7 +97,8 @@ class SolverMJVBDV2(_OneWayCoupledProxy):
         vbd_kwargs["integrate_with_external_rigid_solver"] = external_rigid
         vbd_kwargs["external_rigid_state_from_input"] = external_rigid
         vbd_kwargs["one_way_proxy_bodies"] = True
-        vbd_solver_type = SolverVBDSoft if external_rigid else SolverVBD
+        pneumatic_cavity_count, _ = _get_pneumatic_counts(model)
+        vbd_solver_type = SolverVBDSoft if external_rigid and pneumatic_cavity_count == 0 else SolverVBD
 
         collision_kwargs = dict(collision_options or {})
         soft_contact_margin = float(collision_kwargs.get("soft_contact_margin", 0.0))

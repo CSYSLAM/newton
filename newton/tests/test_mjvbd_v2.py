@@ -143,6 +143,72 @@ def _build_particle_module_model(device, element):
     return builder.finalize(device=device)
 
 
+def _build_pneumatic_shell_model(device, *, add_dynamic_body=False):
+    """Build a sealed tetrahedral shell and optionally add a free rigid body."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    positions = (
+        wp.vec3(0.0, 0.0, 0.0),
+        wp.vec3(1.0, 0.0, 0.0),
+        wp.vec3(0.0, 1.0, 0.0),
+        wp.vec3(0.0, 0.0, 1.0),
+    )
+    for position in positions:
+        builder.add_particle(position, wp.vec3(), 1.0)
+    for triangle in ((0, 2, 1), (0, 1, 3), (1, 2, 3), (2, 0, 3)):
+        builder.add_triangle(*triangle, tri_ke=2.0e3, tri_ka=2.0e3, tri_kd=5.0)
+
+    handle = newton.solvers.add_pneumatic_cavity(
+        builder,
+        range(4),
+        config=newton.solvers.PneumaticConfig(
+            mode=newton.solvers.PneumaticMode.PRESCRIBED_GAUGE_PRESSURE,
+            ambient_pressure=100_000.0,
+            prescribed_gauge_pressure=2_000.0,
+        ),
+    )
+    body = None
+    if add_dynamic_body:
+        body = builder.add_body(
+            xform=wp.transform(wp.vec3(3.0, 0.0, 0.0), wp.quat_identity()),
+        )
+        builder.add_shape_box(
+            body,
+            hx=0.05,
+            hy=0.05,
+            hz=0.05,
+            cfg=newton.ModelBuilder.ShapeConfig(density=1_000.0),
+        )
+    builder.color()
+    return builder.finalize(device=device), handle, body
+
+
+def _build_kinematic_pneumatic_model(device):
+    """Build a prescribed joint beside a sealed particle shell."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverMJVBDV2.register_custom_attributes(builder)
+    link = builder.add_link(label="kinematic_link")
+    builder.add_shape_box(link, hx=0.05, hy=0.05, hz=0.05)
+    joint = builder.add_joint_revolute(
+        parent=-1,
+        child=link,
+        axis=wp.vec3(0.0, 1.0, 0.0),
+        parent_xform=wp.transform(wp.vec3(3.0, 0.0, 0.0), wp.quat_identity()),
+    )
+    builder.add_articulation([joint])
+    for position in (
+        wp.vec3(0.0, 0.0, 0.0),
+        wp.vec3(1.0, 0.0, 0.0),
+        wp.vec3(0.0, 1.0, 0.0),
+        wp.vec3(0.0, 0.0, 1.0),
+    ):
+        builder.add_particle(position, wp.vec3(), 1.0)
+    for triangle in ((0, 2, 1), (0, 1, 3), (1, 2, 3), (2, 0, 3)):
+        builder.add_triangle(*triangle, tri_ke=2.0e3, tri_ka=2.0e3, tri_kd=5.0)
+    newton.solvers.add_pneumatic_cavity(builder, range(4))
+    builder.color()
+    return builder.finalize(device=device)
+
+
 def _build_joint_chain_model(device):
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     SolverMJVBDV2.register_custom_attributes(builder)
@@ -532,6 +598,115 @@ class TestMJVBDV2(unittest.TestCase):
 
                 solver.step(state_0, state_1, model.control(), None, 1.0 / 120.0)
                 self.assertTrue(np.all(np.isfinite(state_1.particle_q.numpy())))
+
+    def test_pneumatic_pressure_uses_pure_vbd(self):
+        """Expand a sealed shell without entering MuJoCo or tetrahedron paths."""
+        model, handle, _ = _build_pneumatic_shell_model("cpu")
+        state_0 = model.state()
+        state_1 = model.state()
+        solver = SolverMJVBDV2(model, vbd_options={"iterations": 4})
+
+        self.assertEqual(solver.features.backend, "pure_vbd")
+        self.assertFalse(solver.features.mujoco_solve_enabled)
+        self.assertTrue(solver.features.pneumatic_solve_enabled)
+        self.assertFalse(solver.features.tetrahedron_solve_enabled)
+        self.assertEqual(solver.features.pneumatic_cavity_count, 1)
+        self.assertTrue(solver.vbd_solver._pneumatic_enabled)
+
+        solver.step(state_0, state_1, model.control(), None, 1.0e-3)
+
+        volume = state_1.pneumatic.volume.numpy()[handle.cavity_index]
+        pressure = state_1.pneumatic.absolute_pressure.numpy()[handle.cavity_index]
+        self.assertGreater(volume, handle.rest_volume)
+        self.assertAlmostEqual(float(pressure), 102_000.0, places=2)
+        self.assertTrue(np.all(np.isfinite(state_1.particle_q.numpy())))
+
+    def test_pneumatic_rigid_scene_prunes_unneeded_solvers(self):
+        """Keep a pneumatic cloth-and-rigid scene on the full pure-VBD backend."""
+        model, _, body = _build_pneumatic_shell_model("cpu", add_dynamic_body=True)
+        solver = SolverMJVBDV2(model, vbd_options={"iterations": 1})
+
+        self.assertIsNotNone(body)
+        self.assertEqual(solver.features.backend, "pure_vbd")
+        self.assertIsNone(solver.mujoco_solver)
+        self.assertTrue(solver.features.rigid_solve_enabled)
+        self.assertTrue(solver.features.triangle_solve_enabled)
+        self.assertFalse(solver.features.tetrahedron_solve_enabled)
+        self.assertTrue(solver.features.pneumatic_solve_enabled)
+
+    def test_non_pneumatic_scene_allocates_no_cavity_state(self):
+        """Leave the pneumatic module completely dormant for ordinary VBD scenes."""
+        model = _build_particle_module_model("cpu", "triangle")
+        solver = SolverMJVBDV2(model, vbd_options={"iterations": 1})
+
+        self.assertNotIn("pneumatic:cavity", model.custom_frequency_counts)
+        self.assertFalse(solver.features.pneumatic_solve_enabled)
+        self.assertEqual(solver.features.pneumatic_cavity_count, 0)
+        self.assertFalse(solver.vbd_solver._pneumatic_enabled)
+        self.assertFalse(hasattr(solver.vbd_solver, "_pneumatic_volume"))
+        self.assertFalse(hasattr(solver.vbd_solver, "_pneumatic_kernels"))
+        self.assertNotIn(
+            "pneumatic_kernels", {module.__name__.rsplit(".", 1)[-1] for module in solver.vbd_solver._module_options}
+        )
+
+    def test_kinematic_soft_contact_uses_full_vbd_for_pneumatics(self):
+        """Select full VBD pressure kernels while retaining soft contact generation."""
+        model = _build_kinematic_pneumatic_model("cpu")
+        solver = SolverMJVBDV2(
+            model,
+            joint_mode="kinematic",
+            contact_mode="soft",
+            vbd_options={"iterations": 1},
+        )
+
+        self.assertEqual(solver.features.backend, "mjvbd_kinematic_soft")
+        self.assertTrue(solver.features.pneumatic_solve_enabled)
+        self.assertTrue(solver.vbd_solver._pneumatic_enabled)
+        self.assertTrue(solver.vbd_solver.__class__.__module__.endswith(".vbd.solver_vbd"))
+
+        state_0 = model.state()
+        state_1 = model.state()
+        solver.step(state_0, state_1, model.control(), None, 1.0e-3)
+        self.assertTrue(np.all(np.isfinite(state_1.pneumatic.volume.numpy())))
+
+    def test_coupled_external_rigid_path_uses_full_vbd_for_pneumatics(self):
+        """Retain pressure kernels when MuJoCo externally integrates joint bodies."""
+        model = _build_kinematic_pneumatic_model("cpu")
+        try:
+            solver = SolverMJVBDV2(
+                model,
+                mujoco_options={"use_mujoco_cpu": True},
+                vbd_options={"iterations": 1},
+            )
+        except (ImportError, ModuleNotFoundError) as error:
+            self.skipTest(f"MuJoCo is unavailable: {error}")
+
+        self.assertEqual(solver.features.backend, "coupled")
+        self.assertTrue(solver.features.pneumatic_solve_enabled)
+        self.assertTrue(solver.vbd_solver._pneumatic_enabled)
+        self.assertTrue(solver.vbd_solver.__class__.__module__.endswith(".vbd.solver_vbd"))
+
+        state_0 = model.state()
+        state_1 = model.state()
+        solver.step(state_0, state_1, model.control(), None, 1.0e-3)
+        self.assertTrue(np.all(np.isfinite(state_1.pneumatic.volume.numpy())))
+
+    def test_open_pneumatic_surface_is_rejected(self):
+        """Reject pneumatic faces that do not form a closed two-manifold shell."""
+        builder = newton.ModelBuilder()
+        for position in (
+            wp.vec3(),
+            wp.vec3(1.0, 0.0, 0.0),
+            wp.vec3(0.0, 1.0, 0.0),
+            wp.vec3(-1.0, 0.0, 0.0),
+            wp.vec3(0.0, -1.0, 0.0),
+        ):
+            builder.add_particle(position, wp.vec3(), 1.0)
+        for triangle in ((0, 1, 2), (0, 2, 3), (0, 3, 4), (0, 4, 1)):
+            builder.add_triangle(*triangle)
+
+        with self.assertRaisesRegex(ValueError, "closed two-manifold"):
+            newton.solvers.add_pneumatic_cavity(builder, range(4))
 
 
 if __name__ == "__main__":

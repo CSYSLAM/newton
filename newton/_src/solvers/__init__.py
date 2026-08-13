@@ -10,7 +10,15 @@ if TYPE_CHECKING:
     from .implicit_mpm import SolverImplicitMPM
     from .kamino import SolverKamino
     from .mjvbd import SolverMJVBD
-    from .mjvbd_v2 import SolverMJVBDV2
+    from .mjvbd_v2 import (
+        PneumaticCavityHandle,
+        PneumaticConfig,
+        PneumaticMode,
+        SolverMJVBDV2,
+        add_inflatable_mesh,
+        add_pneumatic_cavity,
+        register_pneumatic_attributes,
+    )
     from .mujoco import SolverMuJoCo
     from .semi_implicit import SolverSemiImplicit
     from .solver import SolverBase
@@ -19,6 +27,9 @@ if TYPE_CHECKING:
     from .xpbd import SolverXPBD
 
 __all__ = [
+    "PneumaticCavityHandle",
+    "PneumaticConfig",
+    "PneumaticMode",
     "SolverBase",
     "SolverFeatherstone",
     "SolverImplicitMPM",
@@ -30,6 +41,9 @@ __all__ = [
     "SolverStyle3D",
     "SolverVBD",
     "SolverXPBD",
+    "add_inflatable_mesh",
+    "add_pneumatic_cavity",
+    "register_pneumatic_attributes",
     "style3d",
 ]
 
@@ -38,6 +52,9 @@ __all__ = [
 # resolved on first attribute access (PEP 562) so that importing Newton does
 # not pay the import cost of every solver backend.
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
+    "PneumaticCavityHandle": (".mjvbd_v2", "PneumaticCavityHandle"),
+    "PneumaticConfig": (".mjvbd_v2", "PneumaticConfig"),
+    "PneumaticMode": (".mjvbd_v2", "PneumaticMode"),
     "SolverBase": (".solver", "SolverBase"),
     "SolverFeatherstone": (".featherstone", "SolverFeatherstone"),
     "SolverImplicitMPM": (".implicit_mpm", "SolverImplicitMPM"),
@@ -50,6 +67,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "SolverVBD": (".vbd", "SolverVBD"),
     "SolverXPBD": (".xpbd", "SolverXPBD"),
     "style3d": (".style3d", None),
+    "add_inflatable_mesh": (".mjvbd_v2", "add_inflatable_mesh"),
+    "add_pneumatic_cavity": (".mjvbd_v2", "add_pneumatic_cavity"),
+    "register_pneumatic_attributes": (".mjvbd_v2", "register_pneumatic_attributes"),
 }
 
 

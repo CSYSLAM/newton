@@ -34,6 +34,9 @@ https://newton-physics.github.io/newton/stable/solvers/index.html.
    :toctree: _generated
    :nosignatures:
 
+   PneumaticCavityHandle
+   PneumaticConfig
+   PneumaticMode
    SolverBase
    SolverFeatherstone
    SolverImplicitMPM
@@ -45,3 +48,13 @@ https://newton-physics.github.io/newton/stable/solvers/index.html.
    SolverStyle3D
    SolverVBD
    SolverXPBD
+
+.. rubric:: Functions
+
+.. autosummary::
+   :toctree: _generated
+   :signatures: long
+
+   add_inflatable_mesh
+   add_pneumatic_cavity
+   register_pneumatic_attributes

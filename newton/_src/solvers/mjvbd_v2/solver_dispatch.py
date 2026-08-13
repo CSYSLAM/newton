@@ -33,7 +33,7 @@ from .mujoco.solver_mujoco import SolverMuJoCo
 from .ownership import MJVBDV2Ownership, resolve_ownership
 from .soft_contact_pipeline import MJVBDSoftContactPipeline
 from .solver_mjvbd_v2 import SolverMJVBDV2 as _SolverMJVBDV2Coupled
-from .vbd.solver_vbd import SolverVBD
+from .vbd.solver_vbd import SolverVBD, _get_pneumatic_counts
 from .vbd_soft.solver_vbd import SolverVBD as SolverVBDSoft
 
 __all__ = ["SolverMJVBDV2"]
@@ -221,6 +221,7 @@ class _KinematicSoftBackend(SolverBase):
         self,
         model: Model,
         *,
+        use_full_vbd: bool,
         vbd_options: Mapping[str, object] | None,
         collision_options: Mapping[str, object] | None,
     ) -> None:
@@ -237,7 +238,8 @@ class _KinematicSoftBackend(SolverBase):
         requested_external = vbd_kwargs.pop("integrate_with_external_rigid_solver", True)
         if requested_external is not True:
             raise ValueError("The kinematic soft-only backend requires external rigid integration")
-        self.vbd_solver = SolverVBDSoft(
+        vbd_solver_type = SolverVBD if use_full_vbd else SolverVBDSoft
+        self.vbd_solver = vbd_solver_type(
             model,
             integrate_with_external_rigid_solver=True,
             **vbd_kwargs,
@@ -392,6 +394,8 @@ class SolverMJVBDV2(SolverBase):
         edge_count: int
         tetrahedron_count: int
         spring_count: int
+        pneumatic_cavity_count: int
+        pneumatic_face_count: int
         mujoco_solve_enabled: bool
         vbd_solve_enabled: bool
         rigid_solve_enabled: bool
@@ -400,6 +404,7 @@ class SolverMJVBDV2(SolverBase):
         bending_solve_enabled: bool
         tetrahedron_solve_enabled: bool
         spring_solve_enabled: bool
+        pneumatic_solve_enabled: bool
 
     def __init__(
         self,
@@ -432,6 +437,7 @@ class SolverMJVBDV2(SolverBase):
             inv_mass[index] > 0.0 and (int(body_flags[index]) & int(BodyFlags.KINEMATIC)) == 0
             for index in self.ownership.vbd_bodies
         )
+        pneumatic_cavity_count, pneumatic_face_count = _get_pneumatic_counts(model)
 
         has_vbd_dynamics = self.ownership.has_vbd_dynamic_bodies or model.particle_count > 0
 
@@ -466,6 +472,7 @@ class SolverMJVBDV2(SolverBase):
             backend_name = "mjvbd_kinematic_soft"
             backend = _KinematicSoftBackend(
                 model,
+                use_full_vbd=pneumatic_cavity_count > 0,
                 vbd_options=vbd_options,
                 collision_options=collision_options,
             )
@@ -503,6 +510,8 @@ class SolverMJVBDV2(SolverBase):
             edge_count=int(model.edge_count),
             tetrahedron_count=int(model.tet_count),
             spring_count=int(model.spring_count),
+            pneumatic_cavity_count=pneumatic_cavity_count,
+            pneumatic_face_count=pneumatic_face_count,
             mujoco_solve_enabled=backend_name in ("pure_mujoco", "coupled"),
             vbd_solve_enabled=backend_name in ("pure_vbd", "mjvbd_kinematic_soft", "vbd_kinematic_full", "coupled"),
             rigid_solve_enabled=dynamic_body_count > 0,
@@ -511,6 +520,7 @@ class SolverMJVBDV2(SolverBase):
             bending_solve_enabled=model.edge_count > 0,
             tetrahedron_solve_enabled=model.tet_count > 0,
             spring_solve_enabled=model.spring_count > 0,
+            pneumatic_solve_enabled=pneumatic_cavity_count > 0,
         )
 
     @classmethod
