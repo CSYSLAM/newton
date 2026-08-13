@@ -386,26 +386,6 @@ If you run the examples from a source checkout with uv, use
     </td>
   </tr>
   <tr>
-    <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/cloth/example_cloth_mjvbd_v2_dynamic_dexforce_bimanual_fold_tshirt_waic_house.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_mjvbd_v2_dynamic_dexforce_bimanual_fold_tshirt_waic_house.jpg" alt="MJVBDV2 Dynamic Dexforce T-Shirt Fold">
-      </a>
-    </td>
-    <td align="center" width="33%">
-    </td>
-    <td align="center" width="33%">
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="33%">
-      <code>python -m newton.examples cloth_mjvbd_v2_dynamic_dexforce_bimanual_fold_tshirt_waic_house</code>
-    </td>
-    <td align="center" width="33%">
-    </td>
-    <td align="center" width="33%">
-    </td>
-  </tr>
-  <tr>
     <td colspan="3"><h3>Inverse Kinematics Examples</h3></td>
   </tr>
   <tr>
@@ -685,28 +665,6 @@ If you run the examples from a source checkout with uv, use
   </tr>
   <tr>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/vbd/example_vbd_inflatable_bag_v0.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_inflatable_bag_v0.jpg" alt="MJVBDV2 Inflatable Chip Bag">
-      </a>
-    </td>
-    <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/vbd/example_vbd_inflatable_bag_v1.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_inflatable_bag_v1.jpg" alt="MJVBDV2 Perimeter-Sealed Inflatable Bag">
-      </a>
-    </td>
-    <td align="center" width="33%"></td>
-  </tr>
-  <tr>
-    <td align="center" width="33%">
-      <code>python -m newton.examples vbd_inflatable_bag_v0</code>
-    </td>
-    <td align="center" width="33%">
-      <code>python -m newton.examples vbd_inflatable_bag_v1</code>
-    </td>
-    <td align="center" width="33%"></td>
-  </tr>
-  <tr>
-    <td align="center" width="33%">
       <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/vbd/example_gear_crusher.py">
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_gear_crusher.jpg" alt="VBD Gear Crusher">
       </a>
@@ -720,6 +678,61 @@ If you run the examples from a source checkout with uv, use
     </td>
     <td align="center" width="33%"></td>
     <td align="center" width="33%"></td>
+  </tr>
+  <tr>
+    <td colspan="3"><h3>MJVBDV2 Examples</h3></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_vbd_inflatable_bag_v0.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_inflatable_bag_v0.jpg" alt="MJVBDV2 Inflatable Chip Bag">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_vbd_inflatable_bag_v1.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_inflatable_bag_v1.jpg" alt="MJVBDV2 Perimeter-Sealed Inflatable Bag">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_cloth_mjvbd_v2_dynamic_dexforce_bimanual_fold_tshirt_waic_house.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_mjvbd_v2_dynamic_dexforce_bimanual_fold_tshirt_waic_house.jpg" alt="MJVBDV2 Dynamic Dexforce T-Shirt Fold">
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <code>python -m newton.examples vbd_inflatable_bag_v0</code>
+    </td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples vbd_inflatable_bag_v1</code>
+    </td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples cloth_mjvbd_v2_dynamic_dexforce_bimanual_fold_tshirt_waic_house</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_robot_rigid_soft_cloth.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_robot_rigid_soft_cloth.jpg" alt="MJVBDV2 Robot Coupling Matrix">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_rigid_soft_cloth.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_rigid_soft_cloth.jpg" alt="MJVBDV2 Rigid Soft Cloth">
+      </a>
+    </td>
+    <td></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <code>python -m newton.examples mjvbd_v2_robot_rigid_soft_cloth --joint-mode dynamic</code><br>
+      <small>Use <code>--joint-mode kinematic</code>; single-object and pair variants use the same name pattern.</small>
+    </td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples mjvbd_v2_rigid_soft_cloth</code><br>
+      <small>Use <code>--solver vbd</code> for the native VBD comparison.</small>
+    </td>
+    <td></td>
   </tr>
   <tr>
     <td colspan="3"><h3>Multi-Physics Examples</h3></td>
@@ -771,30 +784,6 @@ If you run the examples from a source checkout with uv, use
     </td>
     <td align="center" width="33%">
       <code>python -m newton.examples mujoco_franka_vbd_cable_admm_solver</code>
-    </td>
-    <td></td>
-  </tr>
-  <tr>
-    <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/multiphysics/example_mjvbd_v2_robot_rigid_soft_cloth.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_robot_rigid_soft_cloth.jpg" alt="MJVBDV2 Robot Coupling Matrix">
-      </a>
-    </td>
-    <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/multiphysics/example_mjvbd_v2_rigid_soft_cloth.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_rigid_soft_cloth.jpg" alt="MJVBDV2 Rigid Soft Cloth">
-      </a>
-    </td>
-    <td></td>
-  </tr>
-  <tr>
-    <td align="center" width="33%">
-      <code>python -m newton.examples mjvbd_v2_robot_rigid_soft_cloth --joint-mode dynamic</code><br>
-      <small>Use <code>--joint-mode kinematic</code>; single-object and pair variants use the same name pattern.</small>
-    </td>
-    <td align="center" width="33%">
-      <code>python -m newton.examples mjvbd_v2_rigid_soft_cloth</code><br>
-      <small>Use <code>--solver vbd</code> for the native VBD comparison.</small>
     </td>
     <td></td>
   </tr>

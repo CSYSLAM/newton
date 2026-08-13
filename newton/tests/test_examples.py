@@ -578,14 +578,14 @@ add_example_test(
 )
 add_example_test(
     TestClothExamples,
-    name="vbd.example_vbd_inflatable_bag_v0",
+    name="mjvbdv2.example_vbd_inflatable_bag_v0",
     devices=cuda_test_devices,
     test_options={"num-frames": 100},
     use_viewer=True,
 )
 add_example_test(
     TestClothExamples,
-    name="vbd.example_vbd_inflatable_bag_v1",
+    name="mjvbdv2.example_vbd_inflatable_bag_v1",
     devices=cuda_test_devices,
     test_options={"num-frames": 100},
     use_viewer=True,

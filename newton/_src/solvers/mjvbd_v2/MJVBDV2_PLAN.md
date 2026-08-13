@@ -42,8 +42,8 @@ MJVBDV2 必须同时支持：
 
 V2 另写两个独立示例：
 
-- `newton/examples/vbd/example_mjvbd_v2_dexforce_throw_rigid_into_bag.py`
-- `newton/examples/cloth/example_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house.py`
+- `newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_throw_rigid_into_bag.py`
+- `newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house.py`
 
 新示例可以复用只读基准中的场景资产、材料数值和轨迹数据，但不能通过修改
 或在原文件中加入条件分支来实现。

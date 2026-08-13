@@ -9,7 +9,7 @@ Run::
     python -m newton.examples mjvbd_v2_robot_soft --joint-mode kinematic
 """
 
-from newton.examples.multiphysics.mjvbd_v2_demo import RobotCouplingExample, run_robot_example
+from newton.examples.mjvbdv2.mjvbd_v2_demo import RobotCouplingExample, run_robot_example
 
 
 class Example(RobotCouplingExample):

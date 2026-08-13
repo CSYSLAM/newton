@@ -11,7 +11,7 @@ Run::
     python -m newton.examples mjvbd_v2_rigid_soft_cloth --solver vbd
 """
 
-from newton.examples.multiphysics.mjvbd_v2_demo import VBDMixExample, run_vbd_mix_example
+from newton.examples.mjvbdv2.mjvbd_v2_demo import VBDMixExample, run_vbd_mix_example
 
 
 class Example(VBDMixExample):

@@ -1,14 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-"""Interactively tune a physical W1 right-hand rigid-cube grasp.
+"""Interactively tune a physical W1 right-hand soft-cube grasp.
 
-The scene contains a floating, kinematic W1 right hand and one dynamic rigid
-box. Only the hand's URDF collision meshes participate in the grasp; no
-auxiliary fingertip pads or kinematic attachment are used.
+The scene contains only a floating, kinematic W1 right hand and one volumetric
+VBD soft cube. The hand's visible URDF collision meshes are SDF contact
+boundaries for the soft cube; no particle pose is attached to or copied from
+the hand.
 
 Run from the repository root::
 
-    uv run --extra examples -m newton.examples vbd_mjvbd_v2_right_hand_rigid_cube_recorder --viewer gl
+    uv run --extra examples -m newton.examples vbd_mjvbd_v2_right_hand_soft_cube_recorder --viewer gl
 """
 
 from __future__ import annotations
@@ -25,10 +26,11 @@ import newton.examples
 from newton.solvers import SolverMJVBDV2
 
 FPS = 60
-SIM_SUBSTEPS = 8
-VBD_ITERATIONS = 40
+SIM_SUBSTEPS = 5
+VBD_ITERATIONS = 24
 
 RIGHT_HAND_URDF = Path(__file__).resolve().parents[3] / "assets" / "W1_right_hand" / "DexforceW1_right_hand.urdf"
+# Keep the existing grasp scene's world layout after removing the robot.
 HAND_HOME = wp.transform(
     wp.vec3(-0.15679353, -2.88748360, 1.37893760),
     wp.quat(-0.31233013, 0.67216527, 0.32775849, -0.58584785),
@@ -39,14 +41,35 @@ TABLE_HALF_EXTENTS = (0.32, 0.45, 0.025)
 TABLE_TOP_Z = float(TABLE_POS[2]) + TABLE_HALF_EXTENTS[2]
 CUBE_HALF_EXTENTS = (0.027, 0.012, 0.027)
 CUBE_CENTRE = wp.vec3(-0.14931439, -2.76669516, TABLE_TOP_Z + CUBE_HALF_EXTENTS[2] + 0.001)
-CUBE_DENSITY = 1500.0
+CUBE_DIMS = (10, 6, 10)
+CUBE_DENSITY = 300.0
+CUBE_K_MU = 1.0e6
+CUBE_K_LAMBDA = 3.0e6
+CUBE_K_DAMP = 20.0
+CUBE_PARTICLE_RADIUS = 0.0025
+CUBE_SELF_CONTACT_RADIUS = 0.003
+CUBE_SELF_CONTACT_MARGIN = 2.0 * CUBE_SELF_CONTACT_RADIUS
 
-CONTACT_MARGIN = 0.0015
-CONTACT_KE = 3.0e3
-CONTACT_KD = 1.0
-CONTACT_MU = 3.0e3
-RIGID_BODY_CONTACT_BUFFER_SIZE = 4096
+BAG_WIDTH = 0.20
+BAG_DEPTH = 0.16
+BAG_HEIGHT = 0.24
+BAG_POS = wp.vec3(0.24068561, -2.79869516, 0.93122798)
+BAG_RESOLUTION = 20
+BAG_PARTICLE_RADIUS = 0.003
+BAG_DENSITY = 0.08
+BAG_TRI_KE = 1.5e2
+BAG_TRI_KA = 1.5e2
+BAG_TRI_KD = 0.5
+BAG_EDGE_KE = 0.5
+BAG_EDGE_KD = 1.5e-5
 
+CONTACT_KE = 3.0e4
+CONTACT_KD = 0.5
+CONTACT_MU = 50.0
+CONTACT_MARGIN = 0.003
+RIGID_BODY_PARTICLE_CONTACT_BUFFER_SIZE = 4096
+PARTICLE_VERTEX_CONTACT_BUFFER_SIZE = 128
+PARTICLE_EDGE_CONTACT_BUFFER_SIZE = 256
 POSITION_LIMIT_MM = 500.0
 CAMERA_POS = wp.vec3(2.15, -5.78, 1.94)
 CAMERA_PITCH = -18.0
@@ -65,14 +88,8 @@ HAND_JOINTS = (
     "RIGHT_PINKY_PIP",
 )
 
-# Match the pre-closure approach pose in
-# example_vbd_mjvbd_v2_right_hand_recorded_soft_cube_into_bag.py.
-INITIAL_HAND_ROOT = wp.transform(
-    wp.vec3(-0.16214203834533691, -2.838686943054199, 1.3409454822540283),
-    wp.quat(0.09465623646974564, 0.9546480774879456, -0.2820824682712555, 0.010803722776472569),
-)
-INITIAL_HAND_JOINTS = {
-    "RIGHT_HAND_THUMB1": 6.0,
+RECORDED_JOINT_DEGREES = {
+    "RIGHT_HAND_THUMB1": 12.0,
     "RIGHT_HAND_THUMB2": 90.0,
     "RIGHT_HAND_INDEX": 41.0,
     "RIGHT_INDEX_PIP": 24.0,
@@ -83,6 +100,43 @@ INITIAL_HAND_JOINTS = {
     "RIGHT_HAND_PINKY": 24.0,
     "RIGHT_PINKY_PIP": 26.0,
 }
+
+
+def _generate_box_bag(half_x: float, half_y: float, height: float, resolution: int):
+    """Generate the five faces of an open-topped cloth box."""
+
+    cell_x = 2.0 * half_x / resolution
+    cell_y = 2.0 * half_y / resolution
+    cell_z = height / resolution
+    vertex_map: dict[tuple[float, float, float], int] = {}
+    vertices: list[tuple[float, float, float]] = []
+    indices: list[int] = []
+
+    def vertex(x: float, y: float, z: float):
+        key = (round(x, 6), round(y, 6), round(z, 6))
+        if key not in vertex_map:
+            vertex_map[key] = len(vertices)
+            vertices.append((x, y, z))
+        return vertex_map[key]
+
+    def quad(v00: int, v10: int, v01: int, v11: int):
+        indices.extend((v00, v10, v01, v10, v11, v01))
+
+    for i in range(resolution):
+        for j in range(resolution):
+            x0, y0 = -half_x + i * cell_x, -half_y + j * cell_y
+            x1, y1 = x0 + cell_x, y0 + cell_y
+            quad(vertex(x0, y0, 0.0), vertex(x1, y0, 0.0), vertex(x0, y1, 0.0), vertex(x1, y1, 0.0))
+    for i in range(resolution):
+        for j in range(resolution):
+            x0, x1 = -half_x + i * cell_x, -half_x + (i + 1) * cell_x
+            y0, y1 = -half_y + i * cell_y, -half_y + (i + 1) * cell_y
+            z0, z1 = j * cell_z, (j + 1) * cell_z
+            quad(vertex(x0, -half_y, z0), vertex(x1, -half_y, z0), vertex(x0, -half_y, z1), vertex(x1, -half_y, z1))
+            quad(vertex(x1, half_y, z0), vertex(x0, half_y, z0), vertex(x1, half_y, z1), vertex(x0, half_y, z1))
+            quad(vertex(-half_x, y1, z0), vertex(-half_x, y0, z0), vertex(-half_x, y1, z1), vertex(-half_x, y0, z1))
+            quad(vertex(half_x, y0, z0), vertex(half_x, y1, z0), vertex(half_x, y0, z1), vertex(half_x, y1, z1))
+    return np.asarray(vertices, dtype=np.float32), indices
 
 
 @wp.kernel
@@ -122,12 +176,29 @@ def _joint_velocity(
                 out[qd_begin + i] = (q1[q_begin + i] - q0[q_begin + i]) * inv_dt
 
 
+@wp.kernel
+def _pin_bag_particles(
+    pinned_indices: wp.array[wp.int32],
+    original_positions: wp.array[wp.vec3],
+    pos_0: wp.array[wp.vec3],
+    pos_1: wp.array[wp.vec3],
+):
+    i = wp.tid()
+    particle = pinned_indices[i]
+    pos_0[particle] = original_positions[i]
+    pos_1[particle] = original_positions[i]
+
+
 class Example:
-    """Tune a mesh-only physical grasp of one dynamic rigid cube."""
+    """Interactive right-hand physical recorder for a soft-cube grasp."""
+
+    RIGID_BODY_CONTACT_BUFFER_SIZE = 64
 
     def __init__(self, viewer, args):
         self.viewer = viewer
         self.args = args
+        self.include_bag = getattr(self, "include_bag", False)
+        self.particle_self_contact_enabled = getattr(self, "particle_self_contact_enabled", True)
         self.frame_dt = 1.0 / FPS
         self.sim_dt = self.frame_dt / SIM_SUBSTEPS
         self.sim_time = 0.0
@@ -137,7 +208,6 @@ class Example:
         self._trajectory_frames: list[dict[str, Any]] = []
         self._last_target_signature: tuple[float, ...] | None = None
         self._initial_keyframe = self._load_initial_keyframe()
-
         self._build_scene()
         self.device = self.model.device
         self.state_0 = self.model.state()
@@ -145,6 +215,8 @@ class Example:
         self.control = self.model.control()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_1)
+        if self.include_bag:
+            self._initialize_bag_pin()
         self.solver = SolverMJVBDV2(
             self.model,
             mujoco_articulations=self.hand_articulations,
@@ -152,33 +224,38 @@ class Example:
             contact_mode="full",
             vbd_options={
                 "iterations": VBD_ITERATIONS,
-                "rigid_avbd_contact_alpha": 0.0,
-                "rigid_contact_history": True,
-                "rigid_contact_stick_motion_eps": 5.0e-4,
-                "rigid_contact_stick_freeze_translation_eps": 2.0e-4,
-                "rigid_contact_stick_freeze_angular_eps": 2.0e-4,
-                "rigid_body_contact_buffer_size": RIGID_BODY_CONTACT_BUFFER_SIZE,
-                "particle_enable_self_contact": False,
+                "rigid_body_contact_buffer_size": self.RIGID_BODY_CONTACT_BUFFER_SIZE,
+                "rigid_body_particle_contact_buffer_size": RIGID_BODY_PARTICLE_CONTACT_BUFFER_SIZE,
+                "particle_enable_self_contact": self.particle_self_contact_enabled,
+                "particle_self_contact_radius": CUBE_SELF_CONTACT_RADIUS,
+                "particle_self_contact_margin": CUBE_SELF_CONTACT_MARGIN,
+                "particle_vertex_contact_buffer_size": PARTICLE_VERTEX_CONTACT_BUFFER_SIZE,
+                "particle_edge_contact_buffer_size": PARTICLE_EDGE_CONTACT_BUFFER_SIZE,
+                "particle_collision_detection_interval": 0,
+                "particle_topological_contact_filter_threshold": 1,
+                "particle_rest_shape_contact_exclusion_radius": 0.03,
             },
-            collision_options={"broad_phase": "nxn", "contact_matching": "latest"},
+            collision_options={
+                "broad_phase": "nxn",
+                "soft_contact_margin": CONTACT_MARGIN,
+                "enable_rigid_soft_full_surface_contact": True,
+            },
         )
-
         self.root_joint = self._root_joint_index()
         self.root_q_start = int(self.model.joint_q_start.numpy()[self.root_joint])
         self.hand_joint_indices = self._hand_joint_indices()
         self.frame_q_start = wp.zeros_like(self.model.joint_q)
         self.frame_q_end = wp.zeros_like(self.model.joint_q)
         self.manual_target_q = wp.clone(self.model.joint_q)
-        self.gizmo_transform = self._copy_transform(INITIAL_HAND_ROOT)
+        self.gizmo_transform = self._copy_transform(HAND_HOME)
         self.position_mm = np.zeros(3, dtype=np.float32)
         self.rotation_deg = np.zeros(3, dtype=np.float32)
-        self.joint_degrees = dict(INITIAL_HAND_JOINTS)
+        self.joint_degrees = dict(RECORDED_JOINT_DEGREES)
         self._restore_initial_controls()
         self.joint_limits = self._joint_limits()
-        self.target_transform = self._copy_transform(self.gizmo_transform)
+        self.target_transform = self._copy_transform(HAND_HOME)
         self._refresh_target()
         self._set_initial_hand_pose()
-
         self.viewer.set_model(self.model)
         if hasattr(self.viewer, "renderer"):
             self.viewer.renderer.draw_wireframe = True
@@ -188,15 +265,12 @@ class Example:
     def _build_scene(self):
         if not RIGHT_HAND_URDF.is_file():
             raise FileNotFoundError(f"Right-hand URDF not found: {RIGHT_HAND_URDF}")
-
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.8))
         builder.default_shape_cfg.ke = CONTACT_KE
         builder.default_shape_cfg.kd = CONTACT_KD
         builder.default_shape_cfg.mu = CONTACT_MU
-        builder.default_shape_cfg.margin = CONTACT_MARGIN
         builder.default_shape_cfg.configure_sdf(force_sdf=True)
         SolverMJVBDV2.register_custom_attributes(builder)
-
         articulation_start = builder.articulation_count
         builder.add_urdf(
             str(RIGHT_HAND_URDF),
@@ -226,35 +300,78 @@ class Example:
         )
         builder.add_ground_plane(height=-0.00377202, label="hand_tuning_ground")
 
-        cube_cfg = newton.ModelBuilder.ShapeConfig(
+        if self.include_bag:
+            bag_vertices, bag_indices = _generate_box_bag(
+                0.5 * BAG_WIDTH,
+                0.5 * BAG_DEPTH,
+                BAG_HEIGHT,
+                BAG_RESOLUTION,
+            )
+            self.bag_particle_start = builder.particle_count
+            builder.add_cloth_mesh(
+                pos=BAG_POS,
+                rot=wp.quat_identity(),
+                scale=1.0,
+                vel=wp.vec3(),
+                vertices=bag_vertices.tolist(),
+                indices=bag_indices,
+                density=BAG_DENSITY,
+                tri_ke=BAG_TRI_KE,
+                tri_ka=BAG_TRI_KA,
+                tri_kd=BAG_TRI_KD,
+                edge_ke=BAG_EDGE_KE,
+                edge_kd=BAG_EDGE_KD,
+                particle_radius=BAG_PARTICLE_RADIUS,
+                label="open_soft_box_bag",
+            )
+            self.bag_particle_end = builder.particle_count
+            bag_top = np.flatnonzero(np.abs(bag_vertices[:, 2] - BAG_HEIGHT) < 1.0e-5)
+            self.bag_top_indices = bag_top.astype(np.int32) + self.bag_particle_start
+
+        cube_rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), wp.pi)
+        cube_origin = CUBE_CENTRE - wp.quat_rotate(cube_rotation, wp.vec3(*CUBE_HALF_EXTENTS))
+        self.cube_particle_start = builder.particle_count
+        builder.add_soft_grid(
+            pos=cube_origin,
+            rot=cube_rotation,
+            vel=wp.vec3(),
+            dim_x=CUBE_DIMS[0],
+            dim_y=CUBE_DIMS[1],
+            dim_z=CUBE_DIMS[2],
+            cell_x=2.0 * CUBE_HALF_EXTENTS[0] / CUBE_DIMS[0],
+            cell_y=2.0 * CUBE_HALF_EXTENTS[1] / CUBE_DIMS[1],
+            cell_z=2.0 * CUBE_HALF_EXTENTS[2] / CUBE_DIMS[2],
             density=CUBE_DENSITY,
-            ke=CONTACT_KE,
-            kd=CONTACT_KD,
-            mu=CONTACT_MU,
-            margin=CONTACT_MARGIN,
+            k_mu=CUBE_K_MU,
+            k_lambda=CUBE_K_LAMBDA,
+            k_damp=CUBE_K_DAMP,
+            particle_radius=CUBE_PARTICLE_RADIUS,
+            label="tunable_soft_cube",
         )
-        cube_cfg.configure_sdf(force_sdf=True)
-        self.cube_body = builder.add_body(
-            xform=wp.transform(CUBE_CENTRE, wp.quat_identity()),
-            label="tunable_rigid_cube",
-        )
-        self.cube_shape = builder.shape_count
-        builder.add_shape_box(
-            self.cube_body,
-            hx=CUBE_HALF_EXTENTS[0],
-            hy=CUBE_HALF_EXTENTS[1],
-            hz=CUBE_HALF_EXTENTS[2],
-            cfg=cube_cfg,
-            color=(0.90, 0.32, 0.18),
-            label="tunable_rigid_cube_shape",
-        )
+        self.cube_particle_end = builder.particle_count
 
         collide_shapes = int(newton.ShapeFlags.COLLIDE_SHAPES)
-        for shape in range(builder.shape_count):
-            builder.shape_flags[shape] |= collide_shapes
-
-        builder.color()
+        collide_particles = int(newton.ShapeFlags.COLLIDE_PARTICLES)
+        for shape in range(self.hand_shape_end):
+            builder.shape_flags[shape] |= collide_shapes | collide_particles
+        for shape in range(self.hand_shape_end, builder.shape_count):
+            builder.shape_flags[shape] |= collide_shapes | collide_particles
+        builder.color(include_bending=True)
         self.model = builder.finalize(requires_grad=False)
+        self.model.soft_contact_ke = CONTACT_KE
+        self.model.soft_contact_kd = CONTACT_KD
+        self.model.soft_contact_mu = CONTACT_MU
+
+    def _initialize_bag_pin(self):
+        """Pin the open bag rim at its recorded world positions."""
+
+        pinned_indices = self.bag_top_indices
+        flags = self.model.particle_flags.numpy()
+        flags[pinned_indices] &= ~int(newton.ParticleFlags.ACTIVE)
+        self.model.particle_flags.assign(flags)
+        particle_q = self.state_0.particle_q.numpy()
+        self.bag_pinned_indices = wp.array(pinned_indices, dtype=wp.int32, device=self.device)
+        self.bag_pinned_original = wp.array(particle_q[pinned_indices].copy(), dtype=wp.vec3, device=self.device)
 
     def _root_joint_index(self):
         types = self.model.joint_type.numpy()
@@ -290,6 +407,10 @@ class Example:
             )
             for name in HAND_JOINTS
         }
+
+    def _default_joint_degrees(self):
+        q = self.model.joint_q.numpy()
+        return {name: float(np.degrees(q[index])) for name, index in self.hand_joint_indices.items()}
 
     @staticmethod
     def _copy_transform(transform):
@@ -352,8 +473,7 @@ class Example:
             wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), float(rz)),
         )
         return wp.transform(
-            wp.vec3(*position),
-            self._quat_mul(rotation, wp.transform_get_rotation(self.gizmo_transform)),
+            wp.vec3(*position), self._quat_mul(rotation, wp.transform_get_rotation(self.gizmo_transform))
         )
 
     def _refresh_target(self):
@@ -368,7 +488,7 @@ class Example:
         self._last_target_signature = self._target_signature()
 
     def _set_initial_hand_pose(self):
-        """Initialize the physical hand at the configured grasp keyframe."""
+        """Initialize the physical hand at the recorded grasp keyframe."""
 
         self.state_0.joint_q.assign(self.manual_target_q)
         self.state_1.joint_q.assign(self.manual_target_q)
@@ -403,6 +523,18 @@ class Example:
         wp.copy(self.frame_q_start, self.state_0.joint_q)
         wp.copy(self.frame_q_end, self.manual_target_q)
         for substep in range(SIM_SUBSTEPS):
+            if self.include_bag:
+                wp.launch(
+                    _pin_bag_particles,
+                    self.bag_pinned_indices.shape[0],
+                    [
+                        self.bag_pinned_indices,
+                        self.bag_pinned_original,
+                        self.state_0.particle_q,
+                        self.state_1.particle_q,
+                    ],
+                    device=self.device,
+                )
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
             alpha = (substep + 1) / SIM_SUBSTEPS
@@ -443,34 +575,19 @@ class Example:
         self.state_1 = self.model.state()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_1)
+        if self.include_bag:
+            self._initialize_bag_pin()
         self.manual_target_q = wp.clone(self.model.joint_q)
-        self.gizmo_transform = self._copy_transform(INITIAL_HAND_ROOT)
+        self.gizmo_transform = self._copy_transform(HAND_HOME)
         self.position_mm.fill(0.0)
         self.rotation_deg.fill(0.0)
-        self.joint_degrees = dict(INITIAL_HAND_JOINTS)
+        self.joint_degrees = dict(RECORDED_JOINT_DEGREES)
         self._restore_initial_controls()
         self.sim_time = 0.0
         self.frame_index = 0
         self._trajectory_frames.clear()
         self._refresh_target()
         self._set_initial_hand_pose()
-        self.solver.reset(self.state_0, flags=0)
-
-    def _contact_counts(self) -> tuple[int, int]:
-        """Return current hand-cube and total rigid contact counts."""
-
-        contacts = self.solver.contacts
-        total = int(contacts.rigid_contact_count.numpy()[0])
-        shape_0 = contacts.rigid_contact_shape0.numpy()
-        shape_1 = contacts.rigid_contact_shape1.numpy()
-        active = min(total, shape_0.shape[0])
-        shape_0 = shape_0[:active]
-        shape_1 = shape_1[:active]
-        hand_cube = np.count_nonzero(
-            ((shape_0 == self.cube_shape) & (shape_1 >= 0) & (shape_1 < self.hand_shape_end))
-            | ((shape_1 == self.cube_shape) & (shape_0 >= 0) & (shape_0 < self.hand_shape_end))
-        )
-        return int(hand_cube), total
 
     def _transform_dict(self, transform):
         position = wp.transform_get_translation(transform)
@@ -483,9 +600,6 @@ class Example:
     def _capture_frame(self):
         current_q = self.state_0.joint_q.numpy()
         root_q = current_q[self.root_q_start : self.root_q_start + 7]
-        cube_q = self.state_0.body_q.numpy()[self.cube_body]
-        cube_qd = self.state_0.body_qd.numpy()[self.cube_body]
-        hand_cube_contacts, total_rigid_contacts = self._contact_counts()
         return {
             "frame": self.frame_index,
             "time_s": self.sim_time,
@@ -502,13 +616,7 @@ class Example:
             "finger_joints_degrees": {
                 name: float(np.degrees(current_q[index])) for name, index in self.hand_joint_indices.items()
             },
-            "rigid_cube_pose": {
-                "position_m": [float(value) for value in cube_q[:3]],
-                "quaternion_xyzw": [float(value) for value in cube_q[3:]],
-            },
-            "rigid_cube_twist": [float(value) for value in cube_qd],
-            "hand_cube_contact_count": hand_cube_contacts,
-            "total_rigid_contact_count": total_rigid_contacts,
+            "soft_cube_particles": int(self.cube_particle_end - self.cube_particle_start),
         }
 
     def _store_trajectory_frame(self):
@@ -527,8 +635,7 @@ class Example:
 
     def save_pose(self):
         path = self._write_json(
-            self.args.pose_output,
-            {"format": "newton_w1_right_hand_rigid_cube_pose_v1", "pose": self._capture_frame()},
+            self.args.pose_output, {"format": "newton_w1_right_hand_pose_v1", "pose": self._capture_frame()}
         )
         self._set_status(f"Saved pose: {path}")
 
@@ -536,7 +643,7 @@ class Example:
         path = self._write_json(
             self.args.trajectory_output,
             {
-                "format": "newton_w1_right_hand_rigid_cube_trajectory_v1",
+                "format": "newton_w1_right_hand_trajectory_v1",
                 "frame_dt_s": self.frame_dt,
                 "frames": self._trajectory_frames,
             },
@@ -650,7 +757,6 @@ class Example:
             self.render()
             self.viewer.close()
             return
-
         import tkinter as tk  # noqa: PLC0415
         from tkinter import ttk  # noqa: PLC0415
 
@@ -659,7 +765,7 @@ class Example:
         self._ttk = ttk
         root = tk.Tk()
         self._root = root
-        root.title("MJVBD-v2 W1 right-hand rigid-cube recorder")
+        root.title("MJVBD-v2 W1 right-hand soft-cube recorder")
         root.geometry("710x650")
         root.minsize(660, 630)
         self._build_controls(root)
@@ -670,7 +776,7 @@ class Example:
         ttk.Button(buttons, text="Save pose JSON", command=self.save_pose).pack(side="left", padx=3)
         ttk.Button(buttons, text="Save trajectory", command=self.save_trajectory).pack(side="left", padx=3)
         self._status_var = tk.StringVar(
-            value="Realtime rigid physics running; adjust the hand, then record a stable grasp keyframe."
+            value="Realtime physics running; move the gizmo or sliders, then record a keyframe."
         )
         ttk.Label(root, textvariable=self._status_var, anchor="w").pack(fill="x", padx=12, pady=(0, 7))
 
@@ -694,48 +800,62 @@ class Example:
         self._store_trajectory_frame()
         keyframe_path = self._write_json(
             self.args.keyframe_output,
-            {"format": "newton_w1_right_hand_rigid_cube_keyframe_v1", "keyframe": self._trajectory_frames[-1]},
+            {"format": "newton_w1_right_hand_keyframe_v1", "keyframe": self._trajectory_frames[-1]},
         )
         trajectory_path = self._write_json(
             self.args.trajectory_output,
             {
-                "format": "newton_w1_right_hand_rigid_cube_trajectory_v1",
+                "format": "newton_w1_right_hand_trajectory_v1",
                 "frame_dt_s": self.frame_dt,
                 "frames": self._trajectory_frames,
             },
         )
-        hand_cube_contacts, total_rigid_contacts = self._contact_counts()
+        contact_count = int(self.solver.contacts.soft_contact_count.numpy()[0])
         self._set_status(
             f"Recorded keyframe {len(self._trajectory_frames)} at physics frame {self.frame_index}; "
-            f"hand-cube contacts: {hand_cube_contacts}, total rigid contacts: {total_rigid_contacts}. "
-            f"Saved: {keyframe_path}, {trajectory_path}"
+            f"solved hand/soft contacts: {contact_count}. Saved: {keyframe_path}, {trajectory_path}"
         )
 
     def _reset_from_ui(self):
         self._reset_physics()
-        self._set_status("Reset the hand and rigid cube to their initial states.")
+        self._set_status("Reset hand and soft cube to the recorded initial keyframe.")
         self.render()
 
     def test_final(self):
-        """Verify that one physical step keeps the hand and rigid cube finite."""
+        """Verify that one manual physical step keeps all states finite."""
 
+        assert np.all(np.isfinite(self.state_0.particle_q.numpy()))
         assert np.all(np.isfinite(self.state_0.joint_q.numpy()))
         assert np.all(np.isfinite(self.state_0.body_q.numpy()))
-        assert np.all(np.isfinite(self.state_0.body_qd.numpy()))
 
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
         parser.set_defaults(num_frames=1, paused=True)
-        parser.add_argument("--pose-output", default=str(Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_w1_right_hand_rigid_cube_pose.json"))
-        parser.add_argument("--trajectory-output", default=str(Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_w1_right_hand_rigid_cube_trajectory.json"))
-        parser.add_argument("--keyframe-output", default=str(Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_w1_right_hand_rigid_cube_last_keyframe.json"))
+        parser.add_argument(
+            "--pose-output",
+            default=str(
+                Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_w1_right_hand_pose.json"
+            ),
+        )
+        parser.add_argument(
+            "--trajectory-output",
+            default=str(
+                Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_w1_right_hand_trajectory.json"
+            ),
+        )
+        parser.add_argument(
+            "--keyframe-output",
+            default=str(
+                Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_w1_right_hand_last_keyframe.json"
+            ),
+        )
         parser.add_argument("--recorder-no-gui", action="store_true")
         return parser
 
 
 def main():
-    """Launch the interactive right-hand rigid-cube recorder."""
+    """Launch the interactive right-hand soft-cube recorder."""
 
     parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)

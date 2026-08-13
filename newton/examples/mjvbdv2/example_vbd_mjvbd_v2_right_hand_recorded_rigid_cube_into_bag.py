@@ -22,10 +22,12 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.vbd import example_vbd_mjvbd_v2_right_hand_rigid_cube_recorder as recorder
+from newton.examples.mjvbdv2 import example_vbd_mjvbd_v2_right_hand_rigid_cube_recorder as recorder
 from newton.solvers import SolverMJVBDV2
 
-DEFAULT_GRASP_KEYFRAME = Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_w1_right_hand_rigid_cube_last_keyframe.json"
+DEFAULT_GRASP_KEYFRAME = (
+    Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_w1_right_hand_rigid_cube_last_keyframe.json"
+)
 
 BAG_WIDTH = 0.20
 BAG_DEPTH = 0.16

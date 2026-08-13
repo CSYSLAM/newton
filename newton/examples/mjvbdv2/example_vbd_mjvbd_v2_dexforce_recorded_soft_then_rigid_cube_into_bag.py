@@ -20,9 +20,11 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.vbd import example_vbd_mjvbd_v2_dexforce_grasp_rigid_into_bag_rigid as rigid_reference
-from newton.examples.vbd import example_vbd_mjvbd_v2_dexforce_recorded_soft_cube_into_bag as recorded_soft
-from newton.examples.vbd import example_vbd_mjvbd_v2_right_hand_recorded_soft_then_rigid_cube_into_bag as hand_reference
+from newton.examples.mjvbdv2 import example_vbd_mjvbd_v2_dexforce_grasp_rigid_into_bag_rigid as rigid_reference
+from newton.examples.mjvbdv2 import example_vbd_mjvbd_v2_dexforce_recorded_soft_cube_into_bag as recorded_soft
+from newton.examples.mjvbdv2 import (
+    example_vbd_mjvbd_v2_right_hand_recorded_soft_then_rigid_cube_into_bag as hand_reference,
+)
 
 soft0 = recorded_soft.soft0
 

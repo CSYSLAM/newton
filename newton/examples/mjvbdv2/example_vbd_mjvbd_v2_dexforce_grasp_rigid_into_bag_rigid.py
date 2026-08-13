@@ -98,7 +98,9 @@ DEFAULT_HOUSE_USD = (
     "/home/oem/code/engine/newton/newton/examples/cloth/assets/house_background/"
     "House5_Simple2_visual_table01_table02_box_top_aligned_table02_w1_edge_translated.usd"
 )
-DEFAULT_RECORDED_HAND_POSE = Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_mjvbd_v2_hand_pose.json"
+DEFAULT_RECORDED_HAND_POSE = (
+    Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_mjvbd_v2_hand_pose.json"
+)
 
 
 def _generate_box_bag(half_x: float, half_y: float, height: float, resolution: int):
@@ -299,12 +301,7 @@ class Example:
             if not path.is_file():
                 raise FileNotFoundError(f"--robot-urdf does not exist: {path}")
             return path
-        path = (
-            Path(__file__).resolve().parents[3]
-            / "assets"
-            / "DexforceW1V021"
-            / "DexforceW1V021.urdf"
-        )
+        path = Path(__file__).resolve().parents[3] / "assets" / "DexforceW1V021" / "DexforceW1V021.urdf"
         if path.is_file():
             return path
         raise FileNotFoundError("Dexforce W1 URDF is unavailable; pass --robot-urdf PATH.")

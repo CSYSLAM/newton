@@ -10,7 +10,7 @@ contact; particle positions are never attached to the hand.
 
 Run from the repository root::
 
-    uv run --extra examples newton/examples/vbd/example_vbd_mjvbd_v2_dexforce_recorded_soft_cube_into_bag.py --viewer gl
+    uv run --extra examples newton/examples/mjvbdv2/example_vbd_mjvbd_v2_dexforce_recorded_soft_cube_into_bag.py --viewer gl
 """
 
 from __future__ import annotations
@@ -23,13 +23,15 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.vbd import example_vbd_mjvbd_v2_dexforce_grasp_rigid_into_bag_soft0 as soft0
+from newton.examples.mjvbdv2 import example_vbd_mjvbd_v2_dexforce_grasp_rigid_into_bag_soft0 as soft0
 
 # Match the isolated-hand demo's soft cube exactly.
 soft0.SOFT_CUBE_DENSITY = 100.0
 soft0.SOFT_CUBE_DIMS = (6, 4, 6)
 
-DEFAULT_GRASP_KEYFRAME = Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_w1_right_hand_last_keyframe.json"
+DEFAULT_GRASP_KEYFRAME = (
+    Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_w1_right_hand_last_keyframe.json"
+)
 INITIAL_IK_ITERATIONS = 240
 
 # Fixed mount from the full W1 URDF:

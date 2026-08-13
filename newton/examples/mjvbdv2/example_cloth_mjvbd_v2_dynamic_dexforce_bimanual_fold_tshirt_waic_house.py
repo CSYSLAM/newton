@@ -23,7 +23,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.cloth import example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house as reference
+from newton.examples.mjvbdv2 import example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house as reference
 from newton.solvers import SolverMJVBDV2
 
 

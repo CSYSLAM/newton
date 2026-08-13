@@ -19,9 +19,14 @@ from pathlib import Path
 import numpy as np
 
 import newton.examples
-from newton.examples.vbd import example_vbd_mjvbd_v2_dexforce_recorded_soft_then_rigid_cube_into_bag as simulation
+from newton.examples.mjvbdv2 import example_vbd_mjvbd_v2_dexforce_recorded_soft_then_rigid_cube_into_bag as simulation
 
-DEFAULT_RECORDING = Path(__file__).resolve().parents[3] / "assets" / "vbd_mjvbd_v2" / "vbd_mjvbd_v2_dexforce_soft_then_rigid_cube_into_bag.npz"
+DEFAULT_RECORDING = (
+    Path(__file__).resolve().parents[3]
+    / "assets"
+    / "vbd_mjvbd_v2"
+    / "vbd_mjvbd_v2_dexforce_soft_then_rigid_cube_into_bag.npz"
+)
 CACHE_FORMAT = "newton_dexforce_soft_then_rigid_replay_v1"
 CACHE_STATE_FIELDS = (
     "joint_q",

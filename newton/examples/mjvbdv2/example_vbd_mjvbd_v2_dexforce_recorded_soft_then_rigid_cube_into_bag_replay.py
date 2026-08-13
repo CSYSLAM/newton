@@ -15,8 +15,10 @@ from pathlib import Path
 import numpy as np
 
 import newton.examples
-from newton.examples.vbd import example_vbd_mjvbd_v2_dexforce_recorded_soft_then_rigid_cube_into_bag as simulation
-from newton.examples.vbd import example_vbd_mjvbd_v2_dexforce_recorded_soft_then_rigid_cube_into_bag_record as recorder
+from newton.examples.mjvbdv2 import example_vbd_mjvbd_v2_dexforce_recorded_soft_then_rigid_cube_into_bag as simulation
+from newton.examples.mjvbdv2 import (
+    example_vbd_mjvbd_v2_dexforce_recorded_soft_then_rigid_cube_into_bag_record as recorder,
+)
 
 
 class Example:
@@ -37,9 +39,7 @@ class Example:
         args.recorded_grasp_keyframe = self._resolve_keyframe(
             metadata["recorded_grasp_keyframe"], args.recorded_grasp_keyframe
         )
-        args.rigid_grasp_keyframe = self._resolve_keyframe(
-            metadata["rigid_grasp_keyframe"], args.rigid_grasp_keyframe
-        )
+        args.rigid_grasp_keyframe = self._resolve_keyframe(metadata["rigid_grasp_keyframe"], args.rigid_grasp_keyframe)
         self.source = simulation.Example(viewer, args)
         self.model = self.source.model
         self.state_0 = self.source.state_0
