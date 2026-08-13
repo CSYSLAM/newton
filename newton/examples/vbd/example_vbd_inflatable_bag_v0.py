@@ -3,12 +3,13 @@
 
 """Drop a rigid cube onto a Blender-authored closed pneumatic chip bag.
 
-Run with ``python -m newton.examples vbd_inflatable_bag``.
+Run with ``python -m newton.examples vbd_inflatable_bag_v0``.
 """
 
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 
 import numpy as np
 import warp as wp
@@ -17,7 +18,30 @@ import newton
 import newton.examples
 
 
-def _load_chip_bag_mesh() -> tuple[list[list[float]], list[int]]:
+@dataclass(frozen=True)
+class _ChipBagMesh:
+    """Simulation triangles and rendering edges for the authored bag."""
+
+    vertices: list[list[float]]
+    indices: list[int]
+    edges: list[tuple[int, int]]
+
+
+@wp.kernel
+def _gather_edges(
+    positions: wp.array[wp.vec3],
+    edge_indices: wp.array[int],
+    lift: float,
+    starts: wp.array[wp.vec3],
+    ends: wp.array[wp.vec3],
+):
+    edge = wp.tid()
+    offset = wp.vec3(0.0, 0.0, lift)
+    starts[edge] = positions[edge_indices[2 * edge]] + offset
+    ends[edge] = positions[edge_indices[2 * edge + 1]] + offset
+
+
+def _load_chip_bag_mesh() -> _ChipBagMesh:
     """Load the closed Blender-authored bag mesh."""
     path = newton.examples.get_asset("newton_chip_bag_sealed_cylinder.obj")
     vertices: list[list[float]] = []
@@ -51,7 +75,11 @@ def _load_chip_bag_mesh() -> tuple[list[list[float]], list[int]]:
     if any(count != 2 for count in edge_counts.values()):
         raise ValueError(f"{path} must be a closed two-manifold surface after triangulation.")
 
-    return vertices, [vertex for triangle in triangles for vertex in triangle]
+    return _ChipBagMesh(
+        vertices=vertices,
+        indices=[vertex for triangle in triangles for vertex in triangle],
+        edges=sorted(edge_counts),
+    )
 
 
 # The source asset is an upright cylindrical shell with compressed axial ends.
@@ -83,15 +111,16 @@ class Example:
         self.sim_time = 0.0
 
         builder = newton.ModelBuilder(gravity=PARAMS["gravity"])
-        vertices, indices = _load_chip_bag_mesh()
+        bag_mesh = _load_chip_bag_mesh()
+        particle_start = builder.particle_count
         self.cavity = newton.solvers.add_inflatable_mesh(
             builder,
             pos=wp.vec3(0.0, 0.0, PARAMS["bag_center_z"]),
             rot=_BAG_ROTATION,
             scale=1.0,
             vel=wp.vec3(),
-            vertices=vertices,
-            indices=indices,
+            vertices=bag_mesh.vertices,
+            indices=bag_mesh.indices,
             density=PARAMS["bag_density"],
             tri_ke=6.0e4,
             tri_ka=6.0e4,
@@ -109,6 +138,8 @@ class Example:
                 max_absolute_pressure=200_000.0,
             ),
         )
+        bag_triangle_indices = np.asarray(bag_mesh.indices, dtype=np.int32) + particle_start
+        bag_edges = np.asarray(bag_mesh.edges, dtype=np.int32) + particle_start
 
         contact_cfg = newton.ModelBuilder.ShapeConfig(density=PARAMS["block_density"], ke=4.0e4, kd=100.0, mu=0.7)
         self.block_body = builder.add_body(
@@ -135,6 +166,10 @@ class Example:
 
         builder.color()
         self.model = builder.finalize()
+        self.bag_triangle_indices = wp.array(bag_triangle_indices, dtype=int, device=self.model.device)
+        self.bag_edges = wp.array(bag_edges.reshape(-1), dtype=int, device=self.model.device)
+        self.bag_edge_starts = wp.empty(len(bag_edges), dtype=wp.vec3, device=self.model.device)
+        self.bag_edge_ends = wp.empty(len(bag_edges), dtype=wp.vec3, device=self.model.device)
         self.model.soft_contact_ke = 4.0e4
         self.model.soft_contact_kd = 100.0
         self.model.soft_contact_mu = 0.7
@@ -154,6 +189,7 @@ class Example:
         self.control = self.model.control()
 
         self.viewer.set_model(self.model)
+        self.viewer.show_triangles = False
         if hasattr(self.viewer, "renderer"):
             self.viewer.renderer.draw_wireframe = False
             self.viewer.renderer.draw_edges = False
@@ -176,6 +212,26 @@ class Example:
         """Render the current pneumatic state."""
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
+        self.viewer.log_mesh(
+            "/bag/surface",
+            self.state_0.particle_q,
+            self.bag_triangle_indices,
+            backface_culling=True,
+            color=(0.86, 0.68, 0.34),
+        )
+        wp.launch(
+            _gather_edges,
+            dim=len(self.bag_edge_starts),
+            inputs=[self.state_0.particle_q, self.bag_edges, 1.0e-4],
+            outputs=[self.bag_edge_starts, self.bag_edge_ends],
+            device=self.model.device,
+        )
+        self.viewer.log_lines(
+            "/bag/grid",
+            self.bag_edge_starts,
+            self.bag_edge_ends,
+            (0.08, 0.06, 0.02),
+        )
         self.viewer.end_frame()
 
     def test_final(self):
