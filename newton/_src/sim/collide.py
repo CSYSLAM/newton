@@ -232,11 +232,31 @@ def compute_shape_aabbs(
     geom_scale = scale
 
     if is_infinite_plane:
-        # Bounding sphere fallback for infinite planes
-        radius = shape_collision_radius[shape_id]
-        half_extents = wp.vec3(radius, radius, radius)
-        aabb_lower[shape_id] = pos - half_extents - margin_vec
-        aabb_upper[shape_id] = pos + half_extents + margin_vec
+        # Clamp to the half space the plane bounds, replacing a bounding-sphere
+        # fallback whose 1e6 m cube made every shape a permanent ground-plane
+        # candidate. A nearly-aligned normal's surface rises by
+        # (|n_j| + |n_k|) * d / |n_i| at lateral offset d from the anchor, so
+        # bounding d by the reach this AABB itself admits keeps the clamp
+        # conservative for every shape it does not already prune laterally; a
+        # tilted plane's rise exceeds that reach and the bound stays unbounded.
+        normal = wp.quat_rotate(orientation, wp.vec3(0.0, 0.0, 1.0))
+        # Matches compute_shape_radius's infinite-plane radius.
+        HALF_SPACE_EXTENT = 1.0e6
+        half_extents = wp.vec3(HALF_SPACE_EXTENT, HALF_SPACE_EXTENT, HALF_SPACE_EXTENT)
+        lo = pos - half_extents - margin_vec
+        hi = pos + half_extents + margin_vec
+        for i in range(3):
+            n_i = normal[i]
+            # Below this the rise exceeds HALF_SPACE_EXTENT anyway, and the division stays well conditioned.
+            if wp.abs(n_i) > 0.5:
+                lateral = wp.abs(normal[(i + 1) % 3]) + wp.abs(normal[(i + 2) % 3])
+                rise = lateral * HALF_SPACE_EXTENT / wp.abs(n_i)
+                if n_i > 0.0:
+                    hi[i] = wp.min(hi[i], pos[i] + rise + effective_gap)
+                else:
+                    lo[i] = wp.max(lo[i], pos[i] - rise - effective_gap)
+        aabb_lower[shape_id] = lo
+        aabb_upper[shape_id] = hi
     elif has_local_aabb:
         # Pre-computed local AABB transformed to world space.
         # Scale is already baked into shape_collision_aabb by the builder,
@@ -1023,6 +1043,8 @@ class CollisionPipeline:
             # should not trigger mesh-only kernel setup/launches.
             has_meshes = False
             use_lean_gjk_mpr = False
+            mesh_sdf_texture_only = False
+            mesh_sdf_identity_scale_only = False
             if hasattr(model, "shape_type") and model.shape_type is not None:
                 shape_types = model.shape_type.numpy()
                 colliding_mask = _shape_collide_mask(model, len(shape_types))
@@ -1040,6 +1062,31 @@ class CollisionPipeline:
                         np.any(colliding_mask & (shape_sdf_index >= 0) & (shape_edge_range[:, 1] > 0))
                     )
                     has_meshes = has_meshes or has_planar_sdf_shapes
+                    mesh_sdf_shapes = colliding_mask & (
+                        (shape_types != int(GeoType.HFIELD))
+                        & ((shape_types == int(GeoType.MESH)) | (shape_edge_range[:, 1] > 0))
+                    )
+                    coarse_textures = getattr(model, "_texture_sdf_coarse_textures", None)
+                    has_texture_sdf = np.array(
+                        [
+                            sdf_idx >= 0
+                            and coarse_textures is not None
+                            and sdf_idx < len(coarse_textures)
+                            and coarse_textures[sdf_idx] is not None
+                            for sdf_idx in shape_sdf_index
+                        ],
+                        dtype=bool,
+                    )
+                    mesh_sdf_texture_only = bool(np.any(mesh_sdf_shapes) and np.all(has_texture_sdf[mesh_sdf_shapes]))
+                    if mesh_sdf_texture_only:
+                        texture_sdf_data = model._texture_sdf_data.numpy()
+                        scale_baked = texture_sdf_data["scale_baked"]
+                        shape_scale = model.shape_scale.numpy()
+                        identity_shape_scale = np.all(shape_scale == np.float32(1.0), axis=1)
+                        mesh_sdf_identity_scale_only = all(
+                            bool(scale_baked[shape_sdf_index[shape_idx]]) or identity_shape_scale[shape_idx]
+                            for shape_idx in np.flatnonzero(mesh_sdf_shapes)
+                        )
                 # Use lean GJK/MPR kernel when scene has no capsules, ellipsoids,
                 # cylinders, or cones (which need full support function and axial
                 # rolling post-processing)
@@ -1075,6 +1122,8 @@ class CollisionPipeline:
                 has_meshes=has_meshes,
                 has_heightfields=model.heightfield_count > 0,
                 use_lean_gjk_mpr=use_lean_gjk_mpr,
+                mesh_sdf_identity_scale_only=mesh_sdf_identity_scale_only,
+                mesh_sdf_texture_only=mesh_sdf_texture_only,
                 deterministic=deterministic,
                 contact_max=rigid_contact_max,
                 verify_buffers=verify_buffers,
@@ -1428,6 +1477,8 @@ class CollisionPipeline:
             heightfield_data=model.heightfield_data,
             heightfield_elevations=model.heightfield_elevations,
             mesh_edge_indices=model.mesh_edge_indices,
+            mesh_edge_centers=model.mesh_edge_centers,
+            mesh_edge_halves=model.mesh_edge_halves,
             shape_edge_range=model.shape_edge_range,
             writer_data=writer_data,
             device=self.device,

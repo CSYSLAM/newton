@@ -198,9 +198,10 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any):
         num_contacts = wp.min(num_contacts, reducer_data.capacity)
 
         for i in range(tid, num_contacts, total_num_threads):
-            pd = reducer_data.position_depth[i]
-            normal = decode_oct(reducer_data.normal[i])
-            pair = reducer_data.shape_pairs[i]
+            contact_id = i + 1
+            pd = reducer_data.position_depth[contact_id]
+            normal = decode_oct(reducer_data.normal[contact_id])
+            pair = reducer_data.shape_pairs[contact_id]
 
             position = wp.vec3(pd[0], pd[1], pd[2])
             depth = pd[3]
@@ -220,7 +221,7 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any):
 
             # Cache normal-bin entry index for downstream kernels (avoids repeated hash lookups)
             if reducer_data.contact_nbin_entry.shape[0] > 0:
-                reducer_data.contact_nbin_entry[i] = entry_idx
+                reducer_data.contact_nbin_entry[contact_id] = entry_idx
 
             if entry_idx >= 0:
                 # k_eff is constant for a shape pair, so redundant writes are safe.
@@ -237,10 +238,10 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any):
                     for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
                         dir_2d = get_spatial_direction_2d(dir_i)
                         score = wp.dot(pos_2d_centered, dir_2d) * pen_weight
-                        value = _make_contact_value_fast(score, 0, i)
+                        value = _make_contact_value_fast(score, 0, contact_id)
                         reduction_update_slot(entry_idx, dir_i, value, reducer_data.ht_values, ht_capacity)
 
-                max_depth_value = _make_contact_value_fast(-depth, 0, i)
+                max_depth_value = _make_contact_value_fast(-depth, 0, contact_id)
                 reduction_update_slot(
                     entry_idx,
                     wp.static(NUM_SPATIAL_DIRECTIONS),
@@ -258,7 +259,7 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any):
                         # from buffer state (depth + shape_b) rather than cached.
                         # Previously this used area * |depth|, which implicitly
                         # assumed the linear law p = -kh * depth.
-                        area_i = reducer_data.contact_area[i]
+                        area_i = reducer_data.contact_area[contact_id]
                         p_i = wp.static(pressure_func)(depth, shape_b, pressure_data)
                         wp.atomic_add(agg_moment_unreduced, entry_idx, area_i * p_i * lever)
             else:
@@ -281,7 +282,7 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any):
                 reducer_data.entry_k_eff[voxel_entry_idx] = _effective_stiffness(
                     shape_material_k_hydro[shape_a], shape_material_k_hydro[shape_b]
                 )
-                voxel_value = _make_contact_value_fast(-depth, 0, i)
+                voxel_value = _make_contact_value_fast(-depth, 0, contact_id)
                 reduction_update_slot(
                     voxel_entry_idx,
                     voxel_local_slot,

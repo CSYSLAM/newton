@@ -311,9 +311,34 @@ class TestMJVBDV2(unittest.TestCase):
         self.assertFalse(solver.features.vbd_solve_enabled)
         self.assertIsNone(solver.vbd_solver)
         self.assertIsNotNone(solver.mujoco_solver)
+        self.assertFalse(solver.mujoco_solver.enable_sleeping)
         self.assertEqual(solver.backend.coupled_solver.entry_names(), ("mujoco",))
         self.assertEqual(solver.backend.coupled_solver.view("mujoco").particle_count, 0)
 
+        solver.step(state_0, state_1, model.control(), solver.contacts, 1.0 / 120.0)
+        self.assertTrue(np.all(np.isfinite(state_1.joint_q.numpy())))
+        self.assertTrue(np.all(np.isfinite(state_1.body_q.numpy())))
+
+    @unittest.skipUnless(wp.is_cuda_available(), "MuJoCo sleeping requires CUDA")
+    def test_dynamic_joint_only_model_can_enable_sleeping(self):
+        """Enable sleeping only on the private dynamic MuJoCo backend."""
+        model, _, _, articulation = _build_joint_chain_model("cuda:0")
+        state_0 = model.state()
+        state_1 = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_1)
+        try:
+            solver = SolverMJVBDV2(
+                model,
+                mujoco_articulations=[articulation],
+                mujoco_options={"enable_sleeping": True},
+                collision_options={"broad_phase": "nxn"},
+            )
+        except (ImportError, ModuleNotFoundError) as error:
+            self.skipTest(f"MuJoCo is unavailable: {error}")
+
+        self.assertEqual(solver.features.backend, "pure_mujoco")
+        self.assertTrue(solver.mujoco_solver.enable_sleeping)
         solver.step(state_0, state_1, model.control(), solver.contacts, 1.0 / 120.0)
         self.assertTrue(np.all(np.isfinite(state_1.joint_q.numpy())))
         self.assertTrue(np.all(np.isfinite(state_1.body_q.numpy())))

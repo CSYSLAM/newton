@@ -93,8 +93,20 @@ class TestMuJoCoReset(unittest.TestCase):
             values = buf.numpy()
             self.assertTrue(np.all(values == 0.0), f"{name} not cleared in all worlds")
 
-    def test_reset_rejects_wrong_length_mask(self):
+    def test_reset_accepts_global_world_slot(self):
+        """Accept a trailing global-world slot while resetting local worlds."""
+        self._poison()
         mask = wp.array([True, False, True], dtype=wp.bool, device=self.model.device)
+        self.solver.reset(self.state_out, world_mask=mask)
+
+        for name, buf in self._cleared_buffers().items():
+            values = buf.numpy()
+            self.assertTrue(np.all(values[0] == 0.0), f"{name} not cleared in masked world 0")
+            self.assertTrue(np.all(values[1] == 7.0), f"{name} wrongly cleared in unmasked world 1")
+
+    def test_reset_rejects_wrong_length_mask(self):
+        """Reject masks longer than local worlds plus the global slot."""
+        mask = wp.array([True, False, True, False], dtype=wp.bool, device=self.model.device)
         with self.assertRaises(ValueError):
             self.solver.reset(self.state_out, world_mask=mask)
 

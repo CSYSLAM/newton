@@ -1118,6 +1118,7 @@ MJWARP_OPT_BATCHED_FIELDS: list[str] = [
     "tolerance",
     "ls_tolerance",
     "ccd_tolerance",
+    "sleep_tolerance",
     "density",
     "viscosity",
     "gravity",

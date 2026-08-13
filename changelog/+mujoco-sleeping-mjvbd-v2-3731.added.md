@@ -1,0 +1,1 @@
+Add opt-in MuJoCo Warp sleeping support to `SolverMuJoCo`, including MJCF sleep configuration, per-tree policies, `sleep_tolerance`, compact `nvmax` storage, and routing through dynamic `SolverMJVBDV2` backends. Sleeping remains disabled by default.
