@@ -1,0 +1,122 @@
+{
+  "format": "newton_w1_right_hand_inflatable_bag_keyframe_v1",
+  "keyframe": {
+    "frame": 296,
+    "time_s": 4.933333333333321,
+    "gizmo_world": {
+      "position_m": [
+        -0.16214203834533691,
+        -2.835815668106079,
+        1.338912010192871
+      ],
+      "quaternion_xyzw": [
+        0.03812963888049126,
+        0.9212844967842102,
+        -0.3854166567325592,
+        0.03514265641570091
+      ]
+    },
+    "position_offset_mm": [
+      0.0,
+      0.0,
+      33.0
+    ],
+    "rotation_offset_deg": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "target_root_pose": {
+      "position_m": [
+        -0.16214203834533691,
+        -2.835815668106079,
+        1.3719120025634766
+      ],
+      "quaternion_xyzw": [
+        0.03812963888049126,
+        0.9212844967842102,
+        -0.3854166567325592,
+        0.03514265641570091
+      ]
+    },
+    "target_finger_joints_degrees": {
+      "RIGHT_HAND_THUMB1": 19.0,
+      "RIGHT_HAND_THUMB2": 90.0,
+      "RIGHT_HAND_INDEX": 23.0,
+      "RIGHT_INDEX_PIP": 38.0,
+      "RIGHT_HAND_MIDDLE": 26.0,
+      "RIGHT_MIDDLE_PIP": 43.0,
+      "RIGHT_HAND_RING": 28.0,
+      "RIGHT_RING_PIP": 44.0,
+      "RIGHT_HAND_PINKY": 26.0,
+      "RIGHT_PINKY_PIP": 45.0
+    },
+    "root_pose": {
+      "position_m": [
+        -0.16214203834533691,
+        -2.835815668106079,
+        1.3719120025634766
+      ],
+      "quaternion_xyzw": [
+        0.03812963888049126,
+        0.9212844967842102,
+        -0.3854166567325592,
+        0.03514265641570091
+      ]
+    },
+    "finger_joints_radians": {
+      "RIGHT_HAND_THUMB1": 0.33161255717277527,
+      "RIGHT_HAND_THUMB2": 1.5707963705062866,
+      "RIGHT_HAND_INDEX": 0.40142571926116943,
+      "RIGHT_INDEX_PIP": 0.6632251143455505,
+      "RIGHT_HAND_MIDDLE": 0.45378559827804565,
+      "RIGHT_MIDDLE_PIP": 0.7504915595054626,
+      "RIGHT_HAND_RING": 0.48869219422340393,
+      "RIGHT_RING_PIP": 0.767944872379303,
+      "RIGHT_HAND_PINKY": 0.45378559827804565,
+      "RIGHT_PINKY_PIP": 0.7853981852531433
+    },
+    "finger_joints_degrees": {
+      "RIGHT_HAND_THUMB1": 18.999998092651367,
+      "RIGHT_HAND_THUMB2": 90.0,
+      "RIGHT_HAND_INDEX": 22.999998092651367,
+      "RIGHT_INDEX_PIP": 37.999996185302734,
+      "RIGHT_HAND_MIDDLE": 25.999998092651367,
+      "RIGHT_MIDDLE_PIP": 42.999996185302734,
+      "RIGHT_HAND_RING": 27.999998092651367,
+      "RIGHT_RING_PIP": 43.999996185302734,
+      "RIGHT_HAND_PINKY": 25.999998092651367,
+      "RIGHT_PINKY_PIP": 45.0
+    },
+    "inflatable_bag": {
+      "pneumatic_mode": "target-volume",
+      "particle_count": 216,
+      "center_m": [
+        -0.15548460185527802,
+        -2.791801929473877,
+        1.2317906618118286
+      ],
+      "aabb_min_m": [
+        -0.20886413753032684,
+        -2.8521358966827393,
+        1.1863765716552734
+      ],
+      "aabb_max_m": [
+        -0.08817657828330994,
+        -2.7377445697784424,
+        1.2765437364578247
+      ],
+      "volume_m3": 0.0003520929894875735,
+      "rest_volume_m3": 0.0003878613578397686,
+      "volume_ratio": 0.9077805312923914,
+      "target_volume_m3": 0.0003917401115153308,
+      "volume_stiffness_pa_per_m3": 6103983048.226692,
+      "absolute_pressure_pa": 200000.0,
+      "gauge_pressure_pa": 98675.0,
+      "volume_rate_m3_s": 5.741603672504425e-06,
+      "clamp_flags": 4
+    },
+    "hand_bag_contact_count": 31,
+    "total_soft_contact_count": 31
+  }
+}
