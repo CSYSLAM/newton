@@ -522,6 +522,9 @@ If you run the examples from a source checkout with uv, use
       </a>
     </td>
     <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mpm/example_mpm_w1_burger_slice_waic_kitchen.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mpm_w1_burger_slice_waic_kitchen.jpg" alt="MPM W1 Burger Slice in the WAIC Kitchen">
+      </a>
     </td>
   </tr>
   <tr>
@@ -532,6 +535,7 @@ If you run the examples from a source checkout with uv, use
       <code>python -m newton.examples mpm_snow_ball</code>
     </td>
     <td align="center" width="33%">
+      <code>python -m newton.examples mpm_w1_burger_slice_waic_kitchen</code>
     </td>
   </tr>
   <tr>

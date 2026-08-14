@@ -4,6 +4,10 @@
 
 <!-- towncrier release notes start -->
 
+### Added
+
+- Add an implicit-MPM W1 burger-slicing example in the WAIC kitchen scene.
+
 ## [1.5.0] - 2026-08-11
 
 ### Added

@@ -371,6 +371,7 @@ class MPMSolver:
                     self.bc_norm,
                     self.bc_velo,
                 ],
+                device=self.device,
             )
             break
         self.need_record_again = True
