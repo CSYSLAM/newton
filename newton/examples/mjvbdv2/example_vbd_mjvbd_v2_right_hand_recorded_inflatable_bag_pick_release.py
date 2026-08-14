@@ -7,6 +7,9 @@ performed after the grasp. The hand first approaches the corresponding
 pre-lift root pose, closes at the recorder's contact-aware speed, lifts by the
 scripted distance, holds, and opens to release the bag physically.
 
+CUDA devices capture the warmed physics frame by default. Pass
+``--no-graph-capture`` to use direct kernel launches instead.
+
 Run from the repository root::
 
     uv run --extra examples -m newton.examples \
@@ -15,6 +18,7 @@ Run from the repository root::
 
 from __future__ import annotations
 
+import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,7 +50,10 @@ DROP_SETTLE_DURATION = 2.0
 FINGER_PHASE_PADDING = 0.25
 MINIMUM_ROOT_PHASE_DURATION = 0.25
 DEMO_MAX_ABSOLUTE_PRESSURE = 500_000.0
-RELEASE_FRICTION = 0.0
+RELEASE_FRICTION = 1.0
+
+_SOFT_MATERIAL_GRASP = 0
+_SOFT_MATERIAL_RELEASE = 1
 
 
 @dataclass(frozen=True)
@@ -79,6 +86,33 @@ class Example(recorder.Example):
 
         self._validate_initial_pose()
         self._raise_pressure_limit()
+        self.graph = None
+        self.use_graph = bool(args.graph_capture) and self.device.is_cuda
+        self.script_target_q = self.manual_target_q.numpy()
+        self.soft_contact_materials = None
+        self.soft_contact_material_index = None
+        if self.use_graph:
+            self.soft_contact_materials = wp.array(
+                np.asarray(
+                    (
+                        (recorder.CONTACT_KE, recorder.CONTACT_KD, recorder.CONTACT_MU),
+                        (recorder.CONTACT_KE, recorder.CONTACT_KD, RELEASE_FRICTION),
+                    ),
+                    dtype=np.float32,
+                ),
+                dtype=wp.vec3,
+                device=self.device,
+            )
+            self.soft_contact_material_index = wp.full(
+                1,
+                _SOFT_MATERIAL_GRASP,
+                dtype=wp.int32,
+                device=self.device,
+            )
+            self.solver.vbd_solver.set_soft_contact_material_source(
+                self.soft_contact_materials,
+                self.soft_contact_material_index,
+            )
         self.release_material_applied = False
         self.initial_bag_center_z = self._bag_center_z()
         self.lifted_bag_center_z: float | None = None
@@ -327,7 +361,7 @@ class Example(recorder.Example):
     def _set_hand_target(self, root: wp.transform, joints_degrees: dict[str, float]):
         """Set the next root and finger targets without teleporting bag particles."""
 
-        target_q = self.manual_target_q.numpy()
+        target_q = self.script_target_q
         position = wp.transform_get_translation(root)
         rotation = wp.transform_get_rotation(root)
         target_q[self.root_q_start : self.root_q_start + 7] = [*position, *rotation]
@@ -350,6 +384,8 @@ class Example(recorder.Example):
         friction[: self.hand_shape_end] = RELEASE_FRICTION
         self.model.shape_material_mu.assign(friction)
         self.model.soft_contact_mu = RELEASE_FRICTION
+        if self.soft_contact_material_index is not None:
+            self.soft_contact_material_index.fill_(_SOFT_MATERIAL_RELEASE)
         self.release_material_applied = True
 
     def _enter_phase(self, phase_index: int):
@@ -365,13 +401,38 @@ class Example(recorder.Example):
         if phase.release:
             self._apply_release_material()
 
+    def _capture_simulation_graph(self):
+        """Capture the warmed physics frame as one reusable CUDA graph."""
+
+        state_0_backup = self.model.state()
+        state_1_backup = self.model.state()
+        state_0_backup.assign(self.state_0)
+        state_1_backup.assign(self.state_1)
+
+        with wp.ScopedDevice(self.device), wp.ScopedCapture() as capture:
+            self._advance_physics_frame()
+
+        self.state_0.assign(state_0_backup)
+        self.state_1.assign(state_1_backup)
+        self.graph = capture.graph
+        if self.graph is None:
+            raise RuntimeError(f"CUDA graph capture failed on device {self.device}")
+
     def step(self):
-        """Advance one frame of the autonomous pick-and-release sequence."""
+        """Advance one frame, replaying a warmed CUDA graph when available."""
 
         root, joints, phase_index = self._sample(self.sim_time)
         self._enter_phase(phase_index)
         self._set_hand_target(root, joints)
-        super().step_once()
+        if self.graph is None:
+            self._advance_physics_frame()
+            if self.use_graph:
+                self._capture_simulation_graph()
+        else:
+            with wp.ScopedDevice(self.device):
+                wp.capture_launch(self.graph)
+        self.sim_time += self.frame_dt
+        self.frame_index += 1
 
     def render(self):
         """Render the physical hand and pneumatic bag without recorder controls."""
@@ -423,6 +484,8 @@ class Example(recorder.Example):
         """Verify the hand lifts and physically releases the inflatable bag."""
 
         super().test_final()
+        if self.use_graph:
+            assert self.graph is not None, "The warmed CUDA physics frame was not captured."
         if self.sim_time + self.frame_dt < self.script_duration:
             return
 
@@ -452,6 +515,12 @@ class Example(recorder.Example):
 
         parser = recorder.Example.create_parser()
         parser.set_defaults(num_frames=720, paused=False, pneumatic_mode="target-volume")
+        parser.add_argument(
+            "--graph-capture",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Capture the warmed physics frame as one CUDA graph.",
+        )
         parser.add_argument(
             "--grasp-keyframe",
             default=str(DEFAULT_GRASP_KEYFRAME),

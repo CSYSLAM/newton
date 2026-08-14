@@ -32,10 +32,15 @@ from newton.examples.mjvbdv2 import example_vbd_mjvbd_v2_right_hand_rigid_cube_r
 from newton.solvers import PneumaticConfig, PneumaticMode, SolverMJVBDV2
 
 FPS = 60
-SIM_SUBSTEPS = 12
-VBD_ITERATIONS = 40
+SIM_SUBSTEPS = 5
+VBD_ITERATIONS = 12
 MAX_FINGER_SPEED_DEG_S = 90.0
 MAX_FINGER_CONTACT_SPEED_DEG_S = 30.0
+
+CAMERA_POS = wp.vec3(0.30, -3.39, 1.63)
+CAMERA_FOV = 45.0
+CAMERA_PITCH = -28.3
+CAMERA_YAW = 124.3
 
 BAG_SCALE = 0.36
 BAG_DENSITY = 0.12
@@ -222,10 +227,26 @@ def _gather_edges(
 def _limit_finger_target_step(
     current_q: wp.array[float],
     finger_q_indices: wp.array[int],
-    max_step: float,
+    soft_contact_count: wp.array[int],
+    soft_contact_shape: wp.array[int],
+    hand_shape_end: int,
+    free_max_step: float,
+    contact_max_step: float,
     target_q: wp.array[float],
 ):
     finger = wp.tid()
+    active_contact_count = soft_contact_count[0]
+    if active_contact_count > soft_contact_shape.shape[0]:
+        active_contact_count = soft_contact_shape.shape[0]
+    hand_contact = bool(False)
+    for contact in range(active_contact_count):
+        shape = soft_contact_shape[contact]
+        if shape >= 0 and shape < hand_shape_end:
+            hand_contact = True
+
+    max_step = free_max_step
+    if hand_contact:
+        max_step = contact_max_step
     q_index = finger_q_indices[finger]
     delta = wp.clamp(target_q[q_index] - current_q[q_index], -max_step, max_step)
     target_q[q_index] = current_q[q_index] + delta
@@ -305,11 +326,9 @@ class Example(hand_recorder.Example):
             self.viewer.renderer.draw_wireframe = False
             self.viewer.renderer.draw_edges = False
         if hasattr(self.viewer, "set_camera"):
-            self.viewer.set_camera(
-                hand_recorder.CAMERA_POS,
-                hand_recorder.CAMERA_PITCH,
-                hand_recorder.CAMERA_YAW,
-            )
+            self.viewer.set_camera(CAMERA_POS, CAMERA_PITCH, CAMERA_YAW)
+        if hasattr(self.viewer, "camera") and hasattr(self.viewer.camera, "fov"):
+            self.viewer.camera.fov = CAMERA_FOV
         self._store_trajectory_frame()
 
     def _build_scene(self):
@@ -404,24 +423,31 @@ class Example(hand_recorder.Example):
         self.bag_edge_starts = wp.empty(len(bag_edges), dtype=wp.vec3, device=self.model.device)
         self.bag_edge_ends = wp.empty(len(bag_edges), dtype=wp.vec3, device=self.model.device)
 
-    def step_once(self):
-        """Advance one frame while limiting finger motion through soft contact."""
+    def _prepare_physics_frame(self):
+        """Prepare graph-compatible root and finger targets for one frame."""
 
         wp.copy(self.frame_q_start, self.state_0.joint_q)
         wp.copy(self.frame_q_end, self.manual_target_q)
-        hand_bag_contacts, _ = self._contact_counts()
-        max_finger_step = self.max_finger_contact_step if hand_bag_contacts else self.max_finger_step
+        contacts = self.solver.contacts
         wp.launch(
             _limit_finger_target_step,
             dim=self.hand_joint_q_indices.shape[0],
             inputs=[
                 self.frame_q_start,
                 self.hand_joint_q_indices,
-                max_finger_step,
+                contacts.soft_contact_count,
+                contacts.soft_contact_shape,
+                self.hand_shape_end,
+                self.max_finger_step,
+                self.max_finger_contact_step,
                 self.frame_q_end,
             ],
             device=self.device,
         )
+
+    def _simulate_substeps(self):
+        """Advance the fixed substep sequence for one display frame."""
+
         for substep in range(SIM_SUBSTEPS):
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
@@ -454,7 +480,21 @@ class Example(hand_recorder.Example):
                 body_flag_filter=newton.BodyFlags.KINEMATIC,
             )
             self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
-            self.state_0, self.state_1 = self.state_1, self.state_0
+            if SIM_SUBSTEPS % 2 != 0 and substep == SIM_SUBSTEPS - 1:
+                self.state_0.assign(self.state_1)
+            else:
+                self.state_0, self.state_1 = self.state_1, self.state_0
+
+    def _advance_physics_frame(self):
+        """Prepare targets and advance one graph-capturable physics frame."""
+
+        self._prepare_physics_frame()
+        self._simulate_substeps()
+
+    def step_once(self):
+        """Advance one frame while limiting finger motion through soft contact."""
+
+        self._advance_physics_frame()
         self.sim_time += self.frame_dt
         self.frame_index += 1
 
