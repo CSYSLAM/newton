@@ -5,6 +5,7 @@
 ### Added
 
 - Add a physical MJVBDV2 Dexforce hand-pose recorder with five-finger TCP tuning and JSON trajectory export.
+- Add an MJVBDV2 right-hand inflatable-bag grasp example with configurable bending plasticity and reverse yielding.
 - Add a full-W1 MJVBDV2 example that sequentially places a soft cube and a rigid cube into one compliant bag.
 - Add ViewerGL TCP gizmos for coarse hand-arm placement before fine pose adjustment.
 - Add an MJVBDV2 dynamic Dexforce bimanual T-shirt folding example.
