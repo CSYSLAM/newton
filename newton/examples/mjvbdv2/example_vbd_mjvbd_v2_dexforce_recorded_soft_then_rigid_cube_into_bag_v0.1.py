@@ -40,8 +40,8 @@ RIGID_CUBE_POSITION = wp.vec3(
 
 # Build the full-robot scene with the same integration and bag material used
 # by the canonical isolated-hand trajectory.
-soft0.SIM_SUBSTEPS = 8
-soft0.VBD_ITERATIONS = 12
+soft0.SIM_SUBSTEPS = hand_reference.sequential_base.recorder.SIM_SUBSTEPS
+soft0.VBD_ITERATIONS = 24
 soft0.BAG_RESOLUTION = hand_reference.BAG_RESOLUTION
 soft0.BAG_PARTICLE_RADIUS = hand_reference.BAG_PARTICLE_RADIUS
 soft0.BAG_DENSITY = hand_reference.BAG_DENSITY
@@ -67,12 +67,6 @@ SOFT_CONTACT_MAX = 4096
 RIGID_CONTACT_MAX = 2048
 
 
-@wp.kernel
-def _copy_joint_q_prefix(source: wp.array[float], target: wp.array[float]):
-    joint_coord = wp.tid()
-    target[joint_coord] = source[joint_coord]
-
-
 class Example(recorded_soft.Example):
     """Track the canonical two-pick trajectory with the full Dexforce W1."""
 
@@ -88,12 +82,6 @@ class Example(recorded_soft.Example):
         self.contact_phase = None
         self.hand_shape_collision_enabled = True
         super().__init__(viewer, args)
-        self.frame_q_end_2d = self.frame_q_end.reshape((1, -1))
-        self.desired_finger_q = wp.zeros(
-            self.hand_indices.shape[0],
-            dtype=wp.float32,
-            device=self.model.device,
-        )
         triangles = self.model.tri_indices.numpy().reshape((-1, 3))
         bag_mask = np.all(
             (triangles >= self.bag_particle_start) & (triangles < self.bag_particle_end),
@@ -118,12 +106,9 @@ class Example(recorded_soft.Example):
             self.viewer.renderer.draw_wireframe = False
             self.viewer.renderer.draw_edges = False
         self.graph = None
-        self.ik_graph = None
         self.use_graph = bool(args.graph_capture) and self.device.is_cuda
         if self.use_graph and self.sim_substeps % 2 != 0:
             raise ValueError("--graph-capture requires an even simulation substep count")
-        if self.use_graph:
-            self._capture_ik_graph()
         self.soft_contact_materials = wp.array(
             np.asarray(_SOFT_CONTACT_MATERIALS, dtype=np.float32),
             dtype=wp.vec3,
@@ -378,46 +363,6 @@ class Example(recorded_soft.Example):
         self.state_1.assign(state_1_backup)
         self.graph = capture.graph
 
-    def _solve_ik_and_assemble_joint_targets(self):
-        """Solve IK and assemble the complete joint target on the GPU."""
-
-        self.ik_solver.step(self.ik_q, self.ik_q, iterations=soft0.IK_ITERATIONS)
-        wp.launch(
-            soft0._lock_q,
-            self.lock_indices.shape[0],
-            [self.ik_q, self.lock_indices, self.lock_values],
-            device=self.model.device,
-        )
-        wp.copy(self.frame_q_start, self.state_0.joint_q)
-        wp.copy(self.frame_q_end, self.state_0.joint_q)
-        wp.launch(
-            _copy_joint_q_prefix,
-            self.ik_model.joint_coord_count,
-            [self.ik_q[0], self.frame_q_end],
-            device=self.model.device,
-        )
-        wp.launch(
-            soft0._lock_q,
-            self.hand_indices.shape[0],
-            [self.frame_q_end_2d, self.hand_indices, self.desired_finger_q],
-            device=self.model.device,
-        )
-
-    def _capture_ik_graph(self):
-        """Capture IK and GPU joint-target assembly as one reusable graph."""
-
-        ik_q_backup = wp.clone(self.ik_q)
-        frame_q_start_backup = wp.clone(self.frame_q_start)
-        frame_q_end_backup = wp.clone(self.frame_q_end)
-        with wp.ScopedDevice(self.device), wp.ScopedCapture() as capture:
-            self._solve_ik_and_assemble_joint_targets()
-        self.ik_q.assign(ik_q_backup)
-        self.frame_q_start.assign(frame_q_start_backup)
-        self.frame_q_end.assign(frame_q_end_backup)
-        self.ik_graph = capture.graph
-        if self.ik_graph is None:
-            raise RuntimeError(f"IK CUDA graph capture failed on device {self.device}.")
-
     def _prepare_frame(self):
         """Solve arm IK and copy the canonical finger target for one frame."""
 
@@ -432,12 +377,21 @@ class Example(recorded_soft.Example):
         self.left_rot.set_target_rotation(0, self._v4(wp.transform_get_rotation(left)))
         self.right_obj.set_target_position(0, wp.transform_get_translation(right))
         self.right_rot.set_target_rotation(0, self._v4(wp.transform_get_rotation(right)))
-        self.desired_finger_q.assign([np.radians(finger_joints[f"RIGHT_{suffix}"]) for suffix in self.HAND_SUFFIXES])
-        if self.ik_graph is None:
-            self._solve_ik_and_assemble_joint_targets()
-        else:
-            with wp.ScopedDevice(self.device):
-                wp.capture_launch(self.ik_graph)
+        self.ik_solver.step(self.ik_q, self.ik_q, iterations=soft0.IK_ITERATIONS)
+        wp.launch(
+            soft0._lock_q,
+            self.lock_indices.shape[0],
+            [self.ik_q, self.lock_indices, self.lock_values],
+            device=self.model.device,
+        )
+
+        wp.copy(self.frame_q_start, self.state_0.joint_q)
+        target_q = self.state_0.joint_q.numpy()
+        target_q[: self.ik_model.joint_coord_count] = self.ik_q.numpy()[0]
+        target_q[self.hand_indices.numpy()] = [
+            np.radians(finger_joints[f"RIGHT_{suffix}"]) for suffix in self.HAND_SUFFIXES
+        ]
+        self.frame_q_end.assign(target_q)
 
         if phase != self.contact_phase:
             self._apply_contact_phase(phase)
