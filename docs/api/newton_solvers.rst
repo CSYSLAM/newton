@@ -21,11 +21,13 @@ https://newton-physics.github.io/newton/stable/solvers/index.html.
    :hidden:
 
    newton_solvers_experimental
+   newton_solvers_sph
    newton_solvers_style3d
 
 .. rubric:: Submodules
 
 - :doc:`newton.solvers.experimental <newton_solvers_experimental>`
+- :doc:`newton.solvers.sph <newton_solvers_sph>`
 - :doc:`newton.solvers.style3d <newton_solvers_style3d>`
 
 .. rubric:: Classes
@@ -43,4 +45,5 @@ https://newton-physics.github.io/newton/stable/solvers/index.html.
    SolverSemiImplicit
    SolverStyle3D
    SolverVBD
+   SolverWCSPH
    SolverXPBD

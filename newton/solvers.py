@@ -40,6 +40,27 @@ def __dir__() -> list[str]:
     return sorted(set(globals()) | set(__all__))
 
 
+class _LazySolverModule(ModuleType):
+    """Expose a solver helper namespace without importing its implementation eagerly."""
+
+    def __init__(self, name: str, solver_attr: str):
+        super().__init__(name)
+        self._solver_attr = solver_attr
+        self._module: ModuleType | None = None
+
+    def _load(self) -> ModuleType:
+        if self._module is None:
+            self._module = getattr(_solvers, self._solver_attr)
+            self.__doc__ = self._module.__doc__
+        return self._module
+
+    def __getattr__(self, name: str):
+        return getattr(self._load(), name)
+
+    def __dir__(self) -> list[str]:
+        return dir(self._load())
+
+
 class _LazyCoupledModule(ModuleType):
     def _load(self) -> ModuleType:
         module = importlib.import_module("._src.solvers.coupled", __package__)
@@ -63,6 +84,11 @@ experimental.__doc__ = """Experimental solver namespaces.
 experimental.__all__ = ["coupled"]
 experimental.__path__ = []
 experimental.coupled = _LazyCoupledModule(f"{__name__}.experimental.coupled")
+
+for _solver_module_name in ("sph", "style3d"):
+    _solver_module = _LazySolverModule(f"{__name__}.{_solver_module_name}", _solver_module_name)
+    globals()[_solver_module_name] = _solver_module
+    sys.modules[_solver_module.__name__] = _solver_module
 
 sys.modules[f"{__name__}.experimental"] = experimental
 sys.modules[f"{__name__}.experimental.coupled"] = experimental.coupled

@@ -381,6 +381,7 @@ class TestViewerLayerBackends(unittest.TestCase):
             batched_scales,
             batched_colors,
             lod,
+            side,
         ):
             captured_calls["add_batched_meshes_simple"] = {
                 "name": name,
@@ -391,6 +392,7 @@ class TestViewerLayerBackends(unittest.TestCase):
                 "batched_scales": batched_scales,
                 "batched_colors": batched_colors,
                 "lod": lod,
+                "side": side,
             }
             return Mock()
 
@@ -430,7 +432,7 @@ class TestViewerLayerBackends(unittest.TestCase):
         points = wp.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=wp.vec3)
         indices = wp.array([0, 1, 2], dtype=wp.uint32)
 
-        viewer.log_mesh("mesh", points, indices)
+        viewer.log_mesh("mesh", points, indices, backface_culling=False)
 
         self.assertIn("/layers/solverA/mesh", viewer._meshes)
         self.assertEqual(scene.captured_calls["add_mesh_simple"]["name"], "/layers/solverA/mesh")
@@ -441,7 +443,7 @@ class TestViewerLayerBackends(unittest.TestCase):
 
         points = wp.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=wp.vec3)
         indices = wp.array([0, 1, 2], dtype=wp.uint32)
-        viewer.log_mesh("mesh", points, indices)
+        viewer.log_mesh("mesh", points, indices, backface_culling=False)
 
         xforms = wp.array([wp.transform(wp.vec3(1.0, 2.0, 3.0), wp.quat_identity())], dtype=wp.transform)
         scales = wp.array([[1.0, 1.0, 1.0]], dtype=wp.vec3)
@@ -453,6 +455,7 @@ class TestViewerLayerBackends(unittest.TestCase):
             scene.captured_calls["add_batched_meshes_simple"]["name"],
             "/layers/solverA/instances",
         )
+        self.assertEqual(scene.captured_calls["add_batched_meshes_simple"]["side"], "double")
 
 
 if __name__ == "__main__":

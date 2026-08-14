@@ -19,6 +19,7 @@ class TestLazySolverImports(unittest.TestCase):
             "kamino",
             "mujoco",
             "semi_implicit",
+            "sph",
             "style3d",
             "vbd",
             "xpbd",

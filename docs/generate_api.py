@@ -277,7 +277,7 @@ def write_module_page(mod_name: str, api_toctree_modules: set[str] | None = None
                 "   Because ``newton.solvers`` is a module rather than a package, use",
                 f"   ``from newton.solvers import {sub_name}`` instead of ``import {mod_name}``.",
                 "",
-                f".. currentmodule:: newton._src.solvers.{sub_name}",
+                ".. currentmodule:: newton.solvers",
                 "",
             ]
         )
@@ -315,7 +315,8 @@ def write_module_page(mod_name: str, api_toctree_modules: set[str] | None = None
         lines.extend([".. rubric:: Classes", ""])
         if uses_internal_solver_module or is_solver_submodule:
             for cls in classes:
-                lines.extend([f".. autoclass:: {cls}", ""])
+                target = f"{sub_name}.{cls}" if uses_internal_solver_module else cls
+                lines.extend([f".. autoclass:: {target}", ""])
         else:
             lines.extend(
                 [
@@ -333,7 +334,8 @@ def write_module_page(mod_name: str, api_toctree_modules: set[str] | None = None
         lines.extend([".. rubric:: Functions", ""])
         if uses_internal_solver_module or is_solver_submodule:
             for fn in functions:
-                lines.extend([f".. autofunction:: {fn}", ""])
+                target = f"{sub_name}.{fn}" if uses_internal_solver_module else fn
+                lines.extend([f".. autofunction:: {target}", ""])
         else:
             lines.extend(
                 [
@@ -400,7 +402,7 @@ def write_module_page(mod_name: str, api_toctree_modules: set[str] | None = None
         lines.append("")
 
     outfile.parent.mkdir(parents=True, exist_ok=True)
-    outfile.write_text("\n".join(lines), encoding="utf-8")
+    outfile.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     print(f"Wrote {outfile.relative_to(REPO_ROOT)} ({len(symbols)} symbols)")
 
 

@@ -5,7 +5,7 @@ import importlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from . import style3d
+    from . import sph, style3d
     from .featherstone import SolverFeatherstone
     from .implicit_mpm import SolverImplicitMPM
     from .kamino import SolverKamino
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from .mujoco import SolverMuJoCo
     from .semi_implicit import SolverSemiImplicit
     from .solver import SolverBase
+    from .sph.solver_wcsph import SolverWCSPH
     from .style3d.solver_style3d import SolverStyle3D
     from .vbd import SolverVBD
     from .xpbd import SolverXPBD
@@ -27,7 +28,9 @@ __all__ = [
     "SolverSemiImplicit",
     "SolverStyle3D",
     "SolverVBD",
+    "SolverWCSPH",
     "SolverXPBD",
+    "sph",
     "style3d",
 ]
 
@@ -45,7 +48,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "SolverSemiImplicit": (".semi_implicit", "SolverSemiImplicit"),
     "SolverStyle3D": (".style3d.solver_style3d", "SolverStyle3D"),
     "SolverVBD": (".vbd", "SolverVBD"),
+    "SolverWCSPH": (".sph.solver_wcsph", "SolverWCSPH"),
     "SolverXPBD": (".xpbd", "SolverXPBD"),
+    "sph": (".sph", None),
     "style3d": (".style3d", None),
 }
 
