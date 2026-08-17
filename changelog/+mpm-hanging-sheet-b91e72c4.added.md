@@ -1,0 +1,1 @@
+Add MPM examples that deform a two-particle-thick volumetric sheet under gravity from either one fixed edge or two opposite fixed edges, including a scissors demo with blade contact and progressive separation.

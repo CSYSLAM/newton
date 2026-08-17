@@ -981,6 +981,36 @@ add_example_test(
 
 add_example_test(
     TestMPMExamples,
+    name="mpm.example_mpm_hanging_sheet",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 90},
+    use_viewer=True,
+)
+
+add_example_test(
+    TestMPMExamples,
+    name="mpm.example_mpm_suspended_sheet",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 90},
+    use_viewer=True,
+)
+
+add_example_test(
+    TestMPMExamples,
+    name="mpm.example_mpm_suspended_sheet_scissors",
+    devices=cuda_test_devices,
+    test_options={
+        "num-frames": 132,
+        "settle-time": 0.30,
+        "approach-time": 0.20,
+        "cut-time": 1.40,
+        "depart-time": 0.20,
+    },
+    use_viewer=True,
+)
+
+add_example_test(
+    TestMPMExamples,
     name="mpm.example_mpm_snow_ball",
     devices=cuda_test_devices,
     test_options={"num-frames": 30, "voxel-size": 0.2},
