@@ -82,6 +82,21 @@ def integrate_active_fraction(
 
 
 @fem.integrand
+def integrate_velocity_field_separation(
+    s: fem.Sample,
+    phi: fem.Field,
+    inv_cell_volume: float,
+    particle_separation: wp.array[float],
+    particle_flags: wp.array[wp.int32],
+):
+    """Rasterize activated particle separation onto velocity nodes."""
+    if ~particle_flags[s.qp_index] & newton.ParticleFlags.ACTIVE:
+        return 0.0
+
+    return phi(s) * particle_separation[s.qp_index] * inv_cell_volume
+
+
+@fem.integrand
 def integrate_collider_fraction(
     s: fem.Sample,
     domain: fem.Domain,
@@ -204,6 +219,102 @@ def free_velocity(
     inv_mass_matrix[i] = inv_particle_mass
 
     velocity_avg[i] = vel
+
+
+@wp.kernel
+def build_velocity_field_node_map(
+    grid: wp.uint64,
+    node_positions: wp.array[wp.vec3],
+    environment_offsets: wp.array[int],
+    field_count: int,
+    query_radius: float,
+    node_map: wp.array[int],
+):
+    """Map each environment's colocated nodes to field-zero node slots."""
+    node = wp.tid()
+    environment = wp.lower_bound(environment_offsets, node + 1) - 1
+    if environment < 0 or environment >= field_count:
+        return
+
+    base_begin = environment_offsets[0]
+    base_end = environment_offsets[1]
+    base_count = base_end - base_begin
+    position = node_positions[node]
+    query = wp.hash_grid_query(grid, position, query_radius)
+    candidate = wp.int32(-1)
+    best_distance_sq = query_radius * query_radius
+    while wp.hash_grid_query_next(query, candidate):
+        if candidate >= base_begin and candidate < base_end:
+            distance_sq = wp.length_sq(node_positions[candidate] - position)
+            if distance_sq <= best_distance_sq:
+                best_distance_sq = distance_sq
+                local_node = candidate - base_begin
+                node_map[environment * base_count + local_node] = node
+
+
+@wp.kernel
+def couple_velocity_fields(
+    environment_offsets: wp.array[int],
+    node_map: wp.array[int],
+    field_separation: wp.array[float],
+    inv_mass_matrix: wp.array[float],
+    velocity: wp.array[wp.vec3],
+    field_count: int,
+    drag: float,
+):
+    """Merge colocated velocity fields unless a crack activates the node."""
+    local_node = wp.tid()
+    nodes_per_field = environment_offsets[1] - environment_offsets[0]
+    if local_node >= nodes_per_field:
+        return
+
+    separated = bool(False)
+    total_mass = float(0.0)
+    total_momentum = wp.vec3(0.0)
+
+    field = wp.int32(0)
+    while field < field_count:
+        map_index = field * nodes_per_field + local_node
+        node = wp.int32(-1)
+        if map_index < node_map.shape[0]:
+            node = node_map[map_index]
+        if node < 0:
+            separated = True
+        else:
+            separated = separated or field_separation[node] > 0.0
+            inv_mass = inv_mass_matrix[node]
+            mass = wp.where(inv_mass > EPSILON, wp.max(1.0 / inv_mass - drag, 0.0), INFINITY)
+            total_mass += mass
+            total_momentum += mass * velocity[node]
+        field += 1
+
+    if separated or total_mass <= EPSILON:
+        return
+
+    merged_velocity = total_momentum / total_mass
+    field = wp.int32(0)
+    while field < field_count:
+        node = node_map[field * nodes_per_field + local_node]
+        if node >= 0:
+            velocity[node] = merged_velocity
+        field += 1
+
+
+@wp.kernel
+def repeat_points_for_environments(
+    points: wp.array[wp.vec3],
+    environment_count: int,
+    repeated_points: wp.array[wp.vec3],
+    point_environments: wp.array[int],
+):
+    """Repeat one physical point set in every FEM environment."""
+    index = wp.tid()
+    point_count = points.shape[0]
+    environment = index // point_count
+    point = index - environment * point_count
+    if environment < environment_count:
+        repeated_points[index] = points[point]
+        point_environments[index] = environment
 
 
 @wp.func
@@ -1302,6 +1413,26 @@ def mark_active_cells_by_environment(
 
     if s_grid.element_index != fem.NULL_ELEMENT_INDEX:
         active_cells[s_grid.element_index] = 1
+
+
+@fem.integrand
+def mark_active_cells_in_all_environments(
+    s: fem.Sample,
+    domain: fem.Domain,
+    positions: wp.array[wp.vec3],
+    particle_flags: wp.array[int],
+    environment_count: int,
+    active_cells: wp.array[int],
+):
+    """Activate matching cells in every colocated FEM environment."""
+    if ~particle_flags[s.qp_index] & newton.ParticleFlags.ACTIVE:
+        return
+
+    x = positions[s.qp_index]
+    for environment in range(environment_count):
+        s_grid = fem.lookup(domain, x, environment)
+        if s_grid.element_index != fem.NULL_ELEMENT_INDEX:
+            active_cells[s_grid.element_index] = 1
 
 
 @wp.kernel(module="unique")

@@ -25,6 +25,7 @@ from .contact_solver_kernels import (
     solve_nodal_friction,
     solve_subgrid_friction,
 )
+from .implicit_mpm_solver_kernels import couple_velocity_fields
 from .rheology_solver_kernels import (
     YieldParamVec,
     apply_stress_delta_jacobi,
@@ -333,6 +334,26 @@ class MomentumData:
 
     inv_volume: wp.array
     velocity: wp.array[wp.vec3]
+
+
+@dataclass
+class VelocityFieldData:
+    """Local coupling data for colocated MPM velocity fields.
+
+    Attributes:
+        environment_offsets: Velocity-node offsets for each field.
+        node_map: Mapping from field-major colocated-node slots to velocity
+            node indices.
+        separation: Rasterized separation activation per velocity node.
+        field_count: Number of independent velocity fields.
+        drag: Background drag mass added to each node.
+    """
+
+    environment_offsets: wp.array[int]
+    node_map: wp.array[int]
+    separation: wp.array[float]
+    field_count: int
+    drag: float
 
 
 @dataclass
@@ -676,6 +697,31 @@ class _RheologySolver:
         self.delta_stress.release()
         self.strain_residual.release()
         self._residual_squared_norm_computer.release()
+
+
+class _VelocityFieldCoupler:
+    """Project uncut colocated velocity fields onto a shared momentum state."""
+
+    def __init__(self, momentum: MomentumData, data: VelocityFieldData):
+        self.solve_launch = wp.launch(
+            couple_velocity_fields,
+            dim=momentum.velocity.shape[0] // data.field_count,
+            inputs=[
+                data.environment_offsets,
+                data.node_map,
+                data.separation,
+                momentum.inv_volume,
+                momentum.velocity,
+                data.field_count,
+                data.drag,
+            ],
+            device=momentum.velocity.device,
+            record_cmd=True,
+        )
+
+    def solve(self) -> None:
+        """Apply one velocity-field coupling projection."""
+        self.solve_launch.launch()
 
 
 class _GaussSeidelSolver(_RheologySolver):
@@ -1782,6 +1828,7 @@ def _nonlinear_solver_result_norms(residual, l2_tolerance_scale: float | np.ndar
 def _run_solver_loop(
     rheology_solver: _RheologySolver,
     contact_solver: _ContactSolver,
+    velocity_field_coupler: _VelocityFieldCoupler | None,
     max_iterations: int,
     tolerance: float,
     l2_tolerance_scale: float | wp.array,
@@ -1803,6 +1850,8 @@ def _run_solver_loop(
             for _k in range(solve_granularity):
                 contact_solver.solve()
                 rheology_solver.solve()
+                if velocity_field_coupler is not None:
+                    velocity_field_coupler.solve()
             residual = rheology_solver.eval_residual()
             if rheology_solver.rheology.strain_environment_offsets is None:
                 wp.launch(
@@ -1869,6 +1918,8 @@ def _run_solver_loop(
             for _k in range(solve_granularity):
                 contact_solver.solve()
                 rheology_solver.solve()
+                if velocity_field_coupler is not None:
+                    velocity_field_coupler.solve()
 
             residual = rheology_solver.eval_residual().numpy()
             res_l2, res_linf = _nonlinear_solver_result_norms(residual, host_tolerance_scale)
@@ -1890,6 +1941,7 @@ def solve_rheology(
     momentum: MomentumData,
     rheology: RheologyData,
     collision: CollisionData,
+    velocity_fields: VelocityFieldData | None = None,
     jacobi_warmstart_smoother_iterations: int = 5,
     temporary_store: fem.TemporaryStore | None = None,
     use_graph: bool = True,
@@ -1938,6 +1990,8 @@ def solve_rheology(
             yield parameters, coloring data, and output stress/strain arrays.
         collision: :class:`CollisionData` containing collider matrices, friction,
             adhesion, normals, velocities, rigidity operator, and impulse arrays.
+        velocity_fields: Optional local coupling data for multiple colocated
+            MPM velocity fields.
         jacobi_warmstart_smoother_iterations: Number of Jacobi smoother
             iterations to run before the main Gauss-Seidel solve (ignored
             for Jacobi solver).
@@ -2034,10 +2088,14 @@ def solve_rheology(
 
     rheology_solver = rheology_solver_class(delassus_operator, temporary_store)
     rheology_solver.apply_initial_guess()
+    velocity_field_coupler = _VelocityFieldCoupler(momentum, velocity_fields) if velocity_fields is not None else None
+    if velocity_field_coupler is not None:
+        velocity_field_coupler.solve()
 
     solve_graph = _run_solver_loop(
         rheology_solver,
         contact_solver,
+        velocity_field_coupler,
         max_iterations,
         tolerance,
         tolerance_scale,

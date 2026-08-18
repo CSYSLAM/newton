@@ -26,13 +26,15 @@ from ..solver import SolverBase
 from .implicit_mpm_model import ImplicitMPMModel
 from .rasterized_collisions import (
     Collider,
+    activate_particle_velocity_field_separation,
     build_rigidity_operator,
     interpolate_collider_normals,
     project_outside_collider,
     rasterize_collider,
+    world_position,
 )
 from .render_grains import sample_render_grains, update_render_grains
-from .solve_rheology import CollisionData, MomentumData, RheologyData, YieldParamVec, solve_rheology
+from .solve_rheology import CollisionData, MomentumData, RheologyData, VelocityFieldData, YieldParamVec, solve_rheology
 
 __all__ = ["SolverImplicitMPM"]
 
@@ -45,12 +47,14 @@ from .implicit_mpm_solver_kernels import (
     allocate_by_voxels,
     average_elastic_parameters,
     build_active_particle_mask,
+    build_velocity_field_node_map,
     collision_weight_field,
     compliance_form,
     compute_bounds,
     compute_color_offsets,
     compute_eigenvalues,
     compute_unilateral_strain_offset,
+    couple_velocity_fields,
     fill_uniform_color_block_indices,
     free_velocity,
     integrate_active_fraction,
@@ -62,6 +66,7 @@ from .implicit_mpm_solver_kernels import (
     integrate_particle_stress,
     integrate_velocity,
     integrate_velocity_apic,
+    integrate_velocity_field_separation,
     integrate_yield_parameters,
     inverse_scale_sym_tensor,
     inverse_scale_vector,
@@ -71,6 +76,7 @@ from .implicit_mpm_solver_kernels import (
     make_rotate_vectors,
     mark_active_cells,
     mark_active_cells_by_environment,
+    mark_active_cells_in_all_environments,
     mass_form,
     mat11,
     mat13,
@@ -78,6 +84,7 @@ from .implicit_mpm_solver_kernels import (
     mat66,
     node_color,
     record_volume_rebuild_status,
+    repeat_points_for_environments,
     reset_mpm_collider_history,
     reset_mpm_grid_warmstart,
     reset_mpm_particle_history,
@@ -249,6 +256,7 @@ class ImplicitMPMScratchpad:
         self.divergence_trial = None
         self.fraction_field = None
         self.elastic_parameters_field = None
+        self.velocity_position_field = None
 
         self.plastic_strain_delta_field = None
         self.elastic_strain_delta_field = None
@@ -441,7 +449,7 @@ class ImplicitMPMScratchpad:
         self._strain_space_restriction = strain_space_restriction
         self.strain_environment_offsets = strain_space_partition.env_offsets if environment_first else None
 
-    def require_velocity_space_fields(self, has_compliant_particles: bool):
+    def require_velocity_space_fields(self, has_compliant_particles: bool, need_node_positions: bool = False):
         velocity_basis = self._velocity_basis
         velocity_space = self._velocity_space
         vel_space_restriction = self._vel_space_restriction
@@ -451,6 +459,7 @@ class ImplicitMPMScratchpad:
         if (
             self.velocity_test is not None
             and self.velocity_test.space_restriction.space_partition == vel_space_partition
+            and (not need_node_positions or self.velocity_position_field is not None)
         ):
             return
 
@@ -482,6 +491,11 @@ class ImplicitMPMScratchpad:
                 self.elastic_parameters_field.rebind(elastic_parameters_space, vel_space_partition)
 
         self.velocity_field = velocity_space.make_field(space_partition=vel_space_partition)
+        if need_node_positions:
+            if self.velocity_position_field is None:
+                self.velocity_position_field = velocity_space.make_field(space_partition=vel_space_partition)
+            else:
+                self.velocity_position_field.rebind(velocity_space, vel_space_partition)
 
     def require_collision_space_fields(self):
         collision_basis = self._collision_basis
@@ -923,6 +937,28 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             without prior notice.
         """
 
+        velocity_field_count: int = 1
+        """Number of independent MPM velocity fields in a single Newton world.
+
+        Values greater than one allocate independent grid momentum, strain,
+        and collision fields selected by :attr:`particle_velocity_field`.
+        Colocated fields are momentum-coupled by default. Set values in
+        :attr:`particle_velocity_field_separation` above zero to rasterize a
+        local separation zone where overlapping fields no longer exchange
+        velocity. This supports prescribed material separation such as a
+        progressively advancing cut.
+
+        Multi-velocity fields currently require a single-world model and
+        ``grid_padding=0``. Sparse multi-field grids require CUDA; use a dense
+        or fixed grid on CPU. The default value of one retains the standard
+        MPM transfer path without allocating per-particle field arrays.
+
+        .. experimental::
+
+            Multi-velocity-field MPM configuration and behavior may change
+            without prior notice.
+        """
+
     @classmethod
     def register_custom_attributes(cls, builder: newton.ModelBuilder) -> None:
         """Register MPM-specific custom attributes in the 'mpm' namespace.
@@ -1144,9 +1180,89 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         if self._initial_particle_count == 0:
             raise ValueError("SolverImplicitMPM requires at least one particle.")
 
+        if isinstance(config.velocity_field_count, bool):
+            raise ValueError(
+                f"Config.velocity_field_count must be a positive integer, got {config.velocity_field_count!r}."
+            )
+        try:
+            self.velocity_field_count = operator.index(config.velocity_field_count)
+        except TypeError as error:
+            raise ValueError(
+                f"Config.velocity_field_count must be a positive integer, got {config.velocity_field_count!r}."
+            ) from error
+        if self.velocity_field_count < 1:
+            raise ValueError(
+                f"Config.velocity_field_count must be a positive integer, got {self.velocity_field_count}."
+            )
+
         self._separate_worlds = bool(config.separate_worlds and self._initial_world_count > 1)
-        self._environment_count = self._initial_world_count if self._separate_worlds else 1
-        self._particle_environment = model.particle_world if self._separate_worlds else None
+        self._separate_velocity_fields = self.velocity_field_count > 1
+        if self._separate_velocity_fields and self._initial_world_count != 1:
+            raise ValueError("Config.velocity_field_count > 1 currently requires a single-world model.")
+        if self._separate_velocity_fields and config.grid_padding != 0:
+            raise ValueError("Config.velocity_field_count > 1 currently requires Config.grid_padding=0.")
+        if self._separate_velocity_fields and config.grid_type == "sparse" and model.device.is_cpu:
+            raise ValueError(
+                "Config.velocity_field_count > 1 with Config.grid_type='sparse' requires CUDA; "
+                "use 'dense' or 'fixed' on CPU."
+            )
+        if self._separate_velocity_fields and config.grid_type == "sparse" and config.max_active_cell_count > 0:
+            raise ValueError(
+                "Config.velocity_field_count > 1 does not yet support a rebuildable sparse grid; "
+                "set Config.max_active_cell_count=-1."
+            )
+
+        self._isolated_environments = self._separate_worlds or self._separate_velocity_fields
+        if self._separate_worlds:
+            self._environment_count = self._initial_world_count
+            self._particle_velocity_field = None
+            self._particle_environment = model.particle_world
+        elif self._separate_velocity_fields:
+            self._environment_count = self.velocity_field_count
+            self._particle_velocity_field = wp.zeros(
+                self._initial_particle_count,
+                dtype=wp.int32,
+                device=model.device,
+            )
+            self._particle_velocity_field_separation = wp.zeros(
+                self._initial_particle_count,
+                dtype=wp.float32,
+                device=model.device,
+            )
+            repeated_point_count = self._initial_particle_count * self._environment_count
+            self._environment_grid_points = wp.empty(
+                repeated_point_count,
+                dtype=wp.vec3,
+                device=model.device,
+            )
+            self._environment_grid_indices = wp.empty(
+                repeated_point_count,
+                dtype=wp.int32,
+                device=model.device,
+            )
+            self._velocity_field_node_hash = wp.HashGrid(128, 128, 128, device=model.device)
+            self._velocity_field_node_map = None
+            self._particle_environment = self._particle_velocity_field
+        else:
+            self._environment_count = 1
+            self._particle_velocity_field = None
+            self._particle_velocity_field_separation = None
+            self._environment_grid_points = None
+            self._environment_grid_indices = None
+            self._velocity_field_node_hash = None
+            self._velocity_field_node_map = None
+            self._particle_environment = None
+        if self._separate_worlds:
+            self._particle_velocity_field_separation = None
+            self._environment_grid_points = None
+            self._environment_grid_indices = None
+            self._velocity_field_node_hash = None
+            self._velocity_field_node_map = None
+        self._particle_collision_environment = model.particle_world if self._separate_worlds else None
+        self._velocity_field_separation_collider_mask = None
+        self._velocity_field_separation_contact_margin = 0.0
+        self._velocity_field_separation_minimum_contact_count = 1
+        self._velocity_field_separation_minimum_closing_speed = 0.0
         self._particle_world_ranges = None
 
         if self._separate_worlds:
@@ -1217,6 +1333,8 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         self._grid_accumulated_status = None
         self._grid_point_mask = None
         self.solver = _resolve_solver_spec(config.solver, self.velocity_basis)
+        if self._separate_velocity_fields and self.solver not in (("gs",), ("gauss-seidel",)):
+            raise ValueError("Config.velocity_field_count > 1 currently supports only the 'gs' rheology solver.")
         self.coloring = any("gauss-seidel" in solver or "gs" in solver for solver in self.solver)
         self.apic = config.transfer_scheme == "apic"
         self.gimp = config.integration_scheme == "gimp"
@@ -1327,6 +1445,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             body_q=body_q,
             collider_world_ids=collider_world_ids,
         )
+        self._velocity_field_separation_collider_mask = None
 
         self._last_step_data.save_collider_current_position(self._mpm_model.collider_body_q)
 
@@ -1334,6 +1453,126 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
     def voxel_size(self) -> float:
         """Grid voxel size used by the solver."""
         return self._mpm_model.voxel_size
+
+    @property
+    def particle_velocity_field(self) -> wp.array[wp.int32] | None:
+        """Per-particle independent velocity-field indices.
+
+        The array exists when :attr:`Config.velocity_field_count` is greater
+        than one. Entries must remain in the half-open range
+        ``[0, velocity_field_count)`` and may be updated on the solver device
+        between calls to :meth:`step`.
+        """
+        return self._particle_velocity_field
+
+    @property
+    def particle_velocity_field_separation(self) -> wp.array[float] | None:
+        """Per-particle activation values for local velocity-field separation.
+
+        The array exists when :attr:`Config.velocity_field_count` is greater
+        than one. Positive entries release coupling between colocated velocity
+        fields at grid nodes influenced by those particles. Zero entries leave
+        the fields momentum-coupled.
+        """
+        return self._particle_velocity_field_separation
+
+    @property
+    def uses_multiple_velocity_fields(self) -> bool:
+        """Whether particles can select independent MPM velocity fields."""
+        return self._separate_velocity_fields
+
+    def set_velocity_field_separation_colliders(
+        self,
+        collider_ids: Sequence[int] | wp.array[int] | None,
+        *,
+        contact_margin: float = 0.0,
+        minimum_contact_count: int = 1,
+        minimum_closing_speed: float = 0.0,
+    ) -> None:
+        """Select colliders that separate velocity fields on particle contact.
+
+        Selected colliders persistently activate
+        :attr:`particle_velocity_field_separation` for dynamic particles whose
+        centers lie within ``contact_margin`` of at least
+        ``minimum_contact_count`` selected surfaces. Contact is evaluated at
+        the start of every :meth:`step`. Pass ``None`` or an empty sequence to
+        disable contact-triggered separation.
+
+        Set ``minimum_closing_speed`` above zero to additionally require two
+        contacted surfaces to be moving toward each other along their opposing
+        contact normals. This avoids separation from rigid translation or from
+        surfaces moving apart.
+
+        Calling :meth:`setup_collider` clears this selection because collider
+        indices may change.
+
+        Args:
+            collider_ids: Stable MPM collider indices to treat as cutters.
+            contact_margin: Additional particle-to-surface contact margin [m].
+            minimum_contact_count: Number of selected collider surfaces that
+                must simultaneously contact a particle.
+            minimum_closing_speed: Required relative closing speed between
+                contacted surfaces [m/s]. Zero disables the velocity test.
+
+        Raises:
+            ValueError: If multiple velocity fields are disabled, the margin
+                or contact requirement is invalid, or a collider index is out
+                of range.
+            TypeError: If ``collider_ids`` is not a one-dimensional integer
+                sequence.
+        """
+        if not self._separate_velocity_fields:
+            raise ValueError("Contact separation requires Config.velocity_field_count > 1.")
+        if not np.isfinite(contact_margin) or contact_margin < 0.0:
+            raise ValueError(f"contact_margin must be finite and non-negative, got {contact_margin!r}.")
+        if isinstance(minimum_contact_count, bool):
+            raise ValueError("minimum_contact_count must be a positive integer.")
+        try:
+            minimum_contact_count = operator.index(minimum_contact_count)
+        except TypeError as error:
+            raise ValueError("minimum_contact_count must be a positive integer.") from error
+        if minimum_contact_count < 1:
+            raise ValueError("minimum_contact_count must be a positive integer.")
+        if not np.isfinite(minimum_closing_speed) or minimum_closing_speed < 0.0:
+            raise ValueError(f"minimum_closing_speed must be finite and non-negative, got {minimum_closing_speed!r}.")
+        if minimum_closing_speed > 0.0 and minimum_contact_count < 2:
+            raise ValueError("minimum_closing_speed requires minimum_contact_count >= 2.")
+
+        if collider_ids is None:
+            self._velocity_field_separation_collider_mask = None
+            self._velocity_field_separation_contact_margin = float(contact_margin)
+            self._velocity_field_separation_minimum_contact_count = minimum_contact_count
+            self._velocity_field_separation_minimum_closing_speed = float(minimum_closing_speed)
+            return
+
+        collider_ids_np = collider_ids.numpy() if isinstance(collider_ids, wp.array) else np.asarray(collider_ids)
+        if collider_ids_np.ndim != 1:
+            raise TypeError("collider_ids must be a one-dimensional integer sequence.")
+        if collider_ids_np.size and not np.issubdtype(collider_ids_np.dtype, np.integer):
+            raise TypeError("collider_ids must be a one-dimensional integer sequence.")
+
+        collider_count = self._mpm_model.collider.collider_mesh.shape[0]
+        if collider_ids_np.size == 0:
+            self._velocity_field_separation_collider_mask = None
+        else:
+            if np.any(collider_ids_np < 0) or np.any(collider_ids_np >= collider_count):
+                raise ValueError(f"collider_ids entries must be in [0, {collider_count}).")
+            unique_collider_ids = np.unique(collider_ids_np)
+            if minimum_contact_count > unique_collider_ids.size:
+                raise ValueError(
+                    "minimum_contact_count cannot exceed the number of selected colliders "
+                    f"({unique_collider_ids.size})."
+                )
+            collider_mask_np = np.zeros(collider_count, dtype=np.int32)
+            collider_mask_np[unique_collider_ids] = 1
+            self._velocity_field_separation_collider_mask = wp.array(
+                collider_mask_np,
+                dtype=wp.int32,
+                device=self.model.device,
+            )
+        self._velocity_field_separation_contact_margin = float(contact_margin)
+        self._velocity_field_separation_minimum_contact_count = minimum_contact_count
+        self._velocity_field_separation_minimum_closing_speed = float(minimum_closing_speed)
 
     def check_sparse_grid_rebuild_status(self) -> None:
         """Raise if a rebuildable sparse grid exceeded its reserved capacity.
@@ -1964,7 +2203,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 state_in.mpm.particle_qd_grad,
                 self._mpm_model.particle_flags,
                 self.model.particle_mass,
-                self._particle_environment,
+                self._particle_collision_environment,
                 self._mpm_model.collider,
                 state_in.body_q,
                 state_in.body_qd if self.collider_velocity_mode == "forward" else None,
@@ -2079,7 +2318,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         """
         with self._timer("Allocate grid"):
             if self.grid_type == "sparse":
-                if self._separate_worlds:
+                if self._isolated_environments:
                     if self._sparse_rebuildable:
                         if self._grid_status is None:
                             self._grid_status = wp.zeros(1, dtype=wp.uint32, device=positions.device)
@@ -2113,7 +2352,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                             **capacity_kwargs,
                         )
                         self.check_sparse_grid_rebuild_status()
-                    else:
+                    elif self._separate_worlds:
                         cell_ijks = [
                             voxel_coordinates(positions[begin:end], voxel_size, padding_voxels=padding_voxels)
                             if begin != end
@@ -2138,6 +2377,26 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                         grid = fem.Nanogrid.from_environment_voxels(
                             cell_ijk,
                             cell_environment,
+                            self._environment_count,
+                            voxel_size=voxel_size,
+                            temporary_store=temporary_store,
+                            device=positions.device,
+                        )
+                    else:
+                        wp.launch(
+                            repeat_points_for_environments,
+                            dim=self._environment_grid_points.shape[0],
+                            inputs=[
+                                positions,
+                                self._environment_count,
+                                self._environment_grid_points,
+                                self._environment_grid_indices,
+                            ],
+                            device=positions.device,
+                        )
+                        grid = fem.Nanogrid.from_environment_voxels(
+                            self._environment_grid_points,
+                            self._environment_grid_indices,
                             self._environment_count,
                             voxel_size=voxel_size,
                             temporary_store=temporary_store,
@@ -2241,7 +2500,15 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
         active_cells = fem.borrow_temporary(self.temporary_store, shape=grid.cell_count(), dtype=int)
         active_cells.zero_()
-        if self._separate_worlds:
+        if self._separate_velocity_fields:
+            active_cell_integrand = mark_active_cells_in_all_environments
+            active_cell_values = {
+                "positions": positions,
+                "particle_flags": particle_flags,
+                "environment_count": self._environment_count,
+                "active_cells": active_cells,
+            }
+        elif self._separate_worlds:
             active_cell_integrand = mark_active_cells_by_environment
             active_cell_values = {
                 "positions": positions,
@@ -2295,7 +2562,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 velocity_basis_str=self.velocity_basis,
                 collider_basis_str=self.collider_basis,
                 max_cell_count=self.max_active_cell_count,
-                environment_first=self._separate_worlds,
+                environment_first=self._isolated_environments,
                 temporary_store=self.temporary_store,
             )
 
@@ -2366,7 +2633,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             # them geometry-scoped also gives their PicQuadrature a distinct cache name
             # from fixed/rebuildable grids, whose explicit partitions require domain indices.
             use_domain_element_indices = not (
-                self._separate_worlds and self.grid_type == "sparse" and not self._sparse_rebuildable
+                self._isolated_environments and self.grid_type == "sparse" and not self._sparse_rebuildable
             )
 
             if self.gimp:
@@ -2424,9 +2691,9 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                     particle_cell_fractions[i] += cell_weight
                     return
 
-        separate_worlds = self._separate_worlds
+        isolated_environments = self._isolated_environments
 
-        @fem.cache.dynamic_kernel(suffix=f"{domain.name}_{'isolated' if separate_worlds else 'shared'}")
+        @fem.cache.dynamic_kernel(suffix=f"{domain.name}_{'isolated' if isolated_environments else 'shared'}")
         def particle_locations_gimp(
             cell_arg_value: domain.ElementArg,
             domain_index_arg_value: domain.ElementIndexArg,
@@ -2453,7 +2720,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 k = vtx & 1
 
                 pos = center - wp.vec3(radius) + 2.0 * radius * wp.vec3(float(i), float(j), float(k))
-                if wp.static(separate_worlds):
+                if wp.static(isolated_environments):
                     sample = cell_lookup(domain_arg, pos, int(particle_environment[p]))
                 else:
                     sample = cell_lookup(domain_arg, pos)
@@ -2541,6 +2808,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
         # Rasterize colliders to discrete space
         self._rasterize_colliders(state_in, dt, last_step_data, scratch, inv_cell_volume)
+        self._activate_velocity_field_separation_from_colliders(state_in)
 
         # Velocity right-hand side and inverse mass matrix
         self._compute_unconstrained_velocity(state_in, dt, pic, scratch, inv_cell_volume)
@@ -2561,7 +2829,9 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
         # Solve implicit system
         # Keep _solve_graph alive until end of function as destruction may cause sync point
-        _solve_graph = self._solve_rheology(pic, scratch, rigidity_operator, last_step_data, inv_cell_volume)
+        _solve_graph = self._solve_rheology(pic, scratch, rigidity_operator, last_step_data, inv_cell_volume, dt)
+
+        self._couple_velocity_field_nodes(scratch, dt)
 
         self._save_for_next_warmstart(scratch, pic, last_step_data)
 
@@ -2647,6 +2917,101 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 ],
             )
 
+            if self._separate_velocity_fields:
+                fem.integrate(
+                    integrate_velocity_field_separation,
+                    quadrature=pic,
+                    fields={"phi": scratch.fraction_test},
+                    values={
+                        "inv_cell_volume": inv_cell_volume,
+                        "particle_separation": self._particle_velocity_field_separation,
+                        "particle_flags": mpm_model.particle_flags,
+                    },
+                    output=scratch.fraction_field.dof_values,
+                    temporary_store=self.temporary_store,
+                )
+                self._build_velocity_field_node_map(scratch)
+                self._couple_velocity_field_nodes(scratch, dt)
+
+    def _build_velocity_field_node_map(self, scratch: ImplicitMPMScratchpad) -> None:
+        """Match physically colocated nodes across independent velocity fields."""
+        position_field = scratch.velocity_position_field
+        position_field.dof_values.fill_(wp.vec3(fem.OUTSIDE))
+        fem.interpolate(
+            world_position,
+            dest=position_field,
+            at=scratch.velocity_test.space_restriction,
+            reduction="first",
+            temporary_store=self.temporary_store,
+        )
+
+        node_count = scratch.velocity_node_count
+        if self._velocity_field_node_map is None or self._velocity_field_node_map.shape != (node_count,):
+            self._velocity_field_node_map = wp.empty(node_count, dtype=wp.int32, device=self.model.device)
+            self._velocity_field_node_hash.reserve(node_count)
+        self._velocity_field_node_map.fill_(-1)
+
+        hash_cell_width = self._mpm_model.voxel_size
+        query_radius = max(1.0e-7, 1.0e-4 * hash_cell_width)
+        self._velocity_field_node_hash.build(position_field.dof_values, hash_cell_width)
+        wp.launch(
+            build_velocity_field_node_map,
+            dim=node_count,
+            inputs=[
+                self._velocity_field_node_hash.id,
+                position_field.dof_values,
+                scratch.velocity_environment_offsets,
+                self._environment_count,
+                query_radius,
+                self._velocity_field_node_map,
+            ],
+            device=self.model.device,
+        )
+
+    def _activate_velocity_field_separation_from_colliders(self, state: newton.State) -> None:
+        """Activate persistent local separation from configured cutter contact."""
+        if self._velocity_field_separation_collider_mask is None:
+            return
+
+        wp.launch(
+            activate_particle_velocity_field_separation,
+            dim=self._initial_particle_count,
+            inputs=[
+                state.particle_q,
+                self._mpm_model.particle_flags,
+                self.model.particle_mass,
+                self._mpm_model.collider,
+                state.body_q,
+                state.body_qd,
+                self._velocity_field_separation_collider_mask,
+                self._velocity_field_separation_contact_margin,
+                self._velocity_field_separation_minimum_contact_count,
+                self._velocity_field_separation_minimum_closing_speed,
+                self._particle_velocity_field_separation,
+            ],
+            device=self.model.device,
+        )
+
+    def _couple_velocity_field_nodes(self, scratch: ImplicitMPMScratchpad, dt: float) -> None:
+        """Merge colocated velocity nodes outside activated separation zones."""
+        if not self._separate_velocity_fields:
+            return
+
+        wp.launch(
+            couple_velocity_fields,
+            dim=scratch.velocity_node_count // self._environment_count,
+            inputs=[
+                scratch.velocity_environment_offsets,
+                self._velocity_field_node_map,
+                scratch.fraction_field.dof_values,
+                scratch.inv_mass_matrix,
+                scratch.velocity_field.dof_values,
+                self._environment_count,
+                self._mpm_model.air_drag * dt,
+            ],
+            device=self.model.device,
+        )
+
     def _rasterize_colliders(
         self,
         state_in: newton.State,
@@ -2688,7 +3053,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 scratch.collider_adhesion,
                 scratch.collider_ids,
                 temporary_store=self.temporary_store,
-                node_environment_offsets=scratch.collider_environment_offsets,
+                node_environment_offsets=scratch.collider_environment_offsets if self._separate_worlds else None,
             )
 
             # normal interpolation
@@ -3115,6 +3480,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         rigidity_operator: tuple[wps.BsrMatrix, wps.BsrMatrix, wps.BsrMatrix] | None,
         last_step_data: LastStepData,
         inv_cell_volume: float,
+        dt: float,
     ):
         M_ev, rotated_volume = self._build_strain_eigenbasis(pic, scratch, inv_cell_volume)
 
@@ -3137,10 +3503,14 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 elastic_strain_delta=scratch.elastic_strain_delta_field.dof_values,
                 plastic_strain_delta=scratch.plastic_strain_delta_field.dof_values,
                 stress=scratch.stress_field.dof_values,
-                strain_environment_offsets=scratch.strain_environment_offsets,
+                strain_environment_offsets=None
+                if self._separate_velocity_fields
+                else scratch.strain_environment_offsets,
                 has_viscosity=self._mpm_model.has_viscosity,
                 has_dilatancy=self._mpm_model.has_dilatancy,
-                strain_velocity_node_count=-1 if self._separate_worlds else self._velocity_nodes_per_strain_sample,
+                strain_velocity_node_count=-1
+                if self._isolated_environments
+                else self._velocity_nodes_per_strain_sample,
             )
             collision_data = CollisionData(
                 collider_mat=scratch.collider_matrix,
@@ -3153,6 +3523,15 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 collider_impulse=scratch.impulse_field.dof_values,
                 has_colliders=self._mpm_model.collider.collider_mesh.shape[0] > 0,
             )
+            velocity_field_data = None
+            if self._separate_velocity_fields:
+                velocity_field_data = VelocityFieldData(
+                    environment_offsets=scratch.velocity_environment_offsets,
+                    node_map=self._velocity_field_node_map,
+                    separation=scratch.fraction_field.dof_values,
+                    field_count=self._environment_count,
+                    drag=self._mpm_model.air_drag * dt,
+                )
 
             # Retain graph to avoid immediate CPU sync
             solve_graph = solve_rheology(
@@ -3162,6 +3541,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 momentum_data,
                 rheology_data,
                 collision_data,
+                velocity_fields=velocity_field_data,
                 temporary_store=self.temporary_store,
                 use_graph=self._use_cuda_graph,
                 verbose=self.verbose,
@@ -3276,7 +3656,10 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
     def _require_velocity_space_fields(self, scratch: ImplicitMPMScratchpad, has_compliant_particles: bool):
         """Ensure velocity-space fields exist and match current spaces."""
 
-        scratch.require_velocity_space_fields(has_compliant_particles)
+        scratch.require_velocity_space_fields(
+            has_compliant_particles,
+            need_node_positions=self._separate_velocity_fields,
+        )
 
     def _require_collision_space_fields(self, scratch: ImplicitMPMScratchpad, last_step_data: LastStepData):
         """Ensure collision-space fields exist and match current spaces."""

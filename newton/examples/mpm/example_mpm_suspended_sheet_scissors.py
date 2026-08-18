@@ -3,11 +3,10 @@
 
 """Cut a suspended volumetric MPM sheet with animated scissors.
 
-The sheet is two particles thick and fixed along two opposite edges. A pair of
-kinematic blades first presses against the sheet, then a narrow band of
-particles behind the closing blades is deactivated to create a persistent cut.
-This combines physical blade contact with an explicit MPM separation rule,
-because standard MPM has no topological edge connectivity to sever.
+The sheet is two particles thick and fixed along two opposite edges. Contact
+with the narrow kinematic blade colliders persistently activates a crack-aware
+MPM separation field. Particles on either side then use independent local grid
+velocities without deleting material points; untouched nodes remain coupled.
 
 Run from the repository root::
 
@@ -32,20 +31,21 @@ BLADE_EDGE_COLOR = wp.vec3(0.88, 0.91, 0.95)
 HANDLE_COLOR = wp.vec3(0.86, 0.10, 0.12)
 HINGE_COLOR = wp.vec3(0.95, 0.66, 0.12)
 
-BLADE_LENGTH = 0.18
+BLADE_LENGTH = 0.135
 BLADE_HALF_THICKNESS = 0.00125
 BLADE_EDGE_HALF_HEIGHT = 0.0008
-BLADE_ROOT_HEIGHT = 0.018
-BLADE_TIP_HEIGHT = 0.0025
-BLADE_CURVE_HEIGHT = 0.006
-BLADE_SEGMENTS = 10
+BLADE_ROOT_HEIGHT = 0.014
+BLADE_TIP_HEIGHT = 0.002
+BLADE_CURVE_HEIGHT = 0.0045
+BLADE_SEGMENTS = 8
 BLADE_Y_OFFSET = 0.00135
-HANDLE_LENGTH = 0.105
-HANDLE_HALF_WIDTH = 0.008
-HANDLE_HALF_THICKNESS = 0.007
-HANDLE_Y_OFFSET = 0.012
-HANDLE_RING_MAJOR_RADIUS = 0.023
-HANDLE_RING_MINOR_RADIUS = 0.0045
+HANDLE_LENGTH = 0.095
+HANDLE_HALF_WIDTH = 0.007
+HANDLE_HALF_THICKNESS = 0.006
+HANDLE_Y_OFFSET = 0.0105
+HANDLE_RING_MAJOR_RADIUS = 0.021
+HANDLE_RING_MINOR_RADIUS = 0.004
+HINGE_RADIUS = 0.009
 
 
 @wp.kernel
@@ -100,6 +100,12 @@ def blade_edge_height(x: float, side: float) -> float:
     return side * BLADE_CURVE_HEIGHT * math.sin(phase)
 
 
+def blade_height(x: float) -> float:
+    """Return the tapered blade height in blade-local coordinates."""
+    alpha = float(np.clip(x / BLADE_LENGTH, 0.0, 1.0))
+    return BLADE_TIP_HEIGHT + (BLADE_ROOT_HEIGHT - BLADE_TIP_HEIGHT) * (1.0 - alpha) ** 0.65
+
+
 def create_curved_blade_mesh(side: float) -> newton.Mesh:
     """Create a thin blade with a curved cutting edge and tapered spine."""
     sample_count = BLADE_SEGMENTS + 1
@@ -110,10 +116,8 @@ def create_curved_blade_mesh(side: float) -> newton.Mesh:
 
     for sample in range(sample_count):
         x = BLADE_LENGTH * sample / BLADE_SEGMENTS
-        alpha = sample / BLADE_SEGMENTS
         inner_z = blade_edge_height(x, side)
-        blade_height = BLADE_TIP_HEIGHT + (BLADE_ROOT_HEIGHT - BLADE_TIP_HEIGHT) * (1.0 - alpha) ** 0.65
-        outer_z = inner_z - side * blade_height
+        outer_z = inner_z - side * blade_height(x)
         for y_side, y in enumerate((-BLADE_HALF_THICKNESS, BLADE_HALF_THICKNESS)):
             vertices[vertex_index(sample, 0, y_side)] = (x, y, inner_z)
             vertices[vertex_index(sample, 1, y_side)] = (x, y, outer_z)
@@ -186,6 +190,8 @@ class Example:
         self.anchor_height = float(args.anchor_height)
         self.cut_y = 0.5 * self.sheet_length
         self.cut_z = self.anchor_height - float(args.cut_depth)
+        self.cut_entry_x = -0.5 * self.sheet_width - 0.01
+        self.cut_exit_x = 0.5 * self.sheet_width + 0.01
         self.cut_half_width = float(args.cut_half_width)
         self.settle_time = float(args.settle_time)
         self.approach_time = float(args.approach_time)
@@ -195,12 +201,18 @@ class Example:
         self.trajectory_curve_offset = float(args.trajectory_curve_offset)
         self.open_angle = math.radians(float(args.open_angle))
         self.closed_angle = math.radians(float(args.closed_angle))
+        self.blade_engagement_angle = math.atan(math.pi * BLADE_CURVE_HEIGHT / BLADE_LENGTH)
         if min(self.settle_time, self.approach_time, self.cut_time, self.depart_time) < 0.0:
             raise ValueError("motion durations must be non-negative")
         if self.cut_time <= 0.0 or self.snip_count <= 0:
             raise ValueError("cut time and snip count must be positive")
         if not 0.0 <= self.closed_angle < self.open_angle:
             raise ValueError("expected 0 <= closed angle < open angle")
+        if not self.closed_angle < self.blade_engagement_angle < self.open_angle:
+            raise ValueError(
+                "blade angles must straddle the curved-edge engagement angle "
+                f"({math.degrees(self.blade_engagement_angle):.2f} deg)"
+            )
         if self.cut_half_width <= 0.0:
             raise ValueError("cut half-width must be positive")
         if abs(self.trajectory_curve_offset) + self.cut_half_width >= 0.5 * self.sheet_length:
@@ -246,7 +258,33 @@ class Example:
                 setattr(config, key, value)
         config.warmstart_mode = "particles"
         config.collider_velocity_mode = "forward"
+        config.velocity_field_count = 2
         self.solver = SolverImplicitMPM(self.model, config=config)
+
+        curve_progress = np.clip(
+            (self.rest_positions_np[:, 0] - self.cut_entry_x) / (self.cut_exit_x - self.cut_entry_x),
+            0.0,
+            1.0,
+        )
+        curve_envelope = 16.0 * curve_progress**2 * (1.0 - curve_progress) ** 2
+        cut_center_y = self.cut_y + self.trajectory_curve_offset * curve_envelope
+        particle_velocity_field_np = (self.rest_positions_np[:, 1] > cut_center_y).astype(np.int32)
+        self.solver.particle_velocity_field.assign(particle_velocity_field_np)
+
+        collider_body_index_np = self.solver.collider_body_index.numpy()
+        cutter_collider_ids = np.flatnonzero(
+            (collider_body_index_np == self.upper_blade_body) | (collider_body_index_np == self.lower_blade_body)
+        ).astype(np.int32)
+        if cutter_collider_ids.size < 2:
+            raise ValueError("scissor cutting edges must produce two independent MPM colliders")
+        self.cutter_contact_margin = 0.55 * float(np.min(self.sheet_spacing))
+        self.solver.set_velocity_field_separation_colliders(
+            cutter_collider_ids,
+            contact_margin=self.cutter_contact_margin,
+            minimum_contact_count=2,
+            minimum_closing_speed=1.0e-3,
+        )
+        self.cutter_collider_count = int(cutter_collider_ids.size)
 
         self.particle_colors = wp.full(
             self.model.particle_count,
@@ -255,22 +293,10 @@ class Example:
             device=self.model.device,
         )
         self.particle_colors[self.fixed_indices].fill_(ANCHOR_COLOR)
-        self.render_radii = wp.clone(self.model.particle_radius)
 
-        self.particle_flags_np = self.model.particle_flags.numpy().copy()
-        curve_progress = np.clip(
-            (self.rest_positions_np[:, 0] + 0.5 * self.sheet_width) / self.sheet_width,
-            0.0,
-            1.0,
-        )
-        curve_envelope = 16.0 * curve_progress**2 * (1.0 - curve_progress) ** 2
-        cut_center_y = self.cut_y + self.trajectory_curve_offset * curve_envelope
+        self.initial_particle_flags_np = self.model.particle_flags.numpy().copy()
         cut_candidate_mask = np.abs(self.rest_positions_np[:, 1] - cut_center_y) <= self.cut_half_width
-        cut_candidate_indices = np.flatnonzero(cut_candidate_mask).astype(np.int32)
-        cut_order = np.argsort(self.rest_positions_np[cut_candidate_indices, 0], kind="stable")
-        self.cut_candidate_indices_np = cut_candidate_indices[cut_order]
-        self.cut_candidate_x_np = self.rest_positions_np[self.cut_candidate_indices_np, 0]
-        self.cut_particle_count = 0
+        self.cut_candidate_indices_np = np.flatnonzero(cut_candidate_mask).astype(np.int32)
 
         self._update_scissors(0.0)
         self.viewer.set_model(self.model)
@@ -281,7 +307,7 @@ class Example:
         print(
             f"[newton] MPM suspended-sheet scissors: particles={self.model.particle_count}, "
             f"fixed={self.fixed_indices.shape[0]}, cut_candidates={self.cut_candidate_indices_np.size}, "
-            f"thickness_layers=2"
+            f"cutter_colliders={self.cutter_collider_count}, thickness_layers=2"
         )
 
     @staticmethod
@@ -358,7 +384,7 @@ class Example:
         }
 
     def _add_scissors(self, builder: newton.ModelBuilder) -> None:
-        hinge_x, hinge_y, hinge_z, angle, yaw, _cut_front = self._scissor_motion(0.0)
+        hinge_x, hinge_y, hinge_z, angle, yaw = self._scissor_motion(0.0)
         upper_rotation = self._blade_rotation(yaw, angle)
         lower_rotation = self._blade_rotation(yaw, -angle)
         upper_xform = wp.transform(wp.vec3(hinge_x, hinge_y, hinge_z), upper_rotation)
@@ -372,7 +398,7 @@ class Example:
             is_kinematic=True,
         )
 
-        blade_cfg = newton.ModelBuilder.ShapeConfig(
+        cutting_edge_cfg = newton.ModelBuilder.ShapeConfig(
             density=0.0,
             mu=0.04,
             has_shape_collision=False,
@@ -385,9 +411,10 @@ class Example:
         )
         handle_mesh = create_torus_mesh(HANDLE_RING_MAJOR_RADIUS, HANDLE_RING_MINOR_RADIUS)
 
-        for body, side in ((self.upper_blade_body, 1.0), (self.lower_blade_body, -1.0)):
+        blade_data = ((self.upper_blade_body, 1.0), (self.lower_blade_body, -1.0))
+        for blade_body, side in blade_data:
             builder.add_shape_mesh(
-                body=body,
+                body=blade_body,
                 xform=wp.transform(wp.vec3(0.0, side * BLADE_Y_OFFSET, 0.0), wp.quat_identity()),
                 mesh=create_curved_blade_mesh(side),
                 cfg=visual_cfg,
@@ -404,7 +431,7 @@ class Example:
                 segment_length = math.hypot(delta_x, delta_z)
                 tangent_angle = -math.atan2(delta_z, delta_x)
                 builder.add_shape_box(
-                    body=body,
+                    body=blade_body,
                     xform=wp.transform(
                         wp.vec3(
                             0.5 * (x_0 + x_1),
@@ -416,12 +443,12 @@ class Example:
                     hx=0.5 * segment_length + 0.0002,
                     hy=BLADE_HALF_THICKNESS,
                     hz=BLADE_EDGE_HALF_HEIGHT,
-                    cfg=blade_cfg,
+                    cfg=cutting_edge_cfg,
                     color=BLADE_EDGE_COLOR,
                     label="scissor_cutting_edge",
                 )
             builder.add_shape_box(
-                body=body,
+                body=blade_body,
                 xform=wp.transform(
                     wp.vec3(-0.5 * HANDLE_LENGTH, side * HANDLE_Y_OFFSET, 0.0),
                     wp.quat_identity(),
@@ -434,7 +461,7 @@ class Example:
                 label="scissor_handle",
             )
             builder.add_shape_mesh(
-                body=body,
+                body=blade_body,
                 xform=wp.transform(
                     wp.vec3(-HANDLE_LENGTH - HANDLE_RING_MAJOR_RADIUS, side * HANDLE_Y_OFFSET, 0.0),
                     wp.quat_identity(),
@@ -447,7 +474,7 @@ class Example:
 
         builder.add_shape_sphere(
             body=self.hinge_body,
-            radius=0.010,
+            radius=HINGE_RADIUS,
             cfg=visual_cfg,
             color=HINGE_COLOR,
             label="scissor_hinge_pin",
@@ -480,22 +507,76 @@ class Example:
         derivative = 32.0 * progress * complement * (1.0 - 2.0 * progress)
         return envelope, derivative
 
-    def _scissor_motion(self, query_time: float) -> tuple[float, float, float, float, float, float]:
-        x_min = -0.5 * self.sheet_width
-        x_max = 0.5 * self.sheet_width
-        parked_tip_x = x_min - 0.22
-        entry_tip_x = x_min - 0.01
-        tip_y = self.cut_y
+    @staticmethod
+    def _blade_crossing_point(angle: float) -> tuple[float, float]:
+        """Return local and world-horizontal coordinates of the edge crossing."""
+        angle = abs(angle)
+        tangent = math.tan(angle)
+        if tangent <= 1.0e-8:
+            return BLADE_LENGTH, BLADE_LENGTH
+
+        root_slope = math.pi * BLADE_CURVE_HEIGHT / BLADE_LENGTH
+        if tangent >= root_slope:
+            return 0.0, 0.0
+
+        lower = 1.0e-8
+        upper = BLADE_LENGTH
+        for _iteration in range(48):
+            midpoint = 0.5 * (lower + upper)
+            edge_height = BLADE_CURVE_HEIGHT * math.sin(math.pi * midpoint / BLADE_LENGTH)
+            if edge_height - tangent * midpoint > 0.0:
+                lower = midpoint
+            else:
+                upper = midpoint
+
+        crossing_x = 0.5 * (lower + upper)
+        crossing_z = BLADE_CURVE_HEIGHT * math.sin(math.pi * crossing_x / BLADE_LENGTH)
+        crossing_distance = crossing_x * math.cos(angle) + crossing_z * math.sin(angle)
+        return crossing_x, crossing_distance
+
+    def _blade_closure(self, closure: float) -> tuple[float, float, float]:
+        """Map closure to a smooth angle, bite progress, and edge crossing."""
+        closure = float(np.clip(closure, 0.0, 1.0))
+        engagement_fraction = 0.30
+        if closure <= engagement_fraction:
+            alpha = self._smoothstep(closure / engagement_fraction)
+            angle = self.open_angle + alpha * (self.blade_engagement_angle - self.open_angle)
+            return angle, 0.0, 0.0
+
+        bite_progress = self._smoothstep((closure - engagement_fraction) / (1.0 - engagement_fraction))
+        closed_crossing_x, _closed_crossing_distance = self._blade_crossing_point(self.closed_angle)
+        crossing_x = bite_progress * closed_crossing_x
+        if crossing_x <= 1.0e-8:
+            angle = self.blade_engagement_angle
+            return angle, bite_progress, 0.0
+
+        crossing_z = BLADE_CURVE_HEIGHT * math.sin(math.pi * crossing_x / BLADE_LENGTH)
+        angle = math.atan2(crossing_z, crossing_x)
+        crossing_distance = crossing_x * math.cos(angle) + crossing_z * math.sin(angle)
+        return angle, bite_progress, crossing_distance
+
+    def _cut_path(self, progress: float) -> tuple[float, float, float]:
+        """Return the target point and tangent for the physical blade crossing."""
+        progress = float(np.clip(progress, 0.0, 1.0))
+        path_length = self.cut_exit_x - self.cut_entry_x
+        path_x = self.cut_entry_x + progress * path_length
+        curve_envelope, curve_derivative = self._curve_envelope(progress)
+        path_y = self.cut_y + self.trajectory_curve_offset * curve_envelope
+        yaw = math.atan2(self.trajectory_curve_offset * curve_derivative, path_length)
+        return path_x, path_y, yaw
+
+    def _scissor_motion(self, query_time: float) -> tuple[float, float, float, float, float]:
+        parked_hinge_x = self.cut_entry_x - 0.22
         hinge_z = self.cut_z
+        hinge_y = self.cut_y
         yaw = 0.0
-        cut_front = x_min - self.sheet_spacing[0]
 
         if query_time < self.settle_time:
-            tip_x = parked_tip_x
+            hinge_x = parked_hinge_x
             angle = self.open_angle
         elif query_time < self.settle_time + self.approach_time:
             approach_alpha = self._smoothstep((query_time - self.settle_time) / max(self.approach_time, 1.0e-8))
-            tip_x = parked_tip_x + approach_alpha * (entry_tip_x - parked_tip_x)
+            hinge_x = parked_hinge_x + approach_alpha * (self.cut_entry_x - parked_hinge_x)
             angle = self.open_angle
         elif query_time < self.settle_time + self.approach_time + self.cut_time:
             cut_alpha = (query_time - self.settle_time - self.approach_time) / self.cut_time
@@ -506,35 +587,29 @@ class Example:
             cycle = snip_position - snip_index
             if cycle < 0.5:
                 closure = 2.0 * cycle
-                cut_progress = (snip_index + closure) / self.snip_count
-                angle = self.open_angle + closure * (self.closed_angle - self.open_angle)
+                angle, bite_progress, crossing_distance = self._blade_closure(closure)
+                cut_progress = (snip_index + bite_progress) / self.snip_count
             else:
                 reopen = 2.0 * (cycle - 0.5)
+                angle, _bite_progress, crossing_distance = self._blade_closure(1.0 - reopen)
                 cut_progress = (snip_index + 1.0) / self.snip_count
-                angle = self.closed_angle + reopen * (self.open_angle - self.closed_angle)
-            tip_x = entry_tip_x + cut_progress * (x_max + 0.03 - entry_tip_x)
-            cut_front = x_min + cut_progress * (x_max - x_min + self.sheet_spacing[0])
-            curve_envelope, curve_derivative = self._curve_envelope(cut_progress)
-            tip_y += self.trajectory_curve_offset * curve_envelope
-            tip_path_length = x_max + 0.03 - entry_tip_x
-            yaw = math.atan2(self.trajectory_curve_offset * curve_derivative, tip_path_length)
+            crossing_x, crossing_y, yaw = self._cut_path(cut_progress)
+            hinge_x = crossing_x - crossing_distance * math.cos(yaw)
+            hinge_y = crossing_y - crossing_distance * math.sin(yaw)
         else:
             depart_alpha = self._smoothstep(
                 (query_time - self.settle_time - self.approach_time - self.cut_time) / max(self.depart_time, 1.0e-8)
             )
-            tip_x = x_max + 0.03 + 0.16 * depart_alpha
+            hinge_x = self.cut_exit_x + 0.16 * depart_alpha
+            hinge_y = self.cut_y
             hinge_z += 0.10 * depart_alpha
             angle = self.open_angle
-            cut_front = x_max + self.sheet_spacing[0]
 
-        horizontal_blade_length = BLADE_LENGTH * math.cos(angle)
-        hinge_x = tip_x - horizontal_blade_length * math.cos(yaw)
-        hinge_y = tip_y - horizontal_blade_length * math.sin(yaw)
-        return hinge_x, hinge_y, hinge_z, angle, yaw, cut_front
+        return hinge_x, hinge_y, hinge_z, angle, yaw
 
     def _update_scissors(self, query_time: float) -> None:
-        hinge_x, hinge_y, hinge_z, angle, yaw, _cut_front = self._scissor_motion(query_time)
-        prev_hinge_x, prev_hinge_y, prev_hinge_z, prev_angle, prev_yaw, _prev_cut_front = self._scissor_motion(
+        hinge_x, hinge_y, hinge_z, angle, yaw = self._scissor_motion(query_time)
+        prev_hinge_x, prev_hinge_y, prev_hinge_z, prev_angle, prev_yaw = self._scissor_motion(
             max(query_time - self.sim_dt, 0.0)
         )
         inv_dt = 1.0 / self.sim_dt
@@ -549,6 +624,10 @@ class Example:
         yaw_velocity = wp.vec3(0.0, 0.0, yaw_speed)
         position = wp.vec3(hinge_x, hinge_y, hinge_z)
 
+        upper_xform = wp.transform(position, self._blade_rotation(yaw, angle))
+        lower_xform = wp.transform(position, self._blade_rotation(yaw, -angle))
+        upper_angular_velocity = yaw_velocity + angular_speed * opening_axis
+        lower_angular_velocity = yaw_velocity - angular_speed * opening_axis
         wp.launch(
             set_kinematic_body_pose,
             dim=1,
@@ -556,9 +635,9 @@ class Example:
                 self.state_0.body_q,
                 self.state_0.body_qd,
                 self.upper_blade_body,
-                wp.transform(position, self._blade_rotation(yaw, angle)),
+                upper_xform,
                 linear_velocity,
-                yaw_velocity + angular_speed * opening_axis,
+                upper_angular_velocity,
             ],
             device=self.model.device,
         )
@@ -569,9 +648,9 @@ class Example:
                 self.state_0.body_q,
                 self.state_0.body_qd,
                 self.lower_blade_body,
-                wp.transform(position, self._blade_rotation(yaw, -angle)),
+                lower_xform,
                 linear_velocity,
-                yaw_velocity - angular_speed * opening_axis,
+                lower_angular_velocity,
             ],
             device=self.model.device,
         )
@@ -589,24 +668,6 @@ class Example:
             device=self.model.device,
         )
 
-    def _advance_cut(self, cut_front: float) -> None:
-        new_count = int(np.searchsorted(self.cut_candidate_x_np, cut_front, side="right"))
-        if new_count <= self.cut_particle_count:
-            return
-
-        new_indices_np = self.cut_candidate_indices_np[self.cut_particle_count : new_count]
-        self.particle_flags_np[new_indices_np] &= ~int(newton.ParticleFlags.ACTIVE)
-        self.model.particle_flags = wp.array(
-            self.particle_flags_np,
-            dtype=wp.int32,
-            device=self.model.device,
-        )
-        self.solver.notify_model_changed(newton.ModelFlags.MODEL_PROPERTIES)
-
-        new_indices = wp.array(new_indices_np, dtype=wp.int32, device=self.model.device)
-        self.render_radii[new_indices].fill_(0.0)
-        self.cut_particle_count = new_count
-
     def simulate(self) -> None:
         for substep in range(self.sim_substeps):
             query_time = self.sim_time + (substep + 1) * self.sim_dt
@@ -615,8 +676,6 @@ class Example:
             self.solver.project_outside(self.state_0, self.state_0, self.sim_dt)
 
         self.sim_time += self.frame_dt
-        _hinge_x, _hinge_y, _hinge_z, _angle, _yaw, cut_front = self._scissor_motion(self.sim_time)
-        self._advance_cut(cut_front)
 
     def step(self) -> None:
         self.simulate()
@@ -630,7 +689,7 @@ class Example:
         self.viewer.log_points(
             name="/suspended_sheet",
             points=self.state_0.particle_q,
-            radii=self.render_radii,
+            radii=self.model.particle_radius,
             colors=self.particle_colors,
             hidden=not show_particles,
         )
@@ -642,6 +701,19 @@ class Example:
         body_q = self.state_0.body_q.numpy()
         if not np.all(np.isfinite(positions)) or not np.all(np.isfinite(body_q)):
             raise ValueError("suspended-sheet scissors state is not finite")
+        particle_extent = np.linalg.norm(np.ptp(positions, axis=0))
+        if particle_extent > 5.0:
+            raise ValueError(
+                f"suspended-sheet particles became unbounded at time={self.sim_time:.4f}, "
+                f"extent={particle_extent:.3f} m"
+            )
+        if self.sim_time <= self.settle_time + self.approach_time:
+            separation = self.solver.particle_velocity_field_separation.numpy()
+            if np.any(separation > 0.0):
+                raise ValueError(
+                    "cut activated before both scissor edges began closing: "
+                    f"time={self.sim_time:.4f}, particles={np.count_nonzero(separation > 0.0)}"
+                )
 
     def test_final(self) -> None:
         """Verify both edges stay fixed and the completed cut is persistent."""
@@ -655,12 +727,24 @@ class Example:
             raise ValueError("kinematic edge particles moved")
         if np.linalg.norm(np.ptp(positions, axis=0)) > 5.0:
             raise ValueError("suspended-sheet particles became unbounded")
+        if not np.array_equal(self.model.particle_flags.numpy(), self.initial_particle_flags_np):
+            raise ValueError("cutting changed particle activity flags")
 
         cut_end_time = self.settle_time + self.approach_time + self.cut_time
-        if self.sim_time >= cut_end_time and self.cut_particle_count != self.cut_candidate_indices_np.size:
-            raise ValueError(
-                f"cut stopped after {self.cut_particle_count} of {self.cut_candidate_indices_np.size} particles"
+        if self.sim_time >= cut_end_time:
+            separation = self.solver.particle_velocity_field_separation.numpy()
+            contacted_cut_indices = np.flatnonzero(separation > 0.0)
+            contacted_x_span = (
+                np.ptp(self.rest_positions_np[contacted_cut_indices, 0]) if contacted_cut_indices.size else 0.0
             )
+            minimum_contact_count = max(1, int(0.15 * self.cut_candidate_indices_np.size))
+            if contacted_cut_indices.size < minimum_contact_count:
+                raise ValueError(
+                    f"scissor colliders activated only {contacted_cut_indices.size} cut particles; "
+                    f"expected at least {minimum_contact_count}, x-span={contacted_x_span:.3f} m"
+                )
+            if contacted_x_span < 0.85 * self.sheet_width:
+                raise ValueError("scissor contact did not advance across the sheet")
 
     @staticmethod
     def create_parser():
@@ -679,7 +763,12 @@ class Example:
         parser.add_argument("--initial-sag", type=float, default=0.005, help="Initial center sag [m].")
         parser.add_argument("--initial-ripple", type=float, default=0.004, help="Initial cross-sheet ripple [m].")
         parser.add_argument("--cut-depth", type=float, default=0.09, help="Cut height below the fixed edges [m].")
-        parser.add_argument("--cut-half-width", type=float, default=0.011, help="Half-width of the cut band [m].")
+        parser.add_argument(
+            "--cut-half-width",
+            type=float,
+            default=0.011,
+            help="Half-width of the contact-cut validation band [m].",
+        )
         parser.add_argument(
             "--trajectory-curve-offset",
             type=float,
@@ -692,7 +781,7 @@ class Example:
         parser.add_argument("--depart-time", type=float, default=0.75, help="Scissor departure time [s].")
         parser.add_argument("--snips", type=int, default=8, help="Number of open-close scissor cycles.")
         parser.add_argument("--open-angle", type=float, default=18.0, help="Open half-angle of the blades [deg].")
-        parser.add_argument("--closed-angle", type=float, default=2.0, help="Closed half-angle of the blades [deg].")
+        parser.add_argument("--closed-angle", type=float, default=4.0, help="Closed half-angle of the blades [deg].")
         parser.add_argument("--particles-per-cell", type=int, default=2)
         parser.add_argument("--density", type=float, default=100.0, help="Effective sheet density [kg/m³].")
         parser.add_argument("--young-modulus", "-ym", type=float, default=5.0e4, help="Young's modulus [Pa].")

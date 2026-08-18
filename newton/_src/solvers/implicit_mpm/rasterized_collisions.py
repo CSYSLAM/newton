@@ -11,6 +11,7 @@ from .contact_solver_kernels import solve_coulomb_isotropic
 
 __all__ = [
     "Collider",
+    "activate_particle_velocity_field_separation",
     "build_rigidity_operator",
     "interpolate_collider_normals",
     "project_outside_collider",
@@ -312,6 +313,74 @@ def collision_sdf(
                     sdf_vel += b_v + wp.cross(b_w, com_offset_cur)
 
     return min_sdf, sdf_grad, sdf_vel, collider_id, material_id
+
+
+@wp.kernel
+def activate_particle_velocity_field_separation(
+    positions: wp.array[wp.vec3],
+    particle_flags: wp.array[wp.int32],
+    particle_mass: wp.array[float],
+    collider: Collider,
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    cutter_mask: wp.array[wp.int32],
+    contact_margin: float,
+    minimum_contact_count: int,
+    minimum_closing_speed: float,
+    particle_separation: wp.array[float],
+):
+    """Persistently separate particles that contact selected collider surfaces."""
+    particle = wp.tid()
+    if (
+        particle_separation[particle] > 0.0
+        or (~particle_flags[particle] & newton.ParticleFlags.ACTIVE)
+        or particle_mass[particle] == 0.0
+    ):
+        return
+
+    position = positions[particle]
+    contact_count = int(0)
+    closing_contact_found = bool(False)
+    first_normal = wp.vec3(0.0)
+    first_velocity = wp.vec3(0.0)
+    for collider_id in range(cutter_mask.shape[0]):
+        if cutter_mask[collider_id] == 0:
+            continue
+
+        query_result, sdf, gradient, velocity, closest_point, _material_id = _query_collider_sdf(
+            position, collider, body_q, collider_id
+        )
+        if query_result and sdf <= contact_margin:
+            body_id = collider.collider_body_index[collider_id]
+            if body_id >= 0:
+                body_xform = body_q[body_id]
+                body_rotation = wp.transform_get_rotation(body_xform)
+                normal = wp.normalize(wp.quat_rotate(body_rotation, gradient))
+                velocity = wp.quat_rotate(body_rotation, velocity)
+
+                body_velocity = wp.spatial_top(body_qd[body_id])
+                body_angular_velocity = wp.spatial_bottom(body_qd[body_id])
+                body_com = collider.body_com[body_id]
+                contact_offset = wp.quat_rotate(body_rotation, closest_point - body_com)
+                velocity += body_velocity + wp.cross(body_angular_velocity, contact_offset)
+            else:
+                normal = gradient
+
+            if contact_count == 0:
+                first_normal = normal
+                first_velocity = velocity
+            elif minimum_closing_speed > 0.0:
+                normal_delta = first_normal - normal
+                normal_delta_length = wp.length(normal_delta)
+                if normal_delta_length > _CLOSEST_POINT_NORMAL_EPSILON:
+                    closing_speed = wp.dot(first_velocity - velocity, normal_delta / normal_delta_length)
+                    if closing_speed >= minimum_closing_speed:
+                        closing_contact_found = True
+
+            contact_count += 1
+            if contact_count >= minimum_contact_count and (minimum_closing_speed <= 0.0 or closing_contact_found):
+                particle_separation[particle] = 1.0
+                return
 
 
 @wp.func

@@ -616,6 +616,138 @@ def test_multiworld_isolation_is_opt_in(test, device):
     test.assertFalse(config.separate_worlds)
 
 
+def test_velocity_field_local_separation(test, device):
+    """Verify local separation releases otherwise coupled velocity fields."""
+
+    def run(separation):
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        SolverImplicitMPM.register_custom_attributes(builder)
+        builder.add_particle((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), mass=1.0, radius=0.01)
+        # Give the dense test grid nonzero extent on every axis while keeping both
+        # particles inside the same interpolation stencil.
+        builder.add_particle((1.0e-6, 1.0e-6, 1.0e-6), (-1.0, 0.0, 0.0), mass=1.0, radius=0.01)
+        model = builder.finalize(device=device)
+        initial_flags = model.particle_flags.numpy().copy()
+
+        config = SolverImplicitMPM.Config()
+        config.velocity_field_count = 2
+        config.grid_type = "dense"
+        config.voxel_size = 0.1
+        config.max_iterations = 1
+        config.warmstart_mode = "particles"
+        solver = SolverImplicitMPM(model, config)
+        test.assertTrue(solver.uses_multiple_velocity_fields)
+        test.assertIsNotNone(solver.particle_velocity_field)
+        test.assertIsNotNone(solver.particle_velocity_field_separation)
+        solver.particle_velocity_field.assign((0, 1))
+        solver.particle_velocity_field_separation.fill_(separation)
+
+        state = model.state()
+        solver.step(state, state, control=None, contacts=None, dt=0.01)
+        np.testing.assert_array_equal(model.particle_flags.numpy(), initial_flags)
+        test.assertFalse(np.any(solver._velocity_field_node_map.numpy() < 0))
+        return state.particle_qd.numpy()
+
+    coupled_velocity = run(0.0)
+    separated_velocity = run(1.0)
+    test.assertLess(np.linalg.norm(coupled_velocity[0] - coupled_velocity[1]), 1.0e-3)
+    test.assertGreater(np.linalg.norm(separated_velocity[0] - separated_velocity[1]), 1.0)
+
+
+def test_velocity_field_collider_separation(test, device):
+    """Verify selected collider contact activates persistent field separation."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_particle((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), mass=1.0, radius=0.01)
+    builder.add_particle((0.3, 0.3, 0.3), (0.0, 0.0, 0.0), mass=1.0, radius=0.01)
+    builder.add_shape_box(
+        body=-1,
+        hx=0.05,
+        hy=0.05,
+        hz=0.05,
+        cfg=newton.ModelBuilder.ShapeConfig(
+            density=0.0,
+            has_shape_collision=False,
+            has_particle_collision=True,
+        ),
+    )
+    model = builder.finalize(device=device)
+    initial_flags = model.particle_flags.numpy().copy()
+
+    config = SolverImplicitMPM.Config()
+    config.velocity_field_count = 2
+    config.grid_type = "dense"
+    config.voxel_size = 0.1
+    config.max_iterations = 1
+    config.warmstart_mode = "particles"
+    solver = SolverImplicitMPM(model, config)
+    solver.particle_velocity_field.assign((0, 1))
+    solver.set_velocity_field_separation_colliders((0,), contact_margin=0.001)
+
+    state = model.state()
+    solver.step(state, state, control=None, contacts=None, dt=0.01)
+
+    np.testing.assert_array_equal(solver.particle_velocity_field_separation.numpy(), np.array((1.0, 0.0)))
+    np.testing.assert_array_equal(model.particle_flags.numpy(), initial_flags)
+
+
+def test_velocity_field_collider_contact_count(test, device):
+    """Verify separation can require two colliders that are closing together."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_particle((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), mass=1.0, radius=0.01)
+    builder.add_particle((-0.05, 0.0, 0.0), (0.0, 0.0, 0.0), mass=1.0, radius=0.01)
+    builder.add_particle((0.3, 0.3, 0.3), (0.0, 0.0, 0.0), mass=1.0, radius=0.01)
+    box_cfg = newton.ModelBuilder.ShapeConfig(
+        density=0.0,
+        has_shape_collision=False,
+        has_particle_collision=True,
+    )
+    first_body = builder.add_body(
+        xform=wp.transform(wp.vec3(-0.05, 0.0, 0.0), wp.quat_identity()),
+        is_kinematic=True,
+    )
+    second_body = builder.add_body(
+        xform=wp.transform(wp.vec3(0.05, 0.0, 0.0), wp.quat_identity()),
+        is_kinematic=True,
+    )
+    builder.add_shape_box(body=first_body, hx=0.04, hy=0.05, hz=0.05, cfg=box_cfg)
+    builder.add_shape_box(body=second_body, hx=0.04, hy=0.05, hz=0.05, cfg=box_cfg)
+    model = builder.finalize(device=device)
+
+    config = SolverImplicitMPM.Config()
+    config.velocity_field_count = 2
+    config.grid_type = "dense"
+    config.voxel_size = 0.1
+    config.max_iterations = 1
+    config.warmstart_mode = "particles"
+    solver = SolverImplicitMPM(model, config)
+    solver.particle_velocity_field.assign((0, 1, 0))
+    collider_body_index = solver.collider_body_index.numpy()
+    cutter_ids = np.flatnonzero((collider_body_index == first_body) | (collider_body_index == second_body)).astype(
+        np.int32
+    )
+    test.assertEqual(cutter_ids.size, 2)
+    solver.set_velocity_field_separation_colliders(
+        cutter_ids,
+        contact_margin=0.011,
+        minimum_contact_count=2,
+        minimum_closing_speed=0.01,
+    )
+
+    state = model.state()
+    body_qd = np.zeros((model.body_count, 6), dtype=np.float32)
+    body_qd[first_body, 0] = 0.1
+    body_qd[second_body, 0] = -0.1
+    state.body_qd.assign(body_qd)
+    solver.step(state, state, control=None, contacts=None, dt=0.01)
+
+    np.testing.assert_array_equal(
+        solver.particle_velocity_field_separation.numpy(),
+        np.array((1.0, 0.0, 0.0)),
+    )
+
+
 def test_empty_particle_model_rejected(test, device):
     """Verify empty particle model rejected."""
     builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=(0.0, -9.81, 0.0))
@@ -1537,6 +1669,27 @@ add_function_test(
     TestImplicitMPM,
     "test_multiworld_isolation_is_opt_in",
     test_multiworld_isolation_is_opt_in,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_velocity_field_local_separation",
+    test_velocity_field_local_separation,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_velocity_field_collider_separation",
+    test_velocity_field_collider_separation,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_velocity_field_collider_contact_count",
+    test_velocity_field_collider_contact_count,
     devices=basic_devices,
 )
 
