@@ -1,0 +1,135 @@
+{
+  "format": "newton_mjvbd_v2_bimanual_plastic_bag_pose_v1",
+  "hand_collisions_enabled": false,
+  "rod_handle_collision_enabled": true,
+  "rod_radius_m": 0.0105,
+  "settled_physics_frame": 120,
+  "hands": {
+    "LEFT": {
+      "base_root_world": {
+        "position_m": [
+          -0.2555384635925293,
+          -0.008112963289022446,
+          0.790044367313385
+        ],
+        "quaternion_xyzw": [
+          0.4937283396720886,
+          0.49364110827445984,
+          -0.5061860084533691,
+          0.5062870383262634
+        ]
+      },
+      "gizmo_root_world": {
+        "position_m": [
+          -0.2600812315940857,
+          -0.005619371309876442,
+          0.790044367313385
+        ],
+        "quaternion_xyzw": [
+          0.4937283396720886,
+          0.49364110827445984,
+          -0.5061860084533691,
+          0.5062870383262634
+        ]
+      },
+      "position_offset_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation_offset_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "target_root_world": {
+        "position_m": [
+          -0.2600812315940857,
+          -0.005619371309876442,
+          0.790044367313385
+        ],
+        "quaternion_xyzw": [
+          0.4937283396720886,
+          0.49364110827445984,
+          -0.5061860084533691,
+          0.5062870383262634
+        ]
+      },
+      "finger_joints_degrees": {
+        "HAND_THUMB1": 0.0,
+        "HAND_THUMB2": 0.0,
+        "HAND_INDEX": 0.0,
+        "INDEX_PIP": 0.0,
+        "HAND_MIDDLE": 0.0,
+        "MIDDLE_PIP": 0.0,
+        "HAND_RING": 0.0,
+        "RING_PIP": 0.0,
+        "HAND_PINKY": 0.0,
+        "PINKY_PIP": 0.0
+      }
+    },
+    "RIGHT": {
+      "base_root_world": {
+        "position_m": [
+          0.2555384635925293,
+          -0.008693212643265724,
+          0.7884160876274109
+        ],
+        "quaternion_xyzw": [
+          0.5104626417160034,
+          -0.5104591846466064,
+          0.4893128275871277,
+          0.48931819200515747
+        ]
+      },
+      "gizmo_root_world": {
+        "position_m": [
+          0.2608082592487335,
+          -0.006011848337948322,
+          0.7884160876274109
+        ],
+        "quaternion_xyzw": [
+          0.5016996264457703,
+          -0.5016965866088867,
+          0.49828973412513733,
+          0.49830248951911926
+        ]
+      },
+      "position_offset_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation_offset_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "target_root_world": {
+        "position_m": [
+          0.2608082592487335,
+          -0.006011848337948322,
+          0.7884160876274109
+        ],
+        "quaternion_xyzw": [
+          0.5016996264457703,
+          -0.5016965866088867,
+          0.49828973412513733,
+          0.49830248951911926
+        ]
+      },
+      "finger_joints_degrees": {
+        "HAND_THUMB1": 0.0,
+        "HAND_THUMB2": 0.0,
+        "HAND_INDEX": 0.0,
+        "INDEX_PIP": 0.0,
+        "HAND_MIDDLE": 0.0,
+        "MIDDLE_PIP": 0.0,
+        "HAND_RING": 0.0,
+        "RING_PIP": 0.0,
+        "HAND_PINKY": 0.0,
+        "PINKY_PIP": 0.0
+      }
+    }
+  }
+}

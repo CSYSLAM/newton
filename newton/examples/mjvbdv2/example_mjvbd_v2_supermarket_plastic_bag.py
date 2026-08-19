@@ -1,16 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-"""Hang a supermarket bag containing rigid balls from a rod using VBD.
+"""Hang a supermarket bag containing rigid balls from a rod using MJVBDV2.
 
 The example loads the provided triangulated OBJ as a single thin shell. A
 fixed horizontal rod passes through both handle holes, and contact supports
 the otherwise fully dynamic bag under gravity. Particle self-contact keeps
-the front and back films from passing through one another. Two independently
+the front and back films from passing through one another. Four independently
 moving rigid balls settle on the bag bottom through two-way rigid-cloth contact.
+
+The scene has no joints, so :class:`~newton.solvers.SolverMJVBDV2` selects its
+pure-VBD backend and skips every MuJoCo branch.
 
 Run from the repository root::
 
-    uv run --extra examples -m newton.examples vbd_supermarket_plastic_bag
+    uv run --extra examples -m newton.examples mjvbd_v2_supermarket_plastic_bag
 """
 
 from __future__ import annotations
@@ -45,7 +48,7 @@ BAG_EDGE_KD = 3.0
 AIR_DRAG_RATE = 1.0  # [1/s]
 
 HANDLE_HOLE_CENTER_Z = 0.519
-ROD_RADIUS = 0.0035
+ROD_RADIUS = 0.0105
 ROD_HALF_LENGTH = 0.22
 ROD_CONTACT_MARGIN = 0.002
 ROD_CONTACT_KE = 4.0e8
@@ -168,7 +171,7 @@ def _apply_particle_drag(
 
 
 class Example:
-    """Simulate a self-colliding VBD bag carrying rigid balls."""
+    """Simulate a self-colliding MJVBDV2 bag carrying rigid balls."""
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -198,6 +201,7 @@ class Example:
             raise ValueError("The bag mesh must contain both left and right handles")
 
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81))
+        newton.solvers.SolverMJVBDV2.register_custom_attributes(builder)
         bag_particle_start = builder.particle_count
         builder.add_cloth_mesh(
             pos=wp.vec3(*BAG_POSITION),
@@ -289,26 +293,29 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.collision_pipeline = newton.CollisionPipeline(
+        self.solver = newton.solvers.SolverMJVBDV2(
             self.model,
-            broad_phase="nxn",
-            soft_contact_margin=SOFT_CONTACT_MARGIN,
+            contact_mode="full",
+            vbd_options={
+                "iterations": VBD_ITERATIONS,
+                "friction_epsilon": 1.0e-4,
+                "particle_enable_self_contact": True,
+                "particle_self_contact_radius": BAG_PARTICLE_RADIUS,
+                "particle_self_contact_margin": SELF_CONTACT_MARGIN,
+                "particle_vertex_contact_buffer_size": 48,
+                "particle_edge_contact_buffer_size": 96,
+                "particle_collision_detection_interval": -1,
+                "particle_topological_contact_filter_threshold": 2,
+                "particle_rest_shape_contact_exclusion_radius": SELF_CONTACT_MARGIN,
+                "rigid_body_particle_contact_buffer_size": 1024,
+            },
+            collision_options={
+                "broad_phase": "nxn",
+                "soft_contact_margin": SOFT_CONTACT_MARGIN,
+                "include_static_kinematic_pairs": False,
+            },
         )
-        self.contacts = self.collision_pipeline.contacts()
-        self.solver = newton.solvers.SolverVBD(
-            self.model,
-            iterations=VBD_ITERATIONS,
-            friction_epsilon=1.0e-4,
-            particle_enable_self_contact=True,
-            particle_self_contact_radius=BAG_PARTICLE_RADIUS,
-            particle_self_contact_margin=SELF_CONTACT_MARGIN,
-            particle_vertex_contact_buffer_size=48,
-            particle_edge_contact_buffer_size=96,
-            particle_collision_detection_interval=-1,
-            particle_topological_contact_filter_threshold=2,
-            particle_rest_shape_contact_exclusion_radius=SELF_CONTACT_MARGIN,
-            rigid_body_particle_contact_buffer_size=1024,
-        )
+        self.contacts = self.solver.contacts
 
         self.render_indices = self.model.tri_indices.flatten()
         self.viewer.set_model(self.model)
@@ -329,7 +336,7 @@ class Example:
         self.graph = capture.graph
 
     def simulate(self):
-        """Advance the VBD state by one rendered frame."""
+        """Advance the MJVBDV2 state by one rendered frame."""
         for _ in range(SIM_SUBSTEPS):
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
@@ -340,8 +347,8 @@ class Example:
                 outputs=[self.state_0.particle_f],
                 device=self.model.device,
             )
-            self.collision_pipeline.collide(self.state_0, self.contacts)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            # MJVBDV2 owns the collision pipeline selected for this scene.
+            self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
@@ -369,7 +376,19 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
-        """Verify that the bag remains finite, bounded, and on the rod."""
+        """Verify the pure-VBD dispatch and a stable bag state."""
+        features = self.solver.features
+        assert features.backend == "pure_vbd"
+        assert not features.mujoco_solve_enabled
+        assert features.vbd_solve_enabled
+        assert features.rigid_solve_enabled
+        assert features.particle_solve_enabled
+        assert features.triangle_solve_enabled
+        assert features.bending_solve_enabled
+        assert not features.tetrahedron_solve_enabled
+        assert not features.spring_solve_enabled
+        assert not features.pneumatic_solve_enabled
+
         positions = self.state_0.particle_q.numpy()
         velocities = self.state_0.particle_qd.numpy()
         if not np.all(np.isfinite(positions)) or not np.all(np.isfinite(velocities)):

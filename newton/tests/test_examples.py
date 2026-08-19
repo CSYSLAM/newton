@@ -578,6 +578,34 @@ add_example_test(
 )
 add_example_test(
     TestClothExamples,
+    name="mjvbdv2.example_mjvbd_v2_supermarket_plastic_bag",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 120},
+    use_viewer=True,
+)
+add_example_test(
+    TestClothExamples,
+    name="mjvbdv2.example_mjvbd_v2_dexforce_bimanual_plastic_bag_pose_recorder",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 1},
+    use_viewer=True,
+)
+add_example_test(
+    TestClothExamples,
+    name="mjvbdv2.example_mjvbd_v2_dexforce_bimanual_plastic_bag_carry",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 120},
+    use_viewer=True,
+)
+add_example_test(
+    TestClothExamples,
+    name="mjvbdv2.example_mjvbd_v2_dexforce_bimanual_plastic_bag_rod_handoff",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 180},
+    use_viewer=True,
+)
+add_example_test(
+    TestClothExamples,
     name="vbd.example_vbd_gripper_soft_triangle",
     devices=cuda_test_devices,
     test_options={"num-frames": 360},

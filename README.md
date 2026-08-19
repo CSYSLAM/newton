@@ -752,14 +752,48 @@ If you run the examples from a source checkout with uv, use
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_mjvbd_v2_right_hand_recorded_plastic_inflatable_bag_pick_release.jpg" alt="MJVBDV2 Plastic Inflatable Bag Grasp">
       </a>
     </td>
-    <td align="center" width="33%"></td>
-    <td align="center" width="33%"></td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_supermarket_plastic_bag.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_supermarket_plastic_bag.jpg" alt="MJVBDV2 Supermarket Plastic Bag">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_bimanual_plastic_bag_pose_recorder.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_supermarket_plastic_bag.jpg" alt="MJVBDV2 Bimanual Plastic Bag Pose Recorder">
+      </a>
+    </td>
   </tr>
   <tr>
     <td align="center" width="33%">
       <code>python -m newton.examples vbd_mjvbd_v2_right_hand_recorded_plastic_inflatable_bag_pick_release</code>
     </td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples mjvbd_v2_supermarket_plastic_bag</code>
+    </td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples mjvbd_v2_dexforce_bimanual_plastic_bag_pose_recorder</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_bimanual_plastic_bag_carry.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_supermarket_plastic_bag.jpg" alt="MJVBDV2 Dexforce Bimanual Plastic Bag Carry">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_bimanual_plastic_bag_rod_handoff.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_supermarket_plastic_bag.jpg" alt="MJVBDV2 Dexforce Bimanual Plastic Bag Rod Handoff">
+      </a>
+    </td>
     <td align="center" width="33%"></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <code>python -m newton.examples mjvbd_v2_dexforce_bimanual_plastic_bag_carry</code>
+    </td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples mjvbd_v2_dexforce_bimanual_plastic_bag_rod_handoff</code>
+    </td>
     <td align="center" width="33%"></td>
   </tr>
   <tr>
