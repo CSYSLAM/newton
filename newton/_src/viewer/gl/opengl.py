@@ -231,6 +231,7 @@ class MeshGL:
 
         # Per-mesh albedo and material (applied in render()).
         self.color = (0.7, 0.5, 0.3)
+        self.opacity = 1.0
         self.material = (0.5, 0.0, 0.0, 0.0)
 
         # Create CUDA-GL interop buffer for efficient updates
@@ -364,7 +365,7 @@ class MeshGL:
                 gl.glBindTexture(gl.GL_TEXTURE_2D, RendererGL.get_fallback_texture())
 
             # Set per-mesh albedo and material (global state, not per-VAO).
-            gl.glVertexAttrib3f(7, *self.color)
+            gl.glVertexAttrib4f(7, *self.color, self.opacity)
             gl.glVertexAttrib4f(8, *self.material)
 
             gl.glBindVertexArray(self.vao)
@@ -1846,8 +1847,21 @@ class RendererGL:
             exposure=self.exposure,
         )
 
+        opaque_objects = {name: obj for name, obj in objects.items() if getattr(obj, "opacity", 1.0) >= 1.0}
+        transparent_objects = {name: obj for name, obj in objects.items() if getattr(obj, "opacity", 1.0) < 1.0}
+
         with self._shape_shader:
-            self._draw_objects(objects)
+            self._draw_objects(opaque_objects)
+            if transparent_objects:
+                gl.glEnable(gl.GL_BLEND)
+                gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+                # Keep opaque depth for occlusion without letting one transparent layer hide another.
+                gl.glDepthMask(False)
+                try:
+                    self._draw_objects(transparent_objects)
+                finally:
+                    gl.glDepthMask(True)
+                    gl.glDisable(gl.GL_BLEND)
 
         gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_FILL)
 

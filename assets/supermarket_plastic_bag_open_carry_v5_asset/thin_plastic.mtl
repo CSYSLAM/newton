@@ -1,0 +1,4 @@
+newmtl thin_translucent_plastic
+Kd 0.3 0.52 0.62
+d 0.56
+illum 4

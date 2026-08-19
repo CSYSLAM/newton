@@ -669,14 +669,20 @@ If you run the examples from a source checkout with uv, use
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_gear_crusher.jpg" alt="VBD Gear Crusher">
       </a>
     </td>
-    <td align="center" width="33%"></td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/vbd/example_vbd_supermarket_plastic_bag.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_supermarket_plastic_bag.jpg" alt="VBD Supermarket Plastic Bag">
+      </a>
+    </td>
     <td align="center" width="33%"></td>
   </tr>
   <tr>
     <td align="center" width="33%">
       <code>python -m newton.examples gear_crusher</code><br><small>Use <code>--quality interactive</code> for speed or <code>--quality paper</code> for the reported settings.</small>
     </td>
-    <td align="center" width="33%"></td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples vbd_supermarket_plastic_bag</code>
+    </td>
     <td align="center" width="33%"></td>
   </tr>
   <tr>

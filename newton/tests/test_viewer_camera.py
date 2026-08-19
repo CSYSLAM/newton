@@ -134,6 +134,35 @@ def _build_viewer_model(z: float, up_axis: newton.Axis = newton.Axis.Z) -> newto
 
 @unittest.skipUnless(wp.is_cuda_available(), "ViewerGL model-switch test requires CUDA")
 class TestViewerGLSetModelState(unittest.TestCase):
+    def test_log_mesh_clamps_opacity(self):
+        """Clamp mesh opacity while preserving the opaque default."""
+        try:
+            viewer = ViewerGL(headless=True)
+        except Exception as exc:
+            self.skipTest(f"ViewerGL not available: {exc}")
+            return
+
+        try:
+            points = wp.array(
+                [wp.vec3(-1.0, 0.0, 0.0), wp.vec3(1.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 1.0)],
+                dtype=wp.vec3,
+            )
+            indices = wp.array([0, 1, 2], dtype=wp.int32)
+
+            viewer.log_mesh("opaque", points, indices)
+            self.assertEqual(viewer.objects["opaque"].opacity, 1.0)
+
+            viewer.log_mesh("transparent", points, indices, opacity=0.35)
+            self.assertAlmostEqual(viewer.objects["transparent"].opacity, 0.35)
+
+            viewer.log_mesh("transparent", points, indices, opacity=-1.0)
+            self.assertEqual(viewer.objects["transparent"].opacity, 0.0)
+
+            viewer.log_mesh("transparent", points, indices, opacity=2.0)
+            self.assertEqual(viewer.objects["transparent"].opacity, 1.0)
+        finally:
+            viewer.close()
+
     def test_set_model_preserves_camera_and_wind_for_same_up_axis(self):
         model_a = _build_viewer_model(1.0)
         model_b = _build_viewer_model(2.0)

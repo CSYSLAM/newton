@@ -1,0 +1,20 @@
+{
+  "source_file": "supermarket_plastic_bag_open_carry_v4_tri.obj",
+  "vertices_loaded": 5886,
+  "triangles_loaded": 11512,
+  "connected_components": 1,
+  "boundary_edges": 262,
+  "boundary_loops": 3,
+  "expected_openings": {
+    "main_bag_mouth": 1,
+    "left_handle_hole": 1,
+    "right_handle_hole": 1,
+    "total_boundary_loops": 3
+  },
+  "nonmanifold_edges": 0,
+  "left_top_connection_triangles": 140,
+  "right_top_connection_triangles": 140,
+  "left_long_side_closure_triangles": 0,
+  "right_long_side_closure_triangles": 0,
+  "pass": true
+}

@@ -1,0 +1,31 @@
+{
+  "name": "supermarket_plastic_bag_open_carry_v5",
+  "source": "warped from v4 topology with realistic supermarket-bag side profile",
+  "units": "meters",
+  "up_axis": "Z",
+  "front_axis": "+Y",
+  "dimensions_xyz_m": [
+    0.34,
+    0.03775879440632716,
+    0.54
+  ],
+  "vertices": 5886,
+  "triangle_faces": 11512,
+  "connected_components": 1,
+  "boundary_loops": 3,
+  "boundary_edges": 262,
+  "nonmanifold_edges": 0,
+  "zero_area_triangles": 0,
+  "winding_consistent": true,
+  "triangle_edge_length_m": {
+    "min": 0.0010919999999999999,
+    "median": 0.008435681717097273,
+    "max": 0.016416357639147942
+  },
+  "profile_notes": {
+    "body_max_half_depth_m": 0.01887939720316358,
+    "handle_tip_half_depth_m": 0.008786755084127578,
+    "body_top_rim_z_center_m": 0.3227232402840605
+  },
+  "validation_pass": true
+}

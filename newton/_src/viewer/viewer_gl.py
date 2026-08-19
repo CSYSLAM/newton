@@ -849,6 +849,7 @@ class ViewerGL(ViewerBase):
         color: tuple[float, float, float] | None = None,
         roughness: float | None = None,
         metallic: float | None = None,
+        opacity: float | None = None,
     ):
         """
         Log a mesh for rendering.
@@ -868,6 +869,8 @@ class ViewerGL(ViewerBase):
                 smooth, ``1`` is fully rough.
             metallic: Metallicity in ``[0, 1]``. ``0`` is dielectric, ``1``
                 is metal.
+            opacity: Surface opacity in ``[0, 1]``. Values below ``1`` are
+                rendered after opaque geometry with alpha blending.
         """
         assert isinstance(points, wp.array)
         assert isinstance(indices, wp.array)
@@ -888,6 +891,9 @@ class ViewerGL(ViewerBase):
 
         if color is not None:
             self.objects[name].color = (float(color[0]), float(color[1]), float(color[2]))
+
+        if opacity is not None:
+            self.objects[name].opacity = min(max(float(opacity), 0.0), 1.0)
 
         if roughness is not None or metallic is not None:
             r, m, c, t = self.objects[name].material

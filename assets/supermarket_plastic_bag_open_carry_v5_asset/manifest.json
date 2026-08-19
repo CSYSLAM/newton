@@ -1,0 +1,69 @@
+{
+  "files": [
+    {
+      "name": "README.md",
+      "bytes": 461,
+      "sha256": "16ab2fa2d272893948ec138baf94f3b106b90d004ec185dbd7fb00cbde3041c8"
+    },
+    {
+      "name": "preview_open_carry_v5_hero.png",
+      "bytes": 726459,
+      "sha256": "17410603038190904ad9c70bb835f6f08b4efd72e63db458a1b32c9e2df95a9a"
+    },
+    {
+      "name": "preview_open_carry_v5_reference_handle_verified.png",
+      "bytes": 274559,
+      "sha256": "b050c48bce7ed350571eb18f4bae33e030857da410f06919c9e204f162715473"
+    },
+    {
+      "name": "preview_open_carry_v5_side.png",
+      "bytes": 160202,
+      "sha256": "c7150184073c3807e4b62e02edd5eecfddded5ed78d6e5cd6b190fd63c4eb1ed"
+    },
+    {
+      "name": "preview_open_carry_v5_top.png",
+      "bytes": 259374,
+      "sha256": "a39b3e85c70d678124ee9aba1606aae32e4e77559c7278ec55eb3b42226cea0e"
+    },
+    {
+      "name": "supermarket_plastic_bag_open_carry_v5.glb",
+      "bytes": 209828,
+      "sha256": "8286226faa4c7abf0b5e1e7bfefdc0b6ca55c0852deb468e1ab3af60d89bee84"
+    },
+    {
+      "name": "supermarket_plastic_bag_open_carry_v5.npz",
+      "bytes": 62639,
+      "sha256": "2189318a293bc2adb4d24cabc194bee283a5657fa292efb5df270cd6438a03b0"
+    },
+    {
+      "name": "supermarket_plastic_bag_open_carry_v5_quad.obj",
+      "bytes": 352100,
+      "sha256": "65c331d3d4757b028af80e238fc451fcf109bb4566e26e53b5c65b64342ca505"
+    },
+    {
+      "name": "supermarket_plastic_bag_open_carry_v5_tri.obj",
+      "bytes": 418969,
+      "sha256": "a6fa0e607b7719d35cad5a1484fde79929f9fee8280a1b8092a0cfbe4a12bb30"
+    },
+    {
+      "name": "supermarket_plastic_bag_open_carry_v5_tri.ply",
+      "bytes": 220506,
+      "sha256": "515df9e158e5e1079a949b2ae3ddecdb439bd7771d06a6c3d799a3742f4142a3"
+    },
+    {
+      "name": "thin_plastic.mtl",
+      "bytes": 64,
+      "sha256": "625f7e6253599e80b32624cffa043d548e71cb5bff0857c5825756a56b95ed02"
+    },
+    {
+      "name": "validation_open_carry_v5.json",
+      "bytes": 821,
+      "sha256": "d603b7fefba14a521187a9ffd4a453ee0151589321b540444882be1777cedbc5"
+    },
+    {
+      "name": "verification_from_exported_obj_v5_reference.json",
+      "bytes": 547,
+      "sha256": "298cc9abb0b93f5979644b6bf80dd44a0771d6e8ede30ca5d92f737a183ddc3f"
+    }
+  ]
+}

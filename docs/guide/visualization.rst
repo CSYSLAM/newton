@@ -550,6 +550,22 @@ Use :meth:`~newton.viewer.ViewerBase.log_points` to draw a point cloud:
         colors=(0.0, 1.0, 0.0),  # green
     )
 
+**Drawing meshes:**
+
+Use :meth:`~newton.viewer.ViewerBase.log_mesh` to draw a deformable or static triangle mesh.
+:class:`~newton.viewer.ViewerGL` supports alpha-blended meshes through the optional ``opacity``
+argument; other backends may render the mesh as opaque:
+
+.. code-block:: python
+
+    viewer.log_mesh(
+        "/debug/translucent_surface",
+        points=surface_positions, # wp.array[wp.vec3]
+        indices=triangle_indices, # wp.array[wp.int32]
+        color=(0.9, 0.95, 1.0),
+        opacity=0.4,
+    )
+
 **Visualizing contacts:**
 
 Use :meth:`~newton.viewer.ViewerBase.log_contacts` to draw contact normals from a :class:`~newton.Contacts` object.

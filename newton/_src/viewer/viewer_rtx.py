@@ -1416,6 +1416,7 @@ void main() {
         color: tuple[float, float, float] | None = None,
         roughness: float | None = None,
         metallic: float | None = None,
+        opacity: float | None = None,
     ) -> None:
         """Log a mesh for rendering.
 
@@ -1434,6 +1435,7 @@ void main() {
                 smooth, ``1`` is fully rough.
             metallic: Metallicity in ``[0, 1]``. ``0`` is dielectric, ``1``
                 is metal.
+            opacity: Surface opacity in ``[0, 1]`` (unused).
         """
         name = self._qualify(name)
 
@@ -1450,6 +1452,7 @@ void main() {
                 color=color,
                 roughness=roughness,
                 metallic=metallic,
+                opacity=opacity,
             )
             self._mesh_prim_paths[name] = self._get_path(name)
         elif name in self._mesh_prim_paths:
