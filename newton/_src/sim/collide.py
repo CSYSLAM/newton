@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
 from typing import Literal
 
 import numpy as np
@@ -660,7 +661,35 @@ def _full_surface_capable_shape_mask(model: Model) -> np.ndarray:
     return analytic | infinite_plane | (is_mesh & has_real_sdf)
 
 
-def _raise_on_unprovisioned_full_surface_meshes(model: Model, capable: np.ndarray) -> None:
+def _full_surface_shape_selection_mask(
+    shape_count: int, shape_indices: Sequence[int] | np.ndarray | None
+) -> np.ndarray:
+    """Return the construction-time shape subset eligible for full-surface soft contact."""
+    if shape_indices is None:
+        return np.ones(shape_count, dtype=bool)
+
+    indices = np.asarray(shape_indices)
+    if indices.ndim != 1:
+        raise ValueError("rigid_soft_full_surface_shape_indices must be a one-dimensional sequence")
+    if indices.size == 0:
+        return np.zeros(shape_count, dtype=bool)
+    if not np.issubdtype(indices.dtype, np.integer):
+        raise ValueError("rigid_soft_full_surface_shape_indices must contain integer shape indices")
+
+    indices = indices.astype(np.intp, copy=False)
+    if np.any(indices < 0) or np.any(indices >= shape_count):
+        raise ValueError(
+            "rigid_soft_full_surface_shape_indices contains an out-of-range shape index "
+            f"for a model with {shape_count} shapes"
+        )
+    selected = np.zeros(shape_count, dtype=bool)
+    selected[indices] = True
+    return selected
+
+
+def _raise_on_unprovisioned_full_surface_meshes(
+    model: Model, capable: np.ndarray, selected: np.ndarray | None = None
+) -> None:
     """A participating mesh/convex without a real SDF is a provisioning *mistake*, not an inherent
     limitation, so fail loudly (the edge/face passes would otherwise sample an empty descriptor and a
     soft body could pass straight through). Distinct from the unsupported shape *types*, which warn
@@ -668,6 +697,8 @@ def _raise_on_unprovisioned_full_surface_meshes(model: Model, capable: np.ndarra
     stype = model.shape_type.numpy()
     is_mesh = np.isin(stype, (int(GeoType.MESH), int(GeoType.CONVEX_MESH)))
     collide_particles = (model.shape_flags.numpy() & int(ShapeFlags.COLLIDE_PARTICLES)) != 0
+    if selected is not None:
+        collide_particles &= selected
     unprovisioned = np.where(is_mesh & collide_particles & ~capable)[0]
     if unprovisioned.size == 0:
         return
@@ -687,7 +718,7 @@ def _raise_on_unprovisioned_full_surface_meshes(model: Model, capable: np.ndarra
     )
 
 
-def _warn_full_surface_fallbacks(model: Model, capable: np.ndarray) -> None:
+def _warn_full_surface_fallbacks(model: Model, capable: np.ndarray, selected: np.ndarray | None = None) -> None:
     """Warn about participating shapes whose *type* cannot do edge/face -- heightfields, finite planes,
     Gaussian splats, the NONE placeholder -- which fall back to per-particle soft contact. Mesh/convex
     without an SDF is handled separately (it raises; see
@@ -695,6 +726,8 @@ def _warn_full_surface_fallbacks(model: Model, capable: np.ndarray) -> None:
     stype = model.shape_type.numpy()
     is_mesh = np.isin(stype, (int(GeoType.MESH), int(GeoType.CONVEX_MESH)))
     collide_particles = (model.shape_flags.numpy() & int(ShapeFlags.COLLIDE_PARTICLES)) != 0
+    if selected is not None:
+        collide_particles &= selected
     fallback = np.where(collide_particles & ~capable & ~is_mesh)[0]
     if fallback.size == 0:
         return
@@ -760,6 +793,7 @@ class CollisionPipeline:
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
         enable_rigid_soft_full_surface_contact: bool = False,
+        rigid_soft_full_surface_shape_indices: Sequence[int] | np.ndarray | None = None,
         requires_grad: bool | None = None,
         broad_phase: Literal["nxn", "sap", "explicit"]
         | BroadPhaseAllPairs
@@ -812,6 +846,12 @@ class CollisionPipeline:
                 :class:`~newton.solvers.SolverVBD`; other solvers raise on such contacts. Records are
                 emitted into :attr:`Contacts.soft_contact_indices`. Defaults to False. Fixed at
                 construction because it sizes the soft-contact buffer headroom.
+            rigid_soft_full_surface_shape_indices: Optional one-dimensional sequence of rigid shape
+                indices eligible for full-surface edge and face contacts. Per-vertex soft contacts
+                remain enabled for every shape. Use this to reserve the more expensive full-surface
+                path for thin or high-risk colliders while simpler shapes use per-vertex contacts.
+                Defaults to all capable shapes. Fixed at construction; runtime collision-flag changes
+                remain supported for shapes included in this subset.
             requires_grad: Whether to enable gradient computation. If None, uses model.requires_grad.
             broad_phase:
                 Either a broad phase mode string ("explicit", "nxn", "sap") or
@@ -1168,10 +1208,12 @@ class CollisionPipeline:
             # planes, Gaussian splats, ...) instead warn and are excluded from the edge/face candidate
             # pairs, falling back to per-particle soft contact -- so one such shape does not disable
             # full-surface for the rest of the scene.
+            _selected = _full_surface_shape_selection_mask(model.shape_count, rigid_soft_full_surface_shape_indices)
             _capable = _full_surface_capable_shape_mask(model) if model.shape_count > 0 else None
             if _capable is not None:
-                _raise_on_unprovisioned_full_surface_meshes(model, _capable)
-                _warn_full_surface_fallbacks(model, _capable)
+                _raise_on_unprovisioned_full_surface_meshes(model, _capable, _selected)
+                _warn_full_surface_fallbacks(model, _capable, _selected)
+                _capable &= _selected
             self.soft_edge_rigid_pairs = _build_soft_edge_rigid_contact_pairs(model, _capable)
             self.soft_face_rigid_pairs = _build_soft_face_rigid_contact_pairs(model, _capable)
         else:

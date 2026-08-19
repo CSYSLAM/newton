@@ -88,7 +88,8 @@ SOFT_CONTACT_KE = 1.0e7
 SOFT_CONTACT_KD = 500.0
 SOFT_CONTACT_FRICTION = 0.06
 SOFT_CONTACT_MARGIN = 0.010
-SOFT_CONTACT_MAX = 32768
+SOFT_CONTACT_MAX = 12288
+RIGID_BODY_PARTICLE_CONTACT_BUFFER_SIZE = 1024
 SELF_CONTACT_MARGIN = 0.003
 BAG_COLOR = (0.88, 0.035, 0.025)
 BAG_OPACITY = 0.48
@@ -328,7 +329,7 @@ class Example:
             self.ball_body_indices.append(body)
         self.ball_body_indices = np.asarray(self.ball_body_indices, dtype=np.int32)
 
-        builder.add_ground_plane()
+        self.ground_shape_index = builder.add_ground_plane()
         builder.color(include_bending=True)
         self.model = builder.finalize(requires_grad=False)
         self.model.soft_contact_ke = SOFT_CONTACT_KE
@@ -406,13 +407,18 @@ class Example:
                 "particle_collision_detection_interval": -1,
                 "particle_topological_contact_filter_threshold": 2,
                 "particle_rest_shape_contact_exclusion_radius": SELF_CONTACT_MARGIN,
-                "rigid_body_particle_contact_buffer_size": 4096,
+                "rigid_body_particle_contact_buffer_size": RIGID_BODY_PARTICLE_CONTACT_BUFFER_SIZE,
             },
             collision_options={
                 "broad_phase": "nxn",
                 "soft_contact_margin": SOFT_CONTACT_MARGIN,
                 "soft_contact_max": SOFT_CONTACT_MAX,
                 "enable_rigid_soft_full_surface_contact": True,
+                "rigid_soft_full_surface_shape_indices": (
+                    self.rod_shape_index,
+                    *self.hand_particle_shapes,
+                    self.ground_shape_index,
+                ),
                 "include_static_kinematic_pairs": False,
             },
         )
@@ -582,6 +588,14 @@ class Example:
         assert np.all((shape_flags & int(newton.ShapeFlags.COLLIDE_PARTICLES)) != 0)
 
         soft_contact_count = int(self.solver.contacts.soft_contact_count.numpy()[0])
+        if soft_contact_count >= SOFT_CONTACT_MAX:
+            raise ValueError(f"Soft-contact capacity exhausted: {soft_contact_count} >= {SOFT_CONTACT_MAX}")
+        body_contact_overflow = int(self.solver.vbd_solver.body_particle_contact_overflow_max.numpy()[0])
+        if body_contact_overflow > 0:
+            raise ValueError(
+                "Per-body particle-contact capacity exhausted: "
+                f"{body_contact_overflow} > {RIGID_BODY_PARTICLE_CONTACT_BUFFER_SIZE}"
+            )
         soft_contact_shapes = self.solver.contacts.soft_contact_shape.numpy()
         active_contact_shapes = soft_contact_shapes[: min(soft_contact_count, soft_contact_shapes.size)]
         if not np.any(np.isin(active_contact_shapes, self.hand_particle_shapes)):

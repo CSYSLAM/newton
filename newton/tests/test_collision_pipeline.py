@@ -3283,6 +3283,46 @@ def test_full_surface_catches_what_particles_miss(test, device):
     test.assertGreater(total, 0)  # caught by edge/face
 
 
+def test_full_surface_shape_subset(test, device):
+    """Limit full-surface candidates to the requested rigid shapes."""
+    builder = newton.ModelBuilder()
+    selected = builder.add_shape_box(body=-1, hx=0.5, hy=0.5, hz=0.5)
+    excluded = builder.add_shape_sphere(body=-1, radius=0.5)
+    excluded_mesh = builder.add_shape_mesh(body=-1, mesh=newton.Mesh.create_box(0.5, 0.5, 0.5))
+    builder.add_cloth_grid(
+        pos=wp.vec3(-0.4, -0.4, 0.45),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(0.0, 0.0, 0.0),
+        dim_x=2,
+        dim_y=2,
+        cell_x=0.4,
+        cell_y=0.4,
+        mass=0.1,
+    )
+    model = builder.finalize(device=device)
+
+    pipeline = newton.CollisionPipeline(
+        model,
+        broad_phase="nxn",
+        enable_rigid_soft_full_surface_contact=True,
+        rigid_soft_full_surface_shape_indices=[selected],
+    )
+    particle_shapes = {int(shape) for shape in pipeline.soft_rigid_contact_pairs.numpy()[:, 1]}
+    edge_shapes = {int(shape) for shape in pipeline.soft_edge_rigid_pairs.numpy()[:, 1]}
+    face_shapes = {int(shape) for shape in pipeline.soft_face_rigid_pairs.numpy()[:, 1]}
+    test.assertSetEqual(particle_shapes, {selected, excluded, excluded_mesh})
+    test.assertSetEqual(edge_shapes, {selected})
+    test.assertSetEqual(face_shapes, {selected})
+
+    with test.assertRaisesRegex(ValueError, "out-of-range shape index"):
+        newton.CollisionPipeline(
+            model,
+            broad_phase="nxn",
+            enable_rigid_soft_full_surface_contact=True,
+            rigid_soft_full_surface_shape_indices=[model.shape_count],
+        )
+
+
 for _name, _fn in (
     ("test_optimize_edge_sdf_box", test_optimize_edge_sdf_box),
     ("test_optimize_face_sdf_box", test_optimize_face_sdf_box),
@@ -3292,6 +3332,7 @@ for _name, _fn in (
     ("test_edge_face_respect_shape_margin", test_edge_face_respect_shape_margin),
     ("test_backward_compat_bit_for_bit", test_backward_compat_bit_for_bit),
     ("test_full_surface_catches_what_particles_miss", test_full_surface_catches_what_particles_miss),
+    ("test_full_surface_shape_subset", test_full_surface_shape_subset),
 ):
     add_function_test(TestFullSurfaceSoftContact, _name, _fn, devices=soft_devices)
 
