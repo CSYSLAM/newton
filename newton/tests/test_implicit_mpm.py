@@ -733,7 +733,6 @@ def test_velocity_field_collider_contact_count(test, device):
         contact_margin=0.011,
         minimum_contact_count=2,
         minimum_closing_speed=0.01,
-        collider_groups=(0, 1),
     )
 
     state = model.state()
@@ -747,110 +746,6 @@ def test_velocity_field_collider_contact_count(test, device):
         solver.particle_velocity_field_separation.numpy(),
         np.array((1.0, 0.0, 0.0)),
     )
-
-
-def test_velocity_field_collider_groups(test, device):
-    """Require contacts from both cutter groups before separating fields."""
-
-    def run(second_body_x):
-        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
-        SolverImplicitMPM.register_custom_attributes(builder)
-        builder.add_particle((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), mass=1.0, radius=0.01)
-        builder.add_particle((0.3, 0.3, 0.3), (0.0, 0.0, 0.0), mass=1.0, radius=0.01)
-        box_cfg = newton.ModelBuilder.ShapeConfig(
-            density=0.0,
-            has_shape_collision=False,
-            has_particle_collision=True,
-        )
-        first_body = builder.add_body(
-            xform=wp.transform(wp.vec3(-0.05, 0.0, 0.0), wp.quat_identity()),
-            is_kinematic=True,
-        )
-        duplicate_first_body = builder.add_body(
-            xform=wp.transform(wp.vec3(-0.05, 0.0, 0.0), wp.quat_identity()),
-            is_kinematic=True,
-        )
-        second_body = builder.add_body(
-            xform=wp.transform(wp.vec3(second_body_x, 0.0, 0.0), wp.quat_identity()),
-            is_kinematic=True,
-        )
-        builder.add_shape_box(body=first_body, hx=0.04, hy=0.05, hz=0.05, cfg=box_cfg)
-        builder.add_shape_box(body=duplicate_first_body, hx=0.04, hy=0.05, hz=0.05, cfg=box_cfg)
-        builder.add_shape_box(body=second_body, hx=0.04, hy=0.05, hz=0.05, cfg=box_cfg)
-        model = builder.finalize(device=device)
-
-        config = SolverImplicitMPM.Config()
-        config.velocity_field_count = 2
-        config.grid_type = "dense"
-        config.voxel_size = 0.1
-        config.max_iterations = 1
-        config.warmstart_mode = "particles"
-        solver = SolverImplicitMPM(model, config)
-        solver.set_velocity_field_separation_colliders(
-            (0, 1, 2),
-            contact_margin=0.011,
-            minimum_contact_count=2,
-            collider_groups=(0, 0, 1),
-        )
-
-        state = model.state()
-        solver.step(state, state, control=None, contacts=None, dt=0.01)
-        return solver.particle_velocity_field_separation.numpy()
-
-    np.testing.assert_array_equal(run(0.3), np.array((0.0, 0.0)))
-    np.testing.assert_array_equal(run(0.05), np.array((1.0, 0.0)))
-
-
-def test_velocity_field_collider_previous_pose(test, device):
-    """Detect thin-cutter contact sampled at the previous rigid pose."""
-
-    def run(include_previous_pose):
-        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
-        SolverImplicitMPM.register_custom_attributes(builder)
-        builder.add_particle((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), mass=1.0, radius=0.01)
-        builder.add_particle((0.3, 0.3, 0.3), (0.0, 0.0, 0.0), mass=1.0, radius=0.01)
-        body = builder.add_body(
-            xform=wp.transform(wp.vec3(-0.05, 0.0, 0.0), wp.quat_identity()),
-            is_kinematic=True,
-        )
-        builder.add_shape_box(
-            body=body,
-            hx=0.04,
-            hy=0.05,
-            hz=0.05,
-            cfg=newton.ModelBuilder.ShapeConfig(
-                density=0.0,
-                has_shape_collision=False,
-                has_particle_collision=True,
-            ),
-        )
-        model = builder.finalize(device=device)
-
-        config = SolverImplicitMPM.Config()
-        config.velocity_field_count = 2
-        config.grid_type = "dense"
-        config.voxel_size = 0.1
-        config.max_iterations = 1
-        config.warmstart_mode = "particles"
-        solver = SolverImplicitMPM(model, config)
-        state = model.state()
-        solver.step(state, state, control=None, contacts=None, dt=0.01)
-
-        state.particle_q.assign(np.array(((0.0, 0.0, 0.0), (0.3, 0.3, 0.3)), dtype=np.float32))
-        state.particle_qd.zero_()
-        body_q = state.body_q.numpy()
-        body_q[body, :3] = (0.3, 0.0, 0.0)
-        state.body_q.assign(body_q)
-        solver.set_velocity_field_separation_colliders(
-            (0,),
-            contact_margin=0.011,
-            include_previous_pose=include_previous_pose,
-        )
-        solver.step(state, state, control=None, contacts=None, dt=0.01)
-        return solver.particle_velocity_field_separation.numpy()
-
-    np.testing.assert_array_equal(run(False), np.array((0.0, 0.0)))
-    np.testing.assert_array_equal(run(True), np.array((1.0, 0.0)))
 
 
 def test_empty_particle_model_rejected(test, device):
@@ -1795,20 +1690,6 @@ add_function_test(
     TestImplicitMPM,
     "test_velocity_field_collider_contact_count",
     test_velocity_field_collider_contact_count,
-    devices=basic_devices,
-)
-
-add_function_test(
-    TestImplicitMPM,
-    "test_velocity_field_collider_groups",
-    test_velocity_field_collider_groups,
-    devices=basic_devices,
-)
-
-add_function_test(
-    TestImplicitMPM,
-    "test_velocity_field_collider_previous_pose",
-    test_velocity_field_collider_previous_pose,
     devices=basic_devices,
 )
 

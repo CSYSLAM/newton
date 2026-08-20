@@ -323,13 +323,10 @@ def activate_particle_velocity_field_separation(
     collider: Collider,
     body_q: wp.array[wp.transform],
     body_qd: wp.array[wp.spatial_vector],
-    body_q_prev: wp.array[wp.transform],
     cutter_mask: wp.array[wp.int32],
-    cutter_groups: wp.array[wp.int32],
     contact_margin: float,
     minimum_contact_count: int,
     minimum_closing_speed: float,
-    include_previous_pose: bool,
     particle_separation: wp.array[float],
 ):
     """Persistently separate particles that contact selected collider surfaces."""
@@ -346,14 +343,6 @@ def activate_particle_velocity_field_separation(
     closing_contact_found = bool(False)
     first_normal = wp.vec3(0.0)
     first_velocity = wp.vec3(0.0)
-    group_0_contact = bool(False)
-    group_1_contact = bool(False)
-    group_0_sdf = float(_INFINITY)
-    group_1_sdf = float(_INFINITY)
-    group_0_normal = wp.vec3(0.0)
-    group_1_normal = wp.vec3(0.0)
-    group_0_velocity = wp.vec3(0.0)
-    group_1_velocity = wp.vec3(0.0)
     for collider_id in range(cutter_mask.shape[0]):
         if cutter_mask[collider_id] == 0:
             continue
@@ -361,25 +350,10 @@ def activate_particle_velocity_field_separation(
         query_result, sdf, gradient, velocity, closest_point, _material_id = _query_collider_sdf(
             position, collider, body_q, collider_id
         )
-        use_previous_pose = bool(False)
-        body_id = collider.collider_body_index[collider_id]
-        if include_previous_pose and body_id >= 0 and body_q_prev:
-            previous_result, previous_sdf, previous_gradient, previous_velocity, previous_closest_point, _ = (
-                _query_collider_sdf(position, collider, body_q_prev, collider_id)
-            )
-            if previous_result and (not query_result or previous_sdf < sdf):
-                query_result = previous_result
-                sdf = previous_sdf
-                gradient = previous_gradient
-                velocity = previous_velocity
-                closest_point = previous_closest_point
-                use_previous_pose = True
-
         if query_result and sdf <= contact_margin:
+            body_id = collider.collider_body_index[collider_id]
             if body_id >= 0:
                 body_xform = body_q[body_id]
-                if use_previous_pose:
-                    body_xform = body_q_prev[body_id]
                 body_rotation = wp.transform_get_rotation(body_xform)
                 normal = wp.normalize(wp.quat_rotate(body_rotation, gradient))
                 velocity = wp.quat_rotate(body_rotation, velocity)
@@ -392,49 +366,21 @@ def activate_particle_velocity_field_separation(
             else:
                 normal = gradient
 
-            if cutter_groups:
-                group = cutter_groups[collider_id]
-                if group == 0 and sdf < group_0_sdf:
-                    group_0_contact = True
-                    group_0_sdf = sdf
-                    group_0_normal = normal
-                    group_0_velocity = velocity
-                elif group == 1 and sdf < group_1_sdf:
-                    group_1_contact = True
-                    group_1_sdf = sdf
-                    group_1_normal = normal
-                    group_1_velocity = velocity
-            else:
-                if contact_count == 0:
-                    first_normal = normal
-                    first_velocity = velocity
-                elif minimum_closing_speed > 0.0:
-                    normal_delta = first_normal - normal
-                    normal_delta_length = wp.length(normal_delta)
-                    if normal_delta_length > _CLOSEST_POINT_NORMAL_EPSILON:
-                        closing_speed = wp.dot(first_velocity - velocity, normal_delta / normal_delta_length)
-                        if closing_speed >= minimum_closing_speed:
-                            closing_contact_found = True
+            if contact_count == 0:
+                first_normal = normal
+                first_velocity = velocity
+            elif minimum_closing_speed > 0.0:
+                normal_delta = first_normal - normal
+                normal_delta_length = wp.length(normal_delta)
+                if normal_delta_length > _CLOSEST_POINT_NORMAL_EPSILON:
+                    closing_speed = wp.dot(first_velocity - velocity, normal_delta / normal_delta_length)
+                    if closing_speed >= minimum_closing_speed:
+                        closing_contact_found = True
 
-                contact_count += 1
-                if contact_count >= minimum_contact_count and (minimum_closing_speed <= 0.0 or closing_contact_found):
-                    particle_separation[particle] = 1.0
-                    return
-
-    if group_0_contact and group_1_contact:
-        if minimum_closing_speed <= 0.0:
-            particle_separation[particle] = 1.0
-            return
-
-        normal_delta = group_0_normal - group_1_normal
-        normal_delta_length = wp.length(normal_delta)
-        if normal_delta_length > _CLOSEST_POINT_NORMAL_EPSILON:
-            closing_speed = wp.dot(
-                group_0_velocity - group_1_velocity,
-                normal_delta / normal_delta_length,
-            )
-            if closing_speed >= minimum_closing_speed:
+            contact_count += 1
+            if contact_count >= minimum_contact_count and (minimum_closing_speed <= 0.0 or closing_contact_found):
                 particle_separation[particle] = 1.0
+                return
 
 
 @wp.func

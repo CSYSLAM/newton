@@ -1,1 +1,1 @@
-Add experimental local multi-velocity-field separation, grouped cutter contact, and previous-pose endpoint sampling to `SolverImplicitMPM`, and update the suspended-sheet scissors example to cut without deleting particles.
+Add experimental local multi-velocity-field separation and contact-triggered cutting to `SolverImplicitMPM`, and update the suspended-sheet scissors example to cut without deleting particles.

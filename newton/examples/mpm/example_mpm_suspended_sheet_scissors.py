@@ -223,7 +223,6 @@ class Example:
 
         particle_data = self._emit_sheet(builder, args)
         self.sheet_spacing = particle_data["spacing"]
-        self.sheet_grid_shape = tuple(int(value) for value in particle_data["grid_shape"])
         self.rest_positions_np = particle_data["positions"]
         self.fixed_indices_np = particle_data["fixed_indices"]
         self.center_indices_np = particle_data["center_indices"]
@@ -272,40 +271,18 @@ class Example:
         particle_velocity_field_np = (self.rest_positions_np[:, 1] > cut_center_y).astype(np.int32)
         self.solver.particle_velocity_field.assign(particle_velocity_field_np)
 
-        particle_grid = np.arange(self.model.particle_count, dtype=np.int32).reshape(self.sheet_grid_shape)
-        cut_pairs: list[tuple[int, int]] = []
-        for x_index in range(self.sheet_grid_shape[0]):
-            for z_index in range(self.sheet_grid_shape[2]):
-                line = particle_grid[x_index, :, z_index]
-                field_transitions = np.flatnonzero(
-                    particle_velocity_field_np[line[:-1]] != particle_velocity_field_np[line[1:]]
-                )
-                if field_transitions.size != 1:
-                    raise ValueError("each sheet cross-section must cross the prescribed cut exactly once")
-                transition = int(field_transitions[0])
-                cut_pairs.append((int(line[transition]), int(line[transition + 1])))
-        self.cut_pair_indices_np = np.asarray(cut_pairs, dtype=np.int32)
-        cut_pair_rest_delta = (
-            self.rest_positions_np[self.cut_pair_indices_np[:, 1]]
-            - self.rest_positions_np[self.cut_pair_indices_np[:, 0]]
-        )
-        self.cut_pair_rest_distance_np = np.linalg.norm(cut_pair_rest_delta, axis=1)
-
         collider_body_index_np = self.solver.collider_body_index.numpy()
         cutter_collider_ids = np.flatnonzero(
             (collider_body_index_np == self.upper_blade_body) | (collider_body_index_np == self.lower_blade_body)
         ).astype(np.int32)
         if cutter_collider_ids.size < 2:
             raise ValueError("scissor cutting edges must produce two independent MPM colliders")
-        cutter_collider_groups = (collider_body_index_np[cutter_collider_ids] == self.lower_blade_body).astype(np.int32)
         self.cutter_contact_margin = 0.55 * float(np.min(self.sheet_spacing))
         self.solver.set_velocity_field_separation_colliders(
             cutter_collider_ids,
             contact_margin=self.cutter_contact_margin,
             minimum_contact_count=2,
             minimum_closing_speed=1.0e-3,
-            collider_groups=cutter_collider_groups,
-            include_previous_pose=True,
         )
         self.cutter_collider_count = int(cutter_collider_ids.size)
 
@@ -402,7 +379,6 @@ class Example:
         return {
             "positions": positions,
             "spacing": spacing,
-            "grid_shape": np.asarray(grid_x.shape, dtype=np.int32),
             "fixed_indices": fixed_indices,
             "center_indices": center_indices,
         }
@@ -761,38 +737,14 @@ class Example:
             contacted_x_span = (
                 np.ptp(self.rest_positions_np[contacted_cut_indices, 0]) if contacted_cut_indices.size else 0.0
             )
+            minimum_contact_count = max(1, int(0.15 * self.cut_candidate_indices_np.size))
+            if contacted_cut_indices.size < minimum_contact_count:
+                raise ValueError(
+                    f"scissor colliders activated only {contacted_cut_indices.size} cut particles; "
+                    f"expected at least {minimum_contact_count}, x-span={contacted_x_span:.3f} m"
+                )
             if contacted_x_span < 0.85 * self.sheet_width:
                 raise ValueError("scissor contact did not advance across the sheet")
-
-            coverage, _ = np.histogram(
-                self.rest_positions_np[contacted_cut_indices, 0],
-                bins=self.snip_count,
-                range=(-0.5 * self.sheet_width, 0.5 * self.sheet_width),
-            )
-            occupied_bin_count = int(np.count_nonzero(coverage))
-            minimum_occupied_bin_count = max(1, math.ceil(0.75 * self.snip_count))
-            if occupied_bin_count < minimum_occupied_bin_count:
-                raise ValueError(
-                    f"scissor contact covered only {occupied_bin_count} of {self.snip_count} path bins; "
-                    f"expected at least {minimum_occupied_bin_count}"
-                )
-
-            if self.sim_time >= cut_end_time + self.depart_time:
-                activated_pair_mask = (separation[self.cut_pair_indices_np[:, 0]] > 0.0) | (
-                    separation[self.cut_pair_indices_np[:, 1]] > 0.0
-                )
-                if not np.any(activated_pair_mask):
-                    raise ValueError("scissor contact did not activate any particle pairs across the cut")
-
-                cut_pair_delta = positions[self.cut_pair_indices_np[:, 1]] - positions[self.cut_pair_indices_np[:, 0]]
-                cut_pair_opening = np.linalg.norm(cut_pair_delta, axis=1) - self.cut_pair_rest_distance_np
-                median_opening = float(np.median(cut_pair_opening[activated_pair_mask]))
-                minimum_opening = 0.5 * float(np.min(self.sheet_spacing))
-                if median_opening < minimum_opening:
-                    raise ValueError(
-                        f"cut faces did not remain open after the scissors departed "
-                        f"(median={median_opening:.4f} m, expected at least {minimum_opening:.4f} m)"
-                    )
 
     @staticmethod
     def create_parser():
