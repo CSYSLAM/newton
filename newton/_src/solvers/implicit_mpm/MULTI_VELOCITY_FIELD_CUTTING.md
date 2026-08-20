@@ -2,8 +2,8 @@
 
 ## 文档状态
 
-- 记录日期：2026-08-18
-- 状态：实验性实现，尚未提交
+- 更新日期：2026-08-20
+- 状态：实验性实现
 - 对应示例：`newton/examples/mpm/example_mpm_suspended_sheet_scissors.py`
 - 主要实现目录：`newton/_src/solvers/implicit_mpm/`
 
@@ -89,8 +89,12 @@
 - `contact_margin`：粒子中心到碰撞表面的附加接触距离。
 - `minimum_contact_count`：同一粒子需要同时接触的选中 collider 数量。
 - `minimum_closing_speed`：选中表面沿相对法线方向的最小闭合速度。
+- `collider_groups`：与 collider 一一对应的两个刀刃组；启用后必须同时接触两组，而不是把同组的相邻 collider 重复计数。
+- `include_previous_pose`：同时查询刚体 collider 的前一时间步姿态，减少薄刀具在离散时间步之间漏检接触。
 
 传入 `None` 或空序列可关闭碰撞触发。重新调用 `setup_collider()` 会清空选择，因为 collider 索引可能发生变化。
+
+`include_previous_pose` 是当前姿态与前一姿态的端点扫掠，不是完整的连续碰撞检测；若薄刀具在一个时间步内完整穿过粒子且两个端点都没有接触，仍可能漏检。
 
 ## 多速度场网格实现
 
@@ -132,12 +136,13 @@ merged_velocity = sum(field_mass * field_velocity) / sum(field_mass)
 对每个尚未分离的动态活动粒子：
 
 1. 查询所有被选为 cutter 的 collider SDF。
-2. 判断 `sdf <= contact_margin`。
-3. 将 collider 局部法线和速度转换到世界坐标。
-4. 对刚体 collider 加上质心线速度和接触点角速度 `omega × r`。
-5. 统计同时接触的 cutter collider 数量。
-6. 若启用闭合速度条件，检查至少一对接触面的相对法线速度是否达到阈值。
-7. 条件满足后将该粒子的 separation 置为 `1`。
+2. 若启用前一姿态采样，则同时查询刚体 collider 的前一时间步姿态，并保留距离更近的结果。
+3. 判断 `sdf <= contact_margin`。
+4. 将 collider 局部法线和速度转换到世界坐标。
+5. 对刚体 collider 加上质心线速度和接触点角速度 `omega × r`。
+6. 未分组时统计同时接触的 collider 数量；分组时分别保留两组中 SDF 最小的接触。
+7. 若启用闭合速度条件，检查两组接触面的相对法线速度是否达到阈值。
+8. 条件满足后将该粒子的 separation 置为 `1`。
 
 以下粒子不会触发切割：
 
@@ -145,7 +150,7 @@ merged_velocity = sum(field_mass * field_velocity) / sum(field_mass)
 - `ACTIVE` 标记关闭的粒子。
 - 零质量固定粒子。
 
-当前 `minimum_contact_count` 统计的是 collider 数量，并未明确要求 collider 来自不同刚体。剪刀示例主要依靠相反法线和闭合速度条件排除同一刀片相邻分段的误触发。
+未传入 `collider_groups` 时，`minimum_contact_count` 继续按 collider 数量统计，以保持原有 API 行为。剪刀示例显式把上下刀片设为两个组，因此同一刀片的重复接触不会满足双刃触发条件。
 
 ## 剪刀示例配置
 
@@ -195,9 +200,11 @@ velocity_field_count = 2
 contact_margin = 0.55 * min(sheet_spacing)
 minimum_contact_count = 2
 minimum_closing_speed = 1.0e-3 m/s
+collider_groups = upper/lower blade
+include_previous_pose = True
 ```
 
-这使整体平移、单片刀刃擦过、剪刀张开和刀片远离粒子时不会主动激活裂纹。
+这使整体平移、单片刀刃擦过、剪刀张开和刀片远离粒子时不会主动激活裂纹，同时降低薄刀刃在相邻子步之间漏检接触的概率。
 
 ### 剪刀轨迹
 
@@ -272,7 +279,7 @@ velocity_field_count = 1
 
 ## 测试覆盖
 
-`newton/tests/test_implicit_mpm.py` 当前新增三组测试：
+`newton/tests/test_implicit_mpm.py` 当前包含五组多速度场切割测试：
 
 1. `test_velocity_field_local_separation`
    - 验证 separation 为零时两场速度耦合。
@@ -284,8 +291,14 @@ velocity_field_count = 1
 3. `test_velocity_field_collider_contact_count`
    - 验证可以要求两个 collider 同时接触并相向闭合。
    - 验证单 collider 接触和远处粒子不会触发。
+4. `test_velocity_field_collider_groups`
+   - 验证同一刀刃组内的重复接触不会误触发切割。
+   - 验证两组刀刃都接触后才激活 separation。
+5. `test_velocity_field_collider_previous_pose`
+   - 验证默认路径只查询当前姿态。
+   - 验证端点扫掠可以补获前一刚体姿态处的薄刀具接触。
 
-上述单元测试覆盖 CPU 和 CUDA 支持的基础设备配置。implicit MPM 测试集此前结果为 153 项通过、1 项跳过。
+上述单元测试覆盖 CPU 和 CUDA 支持的基础设备配置。完整 implicit MPM 测试集结果为 157 项通过、1 项跳过，其中五组多速度场测试的 10 个设备用例全部通过。
 
 示例本身还检查：
 
@@ -295,6 +308,8 @@ velocity_field_count = 1
 - 两端固定粒子保持不动。
 - 切割不能修改粒子活动标记。
 - 接触激活需要横跨至少 85% 的布料宽度。
+- 默认八次咬合的切割路径至少覆盖 75% 的等宽分桶。
+- 剪刀离场后，已激活切口粒子对的中位张口至少达到半个粒子间距。
 
 ## 当前已知问题
 
@@ -312,23 +327,11 @@ angle = open_angle
 
 剪刀在离场阶段始终保持打开，后端几何与布料边缘之间没有稳健余量，因此末段仍可能出现刀片或手柄与粒子视觉穿模。当前代码不包含对此问题的修复。
 
-### 2. 示例最终接触数量阈值存在离散波动
-
-当前 `test_final()` 要求至少 15% 的切割候选粒子直接激活 separation。默认 420 帧测试曾出现：
-
-```text
-实际直接接触粒子数 = 38
-要求数量 = 45
-接触横向跨度 = 0.640 m
-```
-
-当时切割横向跨度已经满足要求，但直接接触粒子数量未达到固定比例。说明粒子接触数量受离散位置影响，当前最终断言尚不完全稳定。该阈值在回退后保持原值，没有通过放宽测试掩盖问题。
-
-### 3. 切割路径仍是预设的
+### 2. 切割路径仍是预设的
 
 两套 field 在初始化时按照完整曲线提前分区。接触只控制何时解除耦合，不决定裂纹将向哪里扩展。若要支持任意剪刀轨迹，需要动态生成材料分区、增加更多局部 field，或采用粒子邻域级裂纹图。
 
-### 4. 裂纹面没有自接触
+### 3. 裂纹面没有自接触
 
 当前 field 分离后不再交换速度，但也没有额外求解两侧裂纹面的接触与摩擦。布料大幅折叠时，切口两侧可能互相穿过。
 

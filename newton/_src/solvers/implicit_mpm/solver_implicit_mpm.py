@@ -1260,9 +1260,11 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             self._velocity_field_node_map = None
         self._particle_collision_environment = model.particle_world if self._separate_worlds else None
         self._velocity_field_separation_collider_mask = None
+        self._velocity_field_separation_collider_groups = None
         self._velocity_field_separation_contact_margin = 0.0
         self._velocity_field_separation_minimum_contact_count = 1
         self._velocity_field_separation_minimum_closing_speed = 0.0
+        self._velocity_field_separation_include_previous_pose = False
         self._particle_world_ranges = None
 
         if self._separate_worlds:
@@ -1446,6 +1448,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             collider_world_ids=collider_world_ids,
         )
         self._velocity_field_separation_collider_mask = None
+        self._velocity_field_separation_collider_groups = None
 
         self._last_step_data.save_collider_current_position(self._mpm_model.collider_body_q)
 
@@ -1488,6 +1491,8 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         contact_margin: float = 0.0,
         minimum_contact_count: int = 1,
         minimum_closing_speed: float = 0.0,
+        collider_groups: Sequence[int] | wp.array[int] | None = None,
+        include_previous_pose: bool = False,
     ) -> None:
         """Select colliders that separate velocity fields on particle contact.
 
@@ -1503,6 +1508,18 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         contact normals. This avoids separation from rigid translation or from
         surfaces moving apart.
 
+        Pass two labels in ``collider_groups`` to require contact with both
+        cutter groups. Labels correspond one-to-one with ``collider_ids`` and
+        are normalized internally. This is useful when each cutter blade is
+        represented by multiple adjacent colliders; contacts with two segments
+        from the same blade then count only once. Grouped contact currently
+        requires exactly two groups and ``minimum_contact_count=2``.
+
+        Set ``include_previous_pose`` to also test rigid colliders at their
+        previous-step transforms. This endpoint sweep reduces missed contact
+        when a thin cutter traverses a particle between steps; it is not full
+        continuous collision detection.
+
         Calling :meth:`setup_collider` clears this selection because collider
         indices may change.
 
@@ -1513,6 +1530,10 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 must simultaneously contact a particle.
             minimum_closing_speed: Required relative closing speed between
                 contacted surfaces [m/s]. Zero disables the velocity test.
+            collider_groups: Optional group label for every entry in
+                ``collider_ids``. Exactly two distinct groups are supported.
+            include_previous_pose: Whether to test the previous rigid-body
+                transforms in addition to the current transforms.
 
         Raises:
             ValueError: If multiple velocity fields are disabled, the margin
@@ -1537,12 +1558,18 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             raise ValueError(f"minimum_closing_speed must be finite and non-negative, got {minimum_closing_speed!r}.")
         if minimum_closing_speed > 0.0 and minimum_contact_count < 2:
             raise ValueError("minimum_closing_speed requires minimum_contact_count >= 2.")
+        if not isinstance(include_previous_pose, bool):
+            raise TypeError("include_previous_pose must be a bool.")
 
         if collider_ids is None:
+            if collider_groups is not None:
+                raise ValueError("collider_groups requires collider_ids.")
             self._velocity_field_separation_collider_mask = None
+            self._velocity_field_separation_collider_groups = None
             self._velocity_field_separation_contact_margin = float(contact_margin)
             self._velocity_field_separation_minimum_contact_count = minimum_contact_count
             self._velocity_field_separation_minimum_closing_speed = float(minimum_closing_speed)
+            self._velocity_field_separation_include_previous_pose = include_previous_pose
             return
 
         collider_ids_np = collider_ids.numpy() if isinstance(collider_ids, wp.array) else np.asarray(collider_ids)
@@ -1551,9 +1578,22 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         if collider_ids_np.size and not np.issubdtype(collider_ids_np.dtype, np.integer):
             raise TypeError("collider_ids must be a one-dimensional integer sequence.")
 
+        collider_groups_np = None
+        if collider_groups is not None:
+            collider_groups_np = (
+                collider_groups.numpy() if isinstance(collider_groups, wp.array) else np.asarray(collider_groups)
+            )
+            if collider_groups_np.ndim != 1 or collider_groups_np.shape != collider_ids_np.shape:
+                raise TypeError("collider_groups must be a one-dimensional sequence matching collider_ids.")
+            if collider_groups_np.size and not np.issubdtype(collider_groups_np.dtype, np.integer):
+                raise TypeError("collider_groups must be a one-dimensional integer sequence.")
+            if collider_groups_np.size and minimum_contact_count != 2:
+                raise ValueError("collider_groups currently requires minimum_contact_count=2.")
+
         collider_count = self._mpm_model.collider.collider_mesh.shape[0]
         if collider_ids_np.size == 0:
             self._velocity_field_separation_collider_mask = None
+            self._velocity_field_separation_collider_groups = None
         else:
             if np.any(collider_ids_np < 0) or np.any(collider_ids_np >= collider_count):
                 raise ValueError(f"collider_ids entries must be in [0, {collider_count}).")
@@ -1570,9 +1610,29 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 dtype=wp.int32,
                 device=self.model.device,
             )
+            if collider_groups_np is None:
+                self._velocity_field_separation_collider_groups = None
+            else:
+                unique_group_labels = np.unique(collider_groups_np)
+                if unique_group_labels.size != 2:
+                    raise ValueError("collider_groups must contain exactly two distinct labels.")
+
+                collider_group_map_np = np.full(collider_count, -1, dtype=np.int32)
+                for collider_id, group_label in zip(collider_ids_np, collider_groups_np, strict=True):
+                    normalized_group = int(np.searchsorted(unique_group_labels, group_label))
+                    existing_group = collider_group_map_np[int(collider_id)]
+                    if existing_group >= 0 and existing_group != normalized_group:
+                        raise ValueError("duplicate collider_ids entries must use the same collider group.")
+                    collider_group_map_np[int(collider_id)] = normalized_group
+                self._velocity_field_separation_collider_groups = wp.array(
+                    collider_group_map_np,
+                    dtype=wp.int32,
+                    device=self.model.device,
+                )
         self._velocity_field_separation_contact_margin = float(contact_margin)
         self._velocity_field_separation_minimum_contact_count = minimum_contact_count
         self._velocity_field_separation_minimum_closing_speed = float(minimum_closing_speed)
+        self._velocity_field_separation_include_previous_pose = include_previous_pose
 
     def check_sparse_grid_rebuild_status(self) -> None:
         """Raise if a rebuildable sparse grid exceeded its reserved capacity.
@@ -2983,10 +3043,13 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 self._mpm_model.collider,
                 state.body_q,
                 state.body_qd,
+                self._last_step_data.body_q_prev,
                 self._velocity_field_separation_collider_mask,
+                self._velocity_field_separation_collider_groups,
                 self._velocity_field_separation_contact_margin,
                 self._velocity_field_separation_minimum_contact_count,
                 self._velocity_field_separation_minimum_closing_speed,
+                self._velocity_field_separation_include_previous_pose,
                 self._particle_velocity_field_separation,
             ],
             device=self.model.device,
