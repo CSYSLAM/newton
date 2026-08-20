@@ -1920,6 +1920,9 @@ class SolverVBD(SolverBase, CouplingInterface):
             self._solve_rigid_body_iteration(state_in, state_out, control, contacts, dt)
             self._solve_particle_iteration(state_in, state_out, contacts, dt, iter_num)
 
+        if self.model.particle_count:
+            wp.copy(state_out.particle_q, state_in.particle_q)
+
         # Snapshot solved rigid contact state for next-frame warm-start.
         self._snapshot_rigid_contact_history(contacts)
         self._finalize_rigid_bodies(
@@ -2921,8 +2924,6 @@ class SolverVBD(SolverBase, CouplingInterface):
                     device=self.device,
                 )
             self._penetration_free_truncation(state_in.particle_q, self.model.particle_color_groups[color])
-
-        wp.copy(state_out.particle_q, state_in.particle_q)
 
     def _solve_rigid_body_iteration(
         self, state_in: State, state_out: State, control: Control, contacts: Contacts | None, dt: float

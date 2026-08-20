@@ -42,6 +42,7 @@ from .particle_vbd_kernels import (
     forward_step,
     solve_elasticity,
     solve_elasticity_tile,
+    solve_surface_elasticity_tile,
     update_velocity,
 )
 from .rigid_vbd_kernels import (
@@ -561,6 +562,14 @@ class SolverVBD(SolverBase, CouplingInterface):
         if self.model.soft_mesh_adjacency_device is None:
             raise ValueError("model.soft_mesh_adjacency_device is missing; finalize the model with ModelBuilder.")
         self.particle_adjacency = self.model.soft_mesh_adjacency_device
+        (
+            self.surface_particle_color_groups,
+            self.volumetric_particle_color_groups,
+        ) = self._build_particle_elasticity_color_groups()
+        (
+            self.surface_tile_skip_active_checks,
+            self.surface_tile_skip_material_checks,
+        ) = self._compute_surface_tile_fast_path_flags()
 
         # Self-contact settings
         self.particle_enable_self_contact = particle_enable_self_contact
@@ -572,7 +581,16 @@ class SolverVBD(SolverBase, CouplingInterface):
         if model.device.is_cpu and particle_enable_tile_solve and wp.config.log_level <= wp.LOG_DEBUG:
             print("Info: Tiled solve requires model.device='cuda'. Tiled solve is disabled.")
 
-        self.use_particle_tile_solve = particle_enable_tile_solve and model.device.is_cuda
+        elasticity_groups = [
+            group
+            for group in (*self.surface_particle_color_groups, *self.volumetric_particle_color_groups)
+            if group.size > 0
+        ]
+        self.use_particle_tile_solve = (
+            particle_enable_tile_solve
+            and model.device.is_cuda
+            and all(group.size >= TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE for group in elasticity_groups)
+        )
 
         if particle_enable_self_contact:
             if particle_self_contact_margin < particle_self_contact_radius:
@@ -619,6 +637,52 @@ class SolverVBD(SolverBase, CouplingInterface):
         self.pos_prev_collision_detection = wp.zeros_like(model.particle_q, device=self.device)
         self.particle_displacements = wp.zeros(self.model.particle_count, dtype=wp.vec3, device=self.device)
         self.truncation_ts = wp.zeros(self.model.particle_count, dtype=float, device=self.device)
+
+    def _build_particle_elasticity_color_groups(
+        self,
+    ) -> tuple[list[wp.array[wp.int32]], list[wp.array[wp.int32]]]:
+        """Split every graph-color group into surface-only and tetrahedral vertices."""
+
+        def empty() -> wp.array[wp.int32]:
+            return wp.empty(0, dtype=wp.int32, device=self.device)
+
+        if self.model.tet_count == 0:
+            return list(self.model.particle_color_groups), [empty() for _ in self.model.particle_color_groups]
+
+        adjacency = self.model.soft_mesh_adjacency
+        if adjacency is None or adjacency.v_adj_tets_offsets is None:
+            raise ValueError(
+                "model.soft_mesh_adjacency is missing tetrahedral adjacency; finalize the model with ModelBuilder."
+            )
+        offsets_array = adjacency.v_adj_tets_offsets
+        offsets = offsets_array.numpy() if isinstance(offsets_array, wp.array) else np.asarray(offsets_array)
+        has_tets = ((offsets[1:] - offsets[:-1]) >> 1) > 0
+        surface_groups: list[wp.array[wp.int32]] = []
+        volumetric_groups: list[wp.array[wp.int32]] = []
+        for group in self.model.particle_color_groups:
+            ids = group.numpy().astype(np.int32, copy=False)
+            surface = ids[~has_tets[ids]]
+            volumetric = ids[has_tets[ids]]
+            surface_groups.append(wp.array(surface, dtype=wp.int32, device=self.device) if surface.size else empty())
+            volumetric_groups.append(
+                wp.array(volumetric, dtype=wp.int32, device=self.device) if volumetric.size else empty()
+            )
+        return surface_groups, volumetric_groups
+
+    def _compute_surface_tile_fast_path_flags(self) -> tuple[int, int]:
+        """Precompute uniform active/material conditions for the surface tile kernel."""
+        all_particles_active = self.model.particle_count == 0 or bool(
+            np.all((self.model.particle_flags.numpy() & int(ParticleFlags.ACTIVE)) != 0)
+            and np.all(self.model.particle_mass.numpy() > 0.0)
+        )
+        tri_active = self.model.tri_count == 0 or bool(
+            np.all((self.model.tri_materials.numpy()[:, 0] > 0.0) | (self.model.tri_materials.numpy()[:, 1] > 0.0))
+        )
+        edge_active = self.model.edge_count == 0 or bool(np.all(self.model.edge_bending_properties.numpy()[:, 0] > 0.0))
+        return (
+            int(all_particles_active),
+            int(tri_active and edge_active),
+        )
 
     def _init_pneumatic_system(
         self,
@@ -1073,6 +1137,12 @@ class SolverVBD(SolverBase, CouplingInterface):
         self._apply_module_options()
         if flags & (ModelFlags.BODY_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES):
             self._refresh_kinematic_state()
+        if flags & (ModelFlags.MODEL_PROPERTIES | ModelFlags.SHAPE_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES):
+            if self.model.particle_count:
+                (
+                    self.surface_tile_skip_active_checks,
+                    self.surface_tile_skip_material_checks,
+                ) = self._compute_surface_tile_fast_path_flags()
 
     @override
     def coupling_supports_inertial_property_refresh(self) -> bool:
@@ -2047,6 +2117,9 @@ class SolverVBD(SolverBase, CouplingInterface):
             self._solve_rigid_body_iteration(state_in, state_out, control, contacts, dt)
             self._solve_particle_iteration(state_in, state_out, control, contacts, dt, iter_num)
 
+        if self.model.particle_count:
+            wp.copy(state_out.particle_q, state_in.particle_q)
+
         # Snapshot solved rigid contact state for next-frame warm-start.
         self._snapshot_rigid_contact_history(contacts)
         self._finalize_rigid_bodies(
@@ -2922,38 +2995,69 @@ class SolverVBD(SolverBase, CouplingInterface):
                     max_blocks=self.model.device.sm_count,
                 )
             if self.use_particle_tile_solve:
-                wp.launch(
-                    kernel=solve_elasticity_tile,
-                    dim=self.model.particle_color_groups[color].size * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
-                    block_dim=TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
-                    inputs=[
-                        dt,
-                        self.model.particle_color_groups[color],
-                        self.particle_q_prev,
-                        state_in.particle_q,
-                        self.model.particle_mass,
-                        self.inertia,
-                        self.model.particle_flags,
-                        self.model.tri_indices,
-                        self.model.tri_poses,
-                        self.model.tri_materials,
-                        self.model.tri_areas,
-                        self.model.edge_indices,
-                        self.model.edge_rest_angle,
-                        self.model.edge_rest_length,
-                        self.model.edge_bending_properties,
-                        self.model.tet_indices,
-                        self.model.tet_poses,
-                        self.model.tet_materials,
-                        self.particle_adjacency,
-                        self.particle_forces,
-                        self.particle_hessians,
-                    ],
-                    outputs=[
-                        self.particle_displacements,
-                    ],
-                    device=self.device,
-                )
+                surface_group = self.surface_particle_color_groups[color]
+                if surface_group.size:
+                    wp.launch(
+                        kernel=solve_surface_elasticity_tile,
+                        dim=surface_group.size * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                        block_dim=TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                        inputs=[
+                            dt,
+                            surface_group,
+                            self.particle_q_prev,
+                            state_in.particle_q,
+                            self.model.particle_mass,
+                            self.inertia,
+                            self.model.particle_flags,
+                            self.model.tri_indices,
+                            self.model.tri_poses,
+                            self.model.tri_materials,
+                            self.model.tri_areas,
+                            self.model.edge_indices,
+                            self.model.edge_rest_angle,
+                            self.model.edge_rest_length,
+                            self.model.edge_bending_properties,
+                            self.particle_adjacency,
+                            self.particle_forces,
+                            self.particle_hessians,
+                            self.surface_tile_skip_active_checks,
+                            self.surface_tile_skip_material_checks,
+                        ],
+                        outputs=[self.particle_displacements],
+                        device=self.device,
+                    )
+                volumetric_group = self.volumetric_particle_color_groups[color]
+                if volumetric_group.size:
+                    wp.launch(
+                        kernel=solve_elasticity_tile,
+                        dim=volumetric_group.size * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                        block_dim=TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                        inputs=[
+                            dt,
+                            volumetric_group,
+                            self.particle_q_prev,
+                            state_in.particle_q,
+                            self.model.particle_mass,
+                            self.inertia,
+                            self.model.particle_flags,
+                            self.model.tri_indices,
+                            self.model.tri_poses,
+                            self.model.tri_materials,
+                            self.model.tri_areas,
+                            self.model.edge_indices,
+                            self.model.edge_rest_angle,
+                            self.model.edge_rest_length,
+                            self.model.edge_bending_properties,
+                            self.model.tet_indices,
+                            self.model.tet_poses,
+                            self.model.tet_materials,
+                            self.particle_adjacency,
+                            self.particle_forces,
+                            self.particle_hessians,
+                        ],
+                        outputs=[self.particle_displacements],
+                        device=self.device,
+                    )
             else:
                 wp.launch(
                     kernel=solve_elasticity,
@@ -2987,8 +3091,6 @@ class SolverVBD(SolverBase, CouplingInterface):
                     device=self.device,
                 )
             self._penetration_free_truncation(state_in.particle_q)
-
-        wp.copy(state_out.particle_q, state_in.particle_q)
 
     def _solve_rigid_body_iteration(
         self, state_in: State, state_out: State, control: Control, contacts: Contacts | None, dt: float

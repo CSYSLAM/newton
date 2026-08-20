@@ -4,6 +4,7 @@
 """Focused tests for SolverMJVBDV2 ownership and stepping."""
 
 import unittest
+from unittest import mock
 
 import numpy as np
 import warp as wp
@@ -175,6 +176,31 @@ def _build_self_contact_cloth_model(device, cell_size):
         tri_ke=1.0e3,
         tri_ka=1.0e3,
     )
+    builder.color()
+    return builder.finalize(device=device)
+
+
+def _build_full_vbd_cloth_model(device):
+    """Build a cloth beside a free body so MJVBDV2 selects full VBD."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverMJVBDV2.register_custom_attributes(builder)
+    builder.add_cloth_grid(
+        pos=wp.vec3(),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(),
+        dim_x=9,
+        dim_y=9,
+        cell_x=0.02,
+        cell_y=0.02,
+        mass=0.001,
+        tri_ke=1.0e3,
+        tri_ka=1.0e3,
+    )
+    body = builder.add_body(
+        xform=wp.transform(wp.vec3(5.0, 0.0, 0.0), wp.quat_identity()),
+        mass=1.0,
+    )
+    builder.add_shape_sphere(body, radius=0.05)
     builder.color()
     return builder.finalize(device=device)
 
@@ -868,6 +894,70 @@ class TestMJVBDV2(unittest.TestCase):
         self.assertFalse(solver.vbd_solver.use_particle_tile_solve)
         solver.step(state_0, state_1, model.control(), None, 1.0e-4)
         self.assertTrue(np.all(np.isfinite(state_1.particle_q.numpy())))
+
+    def test_particle_output_is_copied_once_per_step(self):
+        """Copy solved particle positions to the output only after all VBD iterations."""
+        soft_model = _build_particle_module_model("cpu", "triangle")
+        full_model, _, _ = _build_pneumatic_shell_model("cpu")
+        cases = (
+            ("soft", soft_model, SolverVBDSoft(soft_model, iterations=4)),
+            ("full", full_model, SolverMJVBDV2(full_model, vbd_options={"iterations": 4}).vbd_solver),
+        )
+
+        for label, model, solver in cases:
+            with self.subTest(backend=label):
+                state_in = model.state()
+                state_out = model.state()
+                original_copy = wp.copy
+                output_copy_count = 0
+
+                def count_output_copy(
+                    dest,
+                    src,
+                    *args,
+                    state_out_q=state_out.particle_q,
+                    state_in_q=state_in.particle_q,
+                    copy_fn=original_copy,
+                    **kwargs,
+                ):
+                    nonlocal output_copy_count
+                    if dest is state_out_q and src is state_in_q:
+                        output_copy_count += 1
+                    return copy_fn(dest, src, *args, **kwargs)
+
+                with mock.patch.object(wp, "copy", side_effect=count_output_copy):
+                    solver.step(state_in, state_out, model.control(), None, 1.0e-3)
+
+                self.assertEqual(output_copy_count, 1)
+                np.testing.assert_allclose(state_out.particle_q.numpy(), state_in.particle_q.numpy(), atol=0.0)
+
+    def test_full_vbd_builds_surface_elasticity_groups(self):
+        """Partition a pneumatic shell into surface-only elasticity groups."""
+        model, _, _ = _build_pneumatic_shell_model("cpu")
+        solver = SolverMJVBDV2(model, vbd_options={"iterations": 1})
+
+        self.assertTrue(solver.vbd_solver.__class__.__module__.endswith(".vbd.solver_vbd"))
+        self.assertEqual(
+            sum(group.size for group in solver.vbd_solver.surface_particle_color_groups), model.particle_count
+        )
+        self.assertEqual(sum(group.size for group in solver.vbd_solver.volumetric_particle_color_groups), 0)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Tiled VBD requires CUDA")
+    def test_full_vbd_uses_surface_tile_solve(self):
+        """Run the surface-specialized tile path for full VBD cloth scenes."""
+        model = _build_full_vbd_cloth_model("cuda:0")
+        state_in = model.state()
+        state_out = model.state()
+        solver = SolverMJVBDV2(model, vbd_options={"iterations": 2})
+
+        self.assertEqual(solver.features.backend, "pure_vbd")
+        self.assertTrue(solver.vbd_solver.use_particle_tile_solve)
+        self.assertEqual(
+            sum(group.size for group in solver.vbd_solver.surface_particle_color_groups), model.particle_count
+        )
+        self.assertEqual(sum(group.size for group in solver.vbd_solver.volumetric_particle_color_groups), 0)
+        solver.step(state_in, state_out, model.control(), None, 1.0e-3)
+        self.assertTrue(np.all(np.isfinite(state_out.particle_q.numpy())))
 
     def test_pneumatic_pressure_uses_pure_vbd(self):
         """Expand a sealed shell without entering MuJoCo or tetrahedron paths."""

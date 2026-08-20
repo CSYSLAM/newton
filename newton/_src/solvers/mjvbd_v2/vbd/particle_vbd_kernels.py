@@ -2594,6 +2594,97 @@ def solve_elasticity_tile(
 
 
 @wp.kernel
+def solve_surface_elasticity_tile(
+    dt: float,
+    particle_ids_in_color: wp.array[wp.int32],
+    pos_prev: wp.array[wp.vec3],
+    pos: wp.array[wp.vec3],
+    mass: wp.array[float],
+    inertia: wp.array[wp.vec3],
+    particle_flags: wp.array[wp.int32],
+    tri_indices: wp.array2d[wp.int32],
+    tri_poses: wp.array[wp.mat22],
+    tri_materials: wp.array2d[float],
+    tri_areas: wp.array[float],
+    edge_indices: wp.array2d[wp.int32],
+    edge_rest_angles: wp.array[float],
+    edge_rest_length: wp.array[float],
+    edge_bending_properties: wp.array2d[float],
+    particle_adjacency: MeshAdjacencyData,
+    particle_forces: wp.array[wp.vec3],
+    particle_hessians: wp.array[wp.mat33],
+    skip_active_checks: int,
+    skip_material_checks: int,
+    particle_displacements: wp.array[wp.vec3],
+):
+    """Solve membrane and bending elasticity for particles without adjacent tetrahedra."""
+    tid = wp.tid()
+    block_idx = tid // TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
+    thread_idx = tid % TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
+    particle = particle_ids_in_color[block_idx]
+    if skip_active_checks == 0 and (not particle_flags[particle] & ParticleFlags.ACTIVE or mass[particle] == 0.0):
+        if thread_idx == 0:
+            particle_displacements[particle] = wp.vec3(0.0)
+        return
+
+    f = wp.vec3(0.0)
+    h = wp.mat33(0.0)
+    counter = wp.int32(0)
+    faces = get_vertex_num_adjacent_faces(particle_adjacency, particle)
+    while counter + thread_idx < faces:
+        adjacent = counter + thread_idx
+        counter += TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
+        tri, order = get_vertex_adjacent_face_id_order(particle_adjacency, particle, adjacent)
+        if skip_material_checks == 1 or tri_materials[tri, 0] > 0.0 or tri_materials[tri, 1] > 0.0:
+            f_tri, h_tri = evaluate_neo_hookean_membrane_force_hessian(
+                tri,
+                order,
+                pos,
+                pos_prev,
+                tri_indices,
+                tri_poses[tri],
+                tri_areas[tri],
+                tri_materials[tri, 0],
+                tri_materials[tri, 1],
+                tri_materials[tri, 2],
+                dt,
+            )
+            f += f_tri
+            h += h_tri
+
+    counter = wp.int32(0)
+    edges = get_vertex_num_adjacent_edges(particle_adjacency, particle)
+    while counter + thread_idx < edges:
+        adjacent = counter + thread_idx
+        counter += TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
+        edge, order = get_vertex_adjacent_edge_id_order(particle_adjacency, particle, adjacent)
+        if skip_material_checks == 1 or edge_bending_properties[edge, 0] > 0.0:
+            f_edge, h_edge = evaluate_dihedral_angle_based_bending_force_hessian(
+                edge,
+                order,
+                pos,
+                pos_prev,
+                edge_indices,
+                edge_rest_angles,
+                edge_rest_length,
+                edge_bending_properties[edge, 0],
+                edge_bending_properties[edge, 1],
+                dt,
+            )
+            f += f_edge
+            h += h_edge
+
+    f_total = wp.tile_reduce(wp.add, wp.tile(f, preserve_type=True))[0]
+    h_total = wp.tile_reduce(wp.add, wp.tile(h, preserve_type=True))[0]
+    if thread_idx == 0:
+        inv_dt_sq = 1.0 / (dt * dt)
+        h_total += mass[particle] * inv_dt_sq * wp.identity(n=3, dtype=float) + particle_hessians[particle]
+        if abs(wp.determinant(h_total)) > 1.0e-8:
+            f_total += mass[particle] * (inertia[particle] - pos[particle]) * inv_dt_sq + particle_forces[particle]
+            particle_displacements[particle] += wp.inverse(h_total) * f_total
+
+
+@wp.kernel
 def solve_elasticity(
     dt: float,
     particle_ids_in_color: wp.array[wp.int32],

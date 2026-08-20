@@ -247,6 +247,19 @@ Examples:
 - small CUDA graph-color groups use scalar elasticity kernels when tiled
   launches would be under-subscribed.
 
+Both private VBD implementations split graph-color groups once at construction.
+Vertices without adjacent tetrahedra use a surface-only CUDA tile kernel for
+membrane and bending elasticity; vertices incident to tetrahedra retain the
+generic volumetric kernel. The split removes per-vertex tetrahedron work from
+cloth and pneumatic-shell iterations without changing the force model or color
+ordering.
+
+Particle positions in `state_in` are the mutable VBD working buffer during a
+step. The final positions are copied to `state_out` once after all iterations,
+then velocity and pneumatic observables are finalized from that output. Do not
+copy the full position array inside the iteration loop: no iterative rigid or
+particle branch consumes the intermediate output array.
+
 Self-contact activity is selected on device. Do not add per-frame host reads to
 decide whether self-contact kernels should run.
 
@@ -354,6 +367,7 @@ solver or accept a contradictory rigid-integration mode.
 - scene-based module pruning and device-side self-contact selection;
 - sparse world-shape contacts;
 - device material selection and single-graph replay;
+- one final particle-output copy per step and full-VBD surface group selection;
 - pneumatic authoring, pressure, reset, world masks, coupled state transfer,
   and zero allocation for non-pneumatic scenes.
 
