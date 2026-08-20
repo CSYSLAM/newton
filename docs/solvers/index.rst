@@ -41,10 +41,13 @@ method details. For symptom-driven diagnosis and parameter tuning, start with
 Choosing a Solver
 -----------------
 
-MuJoCo and Kamino currently have dedicated backend guides:
+MuJoCo, MJVBDV2, and Kamino currently have dedicated backend guides:
 
 - :doc:`MuJoCo <mujoco>` — generalized-coordinate rigid-body simulation and
   MuJoCo or MJCF workflows.
+- :doc:`MJVBDV2 <mjvbd_v2>` — scene-specialized, one-way coupling from
+  selected MuJoCo articulations to VBD/AVBD rigid and deformable objects;
+  experimental.
 - :doc:`Kamino <kamino>` — constrained rigid mechanisms with kinematic loops
   and hard frictional contacts; experimental.
 
@@ -57,8 +60,11 @@ fits the application. :class:`~newton.solvers.SolverMuJoCo` and
 :class:`~newton.solvers.SolverXPBD`,
 :class:`~newton.solvers.SolverSemiImplicit`, and
 :class:`~newton.solvers.SolverKamino` use maximal coordinates. For deformable
-bodies, particles, or differentiable simulation, use the feature matrix below
-to narrow the choice, then follow the linked API documentation.
+bodies driven by selected generalized-coordinate articulations,
+:class:`~newton.solvers.SolverMJVBDV2` combines MuJoCo with VBD/AVBD under a
+one-way coupling contract. For other particle, deformable, or differentiable
+simulation, use the feature matrix below to narrow the choice, then follow the
+linked API documentation.
 
 .. _Supported Features:
 
@@ -110,6 +116,14 @@ Supported Features
      - ❌
      - ❌
      - ❌
+   * - :class:`~newton.solvers.SolverMJVBDV2`
+     - MuJoCo + implicit VBD/AVBD
+     - ✅ MuJoCo/VBD
+     - ✅ selected generalized coordinates :sup:`3`
+     - ✅
+     - ✅
+     - ✅
+     - ❌
    * - :class:`~newton.solvers.SolverSemiImplicit`
      - Semi-implicit
      - ✅
@@ -147,9 +161,15 @@ Supported Features
   Set ``use_mujoco_contacts=False`` to use Newton's collision pipeline.
 | :sup:`2` ``basic`` means Newton includes several examples that use these solvers in diffsim workflows,
   see :ref:`Differentiability` for further details.
+| :sup:`3` Dynamic mixed scenes synchronize MuJoCo articulation links into VBD
+  without feeding VBD reaction forces back into MuJoCo. See
+  :doc:`MJVBDV2 <mjvbd_v2>`.
 
 .. experimental::
     :class:`~newton.solvers.SolverKamino`'s public API and behavior may change without prior notice.
+
+.. experimental::
+    :class:`~newton.solvers.SolverMJVBDV2`'s public API and behavior may change without prior notice.
 
 .. experimental::
     :class:`~newton.solvers.SolverVBD`'s public API and behavior may change without prior notice.
@@ -168,13 +188,16 @@ formulation.
 - ``mu``: :class:`~newton.solvers.SolverFeatherstone`,
   :class:`~newton.solvers.SolverSemiImplicit`,
   :class:`~newton.solvers.SolverXPBD`, :class:`~newton.solvers.SolverMuJoCo`,
-  :class:`~newton.solvers.SolverVBD`, :class:`~newton.solvers.SolverKamino`,
+  :class:`~newton.solvers.SolverVBD`,
+  :class:`~newton.solvers.SolverMJVBDV2`,
+  :class:`~newton.solvers.SolverKamino`,
   :class:`~newton.solvers.SolverStyle3D`, and
   :class:`~newton.solvers.SolverImplicitMPM`.
 - ``ke`` / ``kd``: :class:`~newton.solvers.SolverFeatherstone`,
   :class:`~newton.solvers.SolverSemiImplicit`,
-  :class:`~newton.solvers.SolverMuJoCo`, and
-  :class:`~newton.solvers.SolverVBD`.
+  :class:`~newton.solvers.SolverMuJoCo`,
+  :class:`~newton.solvers.SolverVBD`, and
+  :class:`~newton.solvers.SolverMJVBDV2`.
 - ``kf`` / ``ka``: :class:`~newton.solvers.SolverFeatherstone` and
   :class:`~newton.solvers.SolverSemiImplicit`.
 - ``restitution``: :class:`~newton.solvers.SolverXPBD` when
@@ -195,8 +218,13 @@ Joint Feature Support
 Not every solver supports every joint type or joint property.
 The tables below document which joint features each solver handles.
 
-Only :class:`~newton.solvers.SolverFeatherstone` and :class:`~newton.solvers.SolverMuJoCo`
-operate on :ref:`articulations <Articulations>` (generalized/reduced coordinates).
+Only :class:`~newton.solvers.SolverFeatherstone`,
+:class:`~newton.solvers.SolverMuJoCo`, and the selected articulation portion of
+:class:`~newton.solvers.SolverMJVBDV2` operate on
+:ref:`articulations <Articulations>` (generalized/reduced coordinates).
+MJVBDV2 delegates those selected joints to MuJoCo and applies a one-way link to
+its VBD-owned objects; see :doc:`MJVBDV2 <mjvbd_v2>` for its ownership and
+joint-selection rules.
 The maximal-coordinate solvers (:class:`~newton.solvers.SolverSemiImplicit`,
 :class:`~newton.solvers.SolverXPBD`, and :class:`~newton.solvers.SolverKamino`)
 enforce joints as pairwise body constraints but do not use the articulation kinematic-tree structure.

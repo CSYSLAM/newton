@@ -377,11 +377,68 @@ class _KinematicFullVBDBackend(SolverBase):
 
 
 class SolverMJVBDV2(SolverBase):
-    """Dispatch MuJoCo-joint/VBD-object coupling to the cheapest valid backend."""
+    """Couple selected articulations one-way to VBD/AVBD objects.
+
+    .. experimental::
+        SolverMJVBDV2's public API and behavior may change without prior notice.
+
+    MuJoCo owns the selected articulation joints and link bodies. Every
+    unselected free rigid body and every particle are owned by VBD, so cloth,
+    tetrahedral soft bodies, springs, pneumatic shells, and VBD rigid bodies
+    interact in one VBD/AVBD solve. In dynamic coupled scenes, MuJoCo link poses
+    become zero-inverse-mass moving colliders for VBD. Contact impulses from VBD
+    do not feed back into MuJoCo.
+
+    The solver inspects the resolved ownership and model topology at
+    construction and selects one of six specialized backends. Joint-free scenes
+    run only VBD; articulation-only scenes run only MuJoCo or a kinematic
+    passthrough; kinematic particle scenes skip MuJoCo; and only dynamic mixed
+    scenes construct the coupled backend. The selected path is available through
+    :attr:`features`.
+
+    Call :meth:`register_custom_attributes` on the builder before finalizing the
+    model. The solver owns the collision pipeline required by the selected
+    backend, so passing ``contacts=None`` to :meth:`step` is supported.
+
+    Args:
+        model: Model to simulate.
+        mujoco_articulations: Articulation IDs assigned to MuJoCo. If neither
+            this argument nor ``mujoco_joints`` is provided, selects
+            articulations that contain at least one non-free, non-fixed joint.
+        mujoco_joints: Closed joint trees assigned to MuJoCo. Mutually exclusive
+            with ``mujoco_articulations``.
+        joint_mode: Use ``"dynamic"`` to integrate selected joints in MuJoCo or
+            ``"kinematic"`` to consume externally prescribed joint and link
+            states.
+        contact_mode: Use ``"soft"`` for sparse particle-shape contacts,
+            ``"full"`` for the complete collision pipeline, or ``"auto"`` to
+            choose full contact only when VBD owns dynamic rigid bodies.
+        vbd_options: Keyword arguments forwarded to the selected private VBD
+            implementation.
+        mujoco_options: Keyword arguments forwarded to the private MuJoCo
+            implementation when the selected backend uses MuJoCo.
+        collision_options: Keyword arguments forwarded to the selected contact
+            pipeline. Soft-only paths accept ``soft_contact_margin``.
+
+    Attributes:
+        features: Frozen snapshot of the selected backend and active solve
+            branches.
+        ownership: Resolved, disjoint MuJoCo/VBD entity partition.
+
+    Note:
+        MuJoCo sleeping is supported only by the articulation-only
+        ``pure_mujoco`` backend. It is rejected by the dynamic coupled backend
+        because one-way VBD contacts cannot wake a MuJoCo articulation.
+    """
 
     @dataclass(frozen=True)
     class Features:
-        """Scene features used to select and audit the V2 backend."""
+        """Scene features used to select and audit the V2 backend.
+
+        Count fields describe the resolved MuJoCo/VBD ownership and present
+        particle constraint topology. The ``*_solve_enabled`` fields report
+        which solver modules the selected backend will execute.
+        """
 
         backend: Literal[
             "pure_mujoco",
@@ -531,7 +588,11 @@ class SolverMJVBDV2(SolverBase):
 
     @classmethod
     def register_custom_attributes(cls, builder: ModelBuilder) -> None:
-        """Register attributes needed by every possible V2 backend."""
+        """Register attributes needed by every possible V2 backend.
+
+        Args:
+            builder: Builder on which to register the solver attributes.
+        """
         _SolverMJVBDV2Coupled.register_custom_attributes(builder)
 
     @property
@@ -574,4 +635,9 @@ class SolverMJVBDV2(SolverBase):
         self.backend.notify_model_changed(flags)
 
     def rebuild_bvh(self, state: State) -> None:
+        """Rebuild the selected VBD backend's particle self-contact BVH.
+
+        Args:
+            state: State whose particle positions define the rebuilt hierarchy.
+        """
         self.backend.rebuild_bvh(state)
