@@ -10,6 +10,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.mjvbd_v2 import collision_pipeline, soft_contact_pipeline
+from newton._src.solvers.mjvbd_v2.full_contact_pipeline import MJVBDV2CollisionPipeline
 from newton._src.solvers.mjvbd_v2.vbd import particle_vbd_kernels as complete_particle_kernels
 from newton._src.solvers.mjvbd_v2.vbd import rigid_vbd_kernels as complete_rigid_kernels
 from newton._src.solvers.mjvbd_v2.vbd.solver_vbd import SolverVBD as SolverVBDComplete
@@ -192,6 +193,97 @@ def _make_dual_data(device, capacity=7):
 
 
 class TestMJVBDV2ContactOptimizations(unittest.TestCase):
+    @unittest.skipUnless(wp.is_cuda_available(), "Private full-surface pruning requires CUDA")
+    def test_private_full_surface_pipeline_matches_shared_contacts(self):
+        """Preserve the full-surface contact set while pruning distant shape pairs."""
+        device = wp.get_device("cuda:0")
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        builder.add_shape_box(
+            body=-1,
+            hx=0.5,
+            hy=0.5,
+            hz=0.5,
+            cfg=newton.ModelBuilder.ShapeConfig(margin=0.1),
+        )
+        builder.add_shape_box(
+            body=-1,
+            xform=wp.transform(wp.vec3(8.0, 0.0, 0.0), wp.quat_identity()),
+            hx=0.5,
+            hy=0.5,
+            hz=0.5,
+        )
+        builder.add_cloth_grid(
+            pos=wp.vec3(-1.0, -1.0, 0.56),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(),
+            dim_x=1,
+            dim_y=1,
+            cell_x=2.0,
+            cell_y=2.0,
+            mass=0.1,
+        )
+        builder.color()
+        model = builder.finalize(device=device)
+        options = {
+            "broad_phase": "nxn",
+            "soft_contact_margin": 0.0,
+            "enable_rigid_soft_full_surface_contact": True,
+        }
+        shared_pipeline = newton.CollisionPipeline(model, **options)
+        private_pipeline = MJVBDV2CollisionPipeline(model, **options)
+        shared_contacts = shared_pipeline.contacts()
+        private_contacts = private_pipeline.contacts()
+        state = model.state()
+
+        shared_pipeline.collide(state, shared_contacts)
+        private_pipeline.collide(state, private_contacts)
+
+        edge_active = private_pipeline._soft_edge_pair_active.numpy()
+        face_active = private_pipeline._soft_face_pair_active.numpy()
+        self.assertGreater(int(np.count_nonzero(edge_active)), 0)
+        self.assertGreater(int(np.count_nonzero(edge_active == 0)), 0)
+        self.assertGreater(int(np.count_nonzero(face_active)), 0)
+        self.assertGreater(int(np.count_nonzero(face_active == 0)), 0)
+
+        def sorted_records(contacts):
+            count = int(contacts.soft_contact_count.numpy()[0])
+            indices = contacts.soft_contact_indices.numpy()[:count]
+            shapes = contacts.soft_contact_shape.numpy()[:count]
+            order = np.lexsort((indices[:, 2], indices[:, 1], indices[:, 0], shapes))
+            return (
+                shapes[order],
+                indices[order],
+                contacts.soft_contact_particle.numpy()[:count][order],
+                contacts.soft_contact_barycentric.numpy()[:count][order],
+                contacts.soft_contact_body_pos.numpy()[:count][order],
+                contacts.soft_contact_normal.numpy()[:count][order],
+            )
+
+        def assert_records_equal():
+            shared_records = sorted_records(shared_contacts)
+            private_records = sorted_records(private_contacts)
+            for shared, private in zip(shared_records[:3], private_records[:3], strict=True):
+                np.testing.assert_array_equal(private, shared)
+            for shared, private in zip(shared_records[3:], private_records[3:], strict=True):
+                np.testing.assert_allclose(private, shared, rtol=1.0e-6, atol=1.0e-6)
+
+        assert_records_equal()
+        model.shape_margin.zero_()
+        shared_pipeline.collide(state, shared_contacts, soft_contact_margin=0.1)
+        private_pipeline.collide(state, private_contacts, soft_contact_margin=0.1)
+        assert_records_equal()
+
+        model.shape_margin.assign(np.array([0.1, 0.0], dtype=np.float32))
+        private_pipeline.collide(state, private_contacts)
+
+        expected_count = int(private_contacts.soft_contact_count.numpy()[0])
+        with wp.ScopedCapture(device=device) as capture:
+            private_pipeline.collide(state, private_contacts)
+        for _ in range(3):
+            wp.capture_launch(capture.graph)
+            self.assertEqual(int(private_contacts.soft_contact_count.numpy()[0]), expected_count)
+        self.assertTrue(private_contacts._enable_rigid_soft_full_surface_contact)
+
     def test_solver_contact_preallocation_excludes_cross_world_pairs(self):
         """Preallocate contact state from world-compatible pairs instead of a Cartesian product."""
         world = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))

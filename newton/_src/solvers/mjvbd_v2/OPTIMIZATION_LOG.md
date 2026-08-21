@@ -38,6 +38,9 @@ Status values are:
 
 | Date | Change | Affected path | Status | Evidence |
 | --- | --- | --- | --- | --- |
+| 2026-08-21 | Add another AABB pass to sparse point contacts | Dynamic and kinematic `soft` backends | **Rejected** | Rejected before implementation: the dynamic fold scans 566,368 candidates in 0.026726 ms per collision Graph; even ten calls are below 0.1% of the measured frame |
+| 2026-08-21 | Move shape-major full-surface AABB rejection into a private V2 collision pipeline | All `full` contact backends with full-surface contact on CUDA | **Retained** | Frozen frame-121 collision time fell from 3.825585 to 1.643479 ms (57.04% lower, 2.33x throughput) with the same 9,838 contact keys |
+| 2026-08-21 | Fuse coupled transfers and pipeline MuJoCo/VBD substeps on two CUDA streams | Dynamic coupled backend | **Rejected** | The real dynamic fold was 1.32% slower with transfer fusion and 0.90% slower with the two-stream wavefront; a 1.66% light-scene gain did not transfer to the representative workload |
 | 2026-08-21 | Selectively port PR 3995 soft-contact traversal and capacity sizing | Both private VBD implementations and sparse contact helpers | **Retained, batch-gated** | A 1,024-world CUDA Graph benchmark is 4.81% faster; world-compatible preallocation removes a 1,024x capacity overestimate in that setup |
 | 2026-08-21 | Cache a particle-color membership mask per rigid-soft contact | Complete `vbd/` particle-side rigid-soft solve | **Retained** | Frozen contact solve is 5.39% faster including mask construction; full handoff graph is 6.99% faster in a consecutive run |
 | 2026-08-21 | Shape-major conservative AABB mask before full-surface SDF optimization | Shared full-contact edge/face generation | **Rejected** | Frozen-state collision graph was 39.4% faster, but the implementation changed Newton's shared collision pipeline and violated MJVBDV2's standalone migration boundary |
@@ -51,6 +54,146 @@ Status values are:
 | 2026-08-10 | Articulation-only dispatch shortcut (`89002b52`) | `pure_mujoco` and `kinematic_passthrough` | **Retained** | Structurally removes VBD construction and execution; no standardized timing archive |
 
 ## Detailed experiments
+
+### 2026-08-21: reject another sparse point-contact broad phase
+
+The dynamic T-shirt fold's private soft pipeline contains 566,368
+world-compatible particle/shape candidates and emitted 16 contacts at the
+measured first-frame state. Despite the large static capacity, one captured
+collision pass took a median 0.026726 ms on an NVIDIA GeForce RTX 5090 D v2
+after ten warm-up launches. The timing used nine samples of twenty synchronized
+Graph launches. Ten such passes account for less than 0.3 ms beside the roughly
+300 ms representative frame measured below.
+
+**Decision.** Rejected before implementation. A second AABB pass would require
+extra buffers and either a private copy of the point-contact narrow phase or a
+new shared hook. Even eliminating the measured collision work entirely cannot
+materially improve this scene. The Cartesian candidate count is therefore a
+memory-capacity concern for replicated worlds, handled by the retained
+world-compatible sizing and large-batch paths, not the single-scene dynamic
+fold's runtime bottleneck.
+
+### 2026-08-21: reject a specialized coupled frame executor
+
+**Hypothesis.** The generic proxy coupler performs separate source-state
+distribution, MuJoCo-to-Newton conversion, forward kinematics, proxy-state
+injection, and destination-state reconciliation for every substep. A private
+MJVBDV2 frame executor could fuse those transfers and overlap MuJoCo substep
+`i + 1` with collision and VBD substep `i` on a second CUDA stream. The
+experiment preserved the existing one-way coupling order: every VBD substep
+consumed the matching, newly computed MuJoCo pose and velocity. It did not read
+MuJoCo's derived `xpos`, `xquat`, or `cvel` before they were refreshed.
+
+The candidate contained three cumulative variants:
+
+1. fused global-to-view and view-to-global kernels plus a fused joint-control
+   copy;
+2. one frame-level API that executed all internal substeps on one stream; and
+3. double-buffered proxy states with CUDA events and a MuJoCo/VBD two-stream
+   wavefront.
+
+All buffers and events were persistent. No host readback, dynamic allocation,
+iteration reduction, stale-pose approximation, or feedback suppression was
+introduced.
+
+**A/B measurements.** Tests used an NVIDIA GeForce RTX 5090 D v2 without CUDA
+Graph capture. The representative dynamic fold contained one 40-body,
+40-joint articulation, 88 shapes, 6,436 particles, 12,736 triangles, and
+19,174 edges. It used 10 substeps and 20 VBD iterations. Initialization used a
+shortened offline IK trajectory cache, but physics topology, substeps,
+iterations, controls, and simulated frame states were identical between each
+pair. Alternating-order measurements discarded the first three frames and
+reported the median of nine synchronized frame samples.
+
+| Candidate | Specialized path | Repeated public `step()` | Result |
+| --- | ---: | ---: | ---: |
+| Fused transfers and control copy | 293.170226 ms | 289.295990 ms | 1.32% slower |
+| Single-stream frame executor | 298.339913 ms | 299.887690 ms | 0.52% faster, within run-to-run noise |
+| Two-stream wavefront | 303.976088 ms | 301.250214 ms | 0.90% slower |
+
+A deliberately small coupled scene with one revolute MuJoCo link, one
+VBD-owned rigid body, one particle, four substeps, and one VBD iteration
+measured 16.852946 ms for the wavefront and 17.132567 ms for repeated steps, a
+1.66% gain. This establishes that the executor can hide submission work when
+the physics workload is tiny, but the gain is not representative of the
+solver's target scenes.
+
+**Correctness evidence.** A three-substep CPU comparison covered nonzero body
+and particle forces and changing joint forces, position targets, velocity
+targets, and actuator inputs. All compared state and internal-control arrays
+were exact. CUDA comparisons checked joint and particle state after every
+frame in both the light and representative scenes; all passed at the existing
+GPU tolerance. The complete MJVBDV2 unit-test module passed before timing.
+
+**Decision.** Rejected and reverted. In the representative scene, VBD and
+collision dominate the frame. MuJoCo and VBD also compete for the same GPU, so
+event overhead and resource contention consume the small amount of work that
+could overlap. Transfer fusion removes about twenty submissions per substep
+but does not remove enough GPU work to produce a stable end-to-end gain. Do
+not add a specialized frame API or make examples depend on it. Reconsider only
+for a CPU-MuJoCo/GPU-VBD backend, a many-environment workload with measured
+transfer dominance, or hardware where a trace demonstrates real concurrent
+execution. Optimize the private collision and VBD paths first.
+
+### 2026-08-21: retain private full-surface AABB rejection
+
+This revisits the rejected shared-pipeline experiment below without changing
+files outside `newton/_src/solvers/mjvbd_v2/`. Every V2 `full` contact backend
+now constructs `MJVBDV2CollisionPipeline`, a private layer over the shared
+pipeline. CPU and scenes without full-surface rigid-soft contact use the
+original implementation directly.
+
+On CUDA, construction stores the unchanged world-compatible edge/shape and
+face/shape candidate sets in stable shape-major order. Each collision pass
+first runs the ordinary rigid and particle contact work, which also refreshes
+the rigid shape AABBs. Two private kernels then mark whether each soft
+feature's world AABB overlaps the current rigid shape AABB. The feature bound
+is expanded by the runtime soft-contact margin and maximum incident particle
+radius; the rigid bound already contains its shape margin and gap. Masked
+edge/face kernels return before shape transforms or SDF evaluation.
+
+The implementation does not compact candidates or resize buffers at runtime.
+Candidate capacity, replay-tid offsets, contact thresholds, optimizer
+iterations, contact record fields, and graph launch dimensions remain fixed.
+Runtime particle positions, body poses, shape flags, and contact-margin
+overrides are read on every launch.
+
+**Controlled A/B.** The benchmark loaded the same saved frame-121 state from
+`example_mjvbd_v2_dexforce_bimanual_plastic_bag_rod_handoff0000.py` into an
+exact shared `CollisionPipeline` and the private candidate in one process. It
+used an NVIDIA GeForce RTX 5090 D v2, 5,886 particles, 11,512 triangles,
+17,399 edges, 24 selected full-surface shapes, 417,576 edge/shape pairs, and
+276,288 face/shape pairs. Both paths were captured as separate CUDA Graphs,
+warmed for ten launches, then measured in alternating order over nine samples
+of twenty synchronized launches.
+
+| Measurement | Shared baseline | Private V2 pipeline | Result |
+| --- | ---: | ---: | ---: |
+| Frozen frame-121 collision graph | 3.825585 ms | 1.643479 ms | 57.04% lower time; 2.33x throughput |
+
+The conservative masks retained 38,522 edge pairs and 25,343 face pairs for
+narrow phase, rejecting 90.77% and 90.83% respectively. Both pipelines
+emitted 9,838 contacts, and their sorted `(shape, particle indices)` keys were
+identical. This is an isolated collision measurement; it is not presented as
+an equal end-to-end frame gain. The earlier full-graph measurements in the
+next entry remain supporting evidence that this hotspot affects the complete
+handoff scene, but they used the prior shared prototype and are not relabeled
+as measurements of this revision.
+
+**Correctness evidence.** A CUDA unit scene compared the shared and private
+contact keys, particle ids, barycentrics, body-local points, and normals, then
+captured and replayed the private collision graph three times. Shape-major
+masks contained both accepted and rejected candidates, the full-surface
+buffer marker remained enabled, and all values agreed with relative and
+absolute tolerances of `1e-6`. All 44 tests in `test_mjvbd_v2` and
+`test_mjvbd_v2_contact_optimizations` passed on CPU/CUDA. A new architecture
+test also requires every V2 full-contact backend to use the private module.
+
+**Decision.** Retained. The controlled hotspot gain is large, the emitted
+contact set is preserved, the path remains graph-capturable, and the entire
+implementation lies inside MJVBDV2. Re-evaluate only if a future shared
+pipeline exposes an equivalent mask hook or compact broad phase without
+changing contact semantics.
 
 ### 2026-08-20: profile full-surface bag contact work
 

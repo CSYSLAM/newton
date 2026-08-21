@@ -46,6 +46,7 @@ mjvbd_v2/
 ├── solver_mjvbd_v2.py       dynamic one-way coupled backend
 ├── collision_pipeline.py    sparse particle-shape pass for current-state paths
 ├── soft_contact_pipeline.py sparse old-particle/new-rigid kinematic pass
+├── full_contact_pipeline.py private full-surface AABB rejection on CUDA
 ├── mujoco/                  private MuJoCo copy used by V2
 ├── vbd/                     complete VBD/AVBD implementation and pneumatics
 ├── vbd_soft/                optimized external-rigid particle implementation
@@ -213,9 +214,10 @@ joint coordinates and velocities from `state_in`.
 - `soft` uses a compact, world-filtered particle-shape candidate array. Shapes
   without `COLLIDE_PARTICLES` are removed before device allocation. This mode
   cannot solve VBD-owned dynamic rigid-body contacts.
-- `full` uses `CollisionPipeline` and full VBD/AVBD contact handling. Its
-  defaults are `broad_phase="nxn"` and
-  `include_static_kinematic_pairs=False` unless the caller overrides them.
+- `full` uses the private `MJVBDV2CollisionPipeline`, layered over
+  `CollisionPipeline`, and full VBD/AVBD contact handling. Its defaults are
+  `broad_phase="nxn"` and `include_static_kinematic_pairs=False` unless the
+  caller overrides them.
 
 The two sparse contact helpers have intentionally different state ordering:
 
@@ -243,9 +245,24 @@ The coupled backend requires MuJoCo's internal rigid contacts to remain
 enabled, while `disable_contacts=True` prevents duplicate Newton rigid-contact
 input. VBD owns all contacts involving VBD objects after proxy synchronization.
 
-Full-surface rigid-soft contact remains a full-pipeline feature. When examples
-restrict it to selected collision shapes, candidate and contact buffers should
-be sized for those shapes rather than the entire scene.
+Full-surface rigid-soft contact remains a full-pipeline feature. All V2
+full-contact backends construct the private pipeline so performance changes do
+not modify Newton's shared collision implementation. When the feature is
+enabled on CUDA, edge/shape and face/shape candidates are stored in stable
+shape-major order. After the ordinary rigid and per-particle passes have
+updated shape AABBs, two lightweight kernels compare each soft feature's
+world AABB against its rigid shape AABB. The feature AABB is expanded by the
+runtime soft margin and maximum incident particle radius; the shape AABB is
+already expanded by its shape margin and gap. Non-overlapping pairs return
+before transforms or SDF samples. Candidate capacities, replay-tid ranges,
+contact thresholds, SDF iteration counts, and emitted record fields are
+unchanged, so the path remains CUDA-Graph-capturable and supports runtime
+shape-flag changes. CPU and disabled/full-surface-empty scenes use the shared
+implementation without allocating masks.
+
+When examples restrict full-surface contact to selected collision shapes,
+candidate and contact buffers should be sized for those shapes rather than the
+entire scene.
 
 ## 7. VBD implementations and branch pruning
 
@@ -416,6 +433,8 @@ solver or accept a contradictory rigid-integration mode.
 - scene-based module pruning and optimized-soft device-side self-contact
   selection;
 - sparse world-shape contacts;
+- private full-contact dispatch, contact equivalence, runtime margins, and
+  CUDA Graph replay;
 - device material selection and single-graph replay;
 - one final particle-output copy per step and full-VBD surface group selection;
 - pneumatic authoring, pressure, reset, world masks, coupled state transfer,

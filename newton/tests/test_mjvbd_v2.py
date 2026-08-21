@@ -363,6 +363,16 @@ def _build_falling_articulation_model(device):
 
 
 class TestMJVBDV2(unittest.TestCase):
+    def test_full_contact_backend_uses_private_pipeline(self):
+        """Keep the full-contact collision implementation inside MJVBDV2."""
+        model, _ = _build_pure_vbd_model("cpu")
+        solver = SolverMJVBDV2(model, contact_mode="full", vbd_options={"iterations": 1})
+
+        self.assertEqual(
+            type(solver.backend.pipeline).__module__,
+            "newton._src.solvers.mjvbd_v2.full_contact_pipeline",
+        )
+
     def test_ownership_partition(self):
         """Partition selected articulation links away from VBD bodies."""
         model, free_body, link, joint, articulation = _build_partition_model("cpu")
@@ -403,6 +413,8 @@ class TestMJVBDV2(unittest.TestCase):
         except (ImportError, ModuleNotFoundError) as error:
             self.skipTest(f"MuJoCo is unavailable: {error}")
 
+        proxy_pipeline = solver.backend._proxy_collision_configs[("mujoco", "vbd")].pipeline
+        self.assertEqual(type(proxy_pipeline).__module__, "newton._src.solvers.mjvbd_v2.full_contact_pipeline")
         initial_z = float(state_0.body_q.numpy()[free_body, 2])
         control = model.control()
         for _ in range(3):
@@ -668,6 +680,10 @@ class TestMJVBDV2(unittest.TestCase):
         )
 
         self.assertEqual(solver.features.backend, "vbd_kinematic_full")
+        self.assertEqual(
+            type(solver.backend.pipeline).__module__,
+            "newton._src.solvers.mjvbd_v2.full_contact_pipeline",
+        )
         self.assertIsNone(solver.mujoco_solver)
         self.assertGreater(float(solver.backend.view.body_inv_mass.numpy()[free_body]), 0.0)
         self.assertEqual(float(solver.backend.view.body_inv_mass.numpy()[link]), 0.0)

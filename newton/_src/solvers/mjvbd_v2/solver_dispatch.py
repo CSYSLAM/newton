@@ -16,7 +16,6 @@ import warp as wp
 from ...core.types import override
 from ...sim import (
     BodyFlags,
-    CollisionPipeline,
     Contacts,
     Control,
     JointType,
@@ -29,6 +28,7 @@ from ...sim import (
 from ..coupled.solver_coupled import SolverCoupled
 from ..solver import SolverBase
 from .collision_pipeline import MJVBDV2SoftContactPipeline
+from .full_contact_pipeline import MJVBDV2CollisionPipeline
 from .mujoco.solver_mujoco import SolverMuJoCo
 from .ownership import MJVBDV2Ownership, resolve_ownership
 from .soft_contact_pipeline import MJVBDSoftContactPipeline
@@ -185,7 +185,7 @@ class _PureVBDBackend(SolverBase):
         else:
             options.setdefault("broad_phase", "nxn")
             options.setdefault("include_static_kinematic_pairs", False)
-            self.pipeline = CollisionPipeline(model, **options)
+            self.pipeline = MJVBDV2CollisionPipeline(model, **options)
         self.contacts = self.pipeline.contacts()
 
     @override
@@ -338,7 +338,7 @@ class _KinematicFullVBDBackend(SolverBase):
         options = dict(collision_options or {})
         options.setdefault("broad_phase", "nxn")
         options.setdefault("include_static_kinematic_pairs", False)
-        self.pipeline = CollisionPipeline(view, **options)
+        self.pipeline = MJVBDV2CollisionPipeline(view, **options)
         self.contacts = self.pipeline.contacts()
 
     @override

@@ -11,9 +11,10 @@ from typing import Literal
 import numpy as np
 import warp as wp
 
-from ...sim import BodyFlags, CollisionPipeline, Model, ModelBuilder, ModelFlags, State
+from ...sim import BodyFlags, Model, ModelBuilder, ModelFlags, State
 from ..coupled.solver_coupled_proxy import SolverCoupledProxy
 from .collision_pipeline import MJVBDV2SoftContactPipeline
+from .full_contact_pipeline import MJVBDV2CollisionPipeline
 from .mujoco.solver_mujoco import SolverMuJoCo
 from .ownership import MJVBDV2Ownership, resolve_ownership
 from .vbd.solver_vbd import SolverVBD, _get_pneumatic_counts
@@ -165,7 +166,7 @@ class SolverMJVBDV2(_OneWayCoupledProxy):
             options = dict(collision_kwargs)
             options.setdefault("broad_phase", "nxn")
             options.setdefault("include_static_kinematic_pairs", False)
-            return CollisionPipeline(view, **options)
+            return MJVBDV2CollisionPipeline(view, **options)
 
         entries = [
             SolverCoupledProxy.Entry(
