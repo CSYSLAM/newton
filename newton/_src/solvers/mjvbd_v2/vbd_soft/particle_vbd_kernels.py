@@ -2518,6 +2518,93 @@ def accumulate_particle_body_contact_force_and_hessian(
                     wp.atomic_add(particle_hessians, ci, (w * w) * ef_hessian)
 
 
+@wp.kernel(enable_backward=False)
+def build_particle_body_contact_adjacency_active(
+    body_particle_contact_indices: wp.array[wp.vec3i],
+    body_particle_contact_count: wp.array[int],
+    body_particle_contact_max: int,
+    contact_stride: int,
+    particle_contact_head: wp.array[int],
+    particle_contact_next: wp.array[int],
+):
+    """Build linked per-particle point-contact lists over the active prefix."""
+    contact = wp.tid()
+    count = min(body_particle_contact_max, body_particle_contact_count[0])
+    while contact < count:
+        particle = body_particle_contact_indices[contact][0]
+        if particle >= 0:
+            previous = wp.atomic_exch(particle_contact_head, particle, contact)
+            particle_contact_next[contact] = previous
+        contact += contact_stride
+
+
+@wp.kernel(enable_backward=False)
+def gather_particle_body_contact_force_and_hessian(
+    dt: float,
+    particle_ids_in_color: wp.array[wp.int32],
+    pos_anchor: wp.array[wp.vec3],
+    pos: wp.array[wp.vec3],
+    friction_epsilon: float,
+    particle_radius: wp.array[float],
+    body_particle_contact_indices: wp.array[wp.vec3i],
+    particle_contact_head: wp.array[int],
+    particle_contact_next: wp.array[int],
+    body_particle_contact_penalty_k: wp.array[float],
+    body_particle_contact_material_kd: wp.array[float],
+    body_particle_contact_material_mu: wp.array[float],
+    shape_body: wp.array[int],
+    body_q: wp.array[wp.transform],
+    body_q_prev: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    contact_shape: wp.array[int],
+    contact_body_pos: wp.array[wp.vec3],
+    contact_body_vel: wp.array[wp.vec3],
+    contact_normal: wp.array[wp.vec3],
+    shape_margin: wp.array[float],
+    particle_forces: wp.array[wp.vec3],
+    particle_hessians: wp.array[wp.mat33],
+):
+    """Gather point-contact contributions for one colored particle without atomics."""
+    particle = particle_ids_in_color[wp.tid()]
+    force = wp.vec3(0.0)
+    hessian = wp.mat33(0.0)
+    contact = particle_contact_head[particle]
+    while contact >= 0:
+        contact_ke = body_particle_contact_penalty_k[contact]
+        contact_kd = body_particle_contact_material_kd[contact]
+        contact_mu = body_particle_contact_material_mu[contact]
+        contact_force, contact_hessian = _eval_body_particle_contact(
+            particle,
+            pos[particle],
+            pos_anchor[particle],
+            contact,
+            contact_ke,
+            contact_kd,
+            contact_mu,
+            friction_epsilon,
+            particle_radius,
+            shape_body,
+            body_q,
+            body_q_prev,
+            body_qd,
+            body_com,
+            contact_shape,
+            contact_body_pos,
+            contact_body_vel,
+            contact_normal,
+            shape_margin,
+            dt,
+        )
+        force += contact_force
+        hessian += contact_hessian
+        contact = particle_contact_next[contact]
+
+    # Other enabled force modules may have accumulated before this phase.
+    particle_forces[particle] += force
+    particle_hessians[particle] += hessian
+
+
 @wp.kernel
 def solve_elasticity_tile(
     dt: float,

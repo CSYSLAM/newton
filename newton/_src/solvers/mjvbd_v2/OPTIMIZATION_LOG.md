@@ -38,6 +38,7 @@ Status values are:
 
 | Date | Change | Affected path | Status | Evidence |
 | --- | --- | --- | --- | --- |
+| 2026-08-21 | Selectively port PR 3995 soft-contact traversal and capacity sizing | Both private VBD implementations and sparse contact helpers | **Retained, batch-gated** | A 1,024-world CUDA Graph benchmark is 4.81% faster; world-compatible preallocation removes a 1,024x capacity overestimate in that setup |
 | 2026-08-21 | Cache a particle-color membership mask per rigid-soft contact | Complete `vbd/` particle-side rigid-soft solve | **Retained** | Frozen contact solve is 5.39% faster including mask construction; full handoff graph is 6.99% faster in a consecutive run |
 | 2026-08-21 | Shape-major conservative AABB mask before full-surface SDF optimization | Shared full-contact edge/face generation | **Rejected** | Frozen-state collision graph was 39.4% faster, but the implementation changed Newton's shared collision pipeline and violated MJVBDV2's standalone migration boundary |
 | 2026-08-21 | Exact particle CSR and per-color compact contact lists | Complete `vbd/` particle-side rigid-soft solve | **Rejected** | Per-particle CSR was 71.7% slower; compact color lists improved the full graph only 0.21%, within noise |
@@ -262,6 +263,109 @@ The benchmark measures the combined commit and cannot attribute the gain to
 one of its two optimizations. If either implementation becomes difficult to
 maintain, benchmark the two changes independently before keeping it solely for
 performance.
+
+### 2026-08-21: selectively port PR 3995 contact traversal and sizing
+
+[Newton PR 3995](https://github.com/newton-physics/newton/pull/3995)
+optimizes upstream VBD for large replicated workloads. MJVBDV2 already has a
+surface-only elasticity specialization and a retained contact-color mask, so
+the upstream patch cannot be copied wholesale.
+
+**Retained work.** The two MJVBDV2-owned sparse particle-shape builders use a
+stable shape-major candidate order on CUDA. The candidate set is unchanged;
+the layout improves shape-transform and SDF locality.
+
+The private VBD constructors size their initial body-particle contact state
+from the world-compatible pair count instead of the full
+`particle_count * shape_count` Cartesian product. The first step can still grow
+the arrays for a larger externally supplied `Contacts` stream. In the measured
+1,024-world setup, the old capacity was 268,435,456 records and the private
+pipeline needed 262,144: a 1,024x reduction. For the four float contact-state
+arrays in `vbd_soft/`, that changes the initial allocation from 4 GiB to 4 MiB.
+
+Both private VBD implementations also contain the PR's linked per-particle
+contact gather and grid-stride body-particle dual update, with stricter V2
+dispatch. They activate only when at least one particle graph-color group has
+at least `SM count * 128` particles. Small and ordinary single-scene models
+retain their previous kernels and launch dimensions. Gather is additionally
+disabled for deterministic execution, differentiable models, and unified
+full-surface edge/face contact streams. Once a model qualifies, all colors use
+gather so a mixed-size coloring cannot fall through to an uninitialized
+contact-color mask. Its linked-list storage is allocated lazily from the
+runtime `Contacts` capacity, not from the model's Cartesian particle-shape
+upper bound.
+
+The batch gate is intentional. A per-particle linked gather serializes all
+contacts incident to one particle. That trades contact-level parallelism for
+removing repeated capacity scans and is beneficial only when the particle
+color group itself provides enough GPU work. The active-prefix dual update has
+the same gate because its grid-stride loop was slower than the legacy
+one-thread-per-capacity launch in the measured single scene.
+
+**Local A/B measurements.** A CUDA Graph run of
+`example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house.py` used an
+NVIDIA GeForce RTX 5090 D v2, 10 substeps, 20 VBD iterations, 6,436 particles,
+12,736 triangles, 19,174 edges, 88 shapes, 566,368 particle-shape candidates,
+and about 5,050 active contacts. Each process warmed 100 frames and reported
+the mean wall time of the next 30 frames. These are evolving-trajectory,
+separate-process results and therefore supporting evidence rather than a
+controlled frozen-state comparison.
+
+| Candidate | Frame time | Change from legacy |
+| --- | ---: | ---: |
+| Legacy contact order, dual launch, and surface tile | 91.022263 ms | baseline |
+| Shape-major sparse candidates only | 89.897158 ms | 1.24% faster |
+| Shape-major plus active-prefix dual | 90.958515 ms | 1.18% slower than shape-major only |
+| Shape-major plus two-particle surface tile | 98.299060 ms | 9.35% slower than shape-major only |
+| All initially ported candidates | 98.559647 ms | 8.28% slower than legacy |
+
+The final implementation therefore keeps shape-major ordering, disables the
+new dual and gather paths for this topology, and retains the existing
+surface-only tile kernel. PR 3995 reports 1.66x cloth and 1.32x soft-volume
+throughput for its complete patch at 1,024 environments on RTX 4090/L40-class
+hardware. Those upstream aggregate figures motivate the batch-only path but
+are not attributed to any one MJVBDV2 optimization.
+
+A separate frozen CUDA Graph benchmark replicated a 15-by-15-cell cloth and
+one static shape into 1,024 worlds: 262,144 particles, 262,144 active contacts,
+three color groups of 87,040--88,064 particles, eight VBD iterations, and an
+NVIDIA GeForce RTX 5090 D v2. Both variants used shape-major candidates. After
+20 warmups, each result is the median of seven samples of 40 graph replays.
+
+| Contact traversal | Frame time | Change |
+| --- | ---: | ---: |
+| Legacy capacity scan and dual launch | 8.402016 ms | baseline |
+| Batch-gated gather and active-prefix dual | 7.998294 ms | 4.81% faster |
+
+This measures the combined gather/dual dispatch, not either kernel in
+isolation. It supports retaining the large-color gate but does not justify
+enabling the path for smaller single-scene models.
+
+**Rejected or deferred work.** The two-particle surface tile is rejected
+because MJVBDV2's existing surface-only tile was faster. Tet-only elasticity
+and split SDF value/gradient helpers are not ported: open PR review identified
+respectively a stale construction-time specialization after material edits and
+a possible missed contact for nonuniformly scaled mesh SDFs. Full-surface
+feature-AABB rejection remains the highest-value follow-up, but it requires a
+private MJVBDV2 full-contact pipeline; changing Newton's shared
+`CollisionPipeline` would violate the migration boundary recorded above.
+
+**Correctness evidence.** Focused CPU and CUDA tests compare gather
+force/Hessian output against both legacy private VBD scatter kernels over
+empty, partial, full, and overflow-clamped active prefixes. Separate CPU and
+CUDA tests cover the dual update for both private rigid kernels. CUDA tests
+also verify both sparse pair builders are shape-major and that a small color
+model retains the legacy dispatch. A forced-dispatch integration test executes
+both private solvers and captures/replays their gather paths in a CUDA Graph.
+Another test verifies two isolated worlds preallocate two compatible records,
+not the four-record Cartesian product. Existing MJVBDV2 CPU and CUDA Graph
+regressions remain required before commit.
+
+**Decision.** Retain the shape-major layout and the batch-gated gather/dual
+paths. Do not enable the latter for ordinary single-world demos without new
+controlled evidence. Revisit the threshold only with additional MJVBDV2
+multiworld A/B measurements across batch sizes; do not infer a per-scene
+speedup from PR 3995's 1,024-environment aggregate result.
 
 ## Reconstructed retained history
 

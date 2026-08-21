@@ -76,7 +76,10 @@ def _build_particle_shape_pairs(model: Model) -> wp.array:
 
     if not pair_blocks:
         return _empty_pairs(model.device)
-    return wp.array(np.concatenate(pair_blocks, axis=0), dtype=wp.vec2i, device=model.device)
+    pairs = np.concatenate(pair_blocks, axis=0)
+    if model.device.is_cuda:
+        pairs = pairs[np.argsort(pairs[:, 1], kind="stable")]
+    return wp.array(pairs, dtype=wp.vec2i, device=model.device)
 
 
 class MJVBDSoftContactPipeline:

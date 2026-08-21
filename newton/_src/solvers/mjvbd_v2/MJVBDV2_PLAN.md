@@ -228,6 +228,17 @@ Both allocate exactly one soft-contact record per world-compatible
 particle-shape candidate. Active particle flags remain device-side so changing
 activity does not force a host rebuild.
 
+The private VBD constructors use the same world-compatibility count as their
+initial body-particle contact-state capacity. They do not preallocate the full
+`particle_count * shape_count` Cartesian product, which grows quadratically
+with replicated world count. A larger externally supplied `Contacts` buffer
+still grows the state lazily before graph capture.
+
+On CUDA, both sparse helpers store the same candidate set in stable
+shape-major order. This is a construction-time layout choice: it adds no
+per-step sorting or allocation and improves locality for shape transforms and
+shape queries. CPU keeps the original construction order.
+
 The coupled backend requires MuJoCo's internal rigid contacts to remain
 enabled, while `disable_contacts=True` prevents duplicate Newton rigid-contact
 input. VBD owns all contacts involving VBD objects after proxy synchronization.
@@ -276,6 +287,25 @@ is rebuilt on contact refresh and lets each color return before rigid-soft force
 evaluation when a contact cannot affect it. Contact generation, contact order,
 force laws, color solve order, launch dimensions, and CUDA Graph topology stay
 unchanged. Models with more than 32 colors retain the original scan path.
+
+Large replicated CUDA models may instead use a linked per-particle gather for
+point rigid-soft contacts. The path is selected only when at least one particle
+color group has `SM count * 128` particles, execution is nondeterministic, and
+the model does not require gradients. It builds adjacency over the
+device-resident active contact prefix, then launches one thread per particle in
+each color instead of rescanning the full contact capacity for every color.
+Unified full-surface edge/face streams retain the contact-major path. All
+colors use the same gather decision so mixed-size color groups cannot observe
+partially initialized contact acceleration data. The linked-list storage is
+allocated lazily from the supplied `Contacts` capacity rather than the model's
+Cartesian particle-shape upper bound, avoiding a second oversized allocation.
+
+The body-particle AVBD dual update uses a graph-stable grid-stride active-prefix
+launch under the same large-color threshold. Smaller models keep the previous
+one-thread-per-capacity launch because the grid-stride form measured slower in
+the representative single-world cloth scene. Both choices read the active
+count on device and clamp it to capacity, so CUDA Graph replay does not require
+a host synchronization.
 
 The optimized `vbd_soft/` path selects self-contact activity on device. Do not
 add per-frame host reads merely to choose a branch inside a captured graph. The

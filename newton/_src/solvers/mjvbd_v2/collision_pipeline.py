@@ -19,6 +19,23 @@ def _empty_pairs(device: wp.context.Devicelike) -> wp.array:
     return wp.array(np.empty((0, 2), dtype=np.int32), dtype=wp.vec2i, device=device)
 
 
+def _count_world_compatible_particle_shape_pairs(model: Model) -> int:
+    """Count the particle-shape candidate upper bound without cross-world pairs."""
+    if model.particle_count == 0 or model.shape_count == 0:
+        return 0
+
+    particle_start = np.asarray(model.particle_world_start.numpy(), dtype=np.int64)
+    shape_start = np.asarray(model.shape_world_start.numpy(), dtype=np.int64)
+    global_particles = int(particle_start[-1] - particle_start[-2] + particle_start[0])
+    global_shapes = int(shape_start[-1] - shape_start[-2] + shape_start[0])
+
+    total = global_particles * model.shape_count
+    total += (model.particle_count - global_particles) * global_shapes
+    local_worlds = slice(0, model.world_count + 1)
+    total += int(np.dot(np.diff(particle_start[local_worlds]), np.diff(shape_start[local_worlds])))
+    return total
+
+
 def _build_particle_shape_pairs(model: Model) -> wp.array:
     if model.particle_count == 0 or model.shape_count == 0:
         return _empty_pairs(model.device)
@@ -60,7 +77,10 @@ def _build_particle_shape_pairs(model: Model) -> wp.array:
 
     if not blocks:
         return _empty_pairs(model.device)
-    return wp.array(np.concatenate(blocks, axis=0), dtype=wp.vec2i, device=model.device)
+    pairs = np.concatenate(blocks, axis=0)
+    if model.device.is_cuda:
+        pairs = pairs[np.argsort(pairs[:, 1], kind="stable")]
+    return wp.array(pairs, dtype=wp.vec2i, device=model.device)
 
 
 class MJVBDV2SoftContactPipeline:
