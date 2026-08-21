@@ -1266,6 +1266,20 @@ add_example_test(
     use_viewer=True,
 )
 
+add_example_test(
+    TestSoftbodyExamples,
+    name="softbody.example_softbody_cutting",
+    devices=test_devices,
+    test_options={
+        "num-frames": 70,
+        "cut-start-time": 0.05,
+        "cut-duration": 0.55,
+        "cut-hold-time": 0.05,
+        "retract-duration": 0.25,
+    },
+    use_viewer=True,
+)
+
 
 class TestKaminoExamples(unittest.TestCase):
     pass
