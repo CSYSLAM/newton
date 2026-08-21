@@ -49,7 +49,10 @@ _DAHL_KAPPADOT_DEADBAND = wp.constant(1.0e-6)
 """Deadband threshold for hysteresis direction selection"""
 
 _NUM_CONTACT_THREADS_PER_BODY = wp.constant(4)
-"""Threads per body for contact accumulation using strided iteration"""
+"""Threads per body for sparse contact accumulation using strided iteration."""
+
+_BODY_PARTICLE_CONTACT_BLOCK_DIM = wp.constant(64)
+"""Threads per dense body-particle contact chunk."""
 
 _STICK_FLAG_ANCHOR = wp.constant(1)
 """contact_stick_flag value: frozen anchor (sticking kinematic/static contacts)"""
@@ -3157,6 +3160,108 @@ def compute_rigid_contact_forces(
     out_force_on_body1[contact_idx] = force_1
 
 
+@wp.func
+def _evaluate_body_particle_contact_reaction(
+    dt: float,
+    contact_idx: int,
+    X_wb: wp.transform,
+    X_wb_prev: wp.transform,
+    com_world: wp.vec3,
+    particle_q: wp.array[wp.vec3],
+    particle_q_prev: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    body_q_prev: wp.array[wp.transform],
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    shape_body: wp.array[int],
+    friction_epsilon: float,
+    body_particle_contact_penalty_k: wp.array[float],
+    body_particle_contact_material_kd: wp.array[float],
+    body_particle_contact_material_mu: wp.array[float],
+    soft_contact_indices: wp.array[wp.vec3i],
+    body_particle_contact_shape: wp.array[int],
+    body_particle_contact_body_pos: wp.array[wp.vec3],
+    body_particle_contact_body_vel: wp.array[wp.vec3],
+    body_particle_contact_normal: wp.array[wp.vec3],
+    soft_contact_barycentric: wp.array[wp.vec3],
+    shape_margin: wp.array[float],
+):
+    """Evaluate one soft-contact reaction in the rigid body's tangent space."""
+    f_soft = wp.vec3(0.0)
+    h_soft = wp.mat33(0.0)
+    cp_world = wp.vec3(0.0)
+    corners = soft_contact_indices[contact_idx]
+
+    if corners[1] < 0:
+        particle_idx = corners[0]
+        if particle_idx < 0:
+            return _zero_force_hessian()
+
+        particle_pos = particle_q[particle_idx]
+        cp_local = body_particle_contact_body_pos[contact_idx]
+        cp_world = wp.transform_point(X_wb, cp_local)
+        n = body_particle_contact_normal[contact_idx]
+        radius = particle_radius[particle_idx]
+        shape_idx = body_particle_contact_shape[contact_idx]
+        margin = shape_margin[shape_idx] if shape_idx >= 0 and shape_margin.shape[0] > 0 else 0.0
+        penetration_depth = -(wp.dot(n, particle_pos - cp_world) - radius - margin)
+        if penetration_depth <= 0.0:
+            return _zero_force_hessian()
+
+        bx_prev = wp.transform_point(X_wb_prev, cp_local)
+        body_velocity = (cp_world - bx_prev) / dt + wp.transform_vector(
+            X_wb, body_particle_contact_body_vel[contact_idx]
+        )
+        relative_translation = particle_pos - particle_q_prev[particle_idx] - body_velocity * dt
+        f_soft, h_soft = _compute_body_particle_contact_force(
+            penetration_depth,
+            n,
+            relative_translation,
+            body_particle_contact_penalty_k[contact_idx],
+            body_particle_contact_material_kd[contact_idx],
+            body_particle_contact_material_mu[contact_idx],
+            friction_epsilon,
+            dt,
+        )
+    else:
+        f_soft, h_soft, cp_world = _eval_soft_ef_contact(
+            contact_idx,
+            corners,
+            soft_contact_barycentric[contact_idx],
+            particle_q,
+            particle_q_prev,
+            particle_radius,
+            body_particle_contact_penalty_k[contact_idx],
+            body_particle_contact_material_kd[contact_idx],
+            body_particle_contact_material_mu[contact_idx],
+            friction_epsilon,
+            shape_body,
+            body_q,
+            body_q_prev,
+            body_qd,
+            body_com,
+            body_particle_contact_shape,
+            body_particle_contact_body_pos,
+            body_particle_contact_body_vel,
+            body_particle_contact_normal,
+            shape_margin,
+            dt,
+        )
+
+    f_body = -f_soft
+    radius_world = cp_world - com_world
+    radius_skew = wp.skew(radius_world)
+    radius_skew_T_K = wp.transpose(radius_skew) * h_soft
+    return (
+        f_body,
+        wp.cross(radius_world, f_body),
+        h_soft,
+        -radius_skew_T_K,
+        radius_skew_T_K * radius_skew,
+    )
+
+
 @wp.kernel
 def accumulate_body_particle_contacts_per_body(
     dt: float,
@@ -3192,6 +3297,7 @@ def accumulate_body_particle_contacts_per_body(
     body_particle_contact_buffer_pre_alloc: int,
     body_particle_contact_counts: wp.array[wp.int32],
     body_particle_contact_indices: wp.array[wp.int32],
+    dense_contact_threshold: int,
     # Outputs
     body_forces: wp.array[wp.vec3],
     body_torques: wp.array[wp.vec3],
@@ -3228,6 +3334,8 @@ def accumulate_body_particle_contacts_per_body(
     num_contacts = body_particle_contact_counts[body_id]
     if num_contacts > body_particle_contact_buffer_pre_alloc:
         num_contacts = body_particle_contact_buffer_pre_alloc
+    if dense_contact_threshold > 0 and num_contacts >= dense_contact_threshold:
+        return
 
     max_contacts = body_particle_contact_count[0]  # single total soft-contact count
 
@@ -3248,90 +3356,203 @@ def accumulate_body_particle_contacts_per_body(
         if contact_idx >= max_contacts:
             continue
 
-        f_soft = wp.vec3(0.0)
-        h_soft = wp.mat33(0.0)
-        cp_world = wp.vec3(0.0)
-
-        corners = soft_contact_indices[contact_idx]
-
-        if corners[1] < 0:
-            # Particle-vs-surface (p, -1, -1): single-particle geometry, resolved inline.
-            particle_idx = corners[0]
-            if particle_idx < 0:
-                continue
-
-            particle_pos = particle_q[particle_idx]
-            cp_local = body_particle_contact_body_pos[contact_idx]
-            cp_world = wp.transform_point(X_wb, cp_local)
-            n = body_particle_contact_normal[contact_idx]
-            radius = particle_radius[particle_idx]
-            s_idx = body_particle_contact_shape[contact_idx]
-            margin = shape_margin[s_idx] if s_idx >= 0 and shape_margin.shape[0] > 0 else 0.0
-            penetration_depth = -(wp.dot(n, particle_pos - cp_world) - radius - margin)
-            if penetration_depth <= 0.0:
-                continue
-
-            bx_prev = wp.transform_point(X_wb_prev, cp_local)
-            bv = (cp_world - bx_prev) / dt + wp.transform_vector(X_wb, body_particle_contact_body_vel[contact_idx])
-            dx = particle_pos - particle_q_prev[particle_idx]
-            relative_translation = dx - bv * dt
-
-            f_soft, h_soft = _compute_body_particle_contact_force(
-                penetration_depth,
-                n,
-                relative_translation,
-                body_particle_contact_penalty_k[contact_idx],
-                body_particle_contact_material_kd[contact_idx],
-                body_particle_contact_material_mu[contact_idx],
-                friction_epsilon,
-                dt,
-            )
-        else:
-            # Edge/face: barycentric contact point over the record's 2-3 soft particles. Uses the
-            # shared force law via _eval_soft_ef_contact -- the same evaluation as the particle side.
-            bary = soft_contact_barycentric[contact_idx]
-            f_soft, h_soft, cp_world = _eval_soft_ef_contact(
-                contact_idx,
-                corners,
-                bary,
-                particle_q,
-                particle_q_prev,
-                particle_radius,
-                body_particle_contact_penalty_k[contact_idx],
-                body_particle_contact_material_kd[contact_idx],
-                body_particle_contact_material_mu[contact_idx],
-                friction_epsilon,
-                shape_body,
-                body_q,
-                body_q_prev,
-                body_qd,
-                body_com,
-                body_particle_contact_shape,
-                body_particle_contact_body_pos,
-                body_particle_contact_body_vel,
-                body_particle_contact_normal,
-                shape_margin,
-                dt,
-            )
-
-        # Equal-and-opposite reaction on the body at the rigid contact point (shared by both kinds).
-        f_body = -f_soft
-        r = cp_world - com_world
-        tau_body = wp.cross(r, f_body)
-        r_skew = wp.skew(r)
-        r_skew_T_K = wp.transpose(r_skew) * h_soft
-
-        force_acc += f_body
-        torque_acc += tau_body
-        h_ll_acc += h_soft
-        h_al_acc += -r_skew_T_K
-        h_aa_acc += r_skew_T_K * r_skew
+        force, torque, h_ll, h_al, h_aa = _evaluate_body_particle_contact_reaction(
+            dt,
+            contact_idx,
+            X_wb,
+            X_wb_prev,
+            com_world,
+            particle_q,
+            particle_q_prev,
+            particle_radius,
+            body_q_prev,
+            body_q,
+            body_qd,
+            body_com,
+            shape_body,
+            friction_epsilon,
+            body_particle_contact_penalty_k,
+            body_particle_contact_material_kd,
+            body_particle_contact_material_mu,
+            soft_contact_indices,
+            body_particle_contact_shape,
+            body_particle_contact_body_pos,
+            body_particle_contact_body_vel,
+            body_particle_contact_normal,
+            soft_contact_barycentric,
+            shape_margin,
+        )
+        force_acc += force
+        torque_acc += torque
+        h_ll_acc += h_ll
+        h_al_acc += h_al
+        h_aa_acc += h_aa
 
     wp.atomic_add(body_forces, body_id, force_acc)
     wp.atomic_add(body_torques, body_id, torque_acc)
     wp.atomic_add(body_hessian_ll, body_id, h_ll_acc)
     wp.atomic_add(body_hessian_al, body_id, h_al_acc)
     wp.atomic_add(body_hessian_aa, body_id, h_aa_acc)
+
+
+@wp.kernel
+def accumulate_body_particle_contact_dense_partials(
+    dt: float,
+    color_group: wp.array[wp.int32],
+    chunks_per_body: int,
+    dense_contact_threshold: int,
+    particle_q: wp.array[wp.vec3],
+    particle_q_prev: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    body_q_prev: wp.array[wp.transform],
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    shape_body: wp.array[int],
+    friction_epsilon: float,
+    body_particle_contact_penalty_k: wp.array[float],
+    body_particle_contact_material_kd: wp.array[float],
+    body_particle_contact_material_mu: wp.array[float],
+    body_particle_contact_count: wp.array[int],
+    soft_contact_indices: wp.array[wp.vec3i],
+    body_particle_contact_shape: wp.array[int],
+    body_particle_contact_body_pos: wp.array[wp.vec3],
+    body_particle_contact_body_vel: wp.array[wp.vec3],
+    body_particle_contact_normal: wp.array[wp.vec3],
+    soft_contact_barycentric: wp.array[wp.vec3],
+    shape_margin: wp.array[float],
+    body_particle_contact_buffer_pre_alloc: int,
+    body_particle_contact_counts: wp.array[wp.int32],
+    body_particle_contact_indices: wp.array[wp.int32],
+    partial_forces: wp.array[wp.vec3],
+    partial_torques: wp.array[wp.vec3],
+    partial_hessian_ll: wp.array[wp.mat33],
+    partial_hessian_al: wp.array[wp.mat33],
+    partial_hessian_aa: wp.array[wp.mat33],
+):
+    """Evaluate dense body-particle contacts in independent contact chunks."""
+    tid = wp.tid()
+    block_idx = tid // _BODY_PARTICLE_CONTACT_BLOCK_DIM
+    lane = tid % _BODY_PARTICLE_CONTACT_BLOCK_DIM
+    body_idx_in_group = block_idx // chunks_per_body
+    chunk = block_idx % chunks_per_body
+    body_id = color_group[body_idx_in_group]
+
+    num_contacts = body_particle_contact_counts[body_id]
+    if num_contacts > body_particle_contact_buffer_pre_alloc:
+        num_contacts = body_particle_contact_buffer_pre_alloc
+    if num_contacts < dense_contact_threshold:
+        return
+    partial_idx = body_id * chunks_per_body + chunk
+
+    force = wp.vec3(0.0)
+    torque = wp.vec3(0.0)
+    h_ll = wp.mat33(0.0)
+    h_al = wp.mat33(0.0)
+    h_aa = wp.mat33(0.0)
+    contact_offset = chunk * _BODY_PARTICLE_CONTACT_BLOCK_DIM + lane
+    if contact_offset < num_contacts:
+        contact_idx = body_particle_contact_indices[body_id * body_particle_contact_buffer_pre_alloc + contact_offset]
+        if contact_idx < body_particle_contact_count[0]:
+            X_wb = body_q[body_id]
+            X_wb_prev = body_q_prev[body_id]
+            com_world = wp.transform_point(X_wb, body_com[body_id])
+            force, torque, h_ll, h_al, h_aa = _evaluate_body_particle_contact_reaction(
+                dt,
+                contact_idx,
+                X_wb,
+                X_wb_prev,
+                com_world,
+                particle_q,
+                particle_q_prev,
+                particle_radius,
+                body_q_prev,
+                body_q,
+                body_qd,
+                body_com,
+                shape_body,
+                friction_epsilon,
+                body_particle_contact_penalty_k,
+                body_particle_contact_material_kd,
+                body_particle_contact_material_mu,
+                soft_contact_indices,
+                body_particle_contact_shape,
+                body_particle_contact_body_pos,
+                body_particle_contact_body_vel,
+                body_particle_contact_normal,
+                soft_contact_barycentric,
+                shape_margin,
+            )
+
+    force_total = wp.tile_reduce(wp.add, wp.tile(force, preserve_type=True))[0]
+    torque_total = wp.tile_reduce(wp.add, wp.tile(torque, preserve_type=True))[0]
+    h_ll_total = wp.tile_reduce(wp.add, wp.tile(h_ll, preserve_type=True))[0]
+    h_al_total = wp.tile_reduce(wp.add, wp.tile(h_al, preserve_type=True))[0]
+    h_aa_total = wp.tile_reduce(wp.add, wp.tile(h_aa, preserve_type=True))[0]
+    if lane == 0:
+        partial_forces[partial_idx] = force_total
+        partial_torques[partial_idx] = torque_total
+        partial_hessian_ll[partial_idx] = h_ll_total
+        partial_hessian_al[partial_idx] = h_al_total
+        partial_hessian_aa[partial_idx] = h_aa_total
+
+
+@wp.kernel
+def accumulate_body_particle_contact_dense_reduction(
+    color_group: wp.array[wp.int32],
+    chunks_per_body: int,
+    dense_contact_threshold: int,
+    body_particle_contact_buffer_pre_alloc: int,
+    body_particle_contact_counts: wp.array[wp.int32],
+    partial_forces: wp.array[wp.vec3],
+    partial_torques: wp.array[wp.vec3],
+    partial_hessian_ll: wp.array[wp.mat33],
+    partial_hessian_al: wp.array[wp.mat33],
+    partial_hessian_aa: wp.array[wp.mat33],
+    body_forces: wp.array[wp.vec3],
+    body_torques: wp.array[wp.vec3],
+    body_hessian_ll: wp.array[wp.mat33],
+    body_hessian_al: wp.array[wp.mat33],
+    body_hessian_aa: wp.array[wp.mat33],
+):
+    """Reduce dense contact chunks once per rigid body."""
+    tid = wp.tid()
+    body_idx_in_group = tid // _BODY_PARTICLE_CONTACT_BLOCK_DIM
+    lane = tid % _BODY_PARTICLE_CONTACT_BLOCK_DIM
+    body_id = color_group[body_idx_in_group]
+    num_contacts = body_particle_contact_counts[body_id]
+    if num_contacts > body_particle_contact_buffer_pre_alloc:
+        num_contacts = body_particle_contact_buffer_pre_alloc
+    if num_contacts < dense_contact_threshold:
+        return
+
+    partial_offset = body_id * chunks_per_body
+    force = wp.vec3(0.0)
+    torque = wp.vec3(0.0)
+    h_ll = wp.mat33(0.0)
+    h_al = wp.mat33(0.0)
+    h_aa = wp.mat33(0.0)
+    chunk = lane
+    while chunk < chunks_per_body:
+        partial_idx = partial_offset + chunk
+        force += partial_forces[partial_idx]
+        torque += partial_torques[partial_idx]
+        h_ll += partial_hessian_ll[partial_idx]
+        h_al += partial_hessian_al[partial_idx]
+        h_aa += partial_hessian_aa[partial_idx]
+        chunk += _BODY_PARTICLE_CONTACT_BLOCK_DIM
+
+    force_total = wp.tile_reduce(wp.add, wp.tile(force, preserve_type=True))[0]
+    torque_total = wp.tile_reduce(wp.add, wp.tile(torque, preserve_type=True))[0]
+    h_ll_total = wp.tile_reduce(wp.add, wp.tile(h_ll, preserve_type=True))[0]
+    h_al_total = wp.tile_reduce(wp.add, wp.tile(h_al, preserve_type=True))[0]
+    h_aa_total = wp.tile_reduce(wp.add, wp.tile(h_aa, preserve_type=True))[0]
+    if lane == 0:
+        wp.atomic_add(body_forces, body_id, force_total)
+        wp.atomic_add(body_torques, body_id, torque_total)
+        wp.atomic_add(body_hessian_ll, body_id, h_ll_total)
+        wp.atomic_add(body_hessian_al, body_id, h_al_total)
+        wp.atomic_add(body_hessian_aa, body_id, h_aa_total)
 
 
 @wp.kernel

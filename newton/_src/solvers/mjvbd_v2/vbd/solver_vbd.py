@@ -50,12 +50,15 @@ from .particle_vbd_kernels import (
     update_velocity,
 )
 from .rigid_vbd_kernels import (
+    _BODY_PARTICLE_CONTACT_BLOCK_DIM,
     _NUM_CONTACT_THREADS_PER_BODY,
     RigidContactHistory,
     RigidForceElementAdjacencyInfo,
     _count_num_adjacent_joints,
     _fill_adjacent_joints,
     accumulate_body_body_contacts_per_body,
+    accumulate_body_particle_contact_dense_partials,
+    accumulate_body_particle_contact_dense_reduction,
     accumulate_body_particle_contacts_per_body,
     build_body_body_contact_lists,
     build_body_particle_contact_lists,
@@ -95,6 +98,8 @@ __all__ = ["SolverVBD"]
 _SOFT_CONTACT_BLOCK_DIM = 256
 _SOFT_CONTACT_BLOCKS_PER_SM = 2
 _PARTICLE_CONTACT_GATHER_BLOCK_DIM = 128
+_BODY_PARTICLE_DENSE_CONTACT_THRESHOLD = 128
+_BODY_PARTICLE_DENSE_MIN_BUFFER_SIZE = 512
 
 
 def _get_pneumatic_counts(model: Model) -> tuple[int, int]:
@@ -410,6 +415,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         super().__init__(model)
 
         effective_deterministic = deterministic if deterministic is not None else wp.config.deterministic
+        self._effective_deterministic = effective_deterministic
         self._particle_contact_gather_min_group_size = (
             self.device.sm_count * _PARTICLE_CONTACT_GATHER_BLOCK_DIM if self.device.is_cuda else 0
         )
@@ -997,6 +1003,14 @@ class SolverVBD(SolverBase, CouplingInterface):
         self.rigid_joint_angular_ke = rigid_joint_angular_ke
         self.rigid_joint_linear_kd = max(0.0, rigid_joint_linear_kd)
         self.rigid_joint_angular_kd = max(0.0, rigid_joint_angular_kd)
+        self._body_particle_dense_supported = False
+        self._body_particle_dense_enabled = False
+        self._body_particle_dense_chunks_per_body = 0
+        self._body_particle_partial_forces = wp.empty(0, dtype=wp.vec3, device=self.device)
+        self._body_particle_partial_torques = wp.empty(0, dtype=wp.vec3, device=self.device)
+        self._body_particle_partial_hessian_ll = wp.empty(0, dtype=wp.mat33, device=self.device)
+        self._body_particle_partial_hessian_al = wp.empty(0, dtype=wp.mat33, device=self.device)
+        self._body_particle_partial_hessian_aa = wp.empty(0, dtype=wp.mat33, device=self.device)
 
         # -------------------------------------------------------------
         # Rigid-only AVBD state (used when SolverVBD integrates bodies)
@@ -1130,6 +1144,24 @@ class SolverVBD(SolverBase, CouplingInterface):
         # Kinematic body support: create effective inv_mass / inv_inertia arrays
         # with kinematic bodies zeroed out.
         self._init_kinematic_state()
+        self._body_particle_dense_supported = (
+            not self.integrate_with_external_rigid_solver
+            and self.device.is_cuda
+            and not model.requires_grad
+            and self._effective_deterministic == wp.DeterministicMode.NOT_GUARANTEED
+            and getattr(self, "body_particle_contact_buffer_pre_alloc", 0) >= _BODY_PARTICLE_DENSE_MIN_BUFFER_SIZE
+        )
+        self._body_particle_dense_enabled = self._body_particle_dense_supported
+        if self._body_particle_dense_supported:
+            self._body_particle_dense_chunks_per_body = (
+                self.body_particle_contact_buffer_pre_alloc + _BODY_PARTICLE_CONTACT_BLOCK_DIM - 1
+            ) // _BODY_PARTICLE_CONTACT_BLOCK_DIM
+            partial_count = model.body_count * self._body_particle_dense_chunks_per_body
+            self._body_particle_partial_forces = wp.zeros(partial_count, dtype=wp.vec3, device=self.device)
+            self._body_particle_partial_torques = wp.zeros(partial_count, dtype=wp.vec3, device=self.device)
+            self._body_particle_partial_hessian_ll = wp.zeros(partial_count, dtype=wp.mat33, device=self.device)
+            self._body_particle_partial_hessian_al = wp.zeros(partial_count, dtype=wp.mat33, device=self.device)
+            self._body_particle_partial_hessian_aa = wp.zeros(partial_count, dtype=wp.mat33, device=self.device)
 
         # Pre-allocate body-body contact buffers when the contact capacity is
         # already known; otherwise lazy allocation handles the first step.
@@ -3295,6 +3327,13 @@ class SolverVBD(SolverBase, CouplingInterface):
 
             # Accumulate body-particle contact forces/hessians for bodies in this color
             if model.particle_count > 0 and contacts is not None:
+                use_dense_body_particle_contacts = (
+                    self._body_particle_dense_enabled
+                    and contacts.soft_contact_max >= _BODY_PARTICLE_DENSE_CONTACT_THRESHOLD
+                )
+                dense_contact_threshold = (
+                    _BODY_PARTICLE_DENSE_CONTACT_THRESHOLD if use_dense_body_particle_contacts else 0
+                )
                 wp.launch(
                     kernel=accumulate_body_particle_contacts_per_body,
                     dim=color_group.size * _NUM_CONTACT_THREADS_PER_BODY,
@@ -3326,6 +3365,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         self.body_particle_contact_buffer_pre_alloc,
                         self.body_particle_contact_counts,
                         self.body_particle_contact_indices,
+                        dense_contact_threshold,
                     ],
                     outputs=[
                         self.body_forces,
@@ -3336,6 +3376,75 @@ class SolverVBD(SolverBase, CouplingInterface):
                     ],
                     device=self.device,
                 )
+                if use_dense_body_particle_contacts:
+                    chunks_per_body = self._body_particle_dense_chunks_per_body
+                    wp.launch(
+                        kernel=accumulate_body_particle_contact_dense_partials,
+                        dim=color_group.size * chunks_per_body * _BODY_PARTICLE_CONTACT_BLOCK_DIM,
+                        block_dim=_BODY_PARTICLE_CONTACT_BLOCK_DIM,
+                        inputs=[
+                            dt,
+                            color_group,
+                            chunks_per_body,
+                            dense_contact_threshold,
+                            state_in.particle_q,
+                            self.particle_q_prev,
+                            model.particle_radius,
+                            self.body_q_prev,
+                            state_in.body_q,
+                            state_in.body_qd,
+                            model.body_com,
+                            model.shape_body,
+                            self.friction_epsilon,
+                            self.body_particle_contact_penalty_k,
+                            self.body_particle_contact_material_kd,
+                            self.body_particle_contact_material_mu,
+                            contacts.soft_contact_count,
+                            contacts.soft_contact_indices,
+                            contacts.soft_contact_shape,
+                            contacts.soft_contact_body_pos,
+                            contacts.soft_contact_body_vel,
+                            contacts.soft_contact_normal,
+                            contacts.soft_contact_barycentric,
+                            model.shape_margin,
+                            self.body_particle_contact_buffer_pre_alloc,
+                            self.body_particle_contact_counts,
+                            self.body_particle_contact_indices,
+                        ],
+                        outputs=[
+                            self._body_particle_partial_forces,
+                            self._body_particle_partial_torques,
+                            self._body_particle_partial_hessian_ll,
+                            self._body_particle_partial_hessian_al,
+                            self._body_particle_partial_hessian_aa,
+                        ],
+                        device=self.device,
+                    )
+                    wp.launch(
+                        kernel=accumulate_body_particle_contact_dense_reduction,
+                        dim=color_group.size * _BODY_PARTICLE_CONTACT_BLOCK_DIM,
+                        block_dim=_BODY_PARTICLE_CONTACT_BLOCK_DIM,
+                        inputs=[
+                            color_group,
+                            chunks_per_body,
+                            dense_contact_threshold,
+                            self.body_particle_contact_buffer_pre_alloc,
+                            self.body_particle_contact_counts,
+                            self._body_particle_partial_forces,
+                            self._body_particle_partial_torques,
+                            self._body_particle_partial_hessian_ll,
+                            self._body_particle_partial_hessian_al,
+                            self._body_particle_partial_hessian_aa,
+                        ],
+                        outputs=[
+                            self.body_forces,
+                            self.body_torques,
+                            self.body_hessian_ll,
+                            self.body_hessian_al,
+                            self.body_hessian_aa,
+                        ],
+                        device=self.device,
+                    )
 
             # Accumulate body-body (rigid-rigid) contact forces and Hessians on bodies (per-body, per-color)
             if contacts is not None:

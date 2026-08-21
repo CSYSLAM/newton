@@ -324,6 +324,21 @@ the representative single-world cloth scene. Both choices read the active
 count on device and clamp it to capacity, so CUDA Graph replay does not require
 a host synchronization.
 
+Dense rigid-side body-particle contacts use a hybrid reduction on CUDA. Models
+requiring gradients, deterministic execution, CPU execution, contact buffers
+smaller than 512 records per body, and bodies with fewer than 128 active
+contacts retain the four-thread strided kernel. Above those gates, 64-thread
+blocks evaluate independent contact chunks into solver-owned partial buffers;
+a second block reduces the chunks once per body. The contact force law,
+per-contact materials, Gauss-Seidel color order, and final rigid solve are
+unchanged. Only floating-point reduction order changes in the explicitly
+nondeterministic path. Chunk counts and scratch capacity are fixed before
+capture, so runtime contact counts remain device-side and CUDA Graph topology
+does not change. The rigid solve continues to consume
+`model.body_color_groups` directly. Existing device-side inverse-mass checks
+reject static and kinematic rows, avoiding a host-cached topology that would
+require CUDA Graph recapture after body mass or flag changes.
+
 The optimized `vbd_soft/` path selects self-contact activity on device. Do not
 add per-frame host reads merely to choose a branch inside a captured graph. The
 complete `vbd/` path does not currently share this fast path; its measured port

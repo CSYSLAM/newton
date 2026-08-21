@@ -38,6 +38,8 @@ Status values are:
 
 | Date | Change | Affected path | Status | Evidence |
 | --- | --- | --- | --- | --- |
+| 2026-08-21 | Reduce dense body-particle contacts in parallel | Complete `vbd/` AVBD path | **Retained, gated** | A 200-frame supermarket-bag CUDA Graph run fell from 37.670750 to 28.246249 ms/frame (25.02%); a 1,024-contact isolated Graph was 25.23x faster |
+| 2026-08-21 | Prune zero-inverse-mass and kinematic rows from rigid color groups | Complete `vbd/` AVBD path | **Rejected** | Both end-to-end dense-contact variants included pruning, so no gain was isolated; the host-cached launch topology would require Graph recapture after runtime mass or flag changes |
 | 2026-08-21 | Add another AABB pass to sparse point contacts | Dynamic and kinematic `soft` backends | **Rejected** | Rejected before implementation: the dynamic fold scans 566,368 candidates in 0.026726 ms per collision Graph; even ten calls are below 0.1% of the measured frame |
 | 2026-08-21 | Move shape-major full-surface AABB rejection into a private V2 collision pipeline | All `full` contact backends with full-surface contact on CUDA | **Retained** | Frozen frame-121 collision time fell from 3.825585 to 1.643479 ms (57.04% lower, 2.33x throughput) with the same 9,838 contact keys |
 | 2026-08-21 | Fuse coupled transfers and pipeline MuJoCo/VBD substeps on two CUDA streams | Dynamic coupled backend | **Rejected** | The real dynamic fold was 1.32% slower with transfer fusion and 0.90% slower with the two-stream wavefront; a 1.66% light-scene gain did not transfer to the representative workload |
@@ -54,6 +56,69 @@ Status values are:
 | 2026-08-10 | Articulation-only dispatch shortcut (`89002b52`) | `pure_mujoco` and `kinematic_passthrough` | **Retained** | Structurally removes VBD construction and execution; no standardized timing archive |
 
 ## Detailed experiments
+
+### 2026-08-21: parallelize dense rigid-side soft contacts
+
+The complete private VBD solver previously launched four threads per rigid
+body. Each thread walked one quarter of that body's particle, edge, and face
+contacts serially, then atomically added five accumulated force/Hessian blocks.
+This underutilized the GPU in scenes with a few rigid bodies and hundreds of
+soft contacts per body.
+
+**Retained implementation.** On nondeterministic CUDA models that do not
+require gradients, a per-body contact capacity of at least 512 enables a hybrid
+path. Bodies below 128 active contacts stay on the four-thread kernel. Dense
+bodies use 64-contact blocks, fixed-capacity partial buffers, and one
+block-level final reduction. CPU, deterministic, differentiable,
+external-rigid, and small-buffer configurations retain the legacy
+accumulation. All dispatch and scratch storage live under `mjvbd_v2/vbd/`.
+The solver continues to iterate the model's original rigid color groups;
+existing kernel guards reject static and kinematic bodies.
+
+An isolated CUDA Graph benchmark used one dynamic body on an NVIDIA GeForce RTX
+5090 D v2. Each sample followed 100 warm-up replays and averaged 2,000 graph
+replays. Both graphs cleared the five body outputs. The dense graph also
+included the sparse-path gate, chunk evaluation, and final reduction.
+
+| Active contacts / capacity | Four-thread path | Hybrid path | Throughput |
+| ---: | ---: | ---: | ---: |
+| 128 / 512 | 74.913 us | 21.232 us | 3.53x |
+| 256 / 512 | 135.350 us | 21.295 us | 6.36x |
+| 512 / 512 | 260.071 us | 21.391 us | 12.16x |
+| 1,024 / 1,024 | 540.278 us | 21.413 us | 25.23x |
+| 4,096 / 4,096 | 2,434.821 us | 23.298 us | 104.51x |
+
+The end-to-end A/B used
+`example_mjvbd_v2_supermarket_plastic_bag.py`: four dynamic balls, 5,886
+particles, 11,512 triangles, 17,399 bending edges, eight particle colors, six
+substeps, 12 VBD iterations, full contact, self-contact, and a captured frame
+graph. Construction and capture were excluded. Each separate run advanced 200
+frames, synchronized every 20 frames, and averaged all step batches.
+
+| Rigid-side accumulation | Frame time | Change |
+| --- | ---: | ---: |
+| Legacy four-thread path | 37.670750 ms | baseline |
+| Gated chunk reduction | 28.246249 ms | 25.02% faster, 1.33x throughput |
+
+Both runs passed the example's final stability, containment, handle-contact,
+and ball/bag penetration checks. A focused CUDA regression compares force,
+torque, and all three Hessian blocks for 1,024 contacts. The path also captured
+and replayed as part of the complete example frame graph. The comparison uses
+floating-point tolerance because the retained path is restricted to
+nondeterministic execution and deliberately changes parallel reduction order.
+
+**Rejected companion change.** Both end-to-end variants above used the same
+construction-time pruning of zero-inverse-mass and kinematic rigid color rows,
+so the measurement isolates dense reduction and provides no evidence that
+pruning helps. Pruning also cached Python launch topology from mutable mass and
+body flags, requiring both `notify_model_changed()` and CUDA Graph recapture
+when either changed. It was removed before commit; device-side inverse-mass
+guards retain the original runtime behavior and color groups.
+
+**Decision.** Retained with all gates above. Do not enable it for deterministic
+or differentiable execution, and do not replace the sparse four-thread path.
+The isolated speedup is a hotspot result; use the measured 25.02% only for this
+representative full-contact bag topology.
 
 ### 2026-08-21: reject another sparse point-contact broad phase
 
@@ -559,11 +624,11 @@ select the corresponding full collision path and shape types.
 
 ## Next measurement targets
 
-Re-profile the complete `vbd/` path after the retained color-mask change. The
-next candidate should target the rigid-side per-body contact accumulation while
-preserving contact-level GPU parallelism. It must remain entirely under
-`newton/_src/solvers/mjvbd_v2/`; shared collision and simulation modules are
-inputs, not optimization targets. The ordinary supermarket bag has a different
-profile dominated by self-contact force accumulation, planar truncation, and
-self-contact collision detection, so handoff-scene gains must not be applied to
-it without a separate measurement.
+Re-profile the complete `vbd/` path after dense rigid-side accumulation before
+choosing another hotspot. Pneumatic cavity-volume updates and compact
+self-contact/color traversal remain candidates, but both must preserve
+per-color Gauss-Seidel pressure and contact semantics. Any implementation must
+remain entirely under `newton/_src/solvers/mjvbd_v2/`; shared collision and
+simulation modules are inputs, not optimization targets. Do not infer a gain
+for particle-only cloth or coupled articulation scenes from the rigid-ball bag
+measurement because those backends do not execute this dense rigid path.

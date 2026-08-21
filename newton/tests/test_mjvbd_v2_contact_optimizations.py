@@ -99,6 +99,65 @@ def _contact_material_inputs(data):
     ]
 
 
+def _make_body_particle_reaction_data(device, contact_count=192, capacity=256):
+    particle_count = 8
+    body_count = 2
+    particle_q = np.zeros((particle_count, 3), dtype=np.float32)
+    particle_q[:, 0] = np.linspace(-0.14, 0.14, particle_count)
+    particle_q[:, 2] = 0.04
+    particle_q_prev = particle_q.copy()
+    particle_q_prev[:, 2] = 0.045
+    body_positions = np.zeros((capacity, 3), dtype=np.float32)
+    body_positions[:, 0] = np.linspace(-0.12, 0.12, capacity)
+    return {
+        "dt": 1.0 / 120.0,
+        "contact_count": wp.array([contact_count], dtype=int, device=device),
+        "capacity": capacity,
+        "body_count": body_count,
+        "color_group": wp.array([0, 1], dtype=wp.int32, device=device),
+        "particle_q": wp.array(particle_q, dtype=wp.vec3, device=device),
+        "particle_q_prev": wp.array(particle_q_prev, dtype=wp.vec3, device=device),
+        "particle_radius": wp.full(particle_count, 0.1, dtype=float, device=device),
+        "body_q": wp.array([wp.transform_identity()] * body_count, dtype=wp.transform, device=device),
+        "body_q_prev": wp.array([wp.transform_identity()] * body_count, dtype=wp.transform, device=device),
+        "body_qd": wp.zeros(body_count, dtype=wp.spatial_vector, device=device),
+        "body_com": wp.zeros(body_count, dtype=wp.vec3, device=device),
+        "body_inv_mass": wp.array([1.0, 0.0], dtype=float, device=device),
+        "shape_body": wp.array([0], dtype=int, device=device),
+        "contact_penalty_k": wp.full(capacity, 200.0, dtype=float, device=device),
+        "contact_material_ke": wp.full(capacity, 200.0, dtype=float, device=device),
+        "contact_material_kd": wp.full(capacity, 2.0, dtype=float, device=device),
+        "contact_material_mu": wp.full(capacity, 0.2, dtype=float, device=device),
+        "contact_indices": wp.array(
+            [[contact % particle_count, -1, -1] for contact in range(capacity)],
+            dtype=wp.vec3i,
+            device=device,
+        ),
+        "contact_shape": wp.zeros(capacity, dtype=int, device=device),
+        "contact_body_pos": wp.array(body_positions, dtype=wp.vec3, device=device),
+        "contact_body_vel": wp.zeros(capacity, dtype=wp.vec3, device=device),
+        "contact_normal": wp.array([[0.0, 0.0, 1.0]] * capacity, dtype=wp.vec3, device=device),
+        "contact_barycentric": wp.array([[1.0, 0.0, 0.0]] * capacity, dtype=wp.vec3, device=device),
+        "shape_margin": wp.zeros(1, dtype=float, device=device),
+        "body_contact_counts": wp.array([contact_count, 0], dtype=wp.int32, device=device),
+        "body_contact_indices": wp.array(
+            np.concatenate([np.arange(capacity, dtype=np.int32), np.zeros(capacity, dtype=np.int32)]),
+            dtype=wp.int32,
+            device=device,
+        ),
+    }
+
+
+def _body_particle_accumulation_outputs(device, body_count):
+    return (
+        wp.zeros(body_count, dtype=wp.vec3, device=device),
+        wp.zeros(body_count, dtype=wp.vec3, device=device),
+        wp.zeros(body_count, dtype=wp.mat33, device=device),
+        wp.zeros(body_count, dtype=wp.mat33, device=device),
+        wp.zeros(body_count, dtype=wp.mat33, device=device),
+    )
+
+
 def _launch_legacy_contacts(kernels, uses_color_masks, data, contact_count, forces, hessians, device):
     for color, _color_group in enumerate(data["color_groups"]):
         color_mask_inputs = []
@@ -193,6 +252,115 @@ def _make_dual_data(device, capacity=7):
 
 
 class TestMJVBDV2ContactOptimizations(unittest.TestCase):
+    @unittest.skipUnless(wp.is_cuda_available(), "Dense rigid-side reduction requires CUDA")
+    def test_dense_body_particle_reduction_matches_legacy(self):
+        """Match legacy rigid reactions with dense contact chunk reduction."""
+        device = wp.get_device("cuda:0")
+        data = _make_body_particle_reaction_data(device, contact_count=1024, capacity=1024)
+        legacy = _body_particle_accumulation_outputs(device, data["body_count"])
+        dense = _body_particle_accumulation_outputs(device, data["body_count"])
+        common_inputs = [
+            data["dt"],
+            data["color_group"],
+            data["particle_q"],
+            data["particle_q_prev"],
+            data["particle_radius"],
+            data["body_q_prev"],
+            data["body_q"],
+            data["body_qd"],
+            data["body_com"],
+            data["body_inv_mass"],
+            data["shape_body"],
+            1.0,
+            data["contact_penalty_k"],
+            data["contact_material_ke"],
+            data["contact_material_kd"],
+            data["contact_material_mu"],
+            data["contact_count"],
+            data["contact_indices"],
+            data["contact_shape"],
+            data["contact_body_pos"],
+            data["contact_body_vel"],
+            data["contact_normal"],
+            data["contact_barycentric"],
+            data["shape_margin"],
+            data["capacity"],
+            data["body_contact_counts"],
+            data["body_contact_indices"],
+        ]
+        wp.launch(
+            complete_rigid_kernels.accumulate_body_particle_contacts_per_body,
+            dim=data["color_group"].size * 4,
+            inputs=[*common_inputs, 0],
+            outputs=list(legacy),
+            device=device,
+        )
+
+        block_dim = 64
+        chunks_per_body = data["capacity"] // block_dim
+        partial_count = data["body_count"] * chunks_per_body
+        partials = (
+            wp.zeros(partial_count, dtype=wp.vec3, device=device),
+            wp.zeros(partial_count, dtype=wp.vec3, device=device),
+            wp.zeros(partial_count, dtype=wp.mat33, device=device),
+            wp.zeros(partial_count, dtype=wp.mat33, device=device),
+            wp.zeros(partial_count, dtype=wp.mat33, device=device),
+        )
+        wp.launch(
+            complete_rigid_kernels.accumulate_body_particle_contact_dense_partials,
+            dim=data["color_group"].size * chunks_per_body * block_dim,
+            block_dim=block_dim,
+            inputs=[
+                data["dt"],
+                data["color_group"],
+                chunks_per_body,
+                128,
+                data["particle_q"],
+                data["particle_q_prev"],
+                data["particle_radius"],
+                data["body_q_prev"],
+                data["body_q"],
+                data["body_qd"],
+                data["body_com"],
+                data["shape_body"],
+                1.0,
+                data["contact_penalty_k"],
+                data["contact_material_kd"],
+                data["contact_material_mu"],
+                data["contact_count"],
+                data["contact_indices"],
+                data["contact_shape"],
+                data["contact_body_pos"],
+                data["contact_body_vel"],
+                data["contact_normal"],
+                data["contact_barycentric"],
+                data["shape_margin"],
+                data["capacity"],
+                data["body_contact_counts"],
+                data["body_contact_indices"],
+            ],
+            outputs=list(partials),
+            device=device,
+        )
+        wp.launch(
+            complete_rigid_kernels.accumulate_body_particle_contact_dense_reduction,
+            dim=data["color_group"].size * block_dim,
+            block_dim=block_dim,
+            inputs=[
+                data["color_group"],
+                chunks_per_body,
+                128,
+                data["capacity"],
+                data["body_contact_counts"],
+                *partials,
+            ],
+            outputs=list(dense),
+            device=device,
+        )
+
+        for legacy_array, dense_array in zip(legacy, dense, strict=True):
+            np.testing.assert_allclose(dense_array.numpy(), legacy_array.numpy(), rtol=2.0e-5, atol=5.0e-4)
+
     @unittest.skipUnless(wp.is_cuda_available(), "Private full-surface pruning requires CUDA")
     def test_private_full_surface_pipeline_matches_shared_contacts(self):
         """Preserve the full-surface contact set while pruning distant shape pairs."""
