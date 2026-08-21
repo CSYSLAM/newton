@@ -2314,6 +2314,32 @@ def apply_truncation_ts(
         pos_out[i] = pos[i] + particle_displacement
 
 
+@wp.kernel(enable_backward=False)
+def build_particle_body_contact_color_masks(
+    body_particle_contact_indices: wp.array[wp.vec3i],
+    body_particle_contact_count: wp.array[int],
+    body_particle_contact_max: int,
+    particle_colors: wp.array[int],
+    contact_color_masks: wp.array[wp.uint32],
+):
+    """Cache the particle colors touched by each active rigid-soft contact."""
+    contact = wp.tid()
+    count = min(body_particle_contact_max, body_particle_contact_count[0])
+    if contact >= count:
+        contact_color_masks[contact] = wp.uint32(0)
+        return
+
+    mask = wp.uint32(0)
+    corners = body_particle_contact_indices[contact]
+    for corner in range(3):
+        particle = corners[corner]
+        if particle >= 0:
+            color = particle_colors[particle]
+            if color >= 0 and color < 32:
+                mask = mask | (wp.uint32(1) << wp.uint32(color))
+    contact_color_masks[contact] = mask
+
+
 @wp.kernel
 def accumulate_particle_body_contact_force_and_hessian(
     # inputs
@@ -2322,6 +2348,8 @@ def accumulate_particle_body_contact_force_and_hessian(
     pos_anchor: wp.array[wp.vec3],
     pos: wp.array[wp.vec3],
     particle_colors: wp.array[int],
+    contact_color_masks: wp.array[wp.uint32],
+    use_contact_color_masks: bool,
     # body-particle contact
     friction_epsilon: float,
     particle_radius: wp.array[float],
@@ -2359,6 +2387,11 @@ def accumulate_particle_body_contact_force_and_hessian(
     count = min(body_particle_contact_max, body_particle_contact_count[0])
     if t_id >= count:
         return
+
+    if use_contact_color_masks:
+        color_bit = wp.uint32(1) << wp.uint32(current_color)
+        if (contact_color_masks[t_id] & color_bit) == wp.uint32(0):
+            return
 
     corners = body_particle_contact_indices[t_id]
     # Per-contact AVBD penalty + material properties shared with the rigid side.

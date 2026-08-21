@@ -38,6 +38,7 @@ from .particle_vbd_kernels import (
     # Planar DAT (Divide and Truncate) kernels
     apply_planar_truncation_parallel_by_collision,
     apply_truncation_ts,
+    build_particle_body_contact_color_masks,
     # Solver kernels (particle VBD)
     forward_step,
     solve_elasticity,
@@ -1097,6 +1098,8 @@ class SolverVBD(SolverBase, CouplingInterface):
         self.body_particle_contact_material_ke = wp.zeros(0, dtype=float, device=self.device)
         self.body_particle_contact_material_kd = wp.zeros(0, dtype=float, device=self.device)
         self.body_particle_contact_material_mu = wp.zeros(0, dtype=float, device=self.device)
+        self._use_particle_body_contact_color_masks = len(model.particle_color_groups) <= 32
+        self.particle_body_contact_color_masks = wp.zeros(0, dtype=wp.uint32, device=self.device)
         # Zero-length body poses for static-shape contact kernels when State.body_q is absent.
         self._empty_body_q = wp.empty(0, dtype=wp.transform, device=self.device)
         if model.particle_count > 0 and model.shape_count > 0:
@@ -1460,6 +1463,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         self.body_particle_contact_material_ke = wp.zeros(soft_contact_max, dtype=float, device=self.device)
         self.body_particle_contact_material_kd = wp.zeros(soft_contact_max, dtype=float, device=self.device)
         self.body_particle_contact_material_mu = wp.zeros(soft_contact_max, dtype=float, device=self.device)
+        self.particle_body_contact_color_masks = wp.zeros(soft_contact_max, dtype=wp.uint32, device=self.device)
 
     def _init_rigid_contact_warmstart(self, rigid_contact_max: int) -> None:
         """Allocate rigid contact warm-start buffers."""
@@ -2830,6 +2834,23 @@ class SolverVBD(SolverBase, CouplingInterface):
                     soft_contact_launch_dim,
                 )
                 self._init_body_particle_contact_state(soft_contact_launch_dim)
+
+            # Contact topology stays fixed across the VBD iterations. Cache a
+            # compact color mask once so each color rejects unrelated contacts
+            # before the expensive rigid-soft force evaluation.
+            if self._use_particle_body_contact_color_masks and soft_contact_launch_dim > 0:
+                wp.launch(
+                    kernel=build_particle_body_contact_color_masks,
+                    dim=soft_contact_launch_dim,
+                    inputs=[
+                        contacts.soft_contact_indices,
+                        contacts.soft_contact_count,
+                        soft_contact_launch_dim,
+                        model.particle_colors,
+                    ],
+                    outputs=[self.particle_body_contact_color_masks],
+                    device=self.device,
+                )
             wp.launch(
                 kernel=init_body_particle_contacts,
                 inputs=[
@@ -2917,6 +2938,8 @@ class SolverVBD(SolverBase, CouplingInterface):
                         self.particle_q_prev,
                         state_in.particle_q,
                         model.particle_colors,
+                        self.particle_body_contact_color_masks,
+                        self._use_particle_body_contact_color_masks,
                         # body-particle contact
                         self.friction_epsilon,
                         model.particle_radius,

@@ -29,6 +29,10 @@ The design invariants are:
    backends selected from the same public `SolverMJVBDV2` entry point.
 8. The solver owns the contact pipeline required by its selected backend.
    Passing `contacts=None` therefore remains the normal call pattern.
+9. MJVBDV2-specific behavior and performance changes stay inside this package.
+   Shared Newton `Model`, `State`, and `Contacts` data are inputs; migrating V2
+   must not require patches to Newton's shared geometry, collision, or solver
+   modules.
 
 These constraints preserve existing MJVBDV2 demos while allowing cloth-only,
 rigid-only, articulation-only, and pneumatic scenes to avoid unrelated work.
@@ -46,6 +50,7 @@ mjvbd_v2/
 ├── vbd/                     complete VBD/AVBD implementation and pneumatics
 ├── vbd_soft/                optimized external-rigid particle implementation
 ├── BASELINES.md             historical demo hash audit
+├── OPTIMIZATION_LOG.md      measured performance decisions and rejected trials
 └── MJVBDV2_PLAN.md          this as-built design record
 ```
 
@@ -53,6 +58,11 @@ There is deliberately no `state_sync.py`. Dynamic composition uses Newton's
 generic coupled-solver state distribution/reconciliation machinery. Pneumatic
 state needs an extra compact gather/scatter layer and is implemented by
 `_SolverMJVBDV2Pneumatic` in `solver_mjvbd_v2.py`.
+
+The package boundary is also the optimization boundary. Upstream Newton
+improvements may benefit V2, but they are optional dependencies rather than
+part of the standalone MJVBDV2 implementation. An optimization that requires a
+shared-module change must be rejected here or reimplemented privately.
 
 The only user-facing imports are public symbols from `newton.solvers`:
 
@@ -260,8 +270,17 @@ then velocity and pneumatic observables are finalized from that output. Do not
 copy the full position array inside the iteration loop: no iterative rigid or
 particle branch consumes the intermediate output array.
 
-Self-contact activity is selected on device. Do not add per-frame host reads to
-decide whether self-contact kernels should run.
+The complete `vbd/` path caches one 32-bit particle-color membership mask per
+active rigid-soft contact when the model has at most 32 graph colors. The mask
+is rebuilt on contact refresh and lets each color return before rigid-soft force
+evaluation when a contact cannot affect it. Contact generation, contact order,
+force laws, color solve order, launch dimensions, and CUDA Graph topology stay
+unchanged. Models with more than 32 colors retain the original scan path.
+
+The optimized `vbd_soft/` path selects self-contact activity on device. Do not
+add per-frame host reads merely to choose a branch inside a captured graph. The
+complete `vbd/` path does not currently share this fast path; its measured port
+was rejected and is recorded in `OPTIMIZATION_LOG.md`.
 
 ## 8. CUDA Graph and runtime material changes
 
@@ -364,7 +383,8 @@ solver or accept a contradictory rigid-integration mode.
 - coupled sleeping rejection and strict no-feedback behavior;
 - kinematic soft numerical agreement with the original MJVBD path;
 - dynamic VBD rigid-body contact;
-- scene-based module pruning and device-side self-contact selection;
+- scene-based module pruning and optimized-soft device-side self-contact
+  selection;
 - sparse world-shape contacts;
 - device material selection and single-graph replay;
 - one final particle-output copy per step and full-VBD surface group selection;
@@ -413,6 +433,9 @@ When extending MJVBDV2:
    and stability requirements and needs a separate explicit design.
 7. Add focused unit tests for the new path and scenario measurements for every
    affected flagship demo.
+8. Record every performance experiment, including rejected candidates, in
+   `OPTIMIZATION_LOG.md` with its affected path, A/B setup, result, and
+   numerical constraints.
 
 The current design intentionally optimizes a one-way robot/environment
 interaction model. It should not be described as a general bidirectional
