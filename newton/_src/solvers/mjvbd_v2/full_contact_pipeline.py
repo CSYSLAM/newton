@@ -26,6 +26,11 @@ from ...sim import CollisionPipeline, Contacts, Model, State
 __all__ = ["MJVBDV2CollisionPipeline"]
 
 
+_COMPACT_SOFT_SURFACE_BLOCK_DIM = 128
+_COMPACT_SOFT_SURFACE_BLOCKS_PER_SM = 2
+_ENABLE_COMPACT_SOFT_SURFACE_PAIRS = True
+
+
 def _shape_major_pairs(pairs: wp.array[wp.vec2i]) -> wp.array[wp.vec2i]:
     """Return the same candidate set grouped by rigid shape."""
     if pairs.shape[0] < 2:
@@ -62,6 +67,10 @@ def _mark_soft_edge_pairs_active(
     shape_aabb_lower: wp.array[wp.vec3],
     shape_aabb_upper: wp.array[wp.vec3],
     margin: float,
+    compact_pairs: bool,
+    compact_pair_indices: wp.array[wp.int32],
+    compact_counts: wp.array[wp.int32],
+    compact_count_index: wp.int32,
     active: wp.array[wp.uint8],
 ):
     tid = wp.tid()
@@ -78,14 +87,16 @@ def _mark_soft_edge_pairs_active(
     q = particle_q[v1]
     padding = margin + wp.max(particle_radius[v0], particle_radius[v1])
     padding_vector = wp.vec3(padding, padding, padding)
-    active[tid] = wp.uint8(
-        _aabb_overlap(
-            wp.min(p, q) - padding_vector,
-            wp.max(p, q) + padding_vector,
-            shape_aabb_lower[shape],
-            shape_aabb_upper[shape],
-        )
+    is_active = _aabb_overlap(
+        wp.min(p, q) - padding_vector,
+        wp.max(p, q) + padding_vector,
+        shape_aabb_lower[shape],
+        shape_aabb_upper[shape],
     )
+    active[tid] = wp.uint8(is_active)
+    if compact_pairs and is_active:
+        compact_index = wp.atomic_add(compact_counts, compact_count_index, 1)
+        compact_pair_indices[compact_index] = tid
 
 
 @wp.kernel(enable_backward=False)
@@ -98,6 +109,10 @@ def _mark_soft_face_pairs_active(
     shape_aabb_lower: wp.array[wp.vec3],
     shape_aabb_upper: wp.array[wp.vec3],
     margin: float,
+    compact_pairs: bool,
+    compact_pair_indices: wp.array[wp.int32],
+    compact_counts: wp.array[wp.int32],
+    compact_count_index: wp.int32,
     active: wp.array[wp.uint8],
 ):
     tid = wp.tid()
@@ -116,19 +131,21 @@ def _mark_soft_face_pairs_active(
     r = particle_q[v2]
     padding = margin + wp.max(particle_radius[v0], wp.max(particle_radius[v1], particle_radius[v2]))
     padding_vector = wp.vec3(padding, padding, padding)
-    active[tid] = wp.uint8(
-        _aabb_overlap(
-            wp.min(p, wp.min(q, r)) - padding_vector,
-            wp.max(p, wp.max(q, r)) + padding_vector,
-            shape_aabb_lower[shape],
-            shape_aabb_upper[shape],
-        )
+    is_active = _aabb_overlap(
+        wp.min(p, wp.min(q, r)) - padding_vector,
+        wp.max(p, wp.max(q, r)) + padding_vector,
+        shape_aabb_lower[shape],
+        shape_aabb_upper[shape],
     )
+    active[tid] = wp.uint8(is_active)
+    if compact_pairs and is_active:
+        compact_index = wp.atomic_add(compact_counts, compact_count_index, 1)
+        compact_pair_indices[compact_index] = tid
 
 
-@wp.kernel
-def _create_soft_edge_contacts(
-    active: wp.array[wp.uint8],
+@wp.func
+def _create_soft_edge_contact_at_pair(
+    tid: wp.int32,
     edge_pairs: wp.array[wp.vec2i],
     particle_q: wp.array[wp.vec3],
     particle_radius: wp.array[float],
@@ -156,10 +173,6 @@ def _create_soft_edge_contacts(
     soft_contact_body_vel: wp.array[wp.vec3],
     soft_contact_normal: wp.array[wp.vec3],
 ):
-    tid = wp.tid()
-    if active[tid] == wp.uint8(0):
-        return
-
     pair = edge_pairs[tid]
     edge = pair[0]
     shape = pair[1]
@@ -213,8 +226,142 @@ def _create_soft_edge_contacts(
 
 
 @wp.kernel
-def _create_soft_face_contacts(
+def _create_soft_edge_contacts(
     active: wp.array[wp.uint8],
+    edge_pairs: wp.array[wp.vec2i],
+    particle_q: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    edge_indices: wp.array2d[wp.int32],
+    shape_body: wp.array[wp.int32],
+    shape_type: wp.array[wp.int32],
+    shape_flags: wp.array[wp.int32],
+    shape_transform: wp.array[wp.transform],
+    shape_scale: wp.array[wp.vec3],
+    body_q: wp.array[wp.transform],
+    shape_sdf_index: wp.array[wp.int32],
+    texture_sdf_table: wp.array[TextureSDFData],
+    shape_margin: wp.array[float],
+    sdf_edge_iters: wp.int32,
+    margin: float,
+    tid_base: wp.int32,
+    soft_contact_max: wp.int32,
+    soft_contact_count: wp.array[wp.int32],
+    soft_contact_tids: wp.array[wp.int32],
+    soft_contact_particle: wp.array[wp.int32],
+    soft_contact_indices: wp.array[wp.vec3i],
+    soft_contact_barycentric: wp.array[wp.vec3],
+    soft_contact_shape: wp.array[wp.int32],
+    soft_contact_body_pos: wp.array[wp.vec3],
+    soft_contact_body_vel: wp.array[wp.vec3],
+    soft_contact_normal: wp.array[wp.vec3],
+):
+    tid = wp.tid()
+    if active[tid] == wp.uint8(0):
+        return
+    _create_soft_edge_contact_at_pair(
+        tid,
+        edge_pairs,
+        particle_q,
+        particle_radius,
+        edge_indices,
+        shape_body,
+        shape_type,
+        shape_flags,
+        shape_transform,
+        shape_scale,
+        body_q,
+        shape_sdf_index,
+        texture_sdf_table,
+        shape_margin,
+        sdf_edge_iters,
+        margin,
+        tid_base,
+        soft_contact_max,
+        soft_contact_count,
+        soft_contact_tids,
+        soft_contact_particle,
+        soft_contact_indices,
+        soft_contact_barycentric,
+        soft_contact_shape,
+        soft_contact_body_pos,
+        soft_contact_body_vel,
+        soft_contact_normal,
+    )
+
+
+@wp.kernel(grid_stride=False)
+def _create_compact_soft_edge_contacts(
+    compact_pair_indices: wp.array[wp.int32],
+    compact_counts: wp.array[wp.int32],
+    compact_count_index: wp.int32,
+    worker_count: wp.int32,
+    edge_pairs: wp.array[wp.vec2i],
+    particle_q: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    edge_indices: wp.array2d[wp.int32],
+    shape_body: wp.array[wp.int32],
+    shape_type: wp.array[wp.int32],
+    shape_flags: wp.array[wp.int32],
+    shape_transform: wp.array[wp.transform],
+    shape_scale: wp.array[wp.vec3],
+    body_q: wp.array[wp.transform],
+    shape_sdf_index: wp.array[wp.int32],
+    texture_sdf_table: wp.array[TextureSDFData],
+    shape_margin: wp.array[float],
+    sdf_edge_iters: wp.int32,
+    margin: float,
+    tid_base: wp.int32,
+    soft_contact_max: wp.int32,
+    soft_contact_count: wp.array[wp.int32],
+    soft_contact_tids: wp.array[wp.int32],
+    soft_contact_particle: wp.array[wp.int32],
+    soft_contact_indices: wp.array[wp.vec3i],
+    soft_contact_barycentric: wp.array[wp.vec3],
+    soft_contact_shape: wp.array[wp.int32],
+    soft_contact_body_pos: wp.array[wp.vec3],
+    soft_contact_body_vel: wp.array[wp.vec3],
+    soft_contact_normal: wp.array[wp.vec3],
+):
+    worker = wp.tid()
+    compact_index = worker
+    compact_count = wp.min(compact_counts[compact_count_index], compact_pair_indices.shape[0])
+    while compact_index < compact_count:
+        tid = compact_pair_indices[compact_index]
+        _create_soft_edge_contact_at_pair(
+            tid,
+            edge_pairs,
+            particle_q,
+            particle_radius,
+            edge_indices,
+            shape_body,
+            shape_type,
+            shape_flags,
+            shape_transform,
+            shape_scale,
+            body_q,
+            shape_sdf_index,
+            texture_sdf_table,
+            shape_margin,
+            sdf_edge_iters,
+            margin,
+            tid_base,
+            soft_contact_max,
+            soft_contact_count,
+            soft_contact_tids,
+            soft_contact_particle,
+            soft_contact_indices,
+            soft_contact_barycentric,
+            soft_contact_shape,
+            soft_contact_body_pos,
+            soft_contact_body_vel,
+            soft_contact_normal,
+        )
+        compact_index += worker_count
+
+
+@wp.func
+def _create_soft_face_contact_at_pair(
+    tid: wp.int32,
     face_pairs: wp.array[wp.vec2i],
     particle_q: wp.array[wp.vec3],
     particle_radius: wp.array[float],
@@ -243,10 +390,6 @@ def _create_soft_face_contacts(
     soft_contact_body_vel: wp.array[wp.vec3],
     soft_contact_normal: wp.array[wp.vec3],
 ):
-    tid = wp.tid()
-    if active[tid] == wp.uint8(0):
-        return
-
     pair = face_pairs[tid]
     face = pair[0]
     shape = pair[1]
@@ -312,6 +455,144 @@ def _create_soft_face_contacts(
         )
 
 
+@wp.kernel
+def _create_soft_face_contacts(
+    active: wp.array[wp.uint8],
+    face_pairs: wp.array[wp.vec2i],
+    particle_q: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    tri_indices: wp.array2d[wp.int32],
+    shape_body: wp.array[wp.int32],
+    shape_type: wp.array[wp.int32],
+    shape_flags: wp.array[wp.int32],
+    shape_transform: wp.array[wp.transform],
+    shape_scale: wp.array[wp.vec3],
+    body_q: wp.array[wp.transform],
+    shape_sdf_index: wp.array[wp.int32],
+    texture_sdf_table: wp.array[TextureSDFData],
+    shape_margin: wp.array[float],
+    sdf_face_iters: wp.int32,
+    sdf_ls_iters: wp.int32,
+    margin: float,
+    tid_base: wp.int32,
+    soft_contact_max: wp.int32,
+    soft_contact_count: wp.array[wp.int32],
+    soft_contact_tids: wp.array[wp.int32],
+    soft_contact_particle: wp.array[wp.int32],
+    soft_contact_indices: wp.array[wp.vec3i],
+    soft_contact_barycentric: wp.array[wp.vec3],
+    soft_contact_shape: wp.array[wp.int32],
+    soft_contact_body_pos: wp.array[wp.vec3],
+    soft_contact_body_vel: wp.array[wp.vec3],
+    soft_contact_normal: wp.array[wp.vec3],
+):
+    tid = wp.tid()
+    if active[tid] == wp.uint8(0):
+        return
+    _create_soft_face_contact_at_pair(
+        tid,
+        face_pairs,
+        particle_q,
+        particle_radius,
+        tri_indices,
+        shape_body,
+        shape_type,
+        shape_flags,
+        shape_transform,
+        shape_scale,
+        body_q,
+        shape_sdf_index,
+        texture_sdf_table,
+        shape_margin,
+        sdf_face_iters,
+        sdf_ls_iters,
+        margin,
+        tid_base,
+        soft_contact_max,
+        soft_contact_count,
+        soft_contact_tids,
+        soft_contact_particle,
+        soft_contact_indices,
+        soft_contact_barycentric,
+        soft_contact_shape,
+        soft_contact_body_pos,
+        soft_contact_body_vel,
+        soft_contact_normal,
+    )
+
+
+@wp.kernel(grid_stride=False)
+def _create_compact_soft_face_contacts(
+    compact_pair_indices: wp.array[wp.int32],
+    compact_counts: wp.array[wp.int32],
+    compact_count_index: wp.int32,
+    worker_count: wp.int32,
+    face_pairs: wp.array[wp.vec2i],
+    particle_q: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    tri_indices: wp.array2d[wp.int32],
+    shape_body: wp.array[wp.int32],
+    shape_type: wp.array[wp.int32],
+    shape_flags: wp.array[wp.int32],
+    shape_transform: wp.array[wp.transform],
+    shape_scale: wp.array[wp.vec3],
+    body_q: wp.array[wp.transform],
+    shape_sdf_index: wp.array[wp.int32],
+    texture_sdf_table: wp.array[TextureSDFData],
+    shape_margin: wp.array[float],
+    sdf_face_iters: wp.int32,
+    sdf_ls_iters: wp.int32,
+    margin: float,
+    tid_base: wp.int32,
+    soft_contact_max: wp.int32,
+    soft_contact_count: wp.array[wp.int32],
+    soft_contact_tids: wp.array[wp.int32],
+    soft_contact_particle: wp.array[wp.int32],
+    soft_contact_indices: wp.array[wp.vec3i],
+    soft_contact_barycentric: wp.array[wp.vec3],
+    soft_contact_shape: wp.array[wp.int32],
+    soft_contact_body_pos: wp.array[wp.vec3],
+    soft_contact_body_vel: wp.array[wp.vec3],
+    soft_contact_normal: wp.array[wp.vec3],
+):
+    worker = wp.tid()
+    compact_index = worker
+    compact_count = wp.min(compact_counts[compact_count_index], compact_pair_indices.shape[0])
+    while compact_index < compact_count:
+        tid = compact_pair_indices[compact_index]
+        _create_soft_face_contact_at_pair(
+            tid,
+            face_pairs,
+            particle_q,
+            particle_radius,
+            tri_indices,
+            shape_body,
+            shape_type,
+            shape_flags,
+            shape_transform,
+            shape_scale,
+            body_q,
+            shape_sdf_index,
+            texture_sdf_table,
+            shape_margin,
+            sdf_face_iters,
+            sdf_ls_iters,
+            margin,
+            tid_base,
+            soft_contact_max,
+            soft_contact_count,
+            soft_contact_tids,
+            soft_contact_particle,
+            soft_contact_indices,
+            soft_contact_barycentric,
+            soft_contact_shape,
+            soft_contact_body_pos,
+            soft_contact_body_vel,
+            soft_contact_normal,
+        )
+        compact_index += worker_count
+
+
 def _launch_soft_surface_contacts(
     model: Model,
     state: State,
@@ -321,6 +602,12 @@ def _launch_soft_surface_contacts(
     face_pairs: wp.array[wp.vec2i],
     edge_active: wp.array[wp.uint8],
     face_active: wp.array[wp.uint8],
+    edge_compact_pair_indices: wp.array[wp.int32],
+    face_compact_pair_indices: wp.array[wp.int32],
+    compact_counts: wp.array[wp.int32],
+    use_compact_pairs: bool,
+    edge_worker_count: int,
+    face_worker_count: int,
     particle_pair_count: int,
 ) -> None:
     """Generate edge and face contacts after conservative AABB pruning."""
@@ -350,44 +637,93 @@ def _launch_soft_surface_contacts(
     ]
 
     if edge_pair_count > 0:
-        wp.launch(
-            _create_soft_edge_contacts,
-            dim=edge_pair_count,
-            inputs=[
-                edge_active,
-                edge_pairs,
-                state.particle_q,
-                model.particle_radius,
-                model.edge_indices,
-                *shape_args,
-                SDF_EDGE_ITERS,
-                margin,
-                particle_pair_count,
-                contacts.soft_contact_max,
-            ],
-            outputs=outputs,
-            device=model.device,
-        )
+        if use_compact_pairs:
+            wp.launch(
+                _create_compact_soft_edge_contacts,
+                dim=edge_worker_count,
+                block_dim=_COMPACT_SOFT_SURFACE_BLOCK_DIM,
+                inputs=[
+                    edge_compact_pair_indices,
+                    compact_counts,
+                    0,
+                    edge_worker_count,
+                    edge_pairs,
+                    state.particle_q,
+                    model.particle_radius,
+                    model.edge_indices,
+                    *shape_args,
+                    SDF_EDGE_ITERS,
+                    margin,
+                    particle_pair_count,
+                    contacts.soft_contact_max,
+                ],
+                outputs=outputs,
+                device=model.device,
+            )
+        else:
+            wp.launch(
+                _create_soft_edge_contacts,
+                dim=edge_pair_count,
+                inputs=[
+                    edge_active,
+                    edge_pairs,
+                    state.particle_q,
+                    model.particle_radius,
+                    model.edge_indices,
+                    *shape_args,
+                    SDF_EDGE_ITERS,
+                    margin,
+                    particle_pair_count,
+                    contacts.soft_contact_max,
+                ],
+                outputs=outputs,
+                device=model.device,
+            )
     if face_pair_count > 0:
-        wp.launch(
-            _create_soft_face_contacts,
-            dim=face_pair_count,
-            inputs=[
-                face_active,
-                face_pairs,
-                state.particle_q,
-                model.particle_radius,
-                model.tri_indices,
-                *shape_args,
-                SDF_FACE_ITERS,
-                SDF_LS_ITERS,
-                margin,
-                particle_pair_count + edge_pair_count,
-                contacts.soft_contact_max,
-            ],
-            outputs=outputs,
-            device=model.device,
-        )
+        if use_compact_pairs:
+            wp.launch(
+                _create_compact_soft_face_contacts,
+                dim=face_worker_count,
+                block_dim=_COMPACT_SOFT_SURFACE_BLOCK_DIM,
+                inputs=[
+                    face_compact_pair_indices,
+                    compact_counts,
+                    1,
+                    face_worker_count,
+                    face_pairs,
+                    state.particle_q,
+                    model.particle_radius,
+                    model.tri_indices,
+                    *shape_args,
+                    SDF_FACE_ITERS,
+                    SDF_LS_ITERS,
+                    margin,
+                    particle_pair_count + edge_pair_count,
+                    contacts.soft_contact_max,
+                ],
+                outputs=outputs,
+                device=model.device,
+            )
+        else:
+            wp.launch(
+                _create_soft_face_contacts,
+                dim=face_pair_count,
+                inputs=[
+                    face_active,
+                    face_pairs,
+                    state.particle_q,
+                    model.particle_radius,
+                    model.tri_indices,
+                    *shape_args,
+                    SDF_FACE_ITERS,
+                    SDF_LS_ITERS,
+                    margin,
+                    particle_pair_count + edge_pair_count,
+                    contacts.soft_contact_max,
+                ],
+                outputs=outputs,
+                device=model.device,
+            )
 
 
 class MJVBDV2CollisionPipeline(CollisionPipeline):
@@ -407,6 +743,22 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
         face_mask_size = self.soft_face_rigid_pairs.shape[0] if self._use_soft_surface_aabb else 0
         self._soft_edge_pair_active = wp.empty(edge_mask_size, dtype=wp.uint8, device=model.device)
         self._soft_face_pair_active = wp.empty(face_mask_size, dtype=wp.uint8, device=model.device)
+        self._use_soft_surface_compaction = bool(
+            _ENABLE_COMPACT_SOFT_SURFACE_PAIRS and self._use_soft_surface_aabb and not self.requires_grad
+        )
+        compact_count = 2 if self._use_soft_surface_compaction else 0
+        edge_compact_size = edge_mask_size if self._use_soft_surface_compaction else 0
+        face_compact_size = face_mask_size if self._use_soft_surface_compaction else 0
+        self._soft_surface_compact_counts = wp.zeros(compact_count, dtype=wp.int32, device=model.device)
+        self._soft_edge_compact_pair_indices = wp.empty(edge_compact_size, dtype=wp.int32, device=model.device)
+        self._soft_face_compact_pair_indices = wp.empty(face_compact_size, dtype=wp.int32, device=model.device)
+        max_workers = (
+            model.device.sm_count * _COMPACT_SOFT_SURFACE_BLOCKS_PER_SM * _COMPACT_SOFT_SURFACE_BLOCK_DIM
+            if self._use_soft_surface_compaction
+            else 0
+        )
+        self._soft_edge_compact_worker_count = min(edge_compact_size, max_workers)
+        self._soft_face_compact_worker_count = min(face_compact_size, max_workers)
 
     def collide(
         self,
@@ -437,6 +789,9 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
         shape_aabb_lower = self.narrow_phase.shape_aabb_lower
         shape_aabb_upper = self.narrow_phase.shape_aabb_upper
 
+        if self._use_soft_surface_compaction:
+            self._soft_surface_compact_counts.zero_()
+
         if self.soft_edge_rigid_pairs.shape[0] > 0:
             wp.launch(
                 _mark_soft_edge_pairs_active,
@@ -450,6 +805,10 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
                     shape_aabb_lower,
                     shape_aabb_upper,
                     margin,
+                    self._use_soft_surface_compaction,
+                    self._soft_edge_compact_pair_indices,
+                    self._soft_surface_compact_counts,
+                    0,
                 ],
                 outputs=[self._soft_edge_pair_active],
                 device=model.device,
@@ -468,6 +827,10 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
                     shape_aabb_lower,
                     shape_aabb_upper,
                     margin,
+                    self._use_soft_surface_compaction,
+                    self._soft_face_compact_pair_indices,
+                    self._soft_surface_compact_counts,
+                    1,
                 ],
                 outputs=[self._soft_face_pair_active],
                 device=model.device,
@@ -482,5 +845,11 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
             self.soft_face_rigid_pairs,
             self._soft_edge_pair_active,
             self._soft_face_pair_active,
+            self._soft_edge_compact_pair_indices,
+            self._soft_face_compact_pair_indices,
+            self._soft_surface_compact_counts,
+            self._use_soft_surface_compaction,
+            self._soft_edge_compact_worker_count,
+            self._soft_face_compact_worker_count,
             self.soft_rigid_contact_pair_count,
         )

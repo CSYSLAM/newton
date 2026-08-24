@@ -45,6 +45,7 @@ Status values are:
 | 2026-08-21 | Fuse coupled transfers and pipeline MuJoCo/VBD substeps on two CUDA streams | Dynamic coupled backend | **Rejected** | The real dynamic fold was 1.32% slower with transfer fusion and 0.90% slower with the two-stream wavefront; a 1.66% light-scene gain did not transfer to the representative workload |
 | 2026-08-21 | Selectively port PR 3995 soft-contact traversal and capacity sizing | Both private VBD implementations and sparse contact helpers | **Retained, batch-gated** | A 1,024-world CUDA Graph benchmark is 4.81% faster; world-compatible preallocation removes a 1,024x capacity overestimate in that setup |
 | 2026-08-21 | Cache a particle-color membership mask per rigid-soft contact | Complete `vbd/` particle-side rigid-soft solve | **Retained** | Frozen contact solve is 5.39% faster including mask construction; full handoff graph is 6.99% faster in a consecutive run |
+| 2026-08-24 | Compact AABB-active full-surface candidates before SDF optimization | CUDA `full` contact backends with full-surface contact | **Retained, gated** | Handoff collision Graph median is 10.58% faster and full frame median is 6.58% faster; pneumatic and 100%-active collision Graphs are 60.54% and 47.21% faster |
 | 2026-08-21 | Shape-major conservative AABB mask before full-surface SDF optimization | Shared full-contact edge/face generation | **Rejected** | Frozen-state collision graph was 39.4% faster, but the implementation changed Newton's shared collision pipeline and violated MJVBDV2's standalone migration boundary |
 | 2026-08-21 | Exact particle CSR and per-color compact contact lists | Complete `vbd/` particle-side rigid-soft solve | **Rejected** | Per-particle CSR was 71.7% slower; compact color lists improved the full graph only 0.21%, within noise |
 | 2026-08-20 | Full-VBD device-selected truncation fast path | Complete `vbd/` particle iterations | **Rejected** | 0.59% in the small pneumatic bag and no repeatable gain in the supermarket bag |
@@ -259,6 +260,85 @@ contact set is preserved, the path remains graph-capturable, and the entire
 implementation lies inside MJVBDV2. Re-evaluate only if a future shared
 pipeline exposes an equivalent mask hook or compact broad phase without
 changing contact semantics.
+
+### 2026-08-24: compact active full-surface candidates
+
+The retained AABB pass above still launched the expensive edge and face SDF
+kernels over their complete candidate capacities. Rejected pairs returned
+immediately, but a CUDA Graph replay continued to schedule every logical pair,
+and mixed active/inactive warps retained avoidable branch and grid-stride
+overhead.
+
+**Retained implementation.** The same private AABB kernels now append passing
+original pair indices into fixed-capacity device arrays while writing the
+existing masks. A two-element device counter is reset once per collision.
+Edge and face contact generation use fixed 128-thread persistent kernels with
+at most two blocks per SM; workers stride only over the device-side active
+count. The original pair index is still passed to the contact emitter, so
+replay-tid ranges, edge/face offsets, contact capacity, SDF iterations,
+thresholds, and record fields are unchanged. Runtime particle positions, body
+poses, shape flags, margins, and AABBs are reread on every collision, including
+inside a captured Graph.
+
+Compaction is enabled only for CUDA full-surface pipelines that do not require
+gradients. CPU, non-full-surface, and differentiable pipelines retain the
+previous path. Candidate and contact buffers remain construction-time fixed;
+there is no host readback, allocation, topology mutation, or Graph recapture.
+The prior masked kernels remain as the fallback and as an A/B reference.
+
+**Controlled A/B.** Tests used an NVIDIA GeForce RTX 5090 D v2 and captured
+single-stream CUDA Graphs. Collision measurements used ten warm-up replays and
+1,000 timed replays per process. The handoff full-frame measurement used three
+warm-up replays and 30 timed replays; three separate masked and compact runs
+are summarized by their median. No solver iteration, substep, contact margin,
+buffer size, or scene parameter changed.
+
+| Scene and topology | Masked | Compact | Result |
+| --- | ---: | ---: | ---: |
+| Handoff frame 130 collision; 417,576 edge and 276,288 face pairs; about 8.6% AABB-active | 2.291320 ms | 2.048838 ms | 10.58% faster |
+| Handoff captured frame; 6 substeps and 12 VBD iterations | 45.602193 ms | 42.603617 ms | 6.58% faster |
+| Pneumatic bag frame 10 collision; 7,680 edge and 5,120 face pairs; 56.25% and 57.50% active | 0.681671 ms | 0.268998 ms | 60.54% faster |
+| Synthetic 96x96 cloth/plane collision; all 27,840 edge and 18,432 face pairs active | 0.187894 ms | 0.099183 ms | 47.21% faster |
+
+The handoff collision medians came from masked samples of 2.291320, 2.321063,
+and 2.129393 ms and compact samples of 2.007445, 2.104492, and 2.048838 ms.
+The full-frame samples were 44.772257, 45.623088, and 45.602193 ms masked and
+41.329248, 45.097961, and 42.603617 ms compact. The synthetic all-active case
+guards against a regression when conservative AABBs cannot reject any pair.
+
+Two exact `v10000` demo spot checks used the same GPU and each demo's default
+captured physics graph. Collision medians came from five samples of 500 graph
+replays. Full-frame medians came from five samples of ten graph replays after
+three warm-ups. Frame 1 checks the warmed initial state; frame 240 checks the
+named active interaction phase. These are representative-phase A/B results,
+not complete 720- or 1,900-frame demo regressions.
+
+| Exact demo and phase | Collision masked / compact | Collision result | Frame masked / compact | Frame result |
+| --- | ---: | ---: | ---: | ---: |
+| `right_hand_recorded_plastic_inflatable_bag_pick_release_v10000`, frame 1 (`validate_initial`) | 0.601839 / 0.279699 ms | 53.53% faster | 21.200090 / 19.325244 ms | 8.84% faster |
+| Same demo, frame 240 (`lift`) | 1.772287 / 1.363240 ms | 23.08% faster | 27.690378 / 25.499519 ms | 7.91% faster |
+| `dexforce_recorded_soft_then_rigid_cube_into_bag_v10000`, frame 1 (`soft_wait`) | 2.196659 / 1.831552 ms | 16.62% faster | 53.287305 / 50.258893 ms | 5.68% faster |
+| Same demo, frame 240 (`soft_grasp`) | 3.561637 / 3.236834 ms | 9.12% faster | 66.660876 / 65.249060 ms | 2.12% faster |
+
+**Correctness evidence.** The focused CUDA regression compares compact and
+masked records as well as the shared pipeline's sorted shape, particle,
+barycentric, body-point, and normal fields. It also checks that compacted pair
+indices exactly equal the AABB masks, changes contact margins, captures and
+replays the Graph, and disables then restores `COLLIDE_PARTICLES` without
+recapture. A ten-frame pneumatic rollout remained finite. Its compact/masked
+state difference was below the old masked path's masked/masked variation in
+the existing nondeterministic atomic mode (particle maximum 0.000547 versus
+0.001597 m; body-array maximum 0.002328 versus 0.006729; cavity-volume maximum
+6.90e-7 versus 1.12e-6 m^3). The compact path also completed all 720 default
+frames of `right_hand_recorded_plastic_inflatable_bag_pick_release_v10000`
+and all 1,900 default frames of
+`dexforce_recorded_soft_then_rigid_cube_into_bag_v10000`; both demos passed
+their own final-state assertions under the Null viewer.
+
+**Decision.** Retained with the CUDA/non-gradient gates above. The compact
+path preserves the contact set and runtime collision controls, improves both
+sparse and fully active candidate distributions, and remains entirely inside
+MJVBDV2. Keep the masked fallback for gradients and for future A/B checks.
 
 ### 2026-08-20: profile full-surface bag contact work
 

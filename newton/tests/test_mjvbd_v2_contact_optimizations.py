@@ -399,6 +399,8 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
         }
         shared_pipeline = newton.CollisionPipeline(model, **options)
         private_pipeline = MJVBDV2CollisionPipeline(model, **options)
+        differentiable_pipeline = MJVBDV2CollisionPipeline(model, **options, requires_grad=True)
+        self.assertFalse(differentiable_pipeline._use_soft_surface_compaction)
         shared_contacts = shared_pipeline.contacts()
         private_contacts = private_pipeline.contacts()
         state = model.state()
@@ -412,6 +414,12 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
         self.assertGreater(int(np.count_nonzero(edge_active == 0)), 0)
         self.assertGreater(int(np.count_nonzero(face_active)), 0)
         self.assertGreater(int(np.count_nonzero(face_active == 0)), 0)
+        self.assertTrue(private_pipeline._use_soft_surface_compaction)
+        compact_counts = private_pipeline._soft_surface_compact_counts.numpy()
+        edge_compact = private_pipeline._soft_edge_compact_pair_indices.numpy()[: compact_counts[0]]
+        face_compact = private_pipeline._soft_face_compact_pair_indices.numpy()[: compact_counts[1]]
+        np.testing.assert_array_equal(np.sort(edge_compact), np.flatnonzero(edge_active))
+        np.testing.assert_array_equal(np.sort(face_compact), np.flatnonzero(face_active))
 
         def sorted_records(contacts):
             count = int(contacts.soft_contact_count.numpy()[0])
@@ -427,15 +435,22 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
                 contacts.soft_contact_normal.numpy()[:count][order],
             )
 
+        def assert_record_tuples_equal(expected_records, actual_records):
+            for expected, actual in zip(expected_records[:3], actual_records[:3], strict=True):
+                np.testing.assert_array_equal(actual, expected)
+            for expected, actual in zip(expected_records[3:], actual_records[3:], strict=True):
+                np.testing.assert_allclose(actual, expected, rtol=1.0e-6, atol=1.0e-6)
+
         def assert_records_equal():
-            shared_records = sorted_records(shared_contacts)
-            private_records = sorted_records(private_contacts)
-            for shared, private in zip(shared_records[:3], private_records[:3], strict=True):
-                np.testing.assert_array_equal(private, shared)
-            for shared, private in zip(shared_records[3:], private_records[3:], strict=True):
-                np.testing.assert_allclose(private, shared, rtol=1.0e-6, atol=1.0e-6)
+            assert_record_tuples_equal(sorted_records(shared_contacts), sorted_records(private_contacts))
 
         assert_records_equal()
+        compact_records = sorted_records(private_contacts)
+        private_pipeline._use_soft_surface_compaction = False
+        private_pipeline.collide(state, private_contacts)
+        assert_record_tuples_equal(compact_records, sorted_records(private_contacts))
+        private_pipeline._use_soft_surface_compaction = True
+
         model.shape_margin.zero_()
         shared_pipeline.collide(state, shared_contacts, soft_contact_margin=0.1)
         private_pipeline.collide(state, private_contacts, soft_contact_margin=0.1)
@@ -450,6 +465,18 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
         for _ in range(3):
             wp.capture_launch(capture.graph)
             self.assertEqual(int(private_contacts.soft_contact_count.numpy()[0]), expected_count)
+
+        shape_flags = model.shape_flags.numpy()
+        shape_flags[0] &= ~int(newton.ShapeFlags.COLLIDE_PARTICLES)
+        model.shape_flags.assign(shape_flags)
+        wp.capture_launch(capture.graph)
+        self.assertEqual(int(private_contacts.soft_contact_count.numpy()[0]), 0)
+        np.testing.assert_array_equal(private_pipeline._soft_surface_compact_counts.numpy(), [0, 0])
+
+        shape_flags[0] |= int(newton.ShapeFlags.COLLIDE_PARTICLES)
+        model.shape_flags.assign(shape_flags)
+        wp.capture_launch(capture.graph)
+        self.assertEqual(int(private_contacts.soft_contact_count.numpy()[0]), expected_count)
         self.assertTrue(private_contacts._enable_rigid_soft_full_surface_contact)
 
     def test_solver_contact_preallocation_excludes_cross_world_pairs(self):
