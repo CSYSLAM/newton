@@ -261,9 +261,6 @@ Representative commands include:
 .. code-block:: console
 
    python -m newton.examples mjvbd_v2_cloth_twist
-   python -m newton.examples mjvbd_v2_robot_cloth --joint-mode dynamic
-   python -m newton.examples mjvbd_v2_robot_cloth --joint-mode kinematic
-   python -m newton.examples mjvbd_v2_rigid_soft_cloth
    python -m newton.examples vbd_inflatable_bag_v0
    python -m newton.examples vbd_inflatable_bag_v1
    python -m newton.examples mjvbd_v2_supermarket_plastic_bag
