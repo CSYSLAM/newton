@@ -2355,7 +2355,9 @@ def apply_truncation_identity_selected(
 
 
 @wp.kernel
-def apply_truncation_ts_if_active(
+def apply_truncation_active_all_or_inactive_selected(
+    particle_ids: wp.array[wp.int32],
+    selected_particle_count: int,
     pos: wp.array[wp.vec3],
     displacement_in: wp.array[wp.vec3],
     truncation_ts: wp.array[float],
@@ -2364,37 +2366,18 @@ def apply_truncation_ts_if_active(
     displacement_out: wp.array[wp.vec3],
     pos_out: wp.array[wp.vec3],
 ):
-    i = wp.tid()
-    if has_active_self_contact[0] == 0:
-        return
-
-    t = truncation_ts[i]
-    particle_displacement = displacement_in[i] * t
-    length = wp.length(particle_displacement)
-    if length > max_displacement:
-        particle_displacement = particle_displacement * max_displacement / length
-
-    displacement_out[i] = particle_displacement
-    if pos_out:
-        pos_out[i] = pos[i] + particle_displacement
-
-
-@wp.kernel
-def apply_truncation_identity_selected_if_inactive(
-    particle_ids: wp.array[wp.int32],
-    pos: wp.array[wp.vec3],
-    displacement_in: wp.array[wp.vec3],
-    max_displacement: float,
-    has_active_self_contact: wp.array[wp.int32],
-    displacement_out: wp.array[wp.vec3],
-    pos_out: wp.array[wp.vec3],
-):
     tid = wp.tid()
-    if has_active_self_contact[0] != 0:
-        return
+    active = has_active_self_contact[0] != 0
+    if active:
+        particle = tid
+        t = truncation_ts[particle]
+    else:
+        if tid >= selected_particle_count:
+            return
+        particle = particle_ids[tid]
+        t = float(1.0)
 
-    particle = particle_ids[tid]
-    displacement = displacement_in[particle]
+    displacement = displacement_in[particle] * t
     length = wp.length(displacement)
     if length > max_displacement:
         displacement = displacement * max_displacement / length

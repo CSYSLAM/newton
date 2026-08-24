@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Dexforce W1 bimanual, two-pass T-shirt folding in the WAIC house.
 
-This is intentionally a self-contained MJVBD example. The fixed robot motion
-is solved once in an *IK-only* model, then replayed as cached joint targets in
-the main model; ``SolverMJVBDV2`` advances the shirt and treats the
-MuJoCo-owned robot links as one-way kinematic collision proxies. The house USD is a
-rendering reference only: it never adds a collider or a particle-contact
-candidate.
+This is intentionally a self-contained MJVBDV2 example. The two-arm IK problem
+is solved from the current scripted TCP targets before every displayed frame;
+joint targets are never replayed from an offline cache. ``SolverMJVBDV2``
+advances the shirt and treats the MuJoCo-owned robot links as one-way kinematic
+collision proxies. The house USD is a rendering reference only: it never adds
+a collider or a particle-contact candidate.
 
 Run, from the repository root::
 
@@ -114,23 +114,53 @@ def _copy_joint_q(src: wp.array[float], dst: wp.array[float]):
 
 
 @wp.kernel
-def _load_cached_joint_q(
-    cached_q: wp.array2d[float], frame_counter: wp.array[wp.int32], max_frame_index: int, dst: wp.array[float]
-):
-    i = wp.tid()
-    dst[i] = cached_q[wp.min(frame_counter[0], max_frame_index), i]
-
-
-@wp.kernel
-def _advance_frame_counter(frame_counter: wp.array[wp.int32], max_frame_index: int):
-    if wp.tid() == 0:
-        frame_counter[0] = wp.min(frame_counter[0] + 1, max_frame_index)
-
-
-@wp.kernel
 def _set_shape_friction(shape_mu: wp.array[float], robot_shape_end: int, robot_mu: float, table_mu: float):
     i = wp.tid()
     shape_mu[i] = robot_mu if i < robot_shape_end else table_mu
+
+
+@wp.kernel
+def _set_indexed_joint_q(
+    indices: wp.array[int],
+    open_q: wp.array[float],
+    grasp_q: wp.array[float],
+    grip: wp.array[float],
+    joint_q: wp.array[float],
+):
+    index = wp.tid()
+    joint_q[indices[index]] = open_q[index] * (1.0 - grip[0]) + grasp_q[index] * grip[0]
+
+
+@wp.kernel
+def _write_ik_target_poses(left: wp.transform, right: wp.transform, target_poses: wp.array[wp.transform]):
+    if wp.tid() == 0:
+        target_poses[0] = left
+        target_poses[1] = right
+
+
+@wp.kernel
+def _write_ik_grip(grip: float, target_grip: wp.array[float]):
+    if wp.tid() == 0:
+        target_grip[0] = grip
+
+
+@wp.kernel
+def _unpack_ik_target_poses(
+    target_poses: wp.array[wp.transform],
+    left_positions: wp.array[wp.vec3],
+    left_rotations: wp.array[wp.vec4],
+    right_positions: wp.array[wp.vec3],
+    right_rotations: wp.array[wp.vec4],
+):
+    if wp.tid() == 0:
+        left = target_poses[0]
+        left_positions[0] = wp.transform_get_translation(left)
+        left_rotation = wp.transform_get_rotation(left)
+        left_rotations[0] = wp.vec4(left_rotation[0], left_rotation[1], left_rotation[2], left_rotation[3])
+        right = target_poses[1]
+        right_positions[0] = wp.transform_get_translation(right)
+        right_rotation = wp.transform_get_rotation(right)
+        right_rotations[0] = wp.vec4(right_rotation[0], right_rotation[1], right_rotation[2], right_rotation[3])
 
 
 class Example:
@@ -204,8 +234,17 @@ class Example:
         self.frame_q_end = wp.zeros_like(self.model.joint_q)
         self.lock_indices, self.lock_values = self._locked_q()
         self.hand_indices, self.hand_open, self.hand_grasp = self._hand_q()
-        self._build_joint_target_cache()
-        self.graph_frame_index = wp.array([1], dtype=wp.int32, device=self.device)
+        if args.ik_iterations < 1:
+            raise ValueError("--ik-iterations must be at least 1")
+        self.ik_iterations = int(args.ik_iterations)
+        self.ik_target_poses = wp.array(
+            [self.left_home, self.right_home],
+            dtype=wp.transform,
+            device=self.device,
+        )
+        self.ik_target_grip = wp.zeros(1, dtype=float, device=self.device)
+        self._unpack_runtime_ik_target_poses()
+        self.material_variants = self._runtime_material_variants()
 
         self._attach_house_usd()
         self.viewer.set_model(self.model)
@@ -389,16 +428,16 @@ class Example:
             (1.4, w(LEFT_GRASP), w(LEFT_LIFT), w(RIGHT_GRASP), w(RIGHT_LIFT), 1.0, 1.0),
             (2.4, w(LEFT_LIFT), w(LEFT_TRAVEL), w(RIGHT_LIFT), w(RIGHT_TRAVEL), 1.0, 1.0),
             (1.4, w(LEFT_TRAVEL), w(LEFT_PLACE), w(RIGHT_TRAVEL), w(RIGHT_PLACE), 1.0, 1.0),
-            (1.0, w(LEFT_PLACE), w(LEFT_PLACE), w(RIGHT_PLACE), w(RIGHT_PLACE), 1.0, 0.75),
-            (1.2, w(LEFT_PLACE), w(LEFT_RELEASE), w(RIGHT_PLACE), w(RIGHT_RELEASE), 0.75, 0.0),
+            (1.0, w(LEFT_PLACE), w(LEFT_PLACE), w(RIGHT_PLACE), w(RIGHT_PLACE), 1.0, 0.25),
+            (1.2, w(LEFT_PLACE), w(LEFT_RELEASE), w(RIGHT_PLACE), w(RIGHT_RELEASE), 0.25, 0.0),
             (1.0, w(LEFT_RELEASE), w(LEFT_RELEASE), w(RIGHT_RELEASE), w(RIGHT_RELEASE), 0.0, 0.0),
             (2.0, w(LEFT_RELEASE), w(LEFT_2GRASP), w(RIGHT_RELEASE), w(RIGHT_2GRASP), 0.0, 0.0),
             (1.2, w(LEFT_2GRASP), w(LEFT_2GRASP), w(RIGHT_2GRASP), w(RIGHT_2GRASP), 0.0, 1.0),
             (1.2, w(LEFT_2GRASP), w(LEFT_2LIFT), w(RIGHT_2GRASP), w(RIGHT_2LIFT), 1.0, 1.0),
             (1.8, w(LEFT_2LIFT), w(LEFT_2TRAVEL), w(RIGHT_2LIFT), w(RIGHT_2TRAVEL), 1.0, 1.0),
             (1.2, w(LEFT_2TRAVEL), w(LEFT_2PLACE), w(RIGHT_2TRAVEL), w(RIGHT_2PLACE), 1.0, 1.0),
-            (0.8, w(LEFT_2PLACE), w(LEFT_2PLACE), w(RIGHT_2PLACE), w(RIGHT_2PLACE), 1.0, 0.75),
-            (1.2, w(LEFT_2PLACE), w(LEFT_2RELEASE), w(RIGHT_2PLACE), w(RIGHT_2RELEASE), 0.75, 0.0),
+            (0.8, w(LEFT_2PLACE), w(LEFT_2PLACE), w(RIGHT_2PLACE), w(RIGHT_2PLACE), 1.0, 0.25),
+            (1.2, w(LEFT_2PLACE), w(LEFT_2RELEASE), w(RIGHT_2PLACE), w(RIGHT_2RELEASE), 0.25, 0.0),
             (2.0, w(LEFT_2RELEASE), w(LEFT_APPROACH), w(RIGHT_2RELEASE), w(RIGHT_APPROACH), 0.0, 0.0),
             (1.0, w(LEFT_APPROACH), w(LEFT_APPROACH), w(RIGHT_APPROACH), w(RIGHT_APPROACH), 0.0, 0.0),
         )
@@ -413,47 +452,84 @@ class Example:
             return FULL_PROCESS_CLOTH_CONTACT_MU, 1.2, FULL_PROCESS_TABLE_CONTACT_MU
         return FULL_PROCESS_CLOTH_CONTACT_MU, 0.25, FULL_PROCESS_TABLE_CONTACT_MU
 
-    def _build_joint_target_cache(self):
-        """Solve the fixed scripted motion once, before simulation starts."""
-        script_duration = sum(segment[0] for segment in self.segments)
-        script_frames = int(np.ceil(script_duration / (self.frame_dt * self.args.trajectory_time_scale)))
-        self.cached_joint_target_frame_count = max(int(self.args.num_frames), script_frames)
+    def _runtime_material_variants(self):
+        """Enumerate the finite set of scripted friction phases."""
+        duration = sum(segment[0] for segment in self.segments)
+        materials = []
+        for script_time in np.linspace(0.0, duration, 128):
+            _, _, grip = self._sample(float(script_time))
+            materials.append(self._materials_for_script_time(float(script_time), grip))
+        return tuple(dict.fromkeys(materials))
 
-        initial_q = np.asarray(self.model.joint_q.numpy(), dtype=np.float32)
-        cache = np.repeat(initial_q[None, :], self.cached_joint_target_frame_count + 1, axis=0)
-        hand_indices = self.hand_indices.numpy()
-        hand_open = self.hand_open.numpy()
-        hand_grasp = self.hand_grasp.numpy()
-        self.cached_materials = [self._materials_for_script_time(0.0, 0.0)]
+    def _set_runtime_ik_target_poses(self, left: wp.transform, right: wp.transform):
+        """Write the current TCP targets into persistent device buffers."""
+        wp.launch(
+            _write_ik_target_poses,
+            1,
+            [left, right, self.ik_target_poses],
+            device=self.device,
+        )
 
-        for frame_index in range(1, self.cached_joint_target_frame_count + 1):
-            script_time = frame_index * self.frame_dt * self.args.trajectory_time_scale
-            left, right, grip = self._sample(script_time)
-            self.left_obj.set_target_position(0, wp.transform_get_translation(left))
-            self.left_rot.set_target_rotation(0, self._v4(wp.transform_get_rotation(left)))
-            self.right_obj.set_target_position(0, wp.transform_get_translation(right))
-            self.right_rot.set_target_rotation(0, self._v4(wp.transform_get_rotation(right)))
-            self.ik_solver.step(self.ik_q, self.ik_q, iterations=IK_ITERATIONS)
-            wp.launch(
-                _lock_q,
-                self.lock_indices.shape[0],
-                [self.ik_q, self.lock_indices, self.lock_values],
-                device=self.device,
-            )
-            cache[frame_index, : self.ik_model.joint_coord_count] = self.ik_q.numpy()[0]
-            cache[frame_index, hand_indices] = hand_open * (1.0 - grip) + hand_grasp * grip
-            self.cached_materials.append(self._materials_for_script_time(script_time, grip))
+    def _set_runtime_ik_grip(self, grip: float):
+        """Write the current normalized hand-close target."""
+        wp.launch(_write_ik_grip, 1, [grip, self.ik_target_grip], device=self.device)
 
-        self.cached_joint_targets = wp.array(cache, dtype=wp.float32, device=self.device)
-        self.cached_materials = tuple(self.cached_materials)
-        self.ik_q = wp.array(initial_q, dtype=wp.float32, device=self.device).reshape((1, -1))
+    def _unpack_runtime_ik_target_poses(self):
+        """Expose persistent pose inputs through the IK objective arrays."""
+        wp.launch(
+            _unpack_ik_target_poses,
+            1,
+            [
+                self.ik_target_poses,
+                self.left_obj.target_positions,
+                self.left_rot.target_rotations,
+                self.right_obj.target_positions,
+                self.right_rot.target_rotations,
+            ],
+            device=self.device,
+        )
 
-    def _prepare_cached_frame(self):
-        """Load one baked target for the uncaptured CPU execution path."""
-        cache_index = min(self.frame_index + 1, self.cached_joint_target_frame_count)
+    def _update_runtime_ik_inputs(self):
+        """Sample this frame's TCP and grip targets without solving IK yet."""
+        script_time = (self.frame_index + 1) * self.frame_dt * self.args.trajectory_time_scale
+        left, right, grip = self._sample(script_time)
+        self._set_runtime_ik_target_poses(left, right)
+        self._set_runtime_ik_grip(grip)
+        return script_time, grip
+
+    def _prepare_runtime_ik_frame_start(self):
+        """Use the current kinematic state as this frame's interpolation start."""
         wp.copy(self.frame_q_start, self.state_0.joint_q)
-        wp.copy(self.frame_q_end, self.cached_joint_targets[cache_index])
-        self._set_materials(*self.cached_materials[cache_index])
+
+    def _solve_runtime_ik_frame(self):
+        """Solve current TCP targets and assemble one kinematic frame target."""
+        self._prepare_runtime_ik_frame_start()
+        self._unpack_runtime_ik_target_poses()
+        self.ik_solver.step(self.ik_q, self.ik_q, iterations=self.ik_iterations)
+        wp.launch(
+            _lock_q,
+            self.lock_indices.shape[0],
+            [self.ik_q, self.lock_indices, self.lock_values],
+            device=self.device,
+        )
+        wp.launch(
+            _copy_joint_q,
+            self.model.joint_coord_count,
+            [self.ik_q[0], self.frame_q_end],
+            device=self.device,
+        )
+        wp.launch(
+            _set_indexed_joint_q,
+            self.hand_indices.shape[0],
+            [
+                self.hand_indices,
+                self.hand_open,
+                self.hand_grasp,
+                self.ik_target_grip,
+                self.frame_q_end,
+            ],
+            device=self.device,
+        )
 
     def _is_release_time(self, time):
         """Return true only during the two deliberate friction-release cracks."""
@@ -487,7 +563,16 @@ class Example:
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def simulate(self):
-        self._prepare_cached_frame()
+        script_time, grip = self._update_runtime_ik_inputs()
+        materials = self._materials_for_script_time(script_time, grip)
+        self.model.soft_contact_mu = materials[0]
+        wp.launch(
+            _set_shape_friction,
+            self.model.shape_count,
+            [self.model.shape_material_mu, self.robot_shape_end, materials[1], materials[2]],
+            device=self.device,
+        )
+        self._solve_runtime_ik_frame()
         self._simulate_substeps()
         self.sim_time += self.frame_dt
         self.frame_index += 1
@@ -497,67 +582,46 @@ class Example:
             self.simulate()
             return
 
-        cache_index = min(self.frame_index + 1, self.cached_joint_target_frame_count)
-        self.graph = self.graphs[self.cached_materials[cache_index]]
-        wp.capture_launch(self.graph)
+        script_time, grip = self._update_runtime_ik_inputs()
+        materials = self._materials_for_script_time(script_time, grip)
+        wp.capture_launch(self.graphs[materials])
         self.sim_time += self.frame_dt
         self.frame_index += 1
 
-    def _capture_graph(self, materials):
-        """Capture one material variant of a complete scripted display frame."""
+    def _capture_runtime_ik_graph(self, materials):
+        """Capture realtime IK and one complete kinematic MJVBDV2 frame."""
         self.model.soft_contact_mu = materials[0]
         state_0_backup = self.model.state()
         state_1_backup = self.model.state()
         state_0_backup.assign(self.state_0)
         state_1_backup.assign(self.state_1)
+        ik_q_backup = wp.clone(self.ik_q)
 
-        with wp.ScopedCapture() as capture:
-            wp.launch(
-                _copy_joint_q,
-                self.model.joint_coord_count,
-                [self.state_0.joint_q, self.frame_q_start],
-                device=self.device,
-            )
-            wp.launch(
-                _load_cached_joint_q,
-                self.model.joint_coord_count,
-                [
-                    self.cached_joint_targets,
-                    self.graph_frame_index,
-                    self.cached_joint_target_frame_count,
-                    self.frame_q_end,
-                ],
-                device=self.device,
-            )
+        with wp.ScopedDevice(self.device), wp.ScopedCapture() as capture:
             wp.launch(
                 _set_shape_friction,
                 self.model.shape_count,
                 [self.model.shape_material_mu, self.robot_shape_end, materials[1], materials[2]],
                 device=self.device,
             )
+            self._solve_runtime_ik_frame()
             self._simulate_substeps()
-            wp.launch(
-                _advance_frame_counter,
-                1,
-                [self.graph_frame_index, self.cached_joint_target_frame_count],
-                device=self.device,
-            )
 
         self.state_0.assign(state_0_backup)
         self.state_1.assign(state_1_backup)
+        self.ik_q.assign(ik_q_backup)
         return capture.graph
 
     def capture(self):
-        """Capture every fixed-trajectory material variant on CUDA."""
+        """Capture realtime IK and one complete frame for each material phase."""
         self.graph = None
         self.graphs = {}
         if not self.use_graph:
             return
 
-        for materials in dict.fromkeys(self.cached_materials):
-            self.graphs[materials] = self._capture_graph(materials)
-        self.graph_frame_index.fill_(1)
-        self.graph = self.graphs[self.cached_materials[1]]
+        for materials in self.material_variants:
+            self.graphs[materials] = self._capture_runtime_ik_graph(materials)
+        self.graph = self.graphs[self.material_variants[0]]
 
     def render(self):
         self.viewer.begin_frame(self.sim_time)
@@ -575,6 +639,10 @@ class Example:
     def test_final(self):
         if not np.all(np.isfinite(self.state_0.particle_q.numpy())):
             raise ValueError("T-shirt particle positions are not finite")
+        if hasattr(self, "cached_joint_targets"):
+            raise ValueError("Realtime folding unexpectedly created an offline joint-target cache")
+        if not np.all(np.isfinite(self.ik_q.numpy())):
+            raise ValueError("Realtime IK joint positions are not finite")
 
     # --- helpers --------------------------------------------------------
     def _set_materials(self, cloth_mu, robot_mu, table_mu):
@@ -740,6 +808,12 @@ class Example:
         parser.add_argument("--show-physics-table", action="store_true")
         parser.add_argument("--enable-self-collisions", action="store_true")
         parser.add_argument("--trajectory-time-scale", type=float, default=4.0)
+        parser.add_argument(
+            "--ik-iterations",
+            type=int,
+            default=IK_ITERATIONS,
+            help="Realtime IK iterations for each displayed frame target.",
+        )
         parser.add_argument(
             "--graph-capture",
             action=argparse.BooleanOptionalAction,

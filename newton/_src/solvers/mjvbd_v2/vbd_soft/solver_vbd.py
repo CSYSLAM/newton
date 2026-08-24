@@ -38,10 +38,9 @@ from .particle_vbd_kernels import (
     accumulate_spring_force_and_hessian,
     # Planar DAT (Divide and Truncate) kernels
     apply_planar_truncation_parallel_by_collision,
+    apply_truncation_active_all_or_inactive_selected,
     apply_truncation_identity_selected,
-    apply_truncation_identity_selected_if_inactive,
     apply_truncation_ts,
-    apply_truncation_ts_if_active,
     build_particle_body_contact_adjacency_active,
     detect_any_active_self_contacts,
     # Solver kernels (particle VBD)
@@ -2275,25 +2274,14 @@ class SolverVBD(SolverBase, CouplingInterface):
             return
 
         wp.launch(
-            kernel=apply_truncation_ts_if_active,
+            kernel=apply_truncation_active_all_or_inactive_selected,
             dim=self.model.particle_count,
             inputs=[
+                selected_particles,
+                selected_particles.size,
                 self.pos_prev_collision_detection,
                 self.particle_displacements,
                 self.truncation_ts,
-                max_displacement,
-                self.has_active_self_contact,
-            ],
-            outputs=[self.particle_displacements, particle_q_out],
-            device=self.device,
-        )
-        wp.launch(
-            kernel=apply_truncation_identity_selected_if_inactive,
-            dim=selected_particles.size,
-            inputs=[
-                selected_particles,
-                self.pos_prev_collision_detection,
-                self.particle_displacements,
                 max_displacement,
                 self.has_active_self_contact,
             ],

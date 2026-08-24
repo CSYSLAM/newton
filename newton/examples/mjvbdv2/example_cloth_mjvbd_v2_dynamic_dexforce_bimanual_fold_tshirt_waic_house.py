@@ -3,10 +3,12 @@
 """Dynamic Dexforce W1 folding a T-shirt with MJVBDV2.
 
 This example reuses the scene, two-pass IK trajectory, and cloth parameters
-from the kinematic MJVBDV2 example. The cached trajectory is used only as a
-MuJoCo joint-position target: robot joint positions are never written directly
-during simulation. MJVBDV2 advances the dynamic robot joints in MuJoCo and the
-shirt in VBD, with robot links acting as one-way collision proxies.
+from the kinematic MJVBDV2 example. It solves the current Cartesian TCP targets
+with realtime IK before every displayed frame, then uses consecutive IK
+solutions as MuJoCo position/velocity-drive targets. Robot joint positions are
+never written directly during simulation. MJVBDV2 advances the dynamic robot
+joints in MuJoCo and the shirt in VBD, with robot links acting as one-way
+collision proxies.
 
 Run, from the repository root::
 
@@ -37,10 +39,15 @@ class Example(reference.Example):
     """Dynamic-joint counterpart of the kinematic MJVBDV2 folding example."""
 
     def __init__(self, viewer, args):
-        # The base class builds the identical scene and cached IK trajectory.
-        # capture() is overridden below so it does not capture the temporary
-        # kinematic solver constructed by the reference example.
+        # capture() is overridden below so the base class does not capture the
+        # temporary kinematic solver constructed before the dynamic backend.
+        self._dynamic_solver_ready = False
         super().__init__(viewer, args)
+
+        # Dynamic PD interpolation must start at the previous IK target, not at
+        # the lagging simulated joint state. Both are identical initially.
+        wp.copy(self.frame_q_start, self.model.joint_q)
+        wp.copy(self.frame_q_end, self.model.joint_q)
 
         self._align_dynamic_mimic_offsets()
         self._configure_dynamic_contact_response()
@@ -76,6 +83,10 @@ class Example(reference.Example):
         self.initial_shirt_q = self.state_0.particle_q.numpy().copy()
         self.script_sim_duration = sum(segment[0] for segment in self.segments) / self.args.trajectory_time_scale
         self.max_soft_contact_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self.track_contact_count = bool(args.test)
+        self._dynamic_solver_ready = True
+        self.use_graph = bool(args.graph_capture) and self.device.is_cuda
+        self.capture()
 
     def _align_dynamic_mimic_offsets(self):
         """Match the fully open PIP pose authored by the kinematic trajectory."""
@@ -104,14 +115,6 @@ class Example(reference.Example):
         mixed_kd = legacy_mixed_kd * 0.5 * (self.model.soft_contact_ke + stiffness)
         damping[:] = 2.0 * mixed_kd - self.model.soft_contact_kd
         self.model.shape_material_kd.assign(damping)
-
-    def _materials_for_script_time(self, script_time, grip):
-        """Keep released dynamic fingers frictionless until they clear the shirt."""
-        materials = super()._materials_for_script_time(script_time, grip)
-        first_start = sum(segment[0] for segment in self.segments[:7])
-        if super()._is_release_time(script_time) or (script_time >= first_start and grip <= 0.15):
-            return reference.FULL_PROCESS_CLOTH_CONTACT_MU, 0.0, reference.FULL_PROCESS_TABLE_CONTACT_MU
-        return materials
 
     def _configure_dynamic_joint_drives(self):
         """Configure stable position drives before MuJoCo model conversion."""
@@ -159,25 +162,9 @@ class Example(reference.Example):
         self.model.joint_effort_limit.assign(effort_limit)
         self.dynamic_target_coord_indices = np.asarray(target_coord_indices, dtype=np.int32)
 
-    def _segments(self):
-        """Open the dynamic fingers completely before each lift-away motion."""
-        segments = list(super()._segments())
-        for settle_index, lift_index in ((7, 8), (15, 16)):
-            settle = list(segments[settle_index])
-            settle[-1] = 0.0
-            segments[settle_index] = tuple(settle)
-            lift = list(segments[lift_index])
-            lift[-2:] = (0.0, 0.0)
-            segments[lift_index] = tuple(lift)
-        return tuple(segments)
-
-    def _prepare_cached_frame(self):
-        """Load target endpoints without overwriting the simulated joint state."""
-        start_index = min(self.frame_index, self.cached_joint_target_frame_count)
-        end_index = min(self.frame_index + 1, self.cached_joint_target_frame_count)
-        wp.copy(self.frame_q_start, self.cached_joint_targets[start_index])
-        wp.copy(self.frame_q_end, self.cached_joint_targets[end_index])
-        self._set_materials(*self.cached_materials[end_index])
+    def _prepare_runtime_ik_frame_start(self):
+        """Advance the persistent dynamic PD-target interval by one frame."""
+        wp.copy(self.frame_q_start, self.frame_q_end)
 
     def _simulate_substeps(self):
         for step in range(self.sim_substeps):
@@ -202,26 +189,59 @@ class Example(reference.Example):
                 device=self.device,
             )
             self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
-            wp.launch(
-                _accumulate_soft_contact_count,
-                1,
-                [self.contacts.soft_contact_count, self.max_soft_contact_count],
-                device=self.device,
-            )
+            if self.track_contact_count:
+                wp.launch(
+                    _accumulate_soft_contact_count,
+                    1,
+                    [self.contacts.soft_contact_count, self.max_soft_contact_count],
+                    device=self.device,
+                )
             self.state_0, self.state_1 = self.state_1, self.state_0
 
+    def _capture_dynamic_graph(self, materials):
+        """Capture realtime IK and one complete dynamic MuJoCo/VBD frame."""
+        self.model.soft_contact_mu = materials[0]
+        state_0_backup = self.model.state()
+        state_1_backup = self.model.state()
+        state_0_backup.assign(self.state_0)
+        state_1_backup.assign(self.state_1)
+        ik_q_backup = wp.clone(self.ik_q)
+        frame_q_start_backup = wp.clone(self.frame_q_start)
+        frame_q_end_backup = wp.clone(self.frame_q_end)
+
+        with wp.ScopedDevice(self.device), wp.ScopedCapture() as capture:
+            wp.launch(
+                reference._set_shape_friction,
+                self.model.shape_count,
+                [self.model.shape_material_mu, self.robot_shape_end, materials[1], materials[2]],
+                device=self.device,
+            )
+            self._solve_runtime_ik_frame()
+            self._simulate_substeps()
+
+        self.state_0.assign(state_0_backup)
+        self.state_1.assign(state_1_backup)
+        self.ik_q.assign(ik_q_backup)
+        self.frame_q_start.assign(frame_q_start_backup)
+        self.frame_q_end.assign(frame_q_end_backup)
+        return capture.graph
+
     def capture(self):
-        """Disable graph capture for the dynamic MuJoCo/VBD composition."""
-        self.use_graph = False
+        """Capture complete dynamic MuJoCo/VBD frames for every material variant."""
         self.graph = None
         self.graphs = {}
+        if not self._dynamic_solver_ready or not self.use_graph:
+            return
+
+        for materials in self.material_variants:
+            self.graphs[materials] = self._capture_dynamic_graph(materials)
+        self.graph = self.graphs[self.material_variants[0]]
 
     def test_post_step(self):
         particle_q = self.state_0.particle_q.numpy()
         joint_q = self.state_0.joint_q.numpy()
         joint_qd = self.state_0.joint_qd.numpy()
-        target_index = min(self.frame_index, self.cached_joint_target_frame_count)
-        target_q = self.cached_joint_targets.numpy()[target_index]
+        target_q = self.frame_q_end.numpy()
         indices = self.dynamic_target_coord_indices
         tracking_error = float(np.max(np.abs(joint_q[indices] - target_q[indices])))
         max_joint_speed = float(np.max(np.abs(joint_qd)))
@@ -256,8 +276,7 @@ class Example(reference.Example):
         if motion < 0.05:
             raise ValueError(f"Dynamic robot did not follow the folding trajectory: motion={motion}")
 
-        target_index = min(self.frame_index, self.cached_joint_target_frame_count)
-        target_q = self.cached_joint_targets.numpy()[target_index]
+        target_q = self.frame_q_end.numpy()
         tracking_error = float(np.max(np.abs(joint_q[indices] - target_q[indices])))
         if tracking_error > self.args.max_tracking_error:
             raise ValueError(
@@ -281,8 +300,8 @@ class Example(reference.Example):
     def create_parser():
         parser = reference.Example.create_parser()
         parser.set_defaults(
-            graph_capture=False,
-            trajectory_time_scale=2.0,
+            graph_capture=True,
+            trajectory_time_scale=4.0,
         )
         parser.add_argument(
             "--vbd-iterations",
@@ -306,8 +325,18 @@ class Example(reference.Example):
             default=40.0,
             help="Minimum MuJoCo finger actuator force limit [N·m].",
         )
-        parser.add_argument("--hold-kp", type=float, default=8000.0, help="Stiffness for non-folding robot joints.")
-        parser.add_argument("--hold-kd", type=float, default=400.0, help="Velocity gain for non-folding robot joints.")
+        parser.add_argument(
+            "--hold-kp",
+            type=float,
+            default=50000.0,
+            help="Stiffness for non-folding support joints.",
+        )
+        parser.add_argument(
+            "--hold-kd",
+            type=float,
+            default=1000.0,
+            help="Velocity gain for non-folding support joints.",
+        )
         parser.add_argument(
             "--hold-effort-limit",
             type=float,

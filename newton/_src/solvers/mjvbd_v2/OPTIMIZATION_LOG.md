@@ -43,6 +43,9 @@ Status values are:
 | 2026-08-21 | Add another AABB pass to sparse point contacts | Dynamic and kinematic `soft` backends | **Rejected** | Rejected before implementation: the dynamic fold scans 566,368 candidates in 0.026726 ms per collision Graph; even ten calls are below 0.1% of the measured frame |
 | 2026-08-21 | Move shape-major full-surface AABB rejection into a private V2 collision pipeline | All `full` contact backends with full-surface contact on CUDA | **Retained** | Frozen frame-121 collision time fell from 3.825585 to 1.643479 ms (57.04% lower, 2.33x throughput) with the same 9,838 contact keys |
 | 2026-08-21 | Fuse coupled transfers and pipeline MuJoCo/VBD substeps on two CUDA streams | Dynamic coupled backend | **Rejected** | The real dynamic fold was 1.32% slower with transfer fusion and 0.90% slower with the two-stream wavefront; a 1.66% light-scene gain did not transfer to the representative workload |
+| 2026-08-24 | Capture complete dynamic-fold frames on one CUDA stream | Dynamic coupled example execution | **Retained** | The dynamic T-shirt fold improved from 3.42 to 16.2 FPS (4.74x); particle state remained bitwise equal and joint differences stayed below 5.37e-7 |
+| 2026-08-24 | Solve dynamic-fold IK during each captured frame | Dynamic coupled example execution | **Retained** | Realtime IK Graph replay reached 14.7 FPS; Graph/eager IK targets were exact, particle state was bitwise equal, and the complete 900-frame test passed |
+| 2026-08-24 | Fuse mutually exclusive active/inactive truncation application | Optimized `vbd_soft/` self-contact path | **Retained** | An isolated 1,800-iteration Graph was 46.6%--46.8% faster for both selector values; outputs were bitwise equal and the 450-frame dynamic fold passed |
 | 2026-08-21 | Selectively port PR 3995 soft-contact traversal and capacity sizing | Both private VBD implementations and sparse contact helpers | **Retained, batch-gated** | A 1,024-world CUDA Graph benchmark is 4.81% faster; world-compatible preallocation removes a 1,024x capacity overestimate in that setup |
 | 2026-08-21 | Cache a particle-color membership mask per rigid-soft contact | Complete `vbd/` particle-side rigid-soft solve | **Retained** | Frozen contact solve is 5.39% faster including mask construction; full handoff graph is 6.99% faster in a consecutive run |
 | 2026-08-24 | Compact AABB-active full-surface candidates before SDF optimization | CUDA `full` contact backends with full-surface contact | **Retained, gated** | Handoff collision Graph median is 10.58% faster and full frame median is 6.58% faster; pneumatic and 100%-active collision Graphs are 60.54% and 47.21% faster |
@@ -57,6 +60,179 @@ Status values are:
 | 2026-08-10 | Articulation-only dispatch shortcut (`89002b52`) | `pure_mujoco` and `kinematic_passthrough` | **Retained** | Structurally removes VBD construction and execution; no standardized timing archive |
 
 ## Detailed experiments
+
+### 2026-08-24: capture the dynamic fold as a single-stream frame graph
+
+The dynamic T-shirt example previously overrode `capture()` to disable CUDA
+Graph execution unconditionally. One displayed frame submits ten coupled
+MuJoCo/VBD substeps, and every substep runs 20 colored VBD iterations. The
+uncaptured path also read the active soft-contact count inside each VBD step
+and copied the shape-friction array through the host once per frame. This made
+kernel submission and synchronization overhead large even though the
+MuJoCo-to-VBD order was already correct.
+
+**Retained implementation.** The dynamic example now records one complete
+single-stream frame graph for each scripted material tuple. A device counter
+loads both cached PD-target endpoints before the coupled solve, so Graph replay
+preserves the original target-to-target interpolation rather than inheriting
+the kinematic example's actual-state-to-target interpolation. The counter
+saturates with both endpoints at the final cache row, avoiding a persistent
+nonzero target velocity after the script ends. Construction skips the base
+class's temporary kinematic solver and records only after the dynamic coupled
+solver and contact buffers exist.
+
+The uncaptured fallback now updates shape friction with a device kernel instead
+of copying the array to NumPy and back. Contact-count diagnostics run only in
+`--test` mode. No solver source, trajectory, PD gain, contact coefficient,
+substep count, VBD iteration count, collision cadence, or one-way coupling
+rule changed. CUDA uses Graph by default; `--no-graph-capture` retains the
+ordinary execution path.
+
+**Local A/B measurement.** The example ran on an NVIDIA GeForce RTX 5090 D v2
+with its then-default trajectory time scale of 2, ten substeps, 20 VBD iterations,
+cloth self-contact enabled, and a null viewer. Each separate process used three
+warm-up frames followed by 17 measured frames at ordinary process priority.
+The timing excludes offline IK-cache construction and Graph recording.
+
+| Execution | Measured time | Throughput |
+| --- | ---: | ---: |
+| Uncaptured single stream | 4.97 s / 17 frames | 3.42 FPS |
+| Complete-frame CUDA Graph | 1.05 s / 17 frames | 16.2 FPS |
+
+This is approximately 4.74x throughput and 78.9% lower measured frame time.
+It is a short end-to-end viewer benchmark rather than a multi-sample median,
+but the margin is much larger than the run-to-run noise observed in prior
+single-digit-percent experiments.
+
+**Correctness evidence.** A five-frame Graph/non-Graph comparison exercised
+material changes and final-cache saturation. `particle_q` and `particle_qd`
+were bitwise identical. Maximum absolute differences were 1.49e-8 for
+`joint_q` and 5.37e-7 for `joint_qd`, consistent with floating-point launch
+rounding and far below visible or control-relevant scale. A CUDA `--test` run
+also captured and replayed the optional contact-count diagnostic. The CPU
+uncaptured path completed a separate construction-and-step smoke test.
+
+**Decision.** Retain the complete single-stream Graph in the dynamic example.
+Do not interpret this result as support for same-GPU MuJoCo/VBD concurrency:
+the rejected two-stream experiment competed for GPU resources, while this
+change preserves strict sequential dependencies and removes submission and
+readback overhead.
+
+### 2026-08-24: solve dynamic-fold IK inside the frame graph
+
+The dynamic T-shirt example originally generated its complete joint-target
+trajectory during construction and replayed adjacent cache rows as MuJoCo
+position/velocity-drive targets. That kept IK outside the measured frame but
+could not respond to a target producer that changes at runtime.
+
+**Retained implementation.** Both folding examples now own persistent device
+buffers for the current Cartesian TCP poses and grip command. Every displayed
+frame updates those inputs and executes 24 fixed IK iterations. The kinematic
+example interpolates from its current prescribed joint state. The dynamic
+example instead retains the preceding IK solution as the start of its MuJoCo
+PD-target interval; using the lagging simulated joint state there would turn
+tracking error into an incorrect target velocity. MuJoCo still integrates the
+robot and VBD still consumes one-way link proxies. No dynamic joint position is
+written directly.
+
+The complete CUDA Graph contains target unpacking, IK, material selection, ten
+coupled substeps, and 20 VBD iterations per substep. The examples no longer
+contain an offline joint-target cache or a device cache-row counter. Cartesian
+trajectory sampling remains a host-side input producer and can be replaced by
+another realtime pose source without changing the captured computation.
+
+**Performance evidence.** A short null-viewer run on an NVIDIA GeForce RTX
+5090 D v2 used the then-default trajectory time scale of 2, ten substeps, 20 VBD
+iterations, and three warm-up frames. The following 17 frames ran at 14.7 FPS.
+The earlier cached-target measurement in the preceding section was 16.2 FPS;
+the roughly 9% throughput difference is supporting evidence from separate
+runs, not a controlled revision A/B, and represents the expected cost of 24
+IK iterations now executed every frame.
+
+**Correctness evidence.** A five-frame Graph/eager comparison at trajectory
+time scale 100 produced bitwise-identical IK solutions, PD targets, particle
+positions, and particle velocities. Maximum absolute MuJoCo differences were
+4.77e-7 rad in joint position and 1.53e-5 rad/s in joint velocity. Neither
+instance created `cached_joint_targets`. Separate two-frame Graph and eager
+tests crossed accelerated material phases. Finally, the default 900-frame
+Graph run passed all per-frame finite-state checks and the final dynamic
+backend, joint motion, tracking-error, cloth-contact, and folded-area checks.
+
+The dynamic class now inherits the same TCP, grip, timing, and material
+schedule as the kinematic example. Its former release override opened each
+hand from fully closed to fully open while stationary at the first and second
+place poses, causing the finger geometry to sweep through the shirt before
+lift-away. The first shared replacement still began lift-away at 0.75 grip.
+A joint-tracking trace showed that this was a geometric clamp rather than a
+dynamic-IK lag: the driven finger coordinates tracked within about 0.003 rad,
+while the larger 0.06 rad error belonged to the passive PIP mimic and opened
+the finger rather than closing it. The retained trajectory therefore relaxes
+grip from 1.0 to 0.25 while the TCP is stationary, then opens from 0.25 to 0.0
+during lift-away. TCP poses, segment durations, friction phases, solver
+iterations, and contact parameters are unchanged. A former dynamic-only
+material override used a condition that stayed active after the first place
+pose, unintentionally forcing every later open-hand phase—including the final
+retreat after the second fold—to zero friction instead of restoring the shared
+0.25 value.
+
+A separate tracking diagnostic showed that the `ANKLE`, `KNEE`, and
+`BUTTOCK` support drives contributed a correlated 16.6 mm TCP displacement
+with the original 8,000/400 gains. Raising only the non-folding support gains
+to 50,000/1,000 reduced the displacement to 4.3 mm; doubling stiffness again
+recovered only another 1.2 mm. The conservative 50,000/1,000 values are
+therefore retained. One complete 900-frame default Graph test passed after the
+trajectory and support-drive corrections. Two subsequent repetitions became
+non-finite at frames 715 and 724 with respectively zero and 0.25 final-retreat
+finger friction. That late-fold sensitivity is therefore not attributed to
+the material phase; it remains a separate robustness issue in this dense,
+nondeterministic self-contact trajectory.
+
+**Decision.** Retain realtime IK in both folding examples. Keep it inside the
+single-stream frame Graph so the functional requirement adds IK computation
+without restoring per-iteration Python launch overhead.
+
+### 2026-08-24: fuse device-selected truncation application
+
+The optimized `vbd_soft/` self-contact path keeps its active-contact selector
+on the device so it remains CUDA Graph compatible. For each particle color
+and VBD iteration, it formerly launched two mutually exclusive kernels: the
+active branch applied planar truncation to every particle, and the inactive
+branch applied identity truncation only to the selected color. One kernel did
+all useful work while every thread in the other returned. The dynamic T-shirt
+frame launches each family 1,800 times (ten substeps, 20 iterations, and nine
+color passes), so the redundant Graph node was measurable even when it did no
+arithmetic.
+
+**Retained implementation.** One solver-local kernel reads the same device
+selector. When active, its particle-count launch uses each thread index and
+the computed truncation factor. When inactive, threads beyond the selected
+color count return and the remaining threads use the selected particle IDs
+with an identity factor. It preserves the all-particle active path, selected
+inactive path, displacement clamp, output writes, fixed capture topology across
+runtime selector values, and Gauss--Seidel order. The complete `vbd/` solver
+is unchanged because it does not use this two-kernel selector.
+
+**Controlled A/B.** An NVIDIA GeForce RTX 5090 D v2 benchmark used 5,886
+particles, 736 selected particles, and a captured 1,800-iteration Graph. Each
+variant received identical positions, displacements, truncation factors, and
+selector values. Ten warm-up replays preceded 21 timed replays; the table
+reports the median complete-Graph GPU time.
+
+| Device selector | Two kernels | Fused kernel | Reduction |
+| --- | ---: | ---: | ---: |
+| No active self-contact | 8.742705 ms | 4.665207 ms | 46.64% |
+| Active self-contact | 7.166376 ms | 3.814676 ms | 46.77% |
+
+The benchmark compared displacement and position outputs bitwise for both
+selector values. A representative evolving-frame trace also reduced the two
+truncation-application families from about 13.6--16.0 ms to about 6.5 ms, but
+that cross-run figure is supporting evidence rather than the controlled A/B.
+The full 450-frame dynamic folding example passed its finite-state, realtime
+IK, dynamic backend, contact, tracking-error, and folded-area assertions.
+
+**Decision.** Retain the fused private `vbd_soft/` kernel. It removes one
+kernel family without changing collision detection, contact evaluation,
+iteration count, material behavior, or any backend outside MJVBDV2.
 
 ### 2026-08-21: parallelize dense rigid-side soft contacts
 
