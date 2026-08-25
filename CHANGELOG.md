@@ -11,6 +11,7 @@
 - Add a full-W1 MJVBDV2 example that sequentially places a soft cube and a rigid cube into one compliant bag.
 - Add ViewerGL TCP gizmos for coarse hand-arm placement before fine pose adjustment.
 - Add an MJVBDV2 dynamic Dexforce bimanual T-shirt folding example.
+- Add an MJVBDV2 nonwoven-bag table-drop example with a repository-local Style3D asset.
 - Add a VBD example of a standalone Dexforce W1 left hand holding a stiff C-bent card packet.
 - Add `genesis_w1_card_shuffle_replay` and `genesis_w1_card_shuffle_square_replay` examples that replay Genesis-IPC-baked complete-W1 card-shuffle caches (robot link poses and deforming card vertices) without re-solving the IPC scene.
 - Add experimental `SolverMJVBDV2` joint-proxy coupling and rigid, soft-body, and cloth example matrix.
