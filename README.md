@@ -728,7 +728,7 @@ If you run the examples from a source checkout with uv, use
       </a>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_vbd_mjvbd_v2_right_hand_armadillo_into_gear_crusher.py">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_vbd_mjvbd_v2_right_hand_armadillo_into_gear_crusher_final00.py">
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_mjvbd_v2_right_hand_armadillo_into_gear_crusher.jpg" alt="MJVBDV2 Right-Hand Armadillo Gear-Crusher Handoff">
       </a>
     </td>
@@ -741,7 +741,7 @@ If you run the examples from a source checkout with uv, use
       <code>python -m newton.examples mjvbd_v2_gear_crusher</code>
     </td>
     <td align="center" width="33%">
-      <code>python -m newton.examples vbd_mjvbd_v2_right_hand_armadillo_into_gear_crusher</code>
+      <code>python -m newton.examples vbd_mjvbd_v2_right_hand_armadillo_into_gear_crusher_final00</code>
     </td>
   </tr>
   <tr>
@@ -783,7 +783,11 @@ If you run the examples from a source checkout with uv, use
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_supermarket_plastic_bag.jpg" alt="MJVBDV2 Dexforce Bimanual Plastic Bag Rod Handoff">
       </a>
     </td>
-    <td align="center" width="33%"></td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_vbd_mjvbd_v2_dexforce_recorded_plastic_inflatable_bag_pick_release_final00.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_mjvbd_v2_right_hand_recorded_plastic_inflatable_bag_pick_release.jpg" alt="MJVBDV2 Full-W1 Plastic Inflatable Bag Grasp">
+      </a>
+    </td>
   </tr>
   <tr>
     <td align="center" width="33%">
@@ -792,6 +796,24 @@ If you run the examples from a source checkout with uv, use
     <td align="center" width="33%">
       <code>python -m newton.examples mjvbd_v2_dexforce_bimanual_plastic_bag_rod_handoff</code>
     </td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples vbd_mjvbd_v2_dexforce_recorded_plastic_inflatable_bag_pick_release_final00</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_w1_bimanual_plastic_bag_rod_final00.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_supermarket_plastic_bag.jpg" alt="MJVBDV2 Full-W1 Bimanual Plastic Bag Rod Handoff">
+      </a>
+    </td>
+    <td align="center" width="33%"></td>
+    <td align="center" width="33%"></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <code>python -m newton.examples mjvbd_v2_dexforce_w1_bimanual_plastic_bag_rod_final00</code>
+    </td>
+    <td align="center" width="33%"></td>
     <td align="center" width="33%"></td>
   </tr>
   <tr>

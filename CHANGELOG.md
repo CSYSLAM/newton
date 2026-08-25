@@ -6,6 +6,8 @@
 
 - Add an MJVBDV2 Dexforce example that physically grasps a soft Armadillo, carries it from a table, and releases it into counter-rotating crusher gears.
 - Add an MJVBDV2 right-hand inflatable-bag grasp example with configurable bending plasticity and reverse yielding.
+- Add a full-W1 realtime-IK variant of the MJVBDV2 plastic inflatable-bag grasp and release example.
+- Add a full-W1 realtime-IK variant of the MJVBDV2 bimanual plastic-bag rod handoff example.
 - Add a full-W1 MJVBDV2 example that sequentially places a soft cube and a rigid cube into one compliant bag.
 - Add ViewerGL TCP gizmos for coarse hand-arm placement before fine pose adjustment.
 - Add an MJVBDV2 dynamic Dexforce bimanual T-shirt folding example.

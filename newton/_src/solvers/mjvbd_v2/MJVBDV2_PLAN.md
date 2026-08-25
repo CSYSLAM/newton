@@ -470,7 +470,7 @@ The historical reference hashes are recorded in `BASELINES.md`.
   joint-free pure VBD.
 - `newton/examples/mjvbdv2/example_vbd_inflatable_bag_v0.py` and
   `example_vbd_inflatable_bag_v1.py`: pneumatic shells.
-- `newton/examples/mjvbdv2/example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house.py`:
+- `newton/examples/mjvbdv2/example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00.py`:
   prescribed bimanual kinematic cloth interaction.
 - `newton/examples/mjvbdv2/example_cloth_mjvbd_v2_dynamic_dexforce_bimanual_fold_tshirt_waic_house.py`:
   dynamic MuJoCo articulation with one-way VBD cloth coupling.

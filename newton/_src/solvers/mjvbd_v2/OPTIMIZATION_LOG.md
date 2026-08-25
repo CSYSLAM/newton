@@ -83,7 +83,7 @@ shape flags, contact thresholds, pair IDs, SDF iterations, capacities, and
 Graph launch topology are unchanged. No shared collision or VBD file changed.
 
 **End-to-end measurement.** An NVIDIA GeForce RTX 5090 D v2 ran
-`example_vbd_mjvbd_v2_right_hand_armadillo_into_gear_crusher` with a null
+`example_vbd_mjvbd_v2_right_hand_armadillo_into_gear_crusher_final00` with a null
 viewer, complete-frame CUDA Graph, ten substeps, ten VBD iterations, 15,228
 particles, 62,770 tetrahedra, 20,000 surface triangles, 30,000 surface edges,
 and 26 shapes. Both separate-process runs used three warm-up frames and 297
@@ -519,7 +519,7 @@ Runtime particle positions, body poses, shape flags, and contact-margin
 overrides are read on every launch.
 
 **Controlled A/B.** The benchmark loaded the same saved frame-121 state from
-`example_mjvbd_v2_dexforce_bimanual_plastic_bag_rod_handoff0000.py` into an
+`example_mjvbd_v2_dexforce_bimanual_plastic_bag_rod_handoff.py` into an
 exact shared `CollisionPipeline` and the private candidate in one process. It
 used an NVIDIA GeForce RTX 5090 D v2, 5,886 particles, 11,512 triangles,
 17,399 edges, 24 selected full-surface shapes, 417,576 edge/shape pairs, and
@@ -885,7 +885,7 @@ the same gate because its grid-stride loop was slower than the legacy
 one-thread-per-capacity launch in the measured single scene.
 
 **Local A/B measurements.** A CUDA Graph run of
-`example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house.py` used an
+`example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00.py` used an
 NVIDIA GeForce RTX 5090 D v2, 10 substeps, 20 VBD iterations, 6,436 particles,
 12,736 triangles, 19,174 edges, 88 shapes, 566,368 particle-shape candidates,
 and about 5,050 active contacts. Each process warmed 100 frames and reported
