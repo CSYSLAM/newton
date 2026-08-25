@@ -252,13 +252,16 @@ enabled on CUDA, edge/shape and face/shape candidates are stored in stable
 shape-major order. After the ordinary rigid and per-particle passes have
 updated shape AABBs, two lightweight kernels compare each soft feature's
 world AABB against its rigid shape AABB. The feature AABB is expanded by the
-runtime soft margin and maximum incident particle radius; the shape AABB is
-already expanded by its shape margin and gap. Non-overlapping pairs return
-before transforms or SDF samples. Candidate capacities, replay-tid ranges,
-contact thresholds, SDF iteration counts, and emitted record fields are
-unchanged, so the path remains CUDA-Graph-capturable and supports runtime
-shape-flag changes. CPU and disabled/full-surface-empty scenes use the shared
-implementation without allocating masks.
+runtime soft margin and maximum incident particle radius. The shared rigid
+AABB contains both `shape_margin` and the rigid-only `shape_gap`; the private
+test removes any positive gap with a 1e-6 m conservative safety margin, leaving
+the shape margin that participates in the soft-contact threshold. Negative
+gaps retain their shared deliberately reduced bound. Non-overlapping pairs
+return before transforms or SDF samples. Candidate capacities, replay-tid
+ranges, contact thresholds, SDF iteration counts, and emitted record fields
+are unchanged, so the path remains CUDA-Graph-capturable and supports runtime
+shape-flag and gap changes. CPU and disabled/full-surface-empty scenes use the
+shared implementation without allocating masks.
 
 When examples restrict full-surface contact to selected collision shapes,
 candidate and contact buffers should be sized for those shapes rather than the

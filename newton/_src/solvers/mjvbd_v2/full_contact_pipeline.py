@@ -29,6 +29,7 @@ __all__ = ["MJVBDV2CollisionPipeline"]
 _COMPACT_SOFT_SURFACE_BLOCK_DIM = 128
 _COMPACT_SOFT_SURFACE_BLOCKS_PER_SM = 2
 _ENABLE_COMPACT_SOFT_SURFACE_PAIRS = True
+_SOFT_SURFACE_AABB_SAFETY_MARGIN = 1.0e-6
 
 
 def _shape_major_pairs(pairs: wp.array[wp.vec2i]) -> wp.array[wp.vec2i]:
@@ -66,6 +67,7 @@ def _mark_soft_edge_pairs_active(
     shape_flags: wp.array[wp.int32],
     shape_aabb_lower: wp.array[wp.vec3],
     shape_aabb_upper: wp.array[wp.vec3],
+    shape_gap: wp.array[float],
     margin: float,
     compact_pairs: bool,
     compact_pair_indices: wp.array[wp.int32],
@@ -87,11 +89,16 @@ def _mark_soft_edge_pairs_active(
     q = particle_q[v1]
     padding = margin + wp.max(particle_radius[v0], particle_radius[v1])
     padding_vector = wp.vec3(padding, padding, padding)
+    # The shared rigid broad phase expands these AABBs by shape_gap, but
+    # full-surface soft contact only uses shape_margin. Remove that unrelated
+    # positive expansion while leaving a small conservative safety margin.
+    aabb_shrink = wp.max(shape_gap[shape] - _SOFT_SURFACE_AABB_SAFETY_MARGIN, 0.0)
+    shrink_vector = wp.vec3(aabb_shrink, aabb_shrink, aabb_shrink)
     is_active = _aabb_overlap(
         wp.min(p, q) - padding_vector,
         wp.max(p, q) + padding_vector,
-        shape_aabb_lower[shape],
-        shape_aabb_upper[shape],
+        shape_aabb_lower[shape] + shrink_vector,
+        shape_aabb_upper[shape] - shrink_vector,
     )
     active[tid] = wp.uint8(is_active)
     if compact_pairs and is_active:
@@ -108,6 +115,7 @@ def _mark_soft_face_pairs_active(
     shape_flags: wp.array[wp.int32],
     shape_aabb_lower: wp.array[wp.vec3],
     shape_aabb_upper: wp.array[wp.vec3],
+    shape_gap: wp.array[float],
     margin: float,
     compact_pairs: bool,
     compact_pair_indices: wp.array[wp.int32],
@@ -131,11 +139,13 @@ def _mark_soft_face_pairs_active(
     r = particle_q[v2]
     padding = margin + wp.max(particle_radius[v0], wp.max(particle_radius[v1], particle_radius[v2]))
     padding_vector = wp.vec3(padding, padding, padding)
+    aabb_shrink = wp.max(shape_gap[shape] - _SOFT_SURFACE_AABB_SAFETY_MARGIN, 0.0)
+    shrink_vector = wp.vec3(aabb_shrink, aabb_shrink, aabb_shrink)
     is_active = _aabb_overlap(
         wp.min(p, wp.min(q, r)) - padding_vector,
         wp.max(p, wp.max(q, r)) + padding_vector,
-        shape_aabb_lower[shape],
-        shape_aabb_upper[shape],
+        shape_aabb_lower[shape] + shrink_vector,
+        shape_aabb_upper[shape] - shrink_vector,
     )
     active[tid] = wp.uint8(is_active)
     if compact_pairs and is_active:
@@ -804,6 +814,7 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
                     model.shape_flags,
                     shape_aabb_lower,
                     shape_aabb_upper,
+                    model.shape_gap,
                     margin,
                     self._use_soft_surface_compaction,
                     self._soft_edge_compact_pair_indices,
@@ -826,6 +837,7 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
                     model.shape_flags,
                     shape_aabb_lower,
                     shape_aabb_upper,
+                    model.shape_gap,
                     margin,
                     self._use_soft_surface_compaction,
                     self._soft_face_compact_pair_indices,

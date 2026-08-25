@@ -727,7 +727,11 @@ If you run the examples from a source checkout with uv, use
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_gear_crusher.jpg" alt="MJVBDV2 Gear Crusher">
       </a>
     </td>
-    <td align="center" width="33%"></td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_vbd_mjvbd_v2_right_hand_armadillo_into_gear_crusher.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_mjvbd_v2_right_hand_armadillo_into_gear_crusher.jpg" alt="MJVBDV2 Right-Hand Armadillo Gear-Crusher Handoff">
+      </a>
+    </td>
   </tr>
   <tr>
     <td align="center" width="33%">
@@ -736,7 +740,9 @@ If you run the examples from a source checkout with uv, use
     <td align="center" width="33%">
       <code>python -m newton.examples mjvbd_v2_gear_crusher</code>
     </td>
-    <td align="center" width="33%"></td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples vbd_mjvbd_v2_right_hand_armadillo_into_gear_crusher</code>
+    </td>
   </tr>
   <tr>
     <td align="center" width="33%">

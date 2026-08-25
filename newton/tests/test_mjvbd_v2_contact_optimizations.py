@@ -363,7 +363,7 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
 
     @unittest.skipUnless(wp.is_cuda_available(), "Private full-surface pruning requires CUDA")
     def test_private_full_surface_pipeline_matches_shared_contacts(self):
-        """Preserve the full-surface contact set while pruning distant shape pairs."""
+        """Preserve full-surface contacts while pruning gap-only shape pairs."""
         device = wp.get_device("cuda:0")
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         builder.add_shape_box(
@@ -375,7 +375,7 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
         )
         builder.add_shape_box(
             body=-1,
-            xform=wp.transform(wp.vec3(8.0, 0.0, 0.0), wp.quat_identity()),
+            xform=wp.transform(wp.vec3(0.0, 0.0, 1.12), wp.quat_identity()),
             hx=0.5,
             hy=0.5,
             hz=0.5,
@@ -389,6 +389,7 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
             cell_x=2.0,
             cell_y=2.0,
             mass=0.1,
+            particle_radius=0.01,
         )
         builder.color()
         model = builder.finalize(device=device)
@@ -410,10 +411,14 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
 
         edge_active = private_pipeline._soft_edge_pair_active.numpy()
         face_active = private_pipeline._soft_face_pair_active.numpy()
+        edge_pairs = private_pipeline.soft_edge_rigid_pairs.numpy()
+        face_pairs = private_pipeline.soft_face_rigid_pairs.numpy()
         self.assertGreater(int(np.count_nonzero(edge_active)), 0)
         self.assertGreater(int(np.count_nonzero(edge_active == 0)), 0)
         self.assertGreater(int(np.count_nonzero(face_active)), 0)
         self.assertGreater(int(np.count_nonzero(face_active == 0)), 0)
+        np.testing.assert_array_equal(edge_active[edge_pairs[:, 1] == 1], 0)
+        np.testing.assert_array_equal(face_active[face_pairs[:, 1] == 1], 0)
         self.assertTrue(private_pipeline._use_soft_surface_compaction)
         compact_counts = private_pipeline._soft_surface_compact_counts.numpy()
         edge_compact = private_pipeline._soft_edge_compact_pair_indices.numpy()[: compact_counts[0]]

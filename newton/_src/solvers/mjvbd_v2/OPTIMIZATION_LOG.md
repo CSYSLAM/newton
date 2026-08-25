@@ -49,6 +49,8 @@ Status values are:
 | 2026-08-21 | Selectively port PR 3995 soft-contact traversal and capacity sizing | Both private VBD implementations and sparse contact helpers | **Retained, batch-gated** | A 1,024-world CUDA Graph benchmark is 4.81% faster; world-compatible preallocation removes a 1,024x capacity overestimate in that setup |
 | 2026-08-21 | Cache a particle-color membership mask per rigid-soft contact | Complete `vbd/` particle-side rigid-soft solve | **Retained** | Frozen contact solve is 5.39% faster including mask construction; full handoff graph is 6.99% faster in a consecutive run |
 | 2026-08-24 | Compact AABB-active full-surface candidates before SDF optimization | CUDA `full` contact backends with full-surface contact | **Retained, gated** | Handoff collision Graph median is 10.58% faster and full frame median is 6.58% faster; pneumatic and 100%-active collision Graphs are 60.54% and 47.21% faster |
+| 2026-08-25 | Remove rigid-only `shape_gap` from the private full-surface AABB mask | CUDA `full` contact backends with full-surface contact | **Retained** | The 300-frame Armadillo grasp improved from 6.34 to 7.00 FPS; its close-phase window improved from 4.10 to 5.51 FPS with unchanged contact thresholds |
+| 2026-08-25 | Retune self-contact block size, rebuild cadence, and reference-distance ordering | Private V2 self-contact | **Rejected** | Block size 16 remained fastest; rebuilding changed 3.312 to 3.319 ms; deferred reference tests reduced the 300-frame result from 7.00 to 6.80 FPS |
 | 2026-08-21 | Shape-major conservative AABB mask before full-surface SDF optimization | Shared full-contact edge/face generation | **Rejected** | Frozen-state collision graph was 39.4% faster, but the implementation changed Newton's shared collision pipeline and violated MJVBDV2's standalone migration boundary |
 | 2026-08-21 | Exact particle CSR and per-color compact contact lists | Complete `vbd/` particle-side rigid-soft solve | **Rejected** | Per-particle CSR was 71.7% slower; compact color lists improved the full graph only 0.21%, within noise |
 | 2026-08-20 | Full-VBD device-selected truncation fast path | Complete `vbd/` particle iterations | **Rejected** | 0.59% in the small pneumatic bag and no repeatable gain in the supermarket bag |
@@ -60,6 +62,89 @@ Status values are:
 | 2026-08-10 | Articulation-only dispatch shortcut (`89002b52`) | `pure_mujoco` and `kinematic_passthrough` | **Retained** | Structurally removes VBD construction and execution; no standardized timing archive |
 
 ## Detailed experiments
+
+### 2026-08-25: remove rigid-only gap from private soft-surface AABBs
+
+The retained private full-surface mask reused shape AABBs produced by the
+shared rigid broad phase. Those AABBs include `shape_margin + shape_gap`.
+Full-surface particle contact, however, uses the soft-contact margin, incident
+particle radius, and `shape_margin`; `shape_gap` only broadens rigid pair
+detection. The builder default is 0.1 m, so an Armadillo only 60 mm above its
+table initially admitted most table/hand edge and face pairs to SDF narrow
+phase even though they could not emit a soft contact.
+
+**Retained implementation.** The two MJVBDV2-private mask kernels tighten the
+shared AABB by each shape's positive gap before testing an edge or face. They
+leave `shape_margin` in the shape bound and continue to expand the soft feature
+by the runtime soft-contact margin and maximum incident particle radius. A
+1e-6 m safety margin keeps the rejection conservative. Negative gaps retain
+their original deliberately reduced broad-phase bound. Shape transforms,
+shape flags, contact thresholds, pair IDs, SDF iterations, capacities, and
+Graph launch topology are unchanged. No shared collision or VBD file changed.
+
+**End-to-end measurement.** An NVIDIA GeForce RTX 5090 D v2 ran
+`example_vbd_mjvbd_v2_right_hand_armadillo_into_gear_crusher` with a null
+viewer, complete-frame CUDA Graph, ten substeps, ten VBD iterations, 15,228
+particles, 62,770 tetrahedra, 20,000 surface triangles, 30,000 surface edges,
+and 26 shapes. Both separate-process runs used three warm-up frames and 297
+measured frames at ordinary process priority.
+
+| Private full-surface bound | Time / 297 frames | Throughput |
+| --- | ---: | ---: |
+| Rigid AABB including 0.1 m `shape_gap` | 46.82 s | 6.34 FPS |
+| Same AABB tightened to the soft-contact bound | 42.42 s | 7.00 FPS |
+
+Synchronized 20-frame windows show that the gain grows when the hand creates
+many contacts:
+
+| Phase window | Before | After | Frame-time reduction |
+| --- | ---: | ---: | ---: |
+| Initial hold | 153.572 ms | 142.428 ms | 7.26% |
+| Pre-grasp hold | 135.747 ms | 122.639 ms | 9.66% |
+| Finger close | 244.154 ms | 181.465 ms | 25.68% |
+| Grasp settle | 261.006 ms | 209.131 ms | 19.88% |
+
+At a representative close state, the private compact pass admitted 48,360
+edge pairs and 33,302 face pairs. Before tightening, a comparable close state
+admitted 658,776 and 439,767 pairs respectively. These evolving-state counts
+explain the hotspot reduction but are not an exact frozen-state comparison.
+After the change, one eager close frame spent 19.897 ms in compact face SDF
+generation and 1.485 ms in edge SDF generation; before it spent 53.238 and
+4.437 ms respectively.
+
+**Correctness evidence.** The focused CUDA regression places a second rigid
+box inside the default 0.1 m rigid gap but outside every full-surface soft
+threshold. Its pairs are rejected while the private and shared pipelines
+still emit identical sorted shape/particle keys, barycentrics, body-local
+points, and normals. The same test changes runtime margins, captures and
+replays the Graph, and toggles `COLLIDE_PARTICLES`. A 320-frame Armadillo trace
+remained finite through initial hold, approach, close, and grasp settle.
+
+**Decision.** Retain. This removes only a rigid-broad-phase expansion that is
+not part of the soft-contact equation, gives a material end-to-end gain, and
+keeps the implementation within the MJVBDV2 migration boundary.
+
+### 2026-08-25: reject additional self-contact tuning
+
+After the retained AABB change, an eager close-frame GPU profile measured
+192.727 ms. Edge-edge detection used 59.259 ms, vertex-triangle detection
+29.615 ms, self-contact force/Hessian evaluation 28.097 ms, planar truncation
+29.501 ms, rigid-soft SDF generation 21.382 ms, and volumetric elasticity
+10.394 ms. Self-contact is therefore the remaining dominant cost, but the
+following exact-semantics experiments did not improve it:
+
+- CUDA collision block sizes 16, 32, 64, 128, and 256 measured 3.368, 3.899,
+  3.630, 3.709, and 3.842 ms per complete self-detection pass. Keep 16.
+- Rebuilding both BVHs after the close deformation cost 0.477 ms and changed a
+  repeated detection pass from 3.312 to 3.319 ms. Refit quality was not the
+  cause of the slowdown.
+- Testing current distance before the rest-shape exclusion is algebraically
+  equivalent, but its extra branch/register pressure reduced the 300-frame
+  Graph result from 7.00 to 6.80 FPS. The shared prototype was reverted.
+
+Do not reduce self-contact cadence, radius, exclusion distance, substeps, or
+VBD iterations under the label of a no-effect optimization. Further work
+needs a contact-set-preserving algorithmic change and a new controlled A/B.
 
 ### 2026-08-24: capture the dynamic fold as a single-stream frame graph
 
