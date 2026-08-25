@@ -1,5 +1,0 @@
-numpy
-trimesh
-fast-simplification
-tetgen
-matplotlib

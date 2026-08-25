@@ -1,16 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Crush a tetrahedral Armadillo with the VBD solver.
+"""Crush a tetrahedral Armadillo with the MJVBDV2 pure-VBD backend.
 
-This uses the same DexSim gear-crusher asset, procedural 16-tooth rollers,
-dimensions, material parameters, prescribed motion, and timing as the
-MJVBDV2 comparison scene. Only the solver and its collision-pipeline plumbing
-differ: this example uses :class:`newton.solvers.SolverVBD` directly.
+This reproduces the DexSim gear-crusher scene with its original VTK asset,
+procedural 16-tooth rollers, dimensions, material parameters, and prescribed
+roller motion. The scene has no joints: MJVBDV2 selects ``pure_vbd`` and VBD
+solves the tetrahedral body, self-contact, and particle contact against the two
+externally prescribed kinematic rollers.
 
 Run, from the repository root::
 
-    uv run --extra examples -m newton.examples gear_crusher
+    uv run --extra examples -m newton.examples mjvbd_v2_gear_crusher
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.solvers import SolverVBD
+from newton.solvers import SolverMJVBDV2
 
 FPS = 60
 DEFAULT_NUM_FRAMES = 360
@@ -198,7 +199,7 @@ def load_vtk_tet_mesh(path: Path) -> tuple[np.ndarray, np.ndarray]:
 
 
 class Example:
-    """Run the gear crusher with the standalone VBD solver."""
+    """Run the gear crusher through MJVBDV2's pure-VBD specialization."""
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -218,7 +219,7 @@ class Example:
 
         builder = newton.ModelBuilder(gravity=wp.vec3(0.0, 0.0, -9.81))
         builder.default_particle_radius = CONTACT_RADIUS
-        SolverVBD.register_custom_attributes(builder, dahl_defaults_enabled=False)
+        SolverMJVBDV2.register_custom_attributes(builder)
 
         gear_cfg = newton.ModelBuilder.ShapeConfig(
             density=0.0,
@@ -296,34 +297,34 @@ class Example:
         self.model.soft_contact_kd = CONTACT_KD
         self.model.soft_contact_mu = CONTACT_MU
 
-        self.collision_pipeline = newton.CollisionPipeline(
+        self.solver = SolverMJVBDV2(
             self.model,
-            broad_phase="nxn",
-            include_static_kinematic_pairs=False,
-            soft_contact_margin=SOFT_CONTACT_MARGIN,
-            enable_rigid_soft_full_surface_contact=False,
+            contact_mode="soft",
+            collision_options={"soft_contact_margin": SOFT_CONTACT_MARGIN},
+            vbd_options={
+                "iterations": self.vbd_iterations,
+                "particle_enable_self_contact": True,
+                "particle_self_contact_radius": CONTACT_RADIUS,
+                "particle_self_contact_margin": 0.0075,
+                "particle_conservative_bound_relaxation": 0.85,
+                "particle_collision_detection_interval": 5,
+                "particle_topological_contact_filter_threshold": 1,
+                "particle_rest_shape_contact_exclusion_radius": 0.02,
+                "particle_enable_tile_solve": True,
+                "particle_vertex_contact_buffer_size": 32,
+                "particle_edge_contact_buffer_size": 64,
+                "rigid_body_particle_contact_buffer_size": 16384,
+            },
         )
-        self.contacts = self.collision_pipeline.contacts()
-        self.solver = SolverVBD(
-            self.model,
-            iterations=self.vbd_iterations,
-            integrate_with_external_rigid_solver=True,
-            particle_enable_self_contact=True,
-            particle_self_contact_radius=CONTACT_RADIUS,
-            particle_self_contact_margin=0.0075,
-            particle_conservative_bound_relaxation=0.85,
-            particle_collision_detection_interval=5,
-            particle_topological_contact_filter_threshold=1,
-            particle_rest_shape_contact_exclusion_radius=0.02,
-            particle_enable_tile_solve=True,
-            particle_vertex_contact_buffer_size=32,
-            particle_edge_contact_buffer_size=64,
-            rigid_body_particle_contact_buffer_size=16384,
-        )
+        if self.solver.features.backend != "pure_vbd":
+            raise RuntimeError(f"Gear crusher requires pure_vbd, got {self.solver.features.backend}")
+        if self.solver.features.mujoco_solve_enabled:
+            raise RuntimeError("Gear crusher unexpectedly enabled the MuJoCo solve")
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
+        self.contacts = self.solver.contacts
         self.sim_time_wp = wp.zeros(1, dtype=float, device=self.model.device)
         self.initial_particle_q = self.state_0.particle_q.numpy().copy()
         self.surface_indices = self.model.tri_indices.flatten()
@@ -348,7 +349,7 @@ class Example:
         self.graph = capture.graph
 
     def simulate(self):
-        """Advance all VBD crusher substeps."""
+        """Advance all pure-VBD crusher substeps."""
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
@@ -369,8 +370,7 @@ class Example:
                 ],
                 device=self.model.device,
             )
-            self.collision_pipeline.collide(self.state_0, self.contacts)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
             if self.track_gear_contacts:
                 wp.launch(
                     mark_gear_contact,
@@ -415,14 +415,14 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
-        """Verify finite VBD state and prescribed roller contact."""
+        """Verify finite pure-VBD state and prescribed roller motion."""
         particle_q = self.state_0.particle_q.numpy()
         if not np.all(np.isfinite(particle_q)):
             raise ValueError("Gear-crusher Armadillo state is not finite")
-        if not self.solver.integrate_with_external_rigid_solver:
-            raise ValueError("Gear crusher did not retain externally prescribed rollers")
-        if self.model.tet_count == 0:
-            raise ValueError("Gear crusher did not create tetrahedral VBD elements")
+        if self.solver.features.backend != "pure_vbd" or self.solver.features.mujoco_solve_enabled:
+            raise ValueError("Gear crusher did not retain the pure-VBD backend")
+        if not self.solver.features.tetrahedron_solve_enabled:
+            raise ValueError("Gear crusher did not enable tetrahedral VBD")
         if self.sim_time >= 0.5:
             if int(self.gear_contact_observed.numpy()[0]) == 0:
                 raise ValueError("Armadillo never contacted either crusher roller")
@@ -451,7 +451,7 @@ class Example:
             "--substeps",
             type=int,
             default=DEFAULT_SUBSTEPS,
-            help="VBD substeps per displayed frame.",
+            help="Pure-VBD substeps per displayed frame.",
         )
         parser.add_argument(
             "--vbd-iterations",
