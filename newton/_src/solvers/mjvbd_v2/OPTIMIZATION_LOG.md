@@ -74,12 +74,13 @@ MuJoCo-to-VBD order was already correct.
 **Retained implementation.** The dynamic example now records one complete
 single-stream frame graph for each scripted material tuple. A device counter
 loads both cached PD-target endpoints before the coupled solve, so Graph replay
-preserves the original target-to-target interpolation rather than inheriting
-the kinematic example's actual-state-to-target interpolation. The counter
+preserves the original target-to-target interpolation instead of using the
+kinematic example's actual-state-to-target interpolation. The counter
 saturates with both endpoints at the final cache row, avoiding a persistent
-nonzero target velocity after the script ends. Construction skips the base
-class's temporary kinematic solver and records only after the dynamic coupled
-solver and contact buffers exist.
+nonzero target velocity after the script ends. The standalone example keeps
+the original two-stage initialization inside one file: its file-local base
+creates the same temporary kinematic setup, then the final dynamic coupled
+solver records only after its contact buffers exist.
 
 The uncaptured fallback now updates shape friction with a device kernel instead
 of copying the array to NumPy and back. Contact-count diagnostics run only in
@@ -158,11 +159,11 @@ tests crossed accelerated material phases. Finally, the default 900-frame
 Graph run passed all per-frame finite-state checks and the final dynamic
 backend, joint motion, tracking-error, cloth-contact, and folded-area checks.
 
-The dynamic class now inherits the same TCP, grip, timing, and material
-schedule as the kinematic example. Its former release override opened each
-hand from fully closed to fully open while stationary at the first and second
-place poses, causing the finger geometry to sweep through the shirt before
-lift-away. The first shared replacement still began lift-away at 0.75 grip.
+The standalone dynamic example uses the same authored TCP, grip, timing, and
+material schedule as the kinematic example. Its former release override
+opened each hand from fully closed to fully open while stationary at the first
+and second place poses, causing the finger geometry to sweep through the shirt
+before lift-away. The first shared replacement still began lift-away at 0.75 grip.
 A joint-tracking trace showed that this was a geometric clamp rather than a
 dynamic-IK lag: the driven finger coordinates tracked within about 0.003 rad,
 while the larger 0.06 rad error belonged to the passive PIP mimic and opened
@@ -190,6 +191,38 @@ nondeterministic self-contact trajectory.
 **Decision.** Retain realtime IK in both folding examples. Keep it inside the
 single-stream frame Graph so the functional requirement adds IK computation
 without restoring per-iteration Python launch overhead.
+
+### 2026-08-25: defer dynamic-fold parity and second-pass penetration
+
+The kinematic and dynamic folding examples each solve realtime IK once per
+displayed frame with the same Cartesian targets and fixed iteration count.
+This does not make their simulated hand trajectories equivalent. The
+kinematic path writes the interpolated joint coordinates into every physics
+substep and evaluates FK directly, so its link poses exactly follow the IK
+trajectory. The dynamic path interpolates MuJoCo PD targets from the preceding
+IK solution, then MuJoCo integrates the actual joints with finite drive gains,
+damping, and effort limits. MJVBDV2 synchronizes those actual MuJoCo link
+poses, not the IK targets, into VBD as one-way moving collision proxies.
+
+Consequently the dynamic links may lag or overshoot even when both examples
+produce the same IK solution. The cloth state also diverges during the first
+fold, so the shared second-pass trajectory is no longer guaranteed to match
+the deformed cloth. The authored first grasp contains a separate hover
+approach followed by a descent, while the second pass moves directly from the
+first release pose to the second grasp pose. That diagonal open-loop segment
+has no second-pass clearance waypoint and can sweep a dynamic hand through
+the already-folded shirt. The finite-stiffness, discrete soft-contact model is
+not a hard nonpenetration constraint and cannot by itself guarantee that this
+motion remains intersection-free.
+
+The standalone dynamic example now keeps the pre-existing initialization,
+trajectory, material schedule, Graph capture, and solver order inside one
+file; this refactor does not claim to correct the second-pass penetration.
+Further dynamic-example tuning is deferred. The next targeted experiment
+should add a second-pass hover waypoint and vertical descent, then measure
+per-stage actual-to-target joint and TCP error before changing drive gains,
+phase timing, substeps, or contact parameters. Increasing IK frequency alone
+does not address the identified difference.
 
 ### 2026-08-24: fuse device-selected truncation application
 
