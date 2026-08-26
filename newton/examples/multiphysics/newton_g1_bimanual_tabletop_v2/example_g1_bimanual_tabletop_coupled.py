@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 import warp as wp
 import yaml
+from newton.solvers.experimental.coupled import SolverCoupledProxy
 from warp_nn.runtime import OnnxRuntime
 
 import newton
@@ -37,8 +38,6 @@ import newton.ik as ik
 import newton.utils
 from newton import JointTargetMode
 from newton.solvers import SolverMuJoCo, SolverVBD
-from newton.solvers.experimental.coupled import SolverCoupledProxy
-
 
 # -----------------------------------------------------------------------------
 # Scene and task constants
@@ -1058,7 +1057,9 @@ class Example:
         parser.set_defaults(num_frames=750)
         newton.examples.add_coupled_view_args(parser)
         parser.add_argument("--walk-speed", type=float, default=0.22, help="G1 forward velocity command [m/s].")
-        parser.add_argument("--robot-stop-y", type=float, default=ROBOT_STOP_Y, help="Pelvis Y stop position before reaching [m].")
+        parser.add_argument(
+            "--robot-stop-y", type=float, default=ROBOT_STOP_Y, help="Pelvis Y stop position before reaching [m]."
+        )
         parser.add_argument("--settle-time", type=float, default=1.6, help="Balance settling time before reaching [s].")
         parser.add_argument("--ik-iterations", type=int, default=28, help="GPU IK iterations per control step.")
         parser.add_argument("--posture-weight", type=float, default=4.0, help="Weight freezing non-arm IK joints.")

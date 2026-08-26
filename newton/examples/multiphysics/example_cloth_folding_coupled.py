@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 import warp as wp
+from newton.solvers.experimental.coupled import SolverCoupledProxy
 
 import newton
 import newton.examples
@@ -29,8 +30,6 @@ import newton.ik as ik
 import newton.usd
 import newton.utils
 from newton.solvers import SolverMuJoCo, SolverVBD
-from newton.solvers.experimental.coupled import SolverCoupledProxy
-
 
 # The original Newton shirt asset and folding trajectory are authored in cm.
 # This example converts both to SI units while leaving the Franka URDF at scale=1.
@@ -132,9 +131,7 @@ class Example:
         # lower bound of 1.5x the radius.
         self.self_contact_radius = float(args.self_contact_radius)
         self.self_contact_margin = (
-            1.5 * self.self_contact_radius
-            if args.self_contact_margin is None
-            else float(args.self_contact_margin)
+            1.5 * self.self_contact_radius if args.self_contact_margin is None else float(args.self_contact_margin)
         )
         if bool(args.cloth_self_contact) and self.self_contact_margin < self.self_contact_radius:
             raise ValueError(
@@ -252,9 +249,7 @@ class Example:
         # the palm/hand housing push the cloth before the fingertips can form a
         # pinch, which is especially harmful for the edge-grasp trajectory used
         # by cloth_franka.
-        self.gripper_bodies = [
-            body for body in self.franka_bodies if "finger" in builder.body_label[body]
-        ]
+        self.gripper_bodies = [body for body in self.franka_bodies if "finger" in builder.body_label[body]]
         if len(self.gripper_bodies) != 2:
             labels = [builder.body_label[body] for body in self.franka_bodies]
             raise RuntimeError(
@@ -316,15 +311,9 @@ class Example:
                 shape_ke[shape_idx] = float(self.args.contact_ke)
                 shape_kd[shape_idx] = float(self.args.contact_kd)
                 shape_mu[shape_idx] = float(self.args.table_mu)
-        self.model.shape_material_ke = wp.array(
-            shape_ke, dtype=self.model.shape_material_ke.dtype, device=self.device
-        )
-        self.model.shape_material_kd = wp.array(
-            shape_kd, dtype=self.model.shape_material_kd.dtype, device=self.device
-        )
-        self.model.shape_material_mu = wp.array(
-            shape_mu, dtype=self.model.shape_material_mu.dtype, device=self.device
-        )
+        self.model.shape_material_ke = wp.array(shape_ke, dtype=self.model.shape_material_ke.dtype, device=self.device)
+        self.model.shape_material_kd = wp.array(shape_kd, dtype=self.model.shape_material_kd.dtype, device=self.device)
+        self.model.shape_material_mu = wp.array(shape_mu, dtype=self.model.shape_material_mu.dtype, device=self.device)
 
         # VBD's soft_contact_mu is also used by cloth self-contact, so keep it
         # separate from the much higher fingertip friction.
@@ -460,18 +449,12 @@ class Example:
                         particle_enable_self_contact=bool(args.cloth_self_contact),
                         particle_self_contact_radius=self.self_contact_radius,
                         particle_self_contact_margin=self.self_contact_margin,
-                        particle_topological_contact_filter_threshold=int(
-                            args.topological_contact_filter_threshold
-                        ),
-                        particle_rest_shape_contact_exclusion_radius=float(
-                            args.rest_shape_contact_exclusion_radius
-                        ),
+                        particle_topological_contact_filter_threshold=int(args.topological_contact_filter_threshold),
+                        particle_rest_shape_contact_exclusion_radius=float(args.rest_shape_contact_exclusion_radius),
                         particle_vertex_contact_buffer_size=int(args.vertex_contact_buffer_size),
                         particle_edge_contact_buffer_size=int(args.edge_contact_buffer_size),
                         rigid_body_particle_contact_buffer_size=int(args.rigid_particle_contact_buffer_size),
-                        particle_collision_detection_interval=int(
-                            args.particle_collision_detection_interval
-                        ),
+                        particle_collision_detection_interval=int(args.particle_collision_detection_interval),
                     ),
                     bodies=[],
                     particles=shirt_particles,
@@ -541,12 +524,8 @@ class Example:
         self.ik_tcp_offset = wp.vec3(0.0, 0.0, 0.22)
         self.ik_frame_label = "fr3_link7 + (0, 0, 0.22 m)"
         first = self.targets[0]
-        self.ik_target_positions = wp.array(
-            [wp.vec3(*first[:3].tolist())], dtype=wp.vec3, device=self.device
-        )
-        self.ik_target_rotations = wp.array(
-            [wp.vec4(*first[3:7].tolist())], dtype=wp.vec4, device=self.device
-        )
+        self.ik_target_positions = wp.array([wp.vec3(*first[:3].tolist())], dtype=wp.vec3, device=self.device)
+        self.ik_target_rotations = wp.array([wp.vec4(*first[3:7].tolist())], dtype=wp.vec4, device=self.device)
 
         self.pos_obj = ik.IKObjectivePosition(
             link_index=hand_body,
@@ -845,7 +824,12 @@ class Example:
             help="Per-finger closed target [m]. Increase if the cloth is squeezed through the fingers.",
         )
 
-        parser.add_argument("--proxy-iterations", type=int, default=2, help="Proxy coupling passes per substep; two passes improve pinch-force transfer.")
+        parser.add_argument(
+            "--proxy-iterations",
+            type=int,
+            default=2,
+            help="Proxy coupling passes per substep; two passes improve pinch-force transfer.",
+        )
         parser.add_argument(
             "--mass-scale",
             type=float,

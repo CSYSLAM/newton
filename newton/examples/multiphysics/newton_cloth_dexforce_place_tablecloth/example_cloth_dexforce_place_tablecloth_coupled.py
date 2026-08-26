@@ -29,14 +29,13 @@ from pathlib import Path
 
 import numpy as np
 import warp as wp
+from newton.solvers.experimental.coupled import SolverCoupledProxy
 
 import newton
 import newton.examples
 import newton.ik as ik
 import newton.utils
 from newton.solvers import SolverMuJoCo, SolverVBD
-from newton.solvers.experimental.coupled import SolverCoupledProxy
-
 
 # ---------------------------------------------------------------------------
 # Scene constants (metres / seconds; matched to the legacy demo).
@@ -102,7 +101,9 @@ HANG_SETTLE_TIME = 0.6
 ROOT_MOTION_START_TIME = HOME_HOLD_TIME + APPROACH_TIME_HANDS + GRASP_TIME + CLOSE_TIME + LIFT_TIME + HANG_SETTLE_TIME
 ROOT_MOTION_DURATION = RETREAT_TIME + TURN_OUT_TIME + CENTER_MOVE_TIME + TURN_IN_TIME + APPROACH_TIME
 ROOT_PRE_APPROACH_TIME = RETREAT_TIME + TURN_OUT_TIME + CENTER_MOVE_TIME + TURN_IN_TIME
-SCRIPT_DURATION = ROOT_MOTION_START_TIME + ROOT_MOTION_DURATION + RELEASE_TIME + POST_RELEASE_HOLD_TIME + POST_RELEASE_LIFT_TIME
+SCRIPT_DURATION = (
+    ROOT_MOTION_START_TIME + ROOT_MOTION_DURATION + RELEASE_TIME + POST_RELEASE_HOLD_TIME + POST_RELEASE_LIFT_TIME
+)
 DEFAULT_NUM_FRAMES = int(math.ceil((SCRIPT_DURATION + FINAL_HOLD_TIME) * 60.0))
 
 CAMERA_POS = wp.vec3(1.10, -2.35, 1.70)
@@ -117,7 +118,9 @@ RIGHT_APPROACH_TF = wp.transform(
     RIGHT_TCP_ROT,
 )
 RIGHT_GRASP_TF = wp.transform(
-    wp.vec3(float(CLOTH_CENTER[0]) + CLOTH_HALF_X - 0.012, TABLECLOTH_START_Y - CLOTH_HALF_Y + 0.012, TABLE_TOP_Z + 0.055),
+    wp.vec3(
+        float(CLOTH_CENTER[0]) + CLOTH_HALF_X - 0.012, TABLECLOTH_START_Y - CLOTH_HALF_Y + 0.012, TABLE_TOP_Z + 0.055
+    ),
     RIGHT_TCP_ROT,
 )
 GRASP_HEIGHT_OFFSET = 0.015
@@ -262,30 +265,51 @@ def _resolve_robot_urdf(cli_override: str | None = None) -> Path:
         if p.is_dir():
             p = p / "DexforceW1V021.urdf"
         return p
-    return (
-        Path(__file__).resolve().parents[4]
-        / "assets"
-        / "DexforceW1V021"
-        / "DexforceW1V021.urdf"
-    )
+    return Path(__file__).resolve().parents[4] / "assets" / "DexforceW1V021" / "DexforceW1V021.urdf"
 
 
 class Example:
     LEFT_ARM_JOINTS = (
-        "LEFT_J1", "LEFT_J2", "LEFT_J3", "LEFT_J4", "LEFT_J5", "LEFT_J6", "LEFT_J7",
+        "LEFT_J1",
+        "LEFT_J2",
+        "LEFT_J3",
+        "LEFT_J4",
+        "LEFT_J5",
+        "LEFT_J6",
+        "LEFT_J7",
     )
     RIGHT_ARM_JOINTS = (
-        "RIGHT_J1", "RIGHT_J2", "RIGHT_J3", "RIGHT_J4", "RIGHT_J5", "RIGHT_J6", "RIGHT_J7",
+        "RIGHT_J1",
+        "RIGHT_J2",
+        "RIGHT_J3",
+        "RIGHT_J4",
+        "RIGHT_J5",
+        "RIGHT_J6",
+        "RIGHT_J7",
     )
     LEFT_HAND_JOINTS = (
-        "LEFT_HAND_THUMB2", "LEFT_HAND_THUMB1", "LEFT_HAND_INDEX", "LEFT_INDEX_PIP",
-        "LEFT_HAND_MIDDLE", "LEFT_MIDDLE_PIP", "LEFT_HAND_RING", "LEFT_RING_PIP",
-        "LEFT_HAND_PINKY", "LEFT_PINKY_PIP",
+        "LEFT_HAND_THUMB2",
+        "LEFT_HAND_THUMB1",
+        "LEFT_HAND_INDEX",
+        "LEFT_INDEX_PIP",
+        "LEFT_HAND_MIDDLE",
+        "LEFT_MIDDLE_PIP",
+        "LEFT_HAND_RING",
+        "LEFT_RING_PIP",
+        "LEFT_HAND_PINKY",
+        "LEFT_PINKY_PIP",
     )
     RIGHT_HAND_JOINTS = (
-        "RIGHT_HAND_THUMB2", "RIGHT_HAND_THUMB1", "RIGHT_HAND_INDEX", "RIGHT_INDEX_PIP",
-        "RIGHT_HAND_MIDDLE", "RIGHT_MIDDLE_PIP", "RIGHT_HAND_RING", "RIGHT_RING_PIP",
-        "RIGHT_HAND_PINKY", "RIGHT_PINKY_PIP",
+        "RIGHT_HAND_THUMB2",
+        "RIGHT_HAND_THUMB1",
+        "RIGHT_HAND_INDEX",
+        "RIGHT_INDEX_PIP",
+        "RIGHT_HAND_MIDDLE",
+        "RIGHT_MIDDLE_PIP",
+        "RIGHT_HAND_RING",
+        "RIGHT_RING_PIP",
+        "RIGHT_HAND_PINKY",
+        "RIGHT_PINKY_PIP",
     )
 
     def __init__(self, viewer, args):
@@ -367,8 +391,12 @@ class Example:
         self.right_lift_tf = self._offset_transform(self.right_grasp_tf, wp.vec3(0.0, 0.0, LIFT_HEIGHT))
         self.left_pre_laydown_tf = self._offset_transform(self.left_lift_tf, wp.vec3(0.7 * LAYDOWN_FORWARD, 0.0, 0.0))
         self.right_pre_laydown_tf = self._offset_transform(self.right_lift_tf, wp.vec3(0.7 * LAYDOWN_FORWARD, 0.0, 0.0))
-        self.left_laydown_tf = self._offset_transform(self.left_lift_tf, wp.vec3(LAYDOWN_FORWARD, 0.0, -LIFT_HEIGHT + LAYDOWN_HEIGHT))
-        self.right_laydown_tf = self._offset_transform(self.right_lift_tf, wp.vec3(LAYDOWN_FORWARD, 0.0, -LIFT_HEIGHT + LAYDOWN_HEIGHT))
+        self.left_laydown_tf = self._offset_transform(
+            self.left_lift_tf, wp.vec3(LAYDOWN_FORWARD, 0.0, -LIFT_HEIGHT + LAYDOWN_HEIGHT)
+        )
+        self.right_laydown_tf = self._offset_transform(
+            self.right_lift_tf, wp.vec3(LAYDOWN_FORWARD, 0.0, -LIFT_HEIGHT + LAYDOWN_HEIGHT)
+        )
         self.left_post_release_tf = self._offset_transform(self.left_laydown_tf, wp.vec3(0.0, 0.0, 0.16))
         self.right_post_release_tf = self._offset_transform(self.right_laydown_tf, wp.vec3(0.0, 0.0, 0.16))
         self.left_tf = self.left_home_tf
@@ -449,7 +477,8 @@ class Example:
 
         # Hand links are the proxy bodies coupled into VBD for cloth contact.
         self.gripper_bodies = [
-            body for body in self.franka_bodies
+            body
+            for body in self.franka_bodies
             if any(kw in builder.body_label[body].lower() for kw in HAND_CONTACT_KEYWORDS)
         ]
         if not self.gripper_bodies:
@@ -529,8 +558,7 @@ class Example:
             q_begin = int(q_start[joint_idx])
             q_end = int(q_start[joint_idx + 1]) if joint_idx + 1 < builder.joint_count else builder.joint_coord_count
             is_free_root = (
-                int(joint_type[joint_idx]) == int(newton.JointType.FREE)
-                and int(joint_parent[joint_idx]) == -1
+                int(joint_type[joint_idx]) == int(newton.JointType.FREE) and int(joint_parent[joint_idx]) == -1
             )
             for local_dof, dof_idx in enumerate(range(dof_begin, dof_end)):
                 q_idx = q_begin + local_dof
@@ -733,7 +761,13 @@ class Example:
         self.ik_solver = ik.IKSolver(
             model=self.ik_model,
             n_problems=1,
-            objectives=[self.left_pos_obj, self.left_rot_obj, self.right_pos_obj, self.right_rot_obj, self.joint_limits_obj],
+            objectives=[
+                self.left_pos_obj,
+                self.left_rot_obj,
+                self.right_pos_obj,
+                self.right_rot_obj,
+                self.joint_limits_obj,
+            ],
             lambda_initial=0.1,
             jacobian_mode=ik.IKJacobianType.ANALYTIC,
         )
@@ -767,17 +801,81 @@ class Example:
         # desynchronises from the hand script and the cloth is released early.
         return (
             (HOME_HOLD_TIME, self.left_home_tf, self.left_home_tf, self.right_home_tf, self.right_home_tf, 0.0, 0.0),
-            (APPROACH_TIME_HANDS, self.left_home_tf, self.left_approach_tf, self.right_home_tf, self.right_approach_tf, 0.0, 0.0),
-            (GRASP_TIME, self.left_approach_tf, self.left_grasp_tf, self.right_approach_tf, self.right_grasp_tf, 0.0, 0.0),
+            (
+                APPROACH_TIME_HANDS,
+                self.left_home_tf,
+                self.left_approach_tf,
+                self.right_home_tf,
+                self.right_approach_tf,
+                0.0,
+                0.0,
+            ),
+            (
+                GRASP_TIME,
+                self.left_approach_tf,
+                self.left_grasp_tf,
+                self.right_approach_tf,
+                self.right_grasp_tf,
+                0.0,
+                0.0,
+            ),
             (CLOSE_TIME, self.left_grasp_tf, self.left_grasp_tf, self.right_grasp_tf, self.right_grasp_tf, 0.0, 1.00),
             (LIFT_TIME, self.left_grasp_tf, self.left_lift_tf, self.right_grasp_tf, self.right_lift_tf, 0.99, 1.0),
             (HANG_SETTLE_TIME, self.left_lift_tf, self.left_lift_tf, self.right_lift_tf, self.right_lift_tf, 1.0, 1.0),
-            (self.rt_pre_approach, self.left_lift_tf, self.left_lift_tf, self.right_lift_tf, self.right_lift_tf, 1.0, 1.0),
-            (self.rt_pre_laydown, self.left_lift_tf, self.left_pre_laydown_tf, self.right_lift_tf, self.right_pre_laydown_tf, 1.0, 1.0),
-            (self.rt_laydown, self.left_pre_laydown_tf, self.left_laydown_tf, self.right_pre_laydown_tf, self.right_laydown_tf, 1.0, 1.0),
-            (RELEASE_TIME, self.left_laydown_tf, self.left_laydown_tf, self.right_laydown_tf, self.right_laydown_tf, 1.0, 0.0),
-            (POST_RELEASE_HOLD_TIME, self.left_laydown_tf, self.left_laydown_tf, self.right_laydown_tf, self.right_laydown_tf, 0.0, 0.0),
-            (POST_RELEASE_LIFT_TIME, self.left_laydown_tf, self.left_post_release_tf, self.right_laydown_tf, self.right_post_release_tf, 0.0, 0.0),
+            (
+                self.rt_pre_approach,
+                self.left_lift_tf,
+                self.left_lift_tf,
+                self.right_lift_tf,
+                self.right_lift_tf,
+                1.0,
+                1.0,
+            ),
+            (
+                self.rt_pre_laydown,
+                self.left_lift_tf,
+                self.left_pre_laydown_tf,
+                self.right_lift_tf,
+                self.right_pre_laydown_tf,
+                1.0,
+                1.0,
+            ),
+            (
+                self.rt_laydown,
+                self.left_pre_laydown_tf,
+                self.left_laydown_tf,
+                self.right_pre_laydown_tf,
+                self.right_laydown_tf,
+                1.0,
+                1.0,
+            ),
+            (
+                RELEASE_TIME,
+                self.left_laydown_tf,
+                self.left_laydown_tf,
+                self.right_laydown_tf,
+                self.right_laydown_tf,
+                1.0,
+                0.0,
+            ),
+            (
+                POST_RELEASE_HOLD_TIME,
+                self.left_laydown_tf,
+                self.left_laydown_tf,
+                self.right_laydown_tf,
+                self.right_laydown_tf,
+                0.0,
+                0.0,
+            ),
+            (
+                POST_RELEASE_LIFT_TIME,
+                self.left_laydown_tf,
+                self.left_post_release_tf,
+                self.right_laydown_tf,
+                self.right_post_release_tf,
+                0.0,
+                0.0,
+            ),
         )
 
     def _build_hand_targets(self):
@@ -931,11 +1029,20 @@ class Example:
         root_tf = self._root_motion_transform(query_time)
         root_pos = wp.transform_get_translation(root_tf)
         root_rot = wp.transform_get_rotation(root_tf)
-        self.root_target_q.assign(np.array(
-            [float(root_pos[0]), float(root_pos[1]), float(root_pos[2]),
-             float(root_rot[0]), float(root_rot[1]), float(root_rot[2]), float(root_rot[3])],
-            dtype=np.float32,
-        ))
+        self.root_target_q.assign(
+            np.array(
+                [
+                    float(root_pos[0]),
+                    float(root_pos[1]),
+                    float(root_pos[2]),
+                    float(root_rot[0]),
+                    float(root_rot[1]),
+                    float(root_rot[2]),
+                    float(root_rot[3]),
+                ],
+                dtype=np.float32,
+            )
+        )
         self.grasp_alpha_buf.assign(np.array([grasp_alpha], dtype=np.float32))
         # Contact friction schedule (in-place writes, safe under graph capture).
         # Time the friction off the same query_time the hand script was sampled
@@ -950,8 +1057,12 @@ class Example:
         # placed) so the tablecloth stays put.
         phase = self._motion_phase(query_time)
         if phase in (
-            "retreat", "turn_out", "move_to_center", "turn_to_table",
-            "pre_laydown", "lay_down",
+            "retreat",
+            "turn_out",
+            "move_to_center",
+            "turn_to_table",
+            "pre_laydown",
+            "lay_down",
         ):
             self._set_table_contact_mu(TABLE_CONTACT_MU_LOW)
         else:
@@ -994,7 +1105,13 @@ class Example:
         wp.launch(
             set_indexed_target_kernel,
             dim=self.hand_q_indices.shape[0],
-            inputs=[self.hand_q_indices, self.hand_open, self.hand_grasp, self.grasp_alpha_buf, self.control.joint_target_q],
+            inputs=[
+                self.hand_q_indices,
+                self.hand_open,
+                self.hand_grasp,
+                self.grasp_alpha_buf,
+                self.control.joint_target_q,
+            ],
             device=self.device,
         )
 
@@ -1097,7 +1214,9 @@ class Example:
     def _offset_transform(self, tf: wp.transform, offset: wp.vec3) -> wp.transform:
         pos = wp.transform_get_translation(tf)
         return wp.transform(
-            wp.vec3(float(pos[0]) + float(offset[0]), float(pos[1]) + float(offset[1]), float(pos[2]) + float(offset[2])),
+            wp.vec3(
+                float(pos[0]) + float(offset[0]), float(pos[1]) + float(offset[1]), float(pos[2]) + float(offset[2])
+            ),
             wp.transform_get_rotation(tf),
         )
 
@@ -1151,7 +1270,9 @@ class Example:
 
     def _target_to_current_root_world(self, target_tf: wp.transform) -> wp.transform:
         root_initial_pos = wp.vec3(float(self.root_q0_np[0]), float(self.root_q0_np[1]), float(self.root_q0_np[2]))
-        root_initial_rot = wp.quat(float(self.root_q0_np[3]), float(self.root_q0_np[4]), float(self.root_q0_np[5]), float(self.root_q0_np[6]))
+        root_initial_rot = wp.quat(
+            float(self.root_q0_np[3]), float(self.root_q0_np[4]), float(self.root_q0_np[5]), float(self.root_q0_np[6])
+        )
         root_current = self._root_motion_transform(self.sim_time)
         root_current_pos = wp.transform_get_translation(root_current)
         root_current_rot = wp.transform_get_rotation(root_current)
@@ -1176,7 +1297,9 @@ class Example:
         approach_u = _smoothstep((base_time - t3) / max(self.rt_approach, 1.0e-6))
         yaw = math.radians(TURN_OUT_DEGREES) * turn_out_u + math.radians(TURN_IN_DEGREES) * turn_in_u
         q_yaw = wp.quat(0.0, 0.0, math.sin(0.5 * yaw), math.cos(0.5 * yaw))
-        q0 = wp.quat(float(self.root_q0_np[3]), float(self.root_q0_np[4]), float(self.root_q0_np[5]), float(self.root_q0_np[6]))
+        q0 = wp.quat(
+            float(self.root_q0_np[3]), float(self.root_q0_np[4]), float(self.root_q0_np[5]), float(self.root_q0_np[6])
+        )
         q = q_yaw * q0
         p = wp.vec3(
             float(self.root_q0_np[0]) - RETREAT_DISTANCE * retreat_u + APPROACH_DISTANCE * approach_u,
@@ -1249,7 +1372,9 @@ class Example:
         )
         parser.add_argument("--substeps", type=int, default=12, help="Coupled substeps per rendered frame.")
         parser.add_argument("--ik-iterations", type=int, default=24, help="Newton GPU IK iterations per frame.")
-        parser.add_argument("--print-interval", type=float, default=3.0, help="Seconds between TCP reports; 0.0 prints every frame.")
+        parser.add_argument(
+            "--print-interval", type=float, default=3.0, help="Seconds between TCP reports; 0.0 prints every frame."
+        )
         parser.add_argument("--enable-self-collisions", action="store_true", help="Enable URDF self-collisions.")
         parser.add_argument(
             "--robot-urdf",

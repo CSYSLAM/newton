@@ -6,6 +6,7 @@ Run from a Newton checkout:
 Optional local URDF override:
     python validate_ik_frame.py --urdf path/to/fr3_franka_hand.urdf
 """
+
 from __future__ import annotations
 
 import argparse

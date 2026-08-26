@@ -484,6 +484,9 @@ class Example(recorded_soft.Example):
         """Verify finite objects, physical releases, placement, and no pads."""
 
         assert not any("physical_pad" in label for label in self.model.shape_label)
+        collision_mask = int(newton.ShapeFlags.COLLIDE_SHAPES) | int(newton.ShapeFlags.COLLIDE_PARTICLES)
+        visual_flags = self.model.shape_flags.numpy()[self.robot_visual_shapes]
+        assert np.all((visual_flags & collision_mask) == 0), "Robot visual shapes must remain non-colliding"
         body_flags = int(self.model.body_flags.numpy()[self.rigid_cube_body])
         assert not body_flags & int(newton.BodyFlags.KINEMATIC), (
             "The rigid cube must be dynamic when the solver is constructed"

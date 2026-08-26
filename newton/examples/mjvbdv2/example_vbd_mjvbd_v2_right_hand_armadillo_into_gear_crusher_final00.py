@@ -659,8 +659,13 @@ class Example:
 
         collide_shapes = int(newton.ShapeFlags.COLLIDE_SHAPES)
         collide_particles = int(newton.ShapeFlags.COLLIDE_PARTICLES)
+        collision_mask = collide_shapes | collide_particles
+        self.robot_visual_shapes = [
+            shape for shape in range(self.hand_shape_end) if not builder.shape_flags[shape] & collision_mask
+        ]
         for shape in range(builder.shape_count):
-            builder.shape_flags[shape] |= collide_shapes | collide_particles
+            if builder.shape_flags[shape] & collision_mask:
+                builder.shape_flags[shape] |= collision_mask
 
         builder.color(balance_colors=True)
         self.model = builder.finalize(requires_grad=False)
@@ -993,6 +998,10 @@ class Example:
 
     def test_final(self):
         """Verify finite state and the completed physical handoff to the gears."""
+        collision_mask = int(newton.ShapeFlags.COLLIDE_SHAPES) | int(newton.ShapeFlags.COLLIDE_PARTICLES)
+        visual_flags = self.model.shape_flags.numpy()[self.robot_visual_shapes]
+        if np.any(visual_flags & collision_mask):
+            raise ValueError("Robot visual shapes must remain non-colliding")
         particle_q = self.state_0.particle_q.numpy()
         if not np.all(np.isfinite(particle_q)):
             raise ValueError("Armadillo particle state contains non-finite values")

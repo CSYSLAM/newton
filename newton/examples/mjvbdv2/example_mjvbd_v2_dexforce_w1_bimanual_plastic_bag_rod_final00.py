@@ -252,19 +252,24 @@ class Example:
 
         collide_particles = int(newton.ShapeFlags.COLLIDE_PARTICLES)
         collide_shapes = int(newton.ShapeFlags.COLLIDE_SHAPES)
+        collision_mask = collide_shapes | collide_particles
         self.hand_particle_shapes = []
+        self.robot_visual_shapes = []
         for shape in range(self.robot_shape_end):
+            is_collider = bool(builder.shape_flags[shape] & collision_mask)
+            if not is_collider:
+                self.robot_visual_shapes.append(shape)
             body = int(builder.shape_body[shape])
             label = builder.body_label[body].lower() if body >= 0 else ""
             is_hand = ("left" in label or "right" in label) and any(
                 keyword in label for keyword in self.HAND_CONTACT_KEYWORDS
             )
-            if is_hand:
+            if is_hand and is_collider:
                 builder.shape_flags[shape] |= collide_particles
                 builder.shape_flags[shape] &= ~collide_shapes
                 self.hand_particle_shapes.append(shape)
             else:
-                builder.shape_flags[shape] &= ~(collide_shapes | collide_particles)
+                builder.shape_flags[shape] &= ~collision_mask
         if not self.hand_particle_shapes:
             raise RuntimeError("The full W1 URDF did not produce hand particle-collision shapes")
 
@@ -651,6 +656,8 @@ class Example:
         assert self.solver.features.backend == "vbd_kinematic_full"
         assert not hasattr(self, "cached_joint_targets")
         assert np.all(np.isfinite(self.ik_q.numpy()))
+        visual_flags = self.model.shape_flags.numpy()[self.robot_visual_shapes]
+        assert np.all((visual_flags & self._collision_mask) == 0), "Robot visual shapes must remain non-colliding"
         if self.use_graph and self.frame_index > 0:
             assert self.graph is not None
 

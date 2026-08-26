@@ -57,6 +57,7 @@ SELF_RADIUS = 0.002
 SELF_MARGIN = 0.002
 VBD_ITERATIONS = 20
 IK_ITERATIONS = 24
+ROBOT_CONTACT_KE = 9.0e5
 LEGACY_SOFT_CONTACT_KD = 5.0e-2
 LEGACY_SHAPE_CONTACT_KD = 1.0e-6
 FULL_PROCESS_CLOTH_CONTACT_MU = 1.2
@@ -298,7 +299,7 @@ class Example:
             self.model.edge_rest_angle.zero_()
         self.model.soft_contact_ke = 3.0e5
         self.model.soft_contact_kd = LEGACY_SOFT_CONTACT_KD
-        self._set_robot_contact_stiffness(3.0e5)
+        self._set_robot_contact_stiffness(ROBOT_CONTACT_KE)
         self._set_legacy_contact_damping()
         self._set_materials(0.50, 0.25, 0.50)
 
@@ -348,9 +349,17 @@ class Example:
         cp, cs = int(newton.ShapeFlags.COLLIDE_PARTICLES), int(newton.ShapeFlags.COLLIDE_SHAPES)
         # Match the captured fold scene: every robot collider can touch cloth,
         # but the rigid-only collision path remains disabled in external-FK mode.
+        self.robot_visual_shapes = []
+        self.robot_collision_shapes = []
         for i in range(self.robot_shape_end):
+            if not builder.shape_flags[i] & (cp | cs):
+                self.robot_visual_shapes.append(i)
+                continue
+            self.robot_collision_shapes.append(i)
             builder.shape_flags[i] &= ~cs
             builder.shape_flags[i] |= cp
+        if not self.robot_collision_shapes:
+            raise RuntimeError("Dexforce URDF did not produce robot collision shapes")
         for i in range(self.robot_shape_end, builder.shape_count):
             builder.shape_flags[i] |= cp
 
@@ -637,6 +646,13 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
+        """Verify finite folding state and collision-only robot contact."""
+
+        collision_mask = int(newton.ShapeFlags.COLLIDE_PARTICLES) | int(newton.ShapeFlags.COLLIDE_SHAPES)
+        visual_flags = self.model.shape_flags.numpy()[self.robot_visual_shapes]
+        assert np.all((visual_flags & collision_mask) == 0), "Robot visual shapes must remain non-colliding"
+        robot_ke = self.model.shape_material_ke.numpy()[self.robot_collision_shapes]
+        assert np.allclose(robot_ke, ROBOT_CONTACT_KE), "Robot contact stiffness changed"
         if not np.all(np.isfinite(self.state_0.particle_q.numpy())):
             raise ValueError("T-shirt particle positions are not finite")
         if hasattr(self, "cached_joint_targets"):
@@ -654,7 +670,7 @@ class Example:
 
     def _set_robot_contact_stiffness(self, robot_ke):
         ke = self.model.shape_material_ke.numpy()
-        ke[: self.robot_shape_end] = robot_ke
+        ke[self.robot_collision_shapes] = robot_ke
         self.model.shape_material_ke.assign(ke)
 
     def _set_legacy_contact_damping(self):

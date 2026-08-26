@@ -1,4 +1,4 @@
-﻿# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 """Dexforce W1 moves rigid objects from a table into a suspended soft bag.
 
@@ -372,12 +372,7 @@ class Example:
             if not path.is_file():
                 raise FileNotFoundError(f"--robot-urdf does not exist: {path}")
             return path
-        path = (
-            Path(__file__).resolve().parents[3]
-            / "assets"
-            / "DexforceW1V021"
-            / "DexforceW1V021.urdf"
-        )
+        path = Path(__file__).resolve().parents[3] / "assets" / "DexforceW1V021" / "DexforceW1V021.urdf"
         if path.is_file():
             return path
         raise FileNotFoundError("Dexforce W1 URDF is unavailable; pass --robot-urdf PATH.")

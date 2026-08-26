@@ -552,17 +552,23 @@ class Example:
         self.hand_shapes = []
         self.right_hand_shapes = []
         collide_particles = int(newton.ShapeFlags.COLLIDE_PARTICLES)
+        collision_mask = collide_shapes | collide_particles
+        self.robot_visual_shapes = []
         # Keep the asset colliders and small pads as physical boundaries.  The
         # pads remain rigid-only helpers; the soft body must interact with the
         # actual URDF finger surfaces instead of an enclosing box.
         for shape in range(self.robot_shape_end):
+            is_urdf_shape = shape < self.robot_urdf_shape_end
+            is_collider = bool(builder.shape_flags[shape] & collision_mask)
+            if is_urdf_shape and not is_collider:
+                self.robot_visual_shapes.append(shape)
             body = int(builder.shape_body[shape])
             label = builder.body_label[body].lower() if body >= 0 else ""
             hand_shape = any(side in label for side in ("left", "right")) and any(
                 word in label for word in self.HAND_CONTACT_KEYWORDS
             )
-            if hand_shape:
-                if shape < self.robot_urdf_shape_end:
+            if hand_shape and is_collider:
+                if is_urdf_shape:
                     self.hand_shapes.append(shape)
                     if "right" in label:
                         self.right_hand_shapes.append(shape)
@@ -571,7 +577,7 @@ class Example:
                     builder.shape_flags[shape] |= collide_shapes
                     builder.shape_flags[shape] &= ~collide_particles
             else:
-                builder.shape_flags[shape] &= ~(collide_shapes | collide_particles)
+                builder.shape_flags[shape] &= ~collision_mask
         for shape in range(self.robot_shape_end, builder.shape_count):
             builder.shape_flags[shape] |= collide_shapes | collide_particles
 
@@ -1000,6 +1006,9 @@ class Example:
     def test_final(self):
         """Verify that the soft cube is finite, released, and inside the bag."""
 
+        collision_mask = int(newton.ShapeFlags.COLLIDE_SHAPES) | int(newton.ShapeFlags.COLLIDE_PARTICLES)
+        visual_flags = self.model.shape_flags.numpy()[self.robot_visual_shapes]
+        assert np.all((visual_flags & collision_mask) == 0), "Robot visual shapes must remain non-colliding"
         bag_q = self.state_0.particle_q.numpy()[self.bag_particle_start : self.bag_particle_end]
         assert np.all(np.isfinite(bag_q)), "Bag particle positions contain non-finite values"
         bag_scene_q = np.asarray([self._scene_vec(wp.vec3(*position)) for position in bag_q])

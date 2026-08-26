@@ -21,17 +21,12 @@ from pathlib import Path
 
 import newton
 import newton.examples
-
 from newton.examples.cloth.example_genesis_w1_card_shuffle_replay import (
     Example as BaseExample,
 )
 
-
 DEFAULT_CACHE = (
-    Path(__file__).resolve().parent
-    / "assets"
-    / "genesis_w1_card_shuffle"
-    / "w1_card_shuffle_square_bake.npz"
+    Path(__file__).resolve().parent / "assets" / "genesis_w1_card_shuffle" / "w1_card_shuffle_square_bake.npz"
 )
 
 

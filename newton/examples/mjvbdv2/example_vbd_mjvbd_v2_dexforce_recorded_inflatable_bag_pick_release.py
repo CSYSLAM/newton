@@ -395,18 +395,23 @@ class Example:
 
         collide_shapes = int(newton.ShapeFlags.COLLIDE_SHAPES)
         collide_particles = int(newton.ShapeFlags.COLLIDE_PARTICLES)
+        collision_mask = collide_shapes | collide_particles
         self.hand_shapes = []
         self.right_hand_shapes = []
+        self.robot_visual_shapes = []
         for shape in range(self.robot_shape_end):
+            is_collider = bool(builder.shape_flags[shape] & collision_mask)
+            if not is_collider:
+                self.robot_visual_shapes.append(shape)
             body = int(builder.shape_body[shape])
             label = builder.body_label[body].lower() if body >= 0 else ""
             right_hand_shape = "right" in label and any(keyword in label for keyword in self.HAND_CONTACT_KEYWORDS)
-            if right_hand_shape:
+            if right_hand_shape and is_collider:
                 self.hand_shapes.append(shape)
                 self.right_hand_shapes.append(shape)
                 builder.shape_flags[shape] |= collide_shapes | collide_particles
             else:
-                builder.shape_flags[shape] &= ~(collide_shapes | collide_particles)
+                builder.shape_flags[shape] &= ~collision_mask
         for shape in range(self.robot_shape_end, builder.shape_count):
             builder.shape_flags[shape] |= collide_shapes | collide_particles
 
@@ -848,6 +853,9 @@ class Example:
         """Verify trajectory fidelity, physical lift, release, and bag volume."""
 
         assert not any("physical_pad" in label for label in self.model.shape_label)
+        collision_mask = int(newton.ShapeFlags.COLLIDE_SHAPES) | int(newton.ShapeFlags.COLLIDE_PARTICLES)
+        visual_flags = self.model.shape_flags.numpy()[self.robot_visual_shapes]
+        assert np.all((visual_flags & collision_mask) == 0), "Robot visual shapes must remain non-colliding"
         assert np.all(np.isfinite(self.state_0.body_q.numpy()))
         if self.use_graph:
             assert self.graph is not None, "The warmed CUDA physics graph was not captured."

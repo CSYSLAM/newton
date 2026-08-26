@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 import warp as wp
 import yaml
+from newton.solvers.experimental.coupled import SolverCoupledProxy
 from warp_nn.runtime import OnnxRuntime
 
 import newton
@@ -37,8 +38,6 @@ import newton.ik as ik
 import newton.utils
 from newton import JointTargetMode
 from newton.solvers import SolverMuJoCo, SolverVBD
-from newton.solvers.experimental.coupled import SolverCoupledProxy
-
 
 # -----------------------------------------------------------------------------
 # Scene and task constants

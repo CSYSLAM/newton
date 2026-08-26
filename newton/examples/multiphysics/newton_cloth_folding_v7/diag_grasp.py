@@ -2,6 +2,7 @@
 the tracked patch height, TCP pose, gripper finger targets, and contact counts
 throughout the run so we can see *why* the grasp fails.
 """
+
 from __future__ import annotations
 
 import sys
@@ -12,10 +13,10 @@ import warp as wp
 
 # Make the example importable.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import newton  # noqa: E402
-import newton.examples  # noqa: E402
+import example_cloth_folding_coupled as ex_mod
 
-import example_cloth_folding_coupled as ex_mod  # noqa: E402
+import newton
+import newton.examples
 
 
 def main() -> None:
@@ -27,9 +28,11 @@ def main() -> None:
     parser.set_defaults(first_grasp_only=True)
     argv = [
         "--first-grasp-only",
-        "--num-frames", "720",
+        "--num-frames",
+        "720",
         "--no-graph-capture",
-        "--viewer", "null",
+        "--viewer",
+        "null",
         "--no-cloth-self-contact",
     ]
     args = parser.parse_args(argv)
@@ -65,10 +68,14 @@ def main() -> None:
     print(f"[diag] finger_bodies={[ex.model.body_label[i] for i in finger_bodies]}")
     # Print the keyframe target table.
     print(f"[diag] key_times={ex.key_times.tolist()}")
-    print(f"[diag] targets (xyz, grip):")
+    print("[diag] targets (xyz, grip):")
     for k, tgt in enumerate(ex.targets):
-        print(f"[diag]   [{k}] t_end={ex.key_times[k]:.3f}  xyz=({tgt[0]:.4f},{tgt[1]:.4f},{tgt[2]:.4f})  grip={tgt[-1]:.4f}")
-    print(f"[diag] header: frame t(s)  patch_p75_z patch_min_z  ik_tgt_z  actual_tcp_z  actual_tcp_xy  grip  finger_z  n_contacts")
+        print(
+            f"[diag]   [{k}] t_end={ex.key_times[k]:.3f}  xyz=({tgt[0]:.4f},{tgt[1]:.4f},{tgt[2]:.4f})  grip={tgt[-1]:.4f}"
+        )
+    print(
+        "[diag] header: frame t(s)  patch_p75_z patch_min_z  ik_tgt_z  actual_tcp_z  actual_tcp_xy  grip  finger_z  n_contacts"
+    )
 
     n_frames = int(args.num_frames)
     log_every = max(1, n_frames // 24)
@@ -102,7 +109,7 @@ def main() -> None:
     pq = ex.state_0.particle_q.numpy()
     patch_z = pq[p_start + patch_local, 2]
     p75 = float(np.percentile(patch_z, 75.0))
-    print(f"\n[diag] FINAL patch_p75_z={p75:.4f} m, table_top={table_top:.4f}, clearance={p75-table_top:.4f}")
+    print(f"\n[diag] FINAL patch_p75_z={p75:.4f} m, table_top={table_top:.4f}, clearance={p75 - table_top:.4f}")
 
     # Contact detail: are fingers actually in contact with cloth at the end?
     try:
