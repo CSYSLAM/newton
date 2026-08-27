@@ -40,6 +40,7 @@ INITIAL_IK_ITERATIONS = 240
 RUNTIME_IK_ITERATIONS = 24
 END_EFFECTOR_POSITION_TOLERANCE = 5.0e-4
 END_EFFECTOR_ANGLE_TOLERANCE_DEG = 0.25
+HAND_CONTACT_KE = 6.0e5
 
 TCP_OFFSET = wp.vec3(-0.18, 0.0, 0.0)
 RIGHT_J7_TO_HAND_BASE_OFFSET = wp.vec3(-0.066, 0.0, 0.0)
@@ -424,7 +425,7 @@ class Example:
         shape_ke = self.model.shape_material_ke.numpy()
         shape_kd = self.model.shape_material_kd.numpy()
         shape_mu[self.right_hand_shapes] = recorder.CONTACT_MU
-        shape_ke[self.right_hand_shapes] = recorder.CONTACT_KE
+        shape_ke[self.right_hand_shapes] = HAND_CONTACT_KE
         shape_kd[self.right_hand_shapes] = recorder.CONTACT_KD
         self.model.shape_material_mu.assign(shape_mu)
         self.model.shape_material_ke.assign(shape_ke)
