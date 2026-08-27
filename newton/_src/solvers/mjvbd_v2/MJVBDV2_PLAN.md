@@ -241,9 +241,10 @@ shape-major order. This is a construction-time layout choice: it adds no
 per-step sorting or allocation and improves locality for shape transforms and
 shape queries. CPU keeps the original construction order.
 
-The coupled backend requires MuJoCo's internal rigid contacts to remain
-enabled, while `disable_contacts=True` prevents duplicate Newton rigid-contact
-input. VBD owns all contacts involving VBD objects after proxy synchronization.
+The coupled backend keeps the MuJoCo-native collision-mode requirement while
+setting `disable_contacts=True`, so MuJoCo does not solve a duplicate contact
+set. VBD owns contacts involving VBD objects after proxy synchronization. The
+pure-MuJoCo backend can retain MuJoCo's native contact solve.
 
 Full-surface rigid-soft contact remains a full-pipeline feature. All V2
 full-contact backends construct the private pipeline so performance changes do
