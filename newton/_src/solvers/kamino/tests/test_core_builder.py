@@ -53,7 +53,7 @@ def assert_model_matches_builder(test: unittest.TestCase, builder: ModelBuilderK
         test.assertEqual(model.info.num_passive_joint_dofs.numpy()[w], world.num_passive_joint_dofs)
         test.assertEqual(model.info.num_actuated_joint_coords.numpy()[w], world.num_actuated_joint_coords)
         test.assertEqual(model.info.num_actuated_joint_dofs.numpy()[w], world.num_actuated_joint_dofs)
-        test.assertEqual(model.info.num_joint_cts.numpy()[w], world.num_joint_cts)
+        test.assertEqual(model.info.num_joint_bilateral_cts.numpy()[w], world.num_bilateral_joint_cts)
         test.assertEqual(model.info.num_joint_dynamic_cts.numpy()[w], world.num_dynamic_joint_cts)
         test.assertEqual(model.info.num_joint_kinematic_cts.numpy()[w], world.num_kinematic_joint_cts)
         test.assertEqual(model.info.bodies_offset.numpy()[w], world.bodies_idx_offset)
@@ -66,9 +66,11 @@ def assert_model_matches_builder(test: unittest.TestCase, builder: ModelBuilderK
         test.assertEqual(model.info.joint_passive_dofs_offset.numpy()[w], world.joint_passive_dofs_idx_offset)
         test.assertEqual(model.info.joint_actuated_coords_offset.numpy()[w], world.joint_actuated_coords_idx_offset)
         test.assertEqual(model.info.joint_actuated_dofs_offset.numpy()[w], world.joint_actuated_dofs_idx_offset)
-        # TODO: test.assertEqual(model.info.joint_cts_offset.numpy()[w], world.joint_cts_idx_offset)
+        test.assertEqual(model.info.joint_bilateral_cts_offset.numpy()[w], world.joint_bilateral_cts_idx_offset)
         test.assertEqual(model.info.joint_dynamic_cts_offset.numpy()[w], world.joint_dynamic_cts_idx_offset)
         test.assertEqual(model.info.joint_kinematic_cts_offset.numpy()[w], world.joint_kinematic_cts_idx_offset)
+        test.assertEqual(model.info.joint_bounded_cts_offset.numpy()[w], world.joint_bounded_cts_idx_offset)
+        test.assertEqual(model.info.joint_friction_cts_offset.numpy()[w], world.joint_friction_cts_idx_offset)
 
     test.assertEqual(builder.num_bodies, model.size.sum_of_num_bodies)
     for i, body in enumerate(builder.all_bodies):
@@ -110,7 +112,7 @@ def assert_model_matches_builder(test: unittest.TestCase, builder: ModelBuilderK
     msg.info("model.info.body_dofs_offset: %s", model.info.body_dofs_offset)
     msg.info("model.info.joint_coords_offset: %s", model.info.joint_coords_offset)
     msg.info("model.info.joint_dofs_offset: %s", model.info.joint_dofs_offset)
-    msg.info("model.info.joint_cts_offset: %s\n", model.info.joint_cts_offset)
+    msg.info("model.info.joint_bilateral_cts_offset: %s\n", model.info.joint_bilateral_cts_offset)
     msg.info("model.info.joint_dynamic_cts_offset: %s\n", model.info.joint_dynamic_cts_offset)
     msg.info("model.info.joint_kinematic_cts_offset: %s\n", model.info.joint_kinematic_cts_offset)
     msg.info("model.info.joint_passive_coords_offset: %s", model.info.joint_passive_coords_offset)
@@ -156,7 +158,7 @@ class TestModelBuilder(unittest.TestCase):
         self.assertEqual(builder.num_joint_dofs, 0)
         self.assertEqual(builder.num_passive_joint_dofs, 0)
         self.assertEqual(builder.num_actuated_joint_dofs, 0)
-        self.assertEqual(builder.num_joint_cts, 0)
+        self.assertEqual(builder.num_bilateral_joint_cts, 0)
         self.assertEqual(builder.num_dynamic_joint_cts, 0)
         self.assertEqual(builder.num_kinematic_joint_cts, 0)
         self.assertEqual(len(builder.bodies), 0)
@@ -175,7 +177,7 @@ class TestModelBuilder(unittest.TestCase):
         self.assertEqual(builder.num_joint_dofs, 0)
         self.assertEqual(builder.num_passive_joint_dofs, 0)
         self.assertEqual(builder.num_actuated_joint_dofs, 0)
-        self.assertEqual(builder.num_joint_cts, 0)
+        self.assertEqual(builder.num_bilateral_joint_cts, 0)
         self.assertEqual(len(builder.bodies), 1)
         self.assertEqual(len(builder.bodies[0]), 0)
         self.assertEqual(len(builder.joints), 1)
@@ -615,7 +617,7 @@ class TestModelBuilder(unittest.TestCase):
         msg.info("world_min_contacts: %s", world_min_contacts)
 
         # Check that the generated meta-data matches expected values for this model
-        expected_contacts_per_world = 2 * len(model_candidate_pairs) * 12  # 12 is the max contacts per pair
+        expected_contacts_per_world = len(model_candidate_pairs) * 8  # Box-box pairs generate up to 8 contacts.
         self.assertEqual(world_num_collidables[0], 5)
         self.assertEqual(model_num_collidables, 5)
         self.assertEqual(len(model_candidate_pairs), 6)
@@ -678,7 +680,7 @@ class TestModelBuilder(unittest.TestCase):
         msg.info("world_min_contacts: %s", world_min_contacts)
 
         # Check that the generated meta-data matches expected values for this model
-        expected_contacts_per_world = 2 * len(model_candidate_pairs) * 12  # 12 is the max contacts per pair
+        expected_contacts_per_world = len(model_candidate_pairs) * 8  # Box-box pairs generate up to 8 contacts.
         self.assertEqual(world_num_collidables[0], 3)
         self.assertEqual(model_num_collidables, 3)
         self.assertEqual(len(model_candidate_pairs), 2)
@@ -774,7 +776,7 @@ class TestModelBuilder(unittest.TestCase):
         msg.info("world_min_contacts: %s", world_min_contacts)
 
         # Check that the generated meta-data matches expected values for this model
-        expected_contacts_per_world = 2 * 6 * 12  # 12 is the max contacts per pair
+        expected_contacts_per_world = 6 * 8  # Six box-box pairs generate up to 8 contacts each.
         self.assertEqual(model_num_collidables, 5 * builder.num_worlds)
         self.assertEqual(world_num_collidables, [5] * builder.num_worlds)
         self.assertEqual(len(model_candidate_pairs), 6 * builder.num_worlds)

@@ -11,7 +11,7 @@ from typing import Literal
 import numpy as np
 import warp as wp
 
-from ...sim import BodyFlags, Model, ModelBuilder, ModelFlags, State
+from ...sim import BodyFlags, Model, ModelBuilder, ModelFlags, State, StateFlags
 from ..coupled.solver_coupled_proxy import SolverCoupledProxy
 from .collision_pipeline import MJVBDV2SoftContactPipeline
 from .full_contact_pipeline import MJVBDV2CollisionPipeline
@@ -269,6 +269,36 @@ class _SolverMJVBDV2Pneumatic(SolverMJVBDV2):
         """Distribute core state and VBD-owned pneumatic history."""
         super()._distribute_state(state_in, dt=dt, iteration_restart=iteration_restart)
         self._copy_pneumatic_state(state_in, self._entries["vbd"].state_0, scatter=False)
+
+    def _distribute_reset_state(self, state_in: State, world_mask: wp.array[wp.bool]) -> None:
+        """Seed VBD cavity history before the shared masked-reset path."""
+        super()._distribute_reset_state(state_in, world_mask)
+        self._copy_pneumatic_state(state_in, self._entries["vbd"].state_0, scatter=False)
+
+    def _sync_entry_reset_state(
+        self,
+        entry,
+        world_mask: wp.array[wp.bool],
+        flags: StateFlags | int | None,
+    ) -> None:
+        """Keep both VBD ping-pong states consistent after cavity reset."""
+        super()._sync_entry_reset_state(entry, world_mask, flags)
+        if entry.name != "vbd" or entry.state_1 is None or entry.state_1 is entry.state_0:
+            return
+        source_namespace = entry.state_0.pneumatic
+        destination_namespace = entry.state_1.pneumatic
+        for field in _PNEUMATIC_STATE_FIELDS:
+            wp.copy(dest=getattr(destination_namespace, field), src=getattr(source_namespace, field))
+
+    def _reconcile_reset_state(
+        self,
+        state_out: State,
+        world_mask: wp.array[wp.bool],
+        flags: StateFlags | int | None,
+    ) -> None:
+        """Scatter reset VBD cavity history back to the parent state."""
+        super()._reconcile_reset_state(state_out, world_mask, flags)
+        self._copy_pneumatic_state(self._entries["vbd"].state_0, state_out, scatter=True)
 
     def _reconcile_state(self, state_out: State) -> None:
         """Reconcile core state and VBD-owned pneumatic observables."""

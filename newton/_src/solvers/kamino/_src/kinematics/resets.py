@@ -18,6 +18,8 @@ from ..kinematics.joints import (
     correct_quat_vector_coord,
     correct_rotational_coord,
     get_joint_coords_mapping_function,
+    map_gimbal_angular_velocity_to_rates,
+    select_gimbal_coords,
 )
 
 ###
@@ -80,6 +82,12 @@ def make_correct_joint_coords(dof_type: JointDoFType):
             coords[0] = correct_rotational_coord(coords[0], coords_ref[0])
             coords[1] = correct_rotational_coord(coords[1], coords_ref[1])
 
+        elif wp.static(
+            dof_type == JointDoFType.GIMBAL or dof_type == JointDoFType.GIMBAL_LEFT_HANDED
+        ):  # Correct angles up to +/- 2 pi
+            for i in range(3):
+                coords[i] = correct_rotational_coord(coords[i], coords_ref[i])
+
         return coords
 
     return _correct_joint_coords
@@ -123,6 +131,7 @@ def make_compute_and_write_joint_vel(dof_type: JointDoFType):
     num_dofs = dof_type.num_dofs
     assert num_dofs > 0
     dof_axes = dof_type.dofs_axes
+    third_axis_sign = -1.0 if dof_type == JointDoFType.GIMBAL_LEFT_HANDED else 1.0
 
     @wp.func
     def _compute_and_write_joint_vel(
@@ -134,6 +143,16 @@ def make_compute_and_write_joint_vel(dof_type: JointDoFType):
         # Convert angular velocity to intermediary body frame for universal joint
         if wp.static(dof_type == JointDoFType.UNIVERSAL):
             u_j = convert_angular_vel_to_universal_joint_intermediary_frame(q_j, u_j)
+
+        if wp.static(dof_type == JointDoFType.GIMBAL or dof_type == JointDoFType.GIMBAL_LEFT_HANDED):
+            rates = map_gimbal_angular_velocity_to_rates(
+                wp.vec3f(joint_u[dofs_offset], joint_u[dofs_offset + 1], joint_u[dofs_offset + 2]),
+                wp.spatial_bottom(u_j),
+                third_axis_sign,
+            )
+            for i in range(3):
+                joint_u[dofs_offset + i] = rates[i]
+            return
 
         # Write out joint velocity (=components of relative velocity along unconstrained axes)
         for i in range(num_dofs):
@@ -172,6 +191,23 @@ def _compute_and_write_joint_coords_and_vel(
     elif dof_type == JointDoFType.FREE:
         wp.static(make_compute_and_write_joint_coords(JointDoFType.FREE))(r_j, q_j, coords_offset, joint_q_ref, joint_q)
         wp.static(make_compute_and_write_joint_vel(JointDoFType.FREE))(q_j, u_j, dofs_offset, joint_u)
+
+    elif dof_type == JointDoFType.GIMBAL or dof_type == JointDoFType.GIMBAL_LEFT_HANDED:
+        # Gimbal resets use select_gimbal_coords and reuse those coords for rate mapping in one step.
+        # Keep this inline so the shared make_compute_and_write_joint_* factories stay decoupled.
+        third_axis_sign = 1.0
+        if dof_type == JointDoFType.GIMBAL_LEFT_HANDED:
+            third_axis_sign = -1.0
+        coords = select_gimbal_coords(
+            q_j,
+            wp.vec3f(joint_q_ref[coords_offset], joint_q_ref[coords_offset + 1], joint_q_ref[coords_offset + 2]),
+            third_axis_sign,
+        )
+        for i in range(3):
+            joint_q[coords_offset + i] = coords[i]
+            joint_u[dofs_offset + i] = map_gimbal_angular_velocity_to_rates(
+                coords, wp.spatial_bottom(u_j), third_axis_sign
+            )[i]
 
     elif dof_type == JointDoFType.PRISMATIC:
         wp.static(make_compute_and_write_joint_coords(JointDoFType.PRISMATIC))(
@@ -302,7 +338,9 @@ def _reset_joints_state_from_bodies_state(
     joint_dof_type: wp.array[wp.int32],
     joint_coords_offset: wp.array[wp.int32],
     joint_dofs_offset: wp.array[wp.int32],
-    joint_cts_offset: wp.array[wp.int32],
+    joint_dynamic_cts_offset: wp.array[wp.int32],
+    joint_kinematic_cts_offset: wp.array[wp.int32],
+    joint_friction_cts_offset: wp.array[wp.int32],
     joint_bid_B: wp.array[wp.int32],
     joint_bid_F: wp.array[wp.int32],
     joint_B_r_Bj: wp.array[wp.vec3f],
@@ -317,7 +355,9 @@ def _reset_joints_state_from_bodies_state(
     joint_q: wp.array[wp.float32],
     joint_q_prev: wp.array[wp.float32],
     joint_u: wp.array[wp.float32],
-    joint_lambda: wp.array[wp.float32],
+    joint_lambda_dyn: wp.array[wp.float32],
+    joint_lambda_kin: wp.array[wp.float32],
+    joint_lambda_f: wp.array[wp.float32],
 ):
     # Get thread id as joint id
     jid = wp.tid()
@@ -332,8 +372,12 @@ def _reset_joints_state_from_bodies_state(
     coords_offset = joint_coords_offset[jid]
     num_coords = joint_coords_offset[jid + 1] - coords_offset
     dofs_offset = joint_dofs_offset[jid]
-    cts_offset = joint_cts_offset[jid]
-    num_cts = joint_cts_offset[jid + 1] - cts_offset
+    dynamic_cts_offset = joint_dynamic_cts_offset[jid]
+    num_dynamic_cts = joint_dynamic_cts_offset[jid + 1] - dynamic_cts_offset
+    kinematic_cts_offset = joint_kinematic_cts_offset[jid]
+    num_kinematic_cts = joint_kinematic_cts_offset[jid + 1] - kinematic_cts_offset
+    friction_cts_offset = joint_friction_cts_offset[jid]
+    num_friction_cts = joint_friction_cts_offset[jid + 1] - friction_cts_offset
     bid_B = joint_bid_B[jid]
     bid_F = joint_bid_F[jid]
     r_B = joint_B_r_Bj[jid]
@@ -360,9 +404,13 @@ def _reset_joints_state_from_bodies_state(
     for i in range(num_coords):
         joint_q_prev[coords_offset + i] = joint_q[coords_offset + i]
 
-    # Set lambda to zero
-    for i in range(num_cts):
-        joint_lambda[cts_offset + i] = 0.0
+    # Set lambdas to zero
+    for i in range(num_dynamic_cts):
+        joint_lambda_dyn[dynamic_cts_offset + i] = 0.0
+    for i in range(num_kinematic_cts):
+        joint_lambda_kin[kinematic_cts_offset + i] = 0.0
+    for i in range(num_friction_cts):
+        joint_lambda_f[friction_cts_offset + i] = 0.0
 
 
 @wp.kernel
@@ -774,7 +822,9 @@ def reset_joints_state_from_bodies_state(
             model.joints.dof_type,
             model.joints.coords_offset,
             model.joints.dofs_offset,
-            model.joints.cts_offset,
+            model.joints.dynamic_cts_offset,
+            model.joints.kinematic_cts_offset,
+            model.joints.friction_cts_offset,
             model.joints.bid_B,
             model.joints.bid_F,
             model.joints.B_r_Bj,
@@ -788,7 +838,9 @@ def reset_joints_state_from_bodies_state(
             state.q_j,
             state.q_j_p,
             state.dq_j,
-            state.lambda_j,
+            state.lambda_dyn_j,
+            state.lambda_kin_j,
+            state.lambda_f_j,
         ],
         device=model.device,
     )

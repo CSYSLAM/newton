@@ -64,7 +64,7 @@ class Example:
 
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         SolverMuJoCo.register_custom_attributes(builder)
-        SolverVBD.register_custom_attributes(builder, dahl_defaults_enabled=False)
+        SolverVBD.register_custom_attributes(builder)
         builder.default_particle_radius = 0.01
 
         self.soft_particle_start = builder.particle_count
@@ -99,9 +99,9 @@ class Example:
 
         vbd_kwargs = {
             "iterations": int(args.vbd_iterations),
+            "rigid_compliant_alm": True,
             "particle_enable_self_contact": False,
             "particle_enable_tile_solve": False,
-            "rigid_contact_hard": False,
             "rigid_body_particle_contact_buffer_size": 1024 if self.scenario == "harsh" else 512,
             "rigid_joint_linear_ke": 5.0e5 if self.scenario == "harsh" else 2.0e7,
             "rigid_joint_angular_ke": 5.0e5 if self.scenario == "harsh" else 2.0e6,

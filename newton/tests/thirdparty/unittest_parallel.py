@@ -27,6 +27,7 @@ from io import StringIO
 os.environ.setdefault("PXR_WORK_THREAD_LIMIT", "1")
 
 from newton.tests.unittest_utils import (  # NVIDIA modification
+    AllocationCleanupTestResultMixin,
     ParallelJunitTestResult,
     write_junit_results,
 )
@@ -51,6 +52,20 @@ def _enable_strict_warnings():
     """
     warnings.filterwarnings("error", category=DeprecationWarning)
     warnings.filterwarnings("error", module=r"newton(\.|$)")
+
+
+def _use_coord_layout_targets():
+    """Run the suite under the coordinate target layout (the future default).
+
+    Set here — in the runner entry points and worker initializers — rather than
+    at unittest_utils import time: newton.examples imports unittest_utils, so an
+    import-time assignment would leak the flag into production example runs.
+    Tests that exercise the deprecated DOF layout set the flag to False locally
+    and restore it afterwards.
+    """
+    import newton  # noqa: PLC0415
+
+    newton.use_coord_layout_targets = True
 
 
 def main(argv=None):
@@ -227,6 +242,7 @@ def main(argv=None):
         # the serial-fallback path, which runs here.
         if args.strict_warnings:
             _enable_strict_warnings()
+        _use_coord_layout_targets()
 
         # Discover tests
         with _coverage(args, temp_dir):
@@ -545,6 +561,7 @@ class ParallelTestManager:
         newton.tests.unittest_utils.strict_warnings = self.args.strict_warnings
         if self.args.strict_warnings:
             _enable_strict_warnings()
+        _use_coord_layout_targets()
 
         if self.args.junit_report_xml:
             resultclass = ParallelJunitTestResult
@@ -596,7 +613,7 @@ class ParallelTestManager:
         )
 
 
-class ParallelTextTestResult(unittest.TextTestResult):
+class ParallelTextTestResult(AllocationCleanupTestResultMixin, unittest.TextTestResult):
     def __init__(self, stream, descriptions, verbosity):
         stream = type(stream)(sys.stderr)
         super().__init__(stream, descriptions, verbosity)
@@ -610,20 +627,6 @@ class ParallelTextTestResult(unittest.TextTestResult):
             self.stream.writeln(f"{test} ...")
             self.stream.flush()
         super(unittest.TextTestResult, self).startTest(test)
-
-    def stopTest(self, test):
-        super().stopTest(test)
-        # Force garbage collection of CPU-side allocations and release unused
-        # CUDA mempool memory to reduce peak host RSS in parallel test runs
-        # (see issue #1881).
-        import gc  # noqa: PLC0415
-
-        gc.collect()
-        import warp as wp  # noqa: PLC0415
-
-        for device_name in wp.get_cuda_devices():
-            if wp.is_mempool_enabled(device_name):
-                wp.set_mempool_release_threshold(device_name, 0)
 
     def _add_helper(self, test, show_all_message):
         if self.showAll:
@@ -673,6 +676,7 @@ def initialize_test_process(lock, shared_index, args, temp_dir):
     # unpickle, before run_tests).
     if args.strict_warnings:
         _enable_strict_warnings()
+    _use_coord_layout_targets()
 
     with lock:
         shared_index.value += 1
