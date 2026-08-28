@@ -38,6 +38,7 @@ Status values are:
 
 | Date | Change | Affected path | Status | Evidence |
 | --- | --- | --- | --- | --- |
+| 2026-08-28 | Precompute rest-shape VT/EE exclusion CSR | Complete `vbd/` and optimized `vbd_soft/` self-contact | **Rejected, reverted** | A two-layer 28-by-28 cloth Graph made VT/EE detection 19.1% slower after CSR rows grew to 190,236/918,016 entries; a 10-second supermarket-bag frame benchmark improved only 1.7%, below the 5% gate |
 | 2026-08-28 | Canonicalize directed edge-edge self-contact records with side masks | Complete `vbd/` and optimized `vbd_soft/` self-contact | **Rejected, reverted** | Dense two-layer cloth reduced 163,224 directed rows to 90,576 pairs, but full eager GPU steps regressed 23.5% (`vbd/`) and 17.5% (`vbd_soft/`) |
 | 2026-08-28 | Compress retained self-contact rows into VT/EE active streams | Complete `vbd/` and optimized `vbd_soft/` self-contact | **Rejected, reverted** | Dense 24-by-24 cloth Graph replays showed only order-sensitive 1%--5% gains and eager steps were neutral; the extra kernels, fixed stream memory, and dual implementation are not justified |
 | 2026-08-28 | Reject spatially remote sparse point-contact pairs before SDF evaluation | Dynamic and kinematic `soft` backends | **Pending, low impact** | Dynamic W1 fold collision Graph fell from 0.024180 to 0.017609 ms (27.18%), but only 0.006571 ms per call; CPU/CUDA contact records remain equivalent |
@@ -65,6 +66,57 @@ Status values are:
 | 2026-08-10 | Articulation-only dispatch shortcut (`89002b52`) | `pure_mujoco` and `kinematic_passthrough` | **Retained** | Structurally removes VBD construction and execution; no standardized timing archive |
 
 ## Detailed experiments
+
+### 2026-08-28: reject rest-shape exclusion CSR precomputation
+
+**Hypothesis.** Rest positions, rest-shape exclusion radius, topology, and
+external filter maps are fixed after solver construction. Build exact
+vertex-triangle (VT) and directed edge-edge (EE) rest-near pair CSR rows once,
+union them with the detector's final static filters, and disable the per-frame
+rest-pose closest-point calculations. The candidate preserved the strict
+`distance_rest < radius` predicate, BVH world grouping, EE directionality,
+topological and asymmetric external filters, current-position force order,
+and CUDA Graph topology.
+
+**Candidate work.** A V2-private module used the construction-time rest BVHs
+to count, scan, and fill exact VT and EE rows on CUDA. It merged and sorted
+the entries with the existing CSR because the detector binary-searches each
+row. A combined eight-million-entry cap left the existing filters and the
+runtime reference-distance path untouched when exceeded. CPU, `requires_grad`,
+and deterministic configurations also retained the legacy path. CUDA tests
+compared sorted detector rows, counters, minimum distances, overflow flags,
+one-step DAT values, final particle positions and velocities, asymmetric
+external filters, cap fallback, and Graph replay.
+
+**Controlled A/B.** The candidate was an uncommitted experiment measured on
+an NVIDIA GeForce RTX 5060 Ti (CUDA 12.9, Warp 1.17.0.dev20260807). The
+isolated CUDA Graph benchmark used two disconnected 28-by-28-cell cloth grids
+at rest-plane separation 0.01 m: 1,682 particles, 3,136 triangles, 4,816
+edges, a 0.03 m rest exclusion, a 0.05 m detection margin, and n-ring filter
+threshold 2. Both variants warmed 30 replays, then ran 300 synchronized
+VT+EE-detection Graph replays. The legacy filter held 27,112 VT and 97,056 EE
+entries; the candidate grew those rows to 190,236 and 918,016 entries.
+
+| Measurement | Runtime rest filter | Static CSR | Change |
+| --- | ---: | ---: | ---: |
+| VT + EE self-detection | 6.0853 ms/pass | 7.2488 ms/pass | 19.1% slower |
+
+The proposal removes rest closest-point arithmetic, but it replaces it with
+large, divergent global-memory binary searches. In this rest-near workload
+the additional CSR traffic dominates the saved geometry work.
+
+As an end-to-end representative check, separate-process null-viewer CUDA
+Graph runs of `mjvbd_v2_supermarket_plastic_bag` used the standard model,
+three-frame warm-up, and a 10.01-second sample at default process priority. The
+candidate completed 422 frames (42.2 FPS); a same-worktree baseline that
+disabled CSR installation completed 415 (41.5 FPS). This is only a 1.7%
+frame-time reduction, below the 5% gate and near desktop timing variance.
+
+**Decision.** Rejected and reverted before commit. Do not restore a general
+rest-near CSR with per-row binary search. Reconsider only with a more compact
+membership representation that does not expand dense rest-near rows, and only
+after it clears at least 15% isolated self-detection and 5% representative
+frame-time improvement.
 
 ### 2026-08-28: reject post-detection canonical edge-edge pairs
 
