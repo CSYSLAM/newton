@@ -212,8 +212,10 @@ joint coordinates and velocities from `state_in`.
 - `auto` selects `full` when VBD owns a dynamic rigid body and `soft`
   otherwise.
 - `soft` uses a compact, world-filtered particle-shape candidate array. Shapes
-  without `COLLIDE_PARTICLES` are removed before device allocation. This mode
-  cannot solve VBD-owned dynamic rigid-body contacts.
+  without `COLLIDE_PARTICLES` are removed before device allocation. Each pass
+  updates conservative world shape AABBs and rejects spatially remote pairs
+  before SDF or mesh evaluation. This mode cannot solve VBD-owned dynamic
+  rigid-body contacts.
 - `full` uses the private `MJVBDV2CollisionPipeline`, layered over
   `CollisionPipeline`, and full VBD/AVBD contact handling. Its defaults are
   `broad_phase="nxn"` and `include_static_kinematic_pairs=False` unless the
@@ -229,6 +231,13 @@ The two sparse contact helpers have intentionally different state ordering:
 Both allocate exactly one soft-contact record per world-compatible
 particle-shape candidate. Active particle flags remain device-side so changing
 activity does not force a host rebuild.
+
+The sparse AABB pass does not resize or compact that candidate table at
+runtime. Pair order, capacity, replay tids, and CUDA Graph launch topology stay
+fixed. Shape margin is included in each shape bound, while the pair test adds
+the runtime soft-contact margin and particle radius. Infinite planes remain
+eligible for every compatible particle because their signed half-space cannot
+be enclosed by a finite scene-independent AABB.
 
 The private VBD constructors use the same world-compatibility count as their
 initial body-particle contact-state capacity. They do not preallocate the full
@@ -452,6 +461,8 @@ solver or accept a contradictory rigid-integration mode.
 - scene-based module pruning and optimized-soft device-side self-contact
   selection;
 - sparse world-shape contacts;
+- sparse point-contact AABB equivalence for moving primitives, offset-origin
+  meshes, runtime shape flags, and CUDA Graph replay;
 - private full-contact dispatch, contact equivalence, runtime margins, and
   CUDA Graph replay;
 - device material selection and single-graph replay;

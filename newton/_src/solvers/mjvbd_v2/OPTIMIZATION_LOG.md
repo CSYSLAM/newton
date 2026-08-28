@@ -38,6 +38,7 @@ Status values are:
 
 | Date | Change | Affected path | Status | Evidence |
 | --- | --- | --- | --- | --- |
+| 2026-08-28 | Reject spatially remote sparse point-contact pairs before SDF evaluation | Dynamic and kinematic `soft` backends | **Pending, low impact** | Dynamic W1 fold collision Graph fell from 0.024180 to 0.017609 ms (27.18%), but only 0.006571 ms per call; CPU/CUDA contact records remain equivalent |
 | 2026-08-21 | Reduce dense body-particle contacts in parallel | Complete `vbd/` AVBD path | **Retained, gated** | A 200-frame supermarket-bag CUDA Graph run fell from 37.670750 to 28.246249 ms/frame (25.02%); a 1,024-contact isolated Graph was 25.23x faster |
 | 2026-08-21 | Prune zero-inverse-mass and kinematic rows from rigid color groups | Complete `vbd/` AVBD path | **Rejected** | Both end-to-end dense-contact variants included pruning, so no gain was isolated; the host-cached launch topology would require Graph recapture after runtime mass or flag changes |
 | 2026-08-21 | Add another AABB pass to sparse point contacts | Dynamic and kinematic `soft` backends | **Rejected** | Rejected before implementation: the dynamic fold scans 566,368 candidates in 0.026726 ms per collision Graph; even ten calls are below 0.1% of the measured frame |
@@ -62,6 +63,68 @@ Status values are:
 | 2026-08-10 | Articulation-only dispatch shortcut (`89002b52`) | `pure_mujoco` and `kinematic_passthrough` | **Retained** | Structurally removes VBD construction and execution; no standardized timing archive |
 
 ## Detailed experiments
+
+### 2026-08-28: revisit sparse point-contact AABB rejection
+
+The earlier experiment below rejected another sparse point-contact broad phase
+because the measured dynamic-fold collision Graph took only 0.026726 ms. That
+result remains valid for that captured state. The optimization is revisited for
+full-robot scenes whose world-compatible candidate table contains many remote
+mesh collision shapes, to measure whether an explicit solver-private spatial
+rejection can make that already-small pass cheaper without changing contacts.
+
+**Pending implementation.** Both MJVBDV2-private `soft` contact entry points
+now update one conservative world AABB per shape, then scan their unchanged
+world-compatible particle/shape table. A pair outside the shape bound expanded
+by the runtime soft-contact margin and particle radius returns before shape
+transform inversion, SDF evaluation, or mesh query. Shape margin remains in
+the shape bound. Infinite planes remain unconditionally eligible because their
+signed half-space has no finite scene-independent AABB.
+
+This is deliberately not a dynamic BVH or compact pair list. Candidate
+capacity, launch dimensions, pair order, replay tids, counter semantics,
+contact fields, contact thresholds, and CUDA Graph topology remain fixed.
+Runtime particle positions, body poses, shape margins, and collision flags are
+reread on every pass. All implementation code is private to `mjvbd_v2`; no
+shared Newton collision or solver module changes.
+
+**Controlled A/B.** The self-contained dynamic W1 T-shirt example ran on an
+NVIDIA GeForce RTX 5090 D v2 at its initial state. The VBD destination view had
+6,436 particles and 88 shapes: 86 triangle meshes, one box, and one plane. Its
+world-compatible table contained 566,368 pairs, of which the conservative
+AABB test admitted 6,444 (1.138%); both variants emitted eight contacts. Each
+collision path was captured as a separate CUDA Graph, warmed for 20 launches,
+then measured in alternating order over nine samples of 1,000 synchronized
+replays. The table reports the median complete collision-Graph time.
+
+| Sparse point collision | Time | Change |
+| --- | ---: | ---: |
+| Original direct SDF/mesh-query scan | 0.024180 ms | baseline |
+| Per-shape AABB plus pair early return | 0.017609 ms | 27.18% faster |
+
+The absolute saving is only 0.006571 ms per collision. Ten collision refreshes
+would therefore save about 0.066 ms per displayed frame, below 0.1% of the
+roughly 68 ms realtime-IK folding frame previously measured. This confirms
+that the AABB rejects remote robot meshes correctly, but also confirms the
+earlier conclusion that sparse point collision is not the dynamic fold's
+frame-time bottleneck.
+
+**Correctness evidence.** A CPU/CUDA reference regression compares both private
+entry points against the original `create_soft_contacts` kernel. It covers a
+moving kinematic sphere, static primitive contact, a watertight mesh whose
+vertices are offset from its authored shape origin, a spatially remote mesh,
+runtime body motion, and runtime `COLLIDE_PARTICLES` changes. Sorted particle
+and shape IDs, unified indices, barycentrics, body-local points, body
+velocities, and normals agree at `1e-6`. The same test captures both paths on
+CUDA and changes shape margin before replay. It passed on an NVIDIA GeForce RTX
+5090 D v2 as well as the CPU path.
+
+**Decision.** Pending, low impact. The representative mesh-heavy collision
+pass is faster and exact, but the expected end-to-end gain is below measurement
+noise while the private contact kernel adds maintenance cost. Keep this as an
+explicitly measured candidate until the affected W1 bag/cloth demos are timed;
+revert it if they show no stable frame gain or if primitive-heavy scenes
+regress.
 
 ### 2026-08-25: remove rigid-only gap from private soft-surface AABBs
 

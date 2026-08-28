@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.geometry.kernels import create_soft_contacts
 from newton._src.solvers.mjvbd_v2 import collision_pipeline, soft_contact_pipeline
 from newton._src.solvers.mjvbd_v2.full_contact_pipeline import MJVBDV2CollisionPipeline
 from newton._src.solvers.mjvbd_v2.vbd import particle_vbd_kernels as complete_particle_kernels
@@ -26,6 +27,71 @@ _RIGID_KERNEL_VARIANTS = (
     ("complete", complete_rigid_kernels),
     ("soft", soft_rigid_kernels),
 )
+
+
+def _launch_reference_soft_contacts(model, pairs, particle_state, rigid_state, contacts, margin):
+    contacts.clear()
+    wp.launch(
+        create_soft_contacts,
+        dim=pairs.shape[0],
+        inputs=[
+            pairs,
+            particle_state.particle_q,
+            model.particle_radius,
+            model.particle_flags,
+            model.particle_world,
+            rigid_state.body_q,
+            model.shape_transform,
+            model.shape_body,
+            model.shape_type,
+            model.shape_scale,
+            model.shape_source_ptr,
+            model._shape_mesh_properties,
+            model.shape_world,
+            margin,
+            model.shape_margin,
+            contacts.soft_contact_max,
+            model.shape_flags,
+            model.shape_heightfield_index,
+            model.heightfield_data,
+            model.heightfield_elevations,
+        ],
+        outputs=[
+            contacts.soft_contact_count,
+            contacts.soft_contact_particle,
+            contacts.soft_contact_indices,
+            contacts.soft_contact_barycentric,
+            contacts.soft_contact_shape,
+            contacts.soft_contact_body_pos,
+            contacts.soft_contact_body_vel,
+            contacts.soft_contact_normal,
+            contacts.soft_contact_tids,
+        ],
+        device=model.device,
+    )
+
+
+def _sorted_soft_contact_records(contacts):
+    count = min(int(contacts.soft_contact_count.numpy()[0]), contacts.soft_contact_max)
+    particles = contacts.soft_contact_particle.numpy()[:count]
+    shapes = contacts.soft_contact_shape.numpy()[:count]
+    order = np.lexsort((shapes, particles))
+    return (
+        particles[order],
+        shapes[order],
+        contacts.soft_contact_indices.numpy()[:count][order],
+        contacts.soft_contact_barycentric.numpy()[:count][order],
+        contacts.soft_contact_body_pos.numpy()[:count][order],
+        contacts.soft_contact_body_vel.numpy()[:count][order],
+        contacts.soft_contact_normal.numpy()[:count][order],
+    )
+
+
+def _assert_soft_contact_records_equal(test_case, expected, actual):
+    for expected_array, actual_array in zip(expected[:3], actual[:3], strict=True):
+        test_case.assertTrue(np.array_equal(actual_array, expected_array))
+    for expected_array, actual_array in zip(expected[3:], actual[3:], strict=True):
+        np.testing.assert_allclose(actual_array, expected_array, rtol=1.0e-6, atol=1.0e-6)
 
 
 def _make_point_contact_data(device, capacity=7):
@@ -588,6 +654,149 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
                             0.1 + 0.01 * np.arange(1, active_count + 1, dtype=np.float32)
                         )
                         np.testing.assert_allclose(penalty_k.numpy(), expected, rtol=1.0e-6, atol=1.0e-6)
+
+    def test_point_contact_aabb_rejection_matches_reference(self):
+        """Preserve point contacts while rejecting spatially remote shape pairs."""
+        devices = [wp.get_device("cpu")]
+        if wp.is_cuda_available():
+            devices.append(wp.get_device("cuda:0"))
+
+        for device in devices:
+            builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+            moving_body = builder.add_body(
+                xform=wp.transform(wp.vec3(3.0, 0.0, 0.0), wp.quat_identity()),
+                is_kinematic=True,
+            )
+            shape_cfg = newton.ModelBuilder.ShapeConfig(density=0.0, margin=0.02)
+            builder.add_shape_box(body=-1, hx=0.2, hy=0.2, hz=0.2, cfg=shape_cfg)
+            moving_shape = builder.add_shape_sphere(body=moving_body, radius=0.15, cfg=shape_cfg)
+            mesh = newton.Mesh.create_box(0.2, 0.2, 0.2, compute_inertia=False)
+            offset_mesh = newton.Mesh(
+                mesh.vertices + np.array((1.0, 0.0, 0.0), dtype=np.float32),
+                mesh.indices,
+                compute_inertia=False,
+            )
+            builder.add_shape_mesh(
+                body=-1,
+                xform=wp.transform(wp.vec3(-1.0, 0.6, 0.0), wp.quat_identity()),
+                mesh=offset_mesh,
+                cfg=shape_cfg,
+            )
+            remote_shape = builder.add_shape_mesh(
+                body=-1,
+                xform=wp.transform(wp.vec3(100.0, 0.0, 0.0), wp.quat_identity()),
+                mesh=mesh,
+                cfg=shape_cfg,
+            )
+            for position in ((0.22, 0.0, 0.0), (0.6, 0.0, 0.0), (0.19, 0.6, 0.0)):
+                builder.add_particle(wp.vec3(*position), wp.vec3(), 0.01, radius=0.05)
+            builder.color()
+            model = builder.finalize(device=device)
+            state = model.state()
+            margin = 0.01
+
+            pipeline_factories = (
+                (
+                    collision_pipeline.MJVBDV2SoftContactPipeline,
+                    lambda pipeline, contacts, state=state: pipeline.collide(state, contacts),
+                    lambda pipeline: pipeline.contacts(),
+                ),
+                (
+                    soft_contact_pipeline.MJVBDSoftContactPipeline,
+                    lambda pipeline, contacts, state=state: pipeline.generate(state, state, contacts),
+                    lambda pipeline: pipeline.make_contacts(),
+                ),
+            )
+            for pipeline_type, generate, make_contacts in pipeline_factories:
+                with self.subTest(device=device, pipeline=pipeline_type.__name__):
+                    body_q = state.body_q.numpy()
+                    body_q[moving_body, :3] = (3.0, 0.0, 0.0)
+                    state.body_q.assign(body_q)
+                    pipeline = pipeline_type(model, margin=margin)
+                    actual_contacts = make_contacts(pipeline)
+                    reference_contacts = make_contacts(pipeline)
+
+                    generate(pipeline, actual_contacts)
+                    _launch_reference_soft_contacts(
+                        model,
+                        pipeline.pairs,
+                        state,
+                        state,
+                        reference_contacts,
+                        margin,
+                    )
+                    _assert_soft_contact_records_equal(
+                        self,
+                        _sorted_soft_contact_records(reference_contacts),
+                        _sorted_soft_contact_records(actual_contacts),
+                    )
+                    initial_count = int(reference_contacts.soft_contact_count.numpy()[0])
+                    self.assertGreater(initial_count, 0)
+                    self.assertGreater(pipeline.shape_aabb_lower.numpy()[remote_shape, 0], 99.0)
+                    self.assertGreater(pipeline.shape_aabb_lower.numpy()[moving_shape, 0], 2.0)
+
+                    body_q = state.body_q.numpy()
+                    body_q[moving_body, :3] = (0.6, 0.0, 0.0)
+                    state.body_q.assign(body_q)
+                    generate(pipeline, actual_contacts)
+                    _launch_reference_soft_contacts(
+                        model,
+                        pipeline.pairs,
+                        state,
+                        state,
+                        reference_contacts,
+                        margin,
+                    )
+                    _assert_soft_contact_records_equal(
+                        self,
+                        _sorted_soft_contact_records(reference_contacts),
+                        _sorted_soft_contact_records(actual_contacts),
+                    )
+                    moved_count = int(reference_contacts.soft_contact_count.numpy()[0])
+                    self.assertGreater(moved_count, initial_count)
+
+                    flags = model.shape_flags.numpy()
+                    flags[moving_shape] &= ~int(newton.ShapeFlags.COLLIDE_PARTICLES)
+                    model.shape_flags.assign(flags)
+                    generate(pipeline, actual_contacts)
+                    _launch_reference_soft_contacts(
+                        model,
+                        pipeline.pairs,
+                        state,
+                        state,
+                        reference_contacts,
+                        margin,
+                    )
+                    _assert_soft_contact_records_equal(
+                        self,
+                        _sorted_soft_contact_records(reference_contacts),
+                        _sorted_soft_contact_records(actual_contacts),
+                    )
+                    self.assertLess(int(reference_contacts.soft_contact_count.numpy()[0]), moved_count)
+
+                    flags[moving_shape] |= int(newton.ShapeFlags.COLLIDE_PARTICLES)
+                    model.shape_flags.assign(flags)
+
+                    if device.is_cuda:
+                        with wp.ScopedCapture(device=device) as capture:
+                            generate(pipeline, actual_contacts)
+                        shape_margin = model.shape_margin.numpy()
+                        shape_margin += 0.01
+                        model.shape_margin.assign(shape_margin)
+                        wp.capture_launch(capture.graph)
+                        _launch_reference_soft_contacts(
+                            model,
+                            pipeline.pairs,
+                            state,
+                            state,
+                            reference_contacts,
+                            margin,
+                        )
+                        _assert_soft_contact_records_equal(
+                            self,
+                            _sorted_soft_contact_records(reference_contacts),
+                            _sorted_soft_contact_records(actual_contacts),
+                        )
 
     @unittest.skipUnless(wp.is_cuda_available(), "Shape-major contact candidates require CUDA")
     def test_cuda_sparse_contact_candidates_are_shape_major(self):

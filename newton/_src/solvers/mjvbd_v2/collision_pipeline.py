@@ -9,8 +9,8 @@ import numpy as np
 import warp as wp
 
 from ...geometry import ShapeFlags
-from ...geometry.kernels import create_soft_contacts
 from ...sim import Contacts, Model, State
+from .point_contact_kernels import compute_shape_world_aabbs, create_soft_contacts_with_aabb
 
 __all__ = ["MJVBDV2SoftContactPipeline"]
 
@@ -93,6 +93,8 @@ class MJVBDV2SoftContactPipeline:
         self.margin = float(margin)
         self.pairs = _build_particle_shape_pairs(model)
         self._empty_body_q = wp.empty(0, dtype=wp.transform, device=model.device)
+        self.shape_aabb_lower = wp.empty(model.shape_count, dtype=wp.vec3, device=model.device)
+        self.shape_aabb_upper = wp.empty(model.shape_count, dtype=wp.vec3, device=model.device)
 
     @property
     def pair_count(self) -> int:
@@ -134,7 +136,23 @@ class MJVBDV2SoftContactPipeline:
 
         model = self.model
         wp.launch(
-            kernel=create_soft_contacts,
+            kernel=compute_shape_world_aabbs,
+            dim=model.shape_count,
+            inputs=[
+                body_q,
+                model.shape_transform,
+                model.shape_body,
+                model.shape_type,
+                model.shape_scale,
+                model.shape_margin,
+                model.shape_collision_aabb_lower,
+                model.shape_collision_aabb_upper,
+            ],
+            outputs=[self.shape_aabb_lower, self.shape_aabb_upper],
+            device=model.device,
+        )
+        wp.launch(
+            kernel=create_soft_contacts_with_aabb,
             dim=self.pair_count,
             inputs=[
                 self.pairs,
@@ -157,6 +175,8 @@ class MJVBDV2SoftContactPipeline:
                 model.shape_heightfield_index,
                 model.heightfield_data,
                 model.heightfield_elevations,
+                self.shape_aabb_lower,
+                self.shape_aabb_upper,
             ],
             outputs=[
                 contacts.soft_contact_count,
