@@ -38,6 +38,8 @@ Status values are:
 
 | Date | Change | Affected path | Status | Evidence |
 | --- | --- | --- | --- | --- |
+| 2026-08-28 | Canonicalize directed edge-edge self-contact records with side masks | Complete `vbd/` and optimized `vbd_soft/` self-contact | **Rejected, reverted** | Dense two-layer cloth reduced 163,224 directed rows to 90,576 pairs, but full eager GPU steps regressed 23.5% (`vbd/`) and 17.5% (`vbd_soft/`) |
+| 2026-08-28 | Compress retained self-contact rows into VT/EE active streams | Complete `vbd/` and optimized `vbd_soft/` self-contact | **Rejected, reverted** | Dense 24-by-24 cloth Graph replays showed only order-sensitive 1%--5% gains and eager steps were neutral; the extra kernels, fixed stream memory, and dual implementation are not justified |
 | 2026-08-28 | Reject spatially remote sparse point-contact pairs before SDF evaluation | Dynamic and kinematic `soft` backends | **Pending, low impact** | Dynamic W1 fold collision Graph fell from 0.024180 to 0.017609 ms (27.18%), but only 0.006571 ms per call; CPU/CUDA contact records remain equivalent |
 | 2026-08-21 | Reduce dense body-particle contacts in parallel | Complete `vbd/` AVBD path | **Retained, gated** | A 200-frame supermarket-bag CUDA Graph run fell from 37.670750 to 28.246249 ms/frame (25.02%); a 1,024-contact isolated Graph was 25.23x faster |
 | 2026-08-21 | Prune zero-inverse-mass and kinematic rows from rigid color groups | Complete `vbd/` AVBD path | **Rejected** | Both end-to-end dense-contact variants included pruning, so no gain was isolated; the host-cached launch topology would require Graph recapture after runtime mass or flag changes |
@@ -63,6 +65,108 @@ Status values are:
 | 2026-08-10 | Articulation-only dispatch shortcut (`89002b52`) | `pure_mujoco` and `kinematic_passthrough` | **Retained** | Structurally removes VBD construction and execution; no standardized timing archive |
 
 ## Detailed experiments
+
+### 2026-08-28: reject post-detection canonical edge-edge pairs
+
+**Hypothesis.** Merge the directed edge-edge (EE) self-contact rows into one
+canonical `(min(edge_a, edge_b), max(edge_a, edge_b))` pair and retain two side
+bits. Force/Hessian and proxy harvest would still process every enabled side,
+preserving asymmetric external topology filtering and graph-color
+Gauss--Seidel semantics. Planar DAT, which constrains all four vertices, would
+run once per pair instead of once per directed row.
+
+**Candidate work.** After the existing EE detector wrote its directed CSR, a
+new device kernel scanned it to build a fixed-capacity canonical-pair stream.
+It reverse-searched the CSR to decide whether each side was present. Both
+private VBD implementations consumed the new stream; the directed CSR was
+retained for conservative bounds and contact activity. CPU/CUDA regressions
+covered symmetric and asymmetric filters, force/Hessian equality against the
+legacy directed reference, DAT, proxy harvest, and CUDA Graph capture.
+
+**Controlled A/B.** The exact parent was `4c3cb08f`; the candidate was an
+uncommitted experiment and was measured before reverting. Tests ran eagerly
+on an NVIDIA GeForce RTX 5060 Ti (CUDA 12.9, Warp 1.17.0.dev20260807), with
+one VBD iteration and self-contact radius/margin of 0.02/0.04 m. The topology
+was two disconnected, quarter-cell-offset 28-by-28 cloth grids: 1,682
+particles, 4,816 edges, one particle color, and 163,224 stored directed EE
+rows. The candidate produced 90,576 canonical pairs, a 44.5% reduction rather
+than an ideal half because the input contained one-sided rows. Each sample
+synchronized the GPU; solver input positions were reset before full-step
+samples. Complete `vbd/` used 20 warm-ups and 100 samples; `vbd_soft/` used
+10 warm-ups and 50 samples. Values below are medians.
+
+| Measurement | Complete parent | Complete candidate | Change |
+| --- | ---: | ---: | ---: |
+| EE detection | 0.677500 ms | 0.876250 ms | 29.3% slower |
+| EE force/Hessian | 0.085700 ms | 0.101150 ms | 18.0% slower |
+| EE DAT | 0.181700 ms | 0.154700 ms | 14.9% faster |
+| Full self-contact step | 2.123400 ms | 2.623400 ms | 23.5% slower |
+
+| Measurement | Soft parent | Soft candidate | Change |
+| --- | ---: | ---: | ---: |
+| EE detection | 0.729350 ms | 0.866850 ms | 18.9% slower |
+| EE force/Hessian | 0.086950 ms | 0.094750 ms | 9.0% slower |
+| EE DAT | 0.084450 ms | 0.086800 ms | 2.8% slower |
+| Full self-contact step | 2.234900 ms | 2.627100 ms | 17.5% slower |
+
+The absolute isolated-kernel numbers are small and have normal desktop-GPU
+variance, but both end-to-end measurements regress materially. DAT's reduced
+work is insufficient to offset canonical-stream construction. The reverse CSR
+lookups add detector work, while force/Hessian cannot remove directional
+evaluations without changing the preserved side semantics.
+
+**Decision.** Rejected and reverted before commit. Do not restore this
+post-processing canonical stream. Revisit only if broad phase can emit a
+unique pair directly, without first materializing and reverse-searching the
+directed CSR, and if a new controlled A/B proves end-to-end benefit.
+
+### 2026-08-28: reject row-buffer active contact streams
+
+**Hypothesis.** Keep the detector's fixed per-vertex VT and per-edge directed
+EE rows, then append each retained row to fixed-capacity device-side streams.
+Force/Hessian and planar DAT would use fixed persistent workers over the
+counts, avoiding the four-thread primitive-row scans. Directed EE entries were
+intentionally not canonicalized: asymmetric filters, both EE force sides, and
+the existing Gauss--Seidel color semantics remain unchanged.
+
+**Candidate work.** Both private VBD detectors allocated streams sized exactly
+to their total retained row capacities and atomically compressed the clamped
+VT/EE prefixes after detection. The CUDA/non-gradient/nondeterministic solver
+path used those streams for force/Hessian and DAT, with a static
+`2 * SM * 128` worker bound. CPU, `requires_grad`, and deterministic modes
+kept their original row kernels. The detector's existing resize flags remained
+authoritative because stream capacity cannot be exceeded by clamped rows.
+
+**Correctness.** CUDA tests verified that sorted VT and directed EE streams
+equal every retained detector row, that one-step positions match the legacy
+row path to `2e-5`, and that complete and soft solvers capture and replay one
+CUDA Graph. CPU, autodiff, and deterministic construction were verified to
+select the legacy path.
+
+**Controlled A/B.** The experiment ran on an NVIDIA GeForce RTX 5060 Ti
+(CUDA 12.9, Warp 1.17.0.dev20260807). The topology was one 24-by-24-cell
+cloth grid (625 particles and 1,152 triangles), one VBD iteration, radius
+0.02 m, margin 0.03 m, and default VT/EE row capacities of 32/64. At the
+measured state, streams held roughly 9.7k--9.9k VT and 60.5k--61.5k directed
+EE entries. The baseline disabled both stream consumption *and* detector
+compression; it otherwise used the same warmed worktree. CUDA Graph samples
+used 50 warm-ups, 11 synchronized samples, and 200 replays per sample.
+
+| Path | Baseline-first Graph result | Stream-first Graph result | Eager full-step result |
+| --- | ---: | ---: | ---: |
+| `vbd_soft/` | 1.913282 -> 1.858652 ms (2.86% faster) | 1.991650 -> 1.972545 ms (0.96% faster) | 2.025850 -> 2.046293 ms (1.01% slower) |
+| Complete `vbd/` | 1.915529 -> 1.824162 ms (4.77% faster) | 2.000077 -> 1.945915 ms (2.71% faster) | 2.021113 -> 2.000897 ms (1.00% faster) |
+
+The small Graph effect was sensitive to run order and did not translate into
+a repeatable eager improvement. It is insufficient to retain duplicated
+kernels, two compression launches, and the fixed stream allocations. The
+planned direct-detector output may remove part of that cost, but it is a
+different experiment and must be measured against the row baseline.
+
+**Decision.** Rejected and reverted before commit. Do not retain a separate
+post-detection active stream. Revisit only together with direct compact output
+from the detector and a controlled end-to-end speedup that exceeds timing
+variance.
 
 ### 2026-08-28: revisit sparse point-contact AABB rejection
 
