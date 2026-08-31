@@ -38,6 +38,9 @@ Status values are:
 
 | Date | Change | Affected path | Status | Evidence |
 | --- | --- | --- | --- | --- |
+| 2026-08-28 | Let one canonical EE owner evaluate both directed filter sides and write the legacy rows | Complete `vbd/` and optimized `vbd_soft/` self-contact | **Rejected, reverted** | Exact directed rows were preserved, but dense 28-by-28 two-layer EE detection regressed 46.6% without rest exclusion and 26.1% with a 0.03 m rest exclusion because dual atomic row updates outweighed the saved narrow phase |
+| 2026-08-28 | Schedule VT/EE source queries in static rest-space Morton order | Complete `vbd/` and optimized `vbd_soft/` self-contact | **Rejected, reverted** | Dense two-layer cloth detection regressed 4.6%; a sparse supermarket-bag state improved only 1.7%--2.3%, about 0.01 ms, because scattered row/filter writes offset more coherent BVH traversal |
+| 2026-08-28 | Skip color-irrelevant directed EE rows before force/Hessian traversal | Complete `vbd/` and optimized `vbd_soft/` self-contact | **Rejected, reverted** | A frozen four-color two-layer cloth Graph improved only 0.42%, while a 10-second supermarket-bag Graph fell from 38.1 to 37.7 FPS and timed EE/VT force launches were 4.13% slower |
 | 2026-08-28 | Precompute rest-shape VT/EE exclusion CSR | Complete `vbd/` and optimized `vbd_soft/` self-contact | **Rejected, reverted** | A two-layer 28-by-28 cloth Graph made VT/EE detection 19.1% slower after CSR rows grew to 190,236/918,016 entries; a 10-second supermarket-bag frame benchmark improved only 1.7%, below the 5% gate |
 | 2026-08-28 | Canonicalize directed edge-edge self-contact records with side masks | Complete `vbd/` and optimized `vbd_soft/` self-contact | **Rejected, reverted** | Dense two-layer cloth reduced 163,224 directed rows to 90,576 pairs, but full eager GPU steps regressed 23.5% (`vbd/`) and 17.5% (`vbd_soft/`) |
 | 2026-08-28 | Compress retained self-contact rows into VT/EE active streams | Complete `vbd/` and optimized `vbd_soft/` self-contact | **Rejected, reverted** | Dense 24-by-24 cloth Graph replays showed only order-sensitive 1%--5% gains and eager steps were neutral; the extra kernels, fixed stream memory, and dual implementation are not justified |
@@ -66,6 +69,170 @@ Status values are:
 | 2026-08-10 | Articulation-only dispatch shortcut (`89002b52`) | `pure_mujoco` and `kinematic_passthrough` | **Retained** | Structurally removes VBD construction and execution; no standardized timing archive |
 
 ## Detailed experiments
+
+### 2026-08-28: reject canonical-owner detection with directed-row compatibility
+
+**Hypothesis.** Let only the smaller edge ID evaluate each unordered BVH
+candidate, query both directional topology/external filter rows, perform the
+current and optional rest closest-point tests once, then emit whichever
+directed sides are enabled. Keep the existing directed per-edge buffers so
+force/Hessian, DAT, conservative bounds, overflow handling, and CUDA Graph
+consumers remain unchanged during a detector-only Go/No-Go test.
+
+**Candidate work.** An uncommitted V2-private CUDA kernel skipped candidates
+whose target ID was not greater than the source ID. For a retained canonical
+pair it atomically updated the count and minimum distance of each enabled
+source row, then wrote `(source, target)` to the old fixed-capacity row. The
+reverse row was allowed independently, preserving asymmetric external
+filters. CPU, differentiable, and deterministic solver configurations kept
+the shared detector. No force/Hessian or DAT kernel was changed.
+
+The compatibility layout requires an initialization pass because row counts
+and minimum distances receive cross-thread atomics. It also turns the old
+single-owner sequential row writes into two potentially scattered atomic row
+updates per canonical pair. These costs are part of this detector-only design,
+not part of a future direct compact-stream implementation.
+
+**Controlled A/B.** Tests used an NVIDIA GeForce RTX 5060 Ti with CUDA 12.9
+and Warp 1.17.0.dev20260807. The frozen topology contained two disconnected,
+quarter-cell-offset 28-by-28 cloth grids separated by 0.01 m: 1,682 particles,
+4,816 edges, n-ring filtering threshold 2, a 0.04 m query margin, and 256
+directed row slots per edge. Each kernel was captured separately against the
+same positions and BVH, warmed for 300 replays, then measured with the median
+of seven samples of 500 synchronized Graph replays.
+
+| EE detector case | Directed-row baseline | Canonical owner | Change |
+| --- | ---: | ---: | ---: |
+| No rest exclusion; 439,800 directed rows | 0.946510 ms | 1.387774 ms | 46.62% slower |
+| 0.03 m rest exclusion; 188,610 directed rows | 1.144414 ms | 1.443326 ms | 26.12% slower |
+
+**Correctness evidence.** In both cases, sorted directed pair keys, every
+per-edge count, every minimum distance, and all overflow flags matched the
+shared detector exactly. A smaller 8-by-8 compile/smoke case also matched all
+four outputs, but regressed 36.4%.
+
+**Decision.** Rejected and reverted before commit. The detector-only gate was
+25% faster; instead both representative variants regressed by more than 25%,
+so do not extend this compatibility design into force/Hessian or DAT. This
+does not measure a detector that directly emits a compact canonical stream:
+such a design must remove the legacy row initialization, dual row counts, and
+directed row writes, and must be evaluated together with all downstream
+consumers rather than reintroducing a compatibility scatter.
+
+### 2026-08-28: reject static Morton self-contact query scheduling
+
+**Hypothesis.** Warp already constructs CUDA BVHs with LBVH, but the VT and EE
+detector kernels still launch source vertices and edges in original ID order.
+Sort source queries once by `(world, rest-space Morton code)` so neighboring
+threads traverse more similar BVH nodes, while continuing to write collision
+results into the original source CSR rows.
+
+**Candidate work.** An uncommitted V2-private module generated 10-bit-per-axis
+Morton permutations for rest vertices and rest edge midpoints. Private copies
+of the shared VT and EE detector kernels changed only
+`source = query_order[tid]`; topology filters, current and rest distance
+tests, row capacities, output IDs, minimum distances, and overflow behavior
+were otherwise unchanged. Both private VBD implementations selected the new
+kernels only for ordinary CUDA execution. CPU, differentiable, and
+deterministic configurations retained the shared kernels. No dynamic sort,
+buffer compression, host readback, or additional Graph kernel was added.
+
+**Controlled A/B.** Tests used an NVIDIA GeForce RTX 5060 Ti with CUDA 12.9
+and Warp 1.17.0.dev20260807. Each pair of kernels was captured against the
+same detector, BVHs, positions, buffers, and capacities; only the Python-side
+kernel selection changed before capture. Each variant warmed 300 replays and
+reported seven samples of 500 synchronized Graph replays in alternating
+order.
+
+The dense case used two disconnected 28-by-28-cell cloth grids separated by
+0.01 m: 1,682 particles, 3,136 triangles, 4,816 edges, 79,098 retained VT
+rows, 428,316 retained directed EE rows, and no overflow.
+
+| Dense two-layer detection | Original order | Morton order | Change |
+| --- | ---: | ---: | ---: |
+| VT-only median | 0.454972 ms | 0.471008 ms | 3.5% slower |
+| EE-only median | 0.971624 ms | 1.018857 ms | 4.9% slower |
+| Combined, order A | 1.419446 ms | 1.484442 ms | 4.6% slower |
+| Combined, reverse order | 1.416001 ms | 1.481688 ms | 4.6% slower |
+
+A second frozen state used the standard supermarket bag after 100 captured
+frames. It contained only 152 VT and 1,442 directed EE rows with no overflow.
+Original-order medians were 0.606674 and 0.613190 ms in the two run orders;
+Morton medians were 0.596230 and 0.599069 ms. This is only 1.7%--2.3% faster,
+or about 0.01--0.014 ms per complete detection, far below the isolated gate
+and below 0.1% of the approximately 26 ms representative frame.
+
+**Related layout checks.** Static Morton sorting inside the four particle
+color groups of a 96-by-96 cloth changed a ten-iteration frozen Graph from
+1.476465/1.477377 ms to 1.487719/1.487336 ms, about 0.7% slower. Changing the
+dense detector BVHs from the default LBVH to SAH was about 1.5% slower.
+LBVH leaf sizes 1, 2, 4, and 8 measured 1.396, 2.708, 2.250, and 1.961 ms;
+retain leaf size 1.
+
+**Correctness evidence.** Dense-cloth and supermarket-bag comparisons matched
+the raw VT and EE row buffers, counts, minimum distances, and overflow flags
+exactly. The focused CPU self-contact activity test passed on the unchanged
+fallback. The candidate compiled and replayed captured Graphs in both
+`vbd_soft/` and complete `vbd/`.
+
+**Decision.** Rejected and reverted before commit. Morton ordering reduces
+the spatial spread of queries, but it turns source positions, row offsets,
+counts, filter CSR reads, and output rows from contiguous accesses into
+indirect scattered accesses. That cost dominates in the dense workload, while
+the sparse real-scene gain is immaterial. Do not reorder cloth primitives,
+BVH inputs, color groups, or detector sources by Morton without a different
+memory layout that preserves coalesced source-row access.
+
+### 2026-08-28: reject directed EE source-color row gating
+
+**Hypothesis.** A directed edge-edge force/Hessian row writes only the two
+vertices of its source edge. Move the source indices and particle-color loads
+outside the variable-length row loop, and avoid reading the row offsets,
+count, and target edges when neither source endpoint belongs to the current
+Gauss--Seidel color. The candidate changed both private VBD implementations
+without changing detector records, asymmetric filters, contact evaluation,
+DAT, material selection, launch dimensions, or CUDA Graph topology.
+
+**Candidate work.** The uncommitted prototype added only the outer source-color
+gate to `accumulate_self_contact_force_and_hessian`. The existing target-edge
+order, per-color current-position force evaluation, directed source-side
+atomics, and VT traversal were unchanged. No stream, counter, buffer, build
+step, or runtime compression was added.
+
+**Controlled A/B.** Measurements used an NVIDIA GeForce RTX 5060 Ti with CUDA
+12.9 and Warp 1.17.0.dev20260807. A frozen `vbd_soft/` benchmark used two
+disconnected 28-by-28-cell cloth grids separated by 0.01 m: 1,682 particles,
+3,136 triangles, 4,816 edges, four particle colors, one VBD iteration, a
+0.02 m contact radius, and a 0.04 m margin. Each separate process warmed 1,000
+captured replays, then reported the median of seven samples of 500 replays.
+
+| Frozen `vbd_soft/` step | Baseline | Source-color gate | Change |
+| --- | ---: | ---: | ---: |
+| Median Graph time | 2.941983 ms | 2.929634 ms | 0.42% faster |
+
+The complete `vbd/` representative check ran the standard supermarket-bag
+CUDA Graph in separate processes with the built-in three-frame warm-up and a
+10-second null-viewer sample at default process priority. Baseline completed
+381 frames at 38.1 FPS; the candidate completed 377 frames at 37.7 FPS,
+approximately 1.0% slower by frame time. Supporting event timing over one
+eager frame measured the 576 force/Hessian launches at 20.311520 ms total for
+the baseline and 21.151072 ms for the candidate, a 4.13% regression. The
+event-wrapped eager result is not used alone for the decision, but it agrees
+with the representative Graph result.
+
+**Correctness evidence.** The focused CPU self-contact activity test passed.
+The changed kernels also compiled and executed on CUDA in both `vbd_soft/`
+and complete `vbd/`, including captured Graph replay. Because the experiment
+was rejected, no new permanent regression test was added.
+
+**Decision.** Rejected and reverted before commit. The only controlled gain
+was 0.42%, within the observed clock and run-order drift, while the
+representative full-frame and event-timed results regressed. CUDA compilation
+can already hoist invariant source data, and avoiding the remaining
+color-irrelevant row metadata does not remove contact evaluation, VT,
+detection, or DAT work. Revisit only with construction-time per-color source
+edge lists that materially reduce the launch domain, and require the usual
+15% isolated and 5% representative gates.
 
 ### 2026-08-28: reject rest-shape exclusion CSR precomputation
 
