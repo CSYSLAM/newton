@@ -1,0 +1,395 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!--
+  WAIC House9 chair extracted from the DexSim workcell asset.  The primitive
+  collision representation is unchanged; the visual uses the reduced OBJ
+  companion mesh so this standalone Newton example does not depend on the
+  original DexSim resource tree.
+-->
+<robot name="chair">
+  <link name="chair_link">
+    <visual name="SM_AI_vol8_05_chair_visual">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/chair_visual.obj" scale="1 1 1" />
+      </geometry>
+    </visual>
+    <collision name="chair_upper_arc_01_capsule_collision_cylinder">
+      <origin xyz="-0.255337656 -0.000508638099 0.698419809" rpy="0 1.47465285 -1.26827961" />
+      <geometry>
+        <cylinder radius="0.018" length="0.0544793781" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_01_capsule_collision_cap_a">
+      <origin xyz="-0.263415515 0.0253740028 0.695804954" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_01_capsule_collision_cap_b">
+      <origin xyz="-0.247259781 -0.026391279 0.701034725" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_02_capsule_collision_cylinder">
+      <origin xyz="-0.238982946 -0.052911438 0.703714013" rpy="0 1.47465302 -1.26827986" />
+      <geometry>
+        <cylinder radius="0.018" length="0.0558212641" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_02_capsule_collision_cap_a">
+      <origin xyz="-0.247259781 -0.026391279 0.701034725" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_02_capsule_collision_cap_b">
+      <origin xyz="-0.230706125 -0.0794316009 0.706393301" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_03_capsule_collision_cylinder">
+      <origin xyz="-0.218683913 -0.104237169 0.710712671" rpy="0 1.4153637 -1.11949769" />
+      <geometry>
+        <cylinder radius="0.018" length="0.055803483" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_03_capsule_collision_cap_a">
+      <origin xyz="-0.230706125 -0.0794316009 0.706393301" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_03_capsule_collision_cap_b">
+      <origin xyz="-0.206661701 -0.129042745 0.715032101" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_04_capsule_collision_cylinder">
+      <origin xyz="-0.190736324 -0.151663288 0.718501687" rpy="0 1.44603082 -0.957375627" />
+      <geometry>
+        <cylinder radius="0.018" length="0.0557617957" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_04_capsule_collision_cap_a">
+      <origin xyz="-0.206661701 -0.129042745 0.715032101" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_04_capsule_collision_cap_b">
+      <origin xyz="-0.174810946 -0.174283832 0.721971214" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_05_capsule_collision_cylinder">
+      <origin xyz="-0.154794514 -0.193699896 0.724832535" rpy="0 1.46854612 -0.770174322" />
+      <geometry>
+        <cylinder radius="0.018" length="0.0560652726" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_05_capsule_collision_cap_a">
+      <origin xyz="-0.174810946 -0.174283832 0.721971214" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_05_capsule_collision_cap_b">
+      <origin xyz="-0.134778082 -0.213115975 0.727693915" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_06_capsule_collision_cylinder">
+      <origin xyz="-0.110379927 -0.226784632 0.729640782" rpy="0 1.5012932 -0.510665816" />
+      <geometry>
+        <cylinder radius="0.018" length="0.0560675477" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_06_capsule_collision_cap_a">
+      <origin xyz="-0.134778082 -0.213115975 0.727693915" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_06_capsule_collision_cap_b">
+      <origin xyz="-0.0859817713 -0.240453288 0.731587648" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_07_capsule_collision_cylinder">
+      <origin xyz="-0.0587496273 -0.24697727 0.732754827" rpy="0 1.52913849 -0.235137809" />
+      <geometry>
+        <cylinder radius="0.018" length="0.0560540614" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_07_capsule_collision_cap_a">
+      <origin xyz="-0.0859817713 -0.240453288 0.731587648" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_07_capsule_collision_cap_b">
+      <origin xyz="-0.0315174833 -0.253501266 0.733922064" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_08_capsule_collision_cylinder">
+      <origin xyz="-0.00361923501 -0.254026711 0.734544933" rpy="0 1.54847755 -0.0188326347" />
+      <geometry>
+        <cylinder radius="0.018" length="0.0558202954" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_08_capsule_collision_cap_a">
+      <origin xyz="-0.0315174833 -0.253501266 0.733922064" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_08_capsule_collision_cap_b">
+      <origin xyz="0.0242790133 -0.254552186 0.735167801" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_09_capsule_collision_cylinder">
+      <origin xyz="0.0516967662 -0.250092208 0.735287547" rpy="0 1.56648449 0.161255095" />
+      <geometry>
+        <cylinder radius="0.018" length="0.0555567796" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_09_capsule_collision_cap_a">
+      <origin xyz="0.0242790133 -0.254552186 0.735167801" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_09_capsule_collision_cap_b">
+      <origin xyz="0.0791145191 -0.245632231 0.735407352" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_10_capsule_collision_cylinder">
+      <origin xyz="0.105346516 -0.236252978 0.734844327" rpy="0 1.59100387 0.343385121" />
+      <geometry>
+        <cylinder radius="0.018" length="0.0557280842" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_10_capsule_collision_cap_a">
+      <origin xyz="0.0791145191 -0.245632231 0.735407352" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_10_capsule_collision_cap_b">
+      <origin xyz="0.131578505 -0.226873726 0.734281301" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_11_capsule_collision_cylinder">
+      <origin xyz="0.155406639 -0.212270886 0.732976437" rpy="0 1.61745349 0.549807396" />
+      <geometry>
+        <cylinder radius="0.018" length="0.0559544673" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_11_capsule_collision_cap_a">
+      <origin xyz="0.131578505 -0.226873726 0.734281301" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_11_capsule_collision_cap_b">
+      <origin xyz="0.179234773 -0.197668046 0.731671572" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_12_capsule_collision_cylinder">
+      <origin xyz="0.19809106 -0.177122027 0.729682744" rpy="0 1.64199255 0.828256014" />
+      <geometry>
+        <cylinder radius="0.018" length="0.0559161472" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_12_capsule_collision_cap_a">
+      <origin xyz="0.179234773 -0.197668046 0.731671572" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_12_capsule_collision_cap_b">
+      <origin xyz="0.216947347 -0.156576008 0.727693915" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_13_capsule_collision_cylinder">
+      <origin xyz="0.229847223 -0.131937921 0.724832535" rpy="0 1.67332179 1.08846742" />
+      <geometry>
+        <cylinder radius="0.018" length="0.0559152724" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_13_capsule_collision_cap_a">
+      <origin xyz="0.216947347 -0.156576008 0.727693915" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_13_capsule_collision_cap_b">
+      <origin xyz="0.242747098 -0.107299834 0.721971214" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_14_capsule_collision_cylinder">
+      <origin xyz="0.250964463 -0.0809243023 0.718560457" rpy="0 1.69363564 1.26877541" />
+      <geometry>
+        <cylinder radius="0.018" length="0.0556714222" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_14_capsule_collision_cap_a">
+      <origin xyz="0.242747098 -0.107299834 0.721971214" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_14_capsule_collision_cap_b">
+      <origin xyz="0.259181798 -0.0545487627 0.71514976" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_15_capsule_collision_cylinder">
+      <origin xyz="0.263595521 -0.02728259 0.71104753" rpy="0 1.71823549 1.41031244" />
+      <geometry>
+        <cylinder radius="0.018" length="0.0558481274" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_15_capsule_collision_cap_a">
+      <origin xyz="0.259181798 -0.0545487627 0.71514976" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_15_capsule_collision_cap_b">
+      <origin xyz="0.268009275 -1.64182857e-05 0.70694536" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_16_capsule_collision_cylinder">
+      <origin xyz="0.267718554 0.0281192902 0.703963697" rpy="0 1.676371 1.5811288" />
+      <geometry>
+        <cylinder radius="0.018" length="0.056589499" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_16_capsule_collision_cap_a">
+      <origin xyz="0.268009275 -1.64182857e-05 0.70694536" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_16_capsule_collision_cap_b">
+      <origin xyz="0.267427832 0.0562549978 0.700982034" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_17_capsule_collision_cylinder">
+      <origin xyz="0.264512718 0.0852785408 0.697108269" rpy="0 1.70282535 1.67090023" />
+      <geometry>
+        <cylinder radius="0.018" length="0.058851345" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_17_capsule_collision_cap_a">
+      <origin xyz="0.267427832 0.0562549978 0.700982034" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_upper_arc_17_capsule_collision_cap_b">
+      <origin xyz="0.261597604 0.114302091 0.693234503" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.018" />
+      </geometry>
+    </collision>
+    <collision name="chair_leg_front_left_capsule_collision_cylinder">
+      <origin xyz="-0.270581186 0.179288 0.074500002" rpy="0 0.0687249447 -0.577551238" />
+      <geometry>
+        <cylinder radius="0.014" length="0.12128632" />
+      </geometry>
+    </collision>
+    <collision name="chair_leg_front_left_capsule_collision_cap_a">
+      <origin xyz="-0.274070144 0.181561664 0.0140000004" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.014" />
+      </geometry>
+    </collision>
+    <collision name="chair_leg_front_left_capsule_collision_cap_b">
+      <origin xyz="-0.267092228 0.177014336 0.135000005" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.014" />
+      </geometry>
+    </collision>
+    <collision name="chair_leg_front_right_capsule_collision_cylinder">
+      <origin xyz="0.219533786 0.262271434 0.074500002" rpy="0 0.0684736852 -2.24033789" />
+      <geometry>
+        <cylinder radius="0.014" length="0.121284226" />
+      </geometry>
+    </collision>
+    <collision name="chair_leg_front_right_capsule_collision_cap_a">
+      <origin xyz="0.222108856 0.265524805 0.0140000004" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.014" />
+      </geometry>
+    </collision>
+    <collision name="chair_leg_front_right_capsule_collision_cap_b">
+      <origin xyz="0.216958717 0.259018064 0.135000005" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.014" />
+      </geometry>
+    </collision>
+    <collision name="chair_leg_back_left_capsule_collision_cylinder">
+      <origin xyz="-0.155141383 -0.222981974 0.0794999972" rpy="0 0.135782493 1.35971685" />
+      <geometry>
+        <cylinder radius="0.014" length="0.132216958" />
+      </geometry>
+    </collision>
+    <collision name="chair_leg_back_left_capsule_collision_cap_a">
+      <origin xyz="-0.157016292 -0.231732175 0.0140000004" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.014" />
+      </geometry>
+    </collision>
+    <collision name="chair_leg_back_left_capsule_collision_cap_b">
+      <origin xyz="-0.15326646 -0.214231774 0.144999996" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.014" />
+      </geometry>
+    </collision>
+    <collision name="chair_leg_back_right_capsule_collision_cylinder">
+      <origin xyz="0.248431534 -0.155077606 0.0794999972" rpy="0 0.132012002 2.13134703" />
+      <geometry>
+        <cylinder radius="0.014" length="0.132149822" />
+      </geometry>
+    </collision>
+    <collision name="chair_leg_back_right_capsule_collision_cap_a">
+      <origin xyz="0.253055513 -0.162443951 0.0140000004" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.014" />
+      </geometry>
+    </collision>
+    <collision name="chair_leg_back_right_capsule_collision_cap_b">
+      <origin xyz="0.243807554 -0.147711262 0.144999996" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.014" />
+      </geometry>
+    </collision>
+  </link>
+</robot>

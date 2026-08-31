@@ -3,3 +3,4 @@ CHANGELOG.md merge=union
 assets/style3d_probe/bag/nonwoven_5k/nonwoven_5k.obj filter=lfs diff=lfs merge=lfs -text
 assets/style3d_probe/bag/nonwoven_5k/nonwoven_5k_BakingAO_1001.png filter=lfs diff=lfs merge=lfs -text
 assets/style3d_probe/bag/nonwoven_5k/nonwoven_5k_Diffuse_1001.png filter=lfs diff=lfs merge=lfs -text
+assets/waic_house9_chair/meshes/chair_visual.obj filter=lfs diff=lfs merge=lfs -text

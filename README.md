@@ -830,7 +830,11 @@ If you run the examples from a source checkout with uv, use
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_nonwoven_bag_table_drop.jpg" alt="MJVBDV2 Nonwoven Bag Table Drop">
       </a>
     </td>
-    <td align="center" width="33%"></td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_realtime_push_chair.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_dexforce_realtime_push_chair.jpg" alt="MJVBDV2 Realtime Dexforce Chair Push">
+      </a>
+    </td>
   </tr>
   <tr>
     <td align="center" width="33%">
@@ -839,7 +843,9 @@ If you run the examples from a source checkout with uv, use
     <td align="center" width="33%">
       <code>python -m newton.examples mjvbd_v2_nonwoven_bag_table_drop</code>
     </td>
-    <td align="center" width="33%"></td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples mjvbd_v2_dexforce_realtime_push_chair</code>
+    </td>
   </tr>
   <tr>
     <td colspan="3"><h3>Multi-Physics Examples</h3></td>

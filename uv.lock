@@ -3731,6 +3731,7 @@ dev = [
     { name = "trimesh" },
     { name = "usd-core", marker = "(python_full_version < '3.14' and platform_machine != 'aarch64') or (python_full_version >= '3.14' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13') or (platform_machine == 'aarch64' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
     { name = "usd-exchange", marker = "(python_full_version < '3.13' and platform_machine == 'aarch64') or (python_full_version >= '3.13' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13') or (platform_machine != 'aarch64' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
+    { name = "vhacdx" },
     { name = "warp-nn", extra = ["onnx"] },
 ]
 docs = [
@@ -3762,6 +3763,7 @@ docs = [
     { name = "trimesh" },
     { name = "usd-core", marker = "(python_full_version < '3.14' and platform_machine != 'aarch64') or (python_full_version >= '3.14' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13') or (platform_machine == 'aarch64' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
     { name = "usd-exchange", marker = "(python_full_version < '3.13' and platform_machine == 'aarch64') or (python_full_version >= '3.13' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13') or (platform_machine != 'aarch64' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
+    { name = "vhacdx" },
     { name = "viser" },
 ]
 examples = [
@@ -3787,6 +3789,7 @@ examples = [
     { name = "trimesh" },
     { name = "usd-core", marker = "(python_full_version < '3.14' and platform_machine != 'aarch64') or (python_full_version >= '3.14' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13') or (platform_machine == 'aarch64' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
     { name = "usd-exchange", marker = "(python_full_version < '3.13' and platform_machine == 'aarch64') or (python_full_version >= '3.13' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13') or (platform_machine != 'aarch64' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
+    { name = "vhacdx" },
     { name = "warp-nn", extra = ["onnx"] },
 ]
 importers = [
@@ -3804,6 +3807,7 @@ importers = [
     { name = "trimesh" },
     { name = "usd-core", marker = "(python_full_version < '3.14' and platform_machine != 'aarch64') or (python_full_version >= '3.14' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13') or (platform_machine == 'aarch64' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
     { name = "usd-exchange", marker = "(python_full_version < '3.13' and platform_machine == 'aarch64') or (python_full_version >= '3.13' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13') or (platform_machine != 'aarch64' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
+    { name = "vhacdx" },
 ]
 notebook = [
     { name = "alphashape" },
@@ -3831,6 +3835,7 @@ notebook = [
     { name = "trimesh" },
     { name = "usd-core", marker = "(python_full_version < '3.14' and platform_machine != 'aarch64') or (python_full_version >= '3.14' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13') or (platform_machine == 'aarch64' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
     { name = "usd-exchange", marker = "(python_full_version < '3.13' and platform_machine == 'aarch64') or (python_full_version >= '3.13' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13') or (platform_machine != 'aarch64' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
+    { name = "vhacdx" },
     { name = "viser" },
     { name = "warp-nn", extra = ["onnx"] },
 ]
@@ -3858,6 +3863,7 @@ rtx = [
     { name = "trimesh" },
     { name = "usd-core", marker = "(python_full_version < '3.14' and platform_machine != 'aarch64') or (python_full_version >= '3.14' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13') or (platform_machine == 'aarch64' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
     { name = "usd-exchange", marker = "(python_full_version < '3.13' and platform_machine == 'aarch64') or (python_full_version >= '3.13' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13') or (platform_machine != 'aarch64' and extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
+    { name = "vhacdx" },
 ]
 sim = [
     { name = "mujoco" },
@@ -3887,6 +3893,7 @@ torch-cu12 = [
     { name = "trimesh" },
     { name = "usd-core", marker = "python_full_version < '3.14' and platform_machine != 'aarch64'" },
     { name = "usd-exchange", marker = "python_full_version < '3.13' and platform_machine == 'aarch64'" },
+    { name = "vhacdx" },
     { name = "warp-nn", extra = ["onnx"], marker = "extra == 'extra-6-newton-torch-cu12'" },
 ]
 torch-cu13 = [
@@ -3913,6 +3920,7 @@ torch-cu13 = [
     { name = "trimesh" },
     { name = "usd-core", marker = "python_full_version < '3.14' and platform_machine != 'aarch64'" },
     { name = "usd-exchange", marker = "python_full_version < '3.13' and platform_machine == 'aarch64'" },
+    { name = "vhacdx" },
     { name = "warp-nn", extra = ["onnx"], marker = "extra == 'extra-6-newton-torch-cu13'" },
 ]
 
@@ -3975,6 +3983,7 @@ requires-dist = [
     { name = "trimesh", marker = "extra == 'importers'", specifier = ">=4.6.8" },
     { name = "usd-core", marker = "python_full_version < '3.14' and platform_machine != 'aarch64' and extra == 'importers'", specifier = ">=25.5,<26.5" },
     { name = "usd-exchange", marker = "python_full_version < '3.13' and platform_machine == 'aarch64' and extra == 'importers'", specifier = ">=2.2.0,<3" },
+    { name = "vhacdx", marker = "extra == 'importers'", specifier = ">=0.0.10" },
     { name = "viser", marker = "extra == 'docs'", specifier = "==1.0.26" },
     { name = "viser", marker = "extra == 'notebook'", specifier = "==1.0.26" },
     { name = "warp-lang", specifier = ">=1.16.0", index = "https://pypi.nvidia.com/" },
