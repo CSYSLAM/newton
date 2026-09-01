@@ -20,6 +20,7 @@ if TYPE_CHECKING:
         register_pneumatic_attributes,
     )
     from .mujoco import SolverMuJoCo
+    from .mujoco_vbd import SolverMuJoCoVBD
     from .semi_implicit import SolverSemiImplicit
     from .solver import SolverBase
     from .style3d.solver_style3d import SolverStyle3D
@@ -37,6 +38,7 @@ __all__ = [
     "SolverMJVBD",
     "SolverMJVBDV2",
     "SolverMuJoCo",
+    "SolverMuJoCoVBD",
     "SolverSemiImplicit",
     "SolverStyle3D",
     "SolverVBD",
@@ -62,6 +64,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "SolverMJVBD": (".mjvbd", "SolverMJVBD"),
     "SolverMJVBDV2": (".mjvbd_v2", "SolverMJVBDV2"),
     "SolverMuJoCo": (".mujoco", "SolverMuJoCo"),
+    "SolverMuJoCoVBD": (".mujoco_vbd", "SolverMuJoCoVBD"),
     "SolverSemiImplicit": (".semi_implicit", "SolverSemiImplicit"),
     "SolverStyle3D": (".style3d.solver_style3d", "SolverStyle3D"),
     "SolverVBD": (".vbd", "SolverVBD"),

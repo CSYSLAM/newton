@@ -876,6 +876,93 @@ If you run the examples from a source checkout with uv, use
     </td>
   </tr>
   <tr>
+    <td colspan="3"><h3>Standalone MuJoCo/VBD Acceptance Examples</h3></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mujoco_vbd/example_mujoco_vbd_bimanual_fold_tshirt.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_mjvbd_v2_dynamic_dexforce_bimanual_fold_tshirt_waic_house.jpg" alt="MuJoCo/VBD Bimanual T-Shirt Fold">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mujoco_vbd/example_mujoco_vbd_bimanual_plastic_bag_rod.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_supermarket_plastic_bag.jpg" alt="MuJoCo/VBD Bimanual Plastic-Bag Rod Handoff">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mujoco_vbd/example_mujoco_vbd_recorded_plastic_inflatable_bag_pick_release.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_mjvbd_v2_right_hand_recorded_plastic_inflatable_bag_pick_release.jpg" alt="MuJoCo/VBD Plastic Inflatable Bag Pick and Release">
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_bimanual_fold_tshirt</code></td>
+    <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_bimanual_plastic_bag_rod</code></td>
+    <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_recorded_plastic_inflatable_bag_pick_release</code></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mujoco_vbd/example_mujoco_vbd_recorded_soft_then_rigid_cube_into_bag.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_supermarket_plastic_bag.jpg" alt="MuJoCo/VBD Soft-Then-Rigid Cube Into Bag">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mujoco_vbd/example_mujoco_vbd_right_hand_armadillo_into_gear_crusher.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_mjvbd_v2_right_hand_armadillo_into_gear_crusher.jpg" alt="MuJoCo/VBD Armadillo Gear-Crusher Handoff">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mujoco_vbd/example_mujoco_vbd_bimanual_nut_bolt.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_bimanual_nut_bolt.jpg" alt="MuJoCo/VBD Bimanual Nut and Bolt">
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_recorded_soft_then_rigid_cube_into_bag</code></td>
+    <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_right_hand_armadillo_into_gear_crusher</code></td>
+    <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_bimanual_nut_bolt</code></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mujoco_vbd/example_mujoco_vbd_dexforce_realtime_plug_socket.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_dexforce_realtime_plug_socket.jpg" alt="MuJoCo/VBD Realtime Dexforce Plug Insertion">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mujoco_vbd/example_mujoco_vbd_dexforce_bimanual_place_tablecloth_waic_house.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_mjvbd_v2_dexforce_bimanual_place_tablecloth_waic_house.jpg" alt="MuJoCo/VBD Dexforce Bimanual Tablecloth Placement">
+      </a>
+    </td>
+    <td align="center" width="33%"></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_dexforce_realtime_plug_socket</code></td>
+    <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_dexforce_bimanual_place_tablecloth_waic_house</code></td>
+    <td align="center" width="33%"></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mujoco_vbd/example_mujoco_vbd_cloth_twist.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_twist.jpg" alt="MuJoCo/VBD Cloth Twist">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mujoco_vbd/example_mujoco_vbd_dexforce_realtime_push_chair.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_dexforce_realtime_push_chair.jpg" alt="MuJoCo/VBD Realtime Dexforce Chair Push">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mujoco_vbd/example_mujoco_vbd_gear_crusher.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_gear_crusher.jpg" alt="MuJoCo/VBD Gear Crusher">
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_cloth_twist</code></td>
+    <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_dexforce_realtime_push_chair</code></td>
+    <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_gear_crusher</code></td>
+  </tr>
+  <tr>
     <td colspan="3"><h3>Multi-Physics Examples</h3></td>
   </tr>
   <tr>

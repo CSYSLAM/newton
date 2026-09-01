@@ -1,0 +1,1 @@
+Add the standalone multi-mode `SolverMuJoCoVBD` and eleven acceptance demos for cloth, soft-body, pneumatic, rigid-body, and robot manipulation scenes, including pure-VBD cloth twisting and gear crushing plus realtime chair pushing, plug insertion, and bimanual tablecloth placement.
