@@ -858,7 +858,11 @@ If you run the examples from a source checkout with uv, use
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_dexforce_realtime_plug_socket.jpg" alt="MJVBDV2 Realtime Dexforce Plug Insertion">
       </a>
     </td>
-    <td align="center" width="33%"></td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_cloth_mjvbd_v2_dexforce_bimanual_place_tablecloth_waic_house.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_mjvbd_v2_dexforce_bimanual_place_tablecloth_waic_house.jpg" alt="MJVBDV2 Dexforce Bimanual Tablecloth Placement">
+      </a>
+    </td>
   </tr>
   <tr>
     <td align="center" width="33%">
@@ -867,7 +871,9 @@ If you run the examples from a source checkout with uv, use
     <td align="center" width="33%">
       <code>python -m newton.examples mjvbd_v2_dexforce_realtime_plug_socket</code>
     </td>
-    <td align="center" width="33%"></td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples cloth_mjvbd_v2_dexforce_bimanual_place_tablecloth_waic_house</code>
+    </td>
   </tr>
   <tr>
     <td colspan="3"><h3>Multi-Physics Examples</h3></td>
