@@ -34,6 +34,7 @@ from .particle_vbd_kernels import (
     TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
     # Topological filtering helper functions
     accumulate_particle_body_contact_force_and_hessian,
+    accumulate_particle_body_contact_force_and_hessian_active,
     accumulate_self_contact_force_and_hessian,
     accumulate_spring_force_and_hessian,
     # Planar DAT (Divide and Truncate) kernels
@@ -97,6 +98,8 @@ __all__ = ["SolverVBD"]
 _SOFT_CONTACT_BLOCK_DIM = 256
 _SOFT_CONTACT_BLOCKS_PER_SM = 2
 _PARTICLE_CONTACT_GATHER_BLOCK_DIM = 128
+_PERSISTENT_PARTICLE_CONTACT_WORKERS = 4096
+_PERSISTENT_PARTICLE_CONTACT_MIN_CAPACITY_RATIO = 8
 
 
 class SolverVBD(SolverBase, CouplingInterface):
@@ -411,6 +414,11 @@ class SolverVBD(SolverBase, CouplingInterface):
             group.size >= self._particle_contact_gather_min_group_size for group in model.particle_color_groups
         )
         self._use_active_soft_contact_prefix = has_large_particle_color_group
+        self._persistent_particle_contact_force_supported = (
+            self.device.is_cuda
+            and not model.requires_grad
+            and effective_deterministic == wp.DeterministicMode.NOT_GUARANTEED
+        )
         self._particle_contact_gather_supported = (
             has_large_particle_color_group
             and not model.requires_grad
@@ -1321,6 +1329,19 @@ class SolverVBD(SolverBase, CouplingInterface):
                 self.device.sm_count * _SOFT_CONTACT_BLOCKS_PER_SM * _SOFT_CONTACT_BLOCK_DIM,
             )
         return min(soft_contact_max, parallelism)
+
+    def _persistent_particle_contact_worker_dim(self, soft_contact_max: int) -> int:
+        """Return a fixed CUDA worker width for active-prefix contact force."""
+        if soft_contact_max <= 0 or not self.device.is_cuda:
+            return soft_contact_max
+        return min(soft_contact_max, _PERSISTENT_PARTICLE_CONTACT_WORKERS)
+
+    def _should_use_persistent_particle_contact_force(self, soft_contact_launch_dim: int) -> bool:
+        """Select the graph-only active-prefix traversal for overallocated contact streams."""
+        if not self._persistent_particle_contact_force_supported or not self.device.is_capturing:
+            return False
+        worker_dim = self._persistent_particle_contact_worker_dim(soft_contact_launch_dim)
+        return soft_contact_launch_dim >= _PERSISTENT_PARTICLE_CONTACT_MIN_CAPACITY_RATIO * worker_dim
 
     def _init_rigid_contact_warmstart(self, rigid_contact_max: int) -> None:
         """Allocate rigid contact warm-start buffers."""
@@ -2845,20 +2866,30 @@ class SolverVBD(SolverBase, CouplingInterface):
                         device=self.device,
                     )
                 else:
-                    wp.launch(
-                        kernel=accumulate_particle_body_contact_force_and_hessian,
-                        dim=self._soft_contact_launch_dim,
-                        inputs=[
-                            dt,
-                            color,
-                            self.particle_q_prev,
-                            state_in.particle_q,
-                            model.particle_colors,
-                            self.friction_epsilon,
-                            model.particle_radius,
-                            contacts.soft_contact_indices,
-                            contacts.soft_contact_count,
-                            contacts.soft_contact_max,
+                    use_persistent_contact_force = self._should_use_persistent_particle_contact_force(
+                        self._soft_contact_launch_dim
+                    )
+                    contact_force_dim = (
+                        self._persistent_particle_contact_worker_dim(self._soft_contact_launch_dim)
+                        if use_persistent_contact_force
+                        else self._soft_contact_launch_dim
+                    )
+                    contact_force_inputs = [
+                        dt,
+                        color,
+                        self.particle_q_prev,
+                        state_in.particle_q,
+                        model.particle_colors,
+                        self.friction_epsilon,
+                        model.particle_radius,
+                        contacts.soft_contact_indices,
+                        contacts.soft_contact_count,
+                        contacts.soft_contact_max,
+                    ]
+                    if use_persistent_contact_force:
+                        contact_force_inputs.append(contact_force_dim)
+                    contact_force_inputs.extend(
+                        [
                             self.body_particle_contact_penalty_k,
                             self.body_particle_contact_material_ke,
                             self.body_particle_contact_material_kd,
@@ -2874,7 +2905,17 @@ class SolverVBD(SolverBase, CouplingInterface):
                             contacts.soft_contact_normal,
                             model.shape_margin,
                             contacts.soft_contact_barycentric,
-                        ],
+                        ]
+                    )
+                    wp.launch(
+                        kernel=(
+                            accumulate_particle_body_contact_force_and_hessian_active
+                            if use_persistent_contact_force
+                            else accumulate_particle_body_contact_force_and_hessian
+                        ),
+                        dim=contact_force_dim,
+                        block_dim=_SOFT_CONTACT_BLOCK_DIM,
+                        inputs=contact_force_inputs,
                         outputs=[self.particle_forces, self.particle_hessians],
                         device=self.device,
                     )

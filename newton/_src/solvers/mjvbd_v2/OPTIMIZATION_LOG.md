@@ -38,6 +38,7 @@ Status values are:
 
 | Date | Change | Affected path | Status | Evidence |
 | --- | --- | --- | --- | --- |
+| 2026-09-03 | Traverse an overallocated rigid-soft contact stream with a fixed active-prefix worker grid | CUDA Graph `vbd_soft/` particle-side rigid-soft scatter | **Retained, gated** | The 6,436-particle T-shirt Graph improved 3.40%--4.10% in same-process A/B runs; the unchanged 31,768-capacity tablecloth path and a 300-frame cloth-twist regression passed |
 | 2026-08-28 | Let one canonical EE owner evaluate both directed filter sides and write the legacy rows | Complete `vbd/` and optimized `vbd_soft/` self-contact | **Rejected, reverted** | Exact directed rows were preserved, but dense 28-by-28 two-layer EE detection regressed 46.6% without rest exclusion and 26.1% with a 0.03 m rest exclusion because dual atomic row updates outweighed the saved narrow phase |
 | 2026-08-28 | Schedule VT/EE source queries in static rest-space Morton order | Complete `vbd/` and optimized `vbd_soft/` self-contact | **Rejected, reverted** | Dense two-layer cloth detection regressed 4.6%; a sparse supermarket-bag state improved only 1.7%--2.3%, about 0.01 ms, because scattered row/filter writes offset more coherent BVH traversal |
 | 2026-08-28 | Skip color-irrelevant directed EE rows before force/Hessian traversal | Complete `vbd/` and optimized `vbd_soft/` self-contact | **Rejected, reverted** | A frozen four-color two-layer cloth Graph improved only 0.42%, while a 10-second supermarket-bag Graph fell from 38.1 to 37.7 FPS and timed EE/VT force launches were 4.13% slower |
@@ -69,6 +70,88 @@ Status values are:
 | 2026-08-10 | Articulation-only dispatch shortcut (`89002b52`) | `pure_mujoco` and `kinematic_passthrough` | **Retained** | Structurally removes VBD construction and execution; no standardized timing archive |
 
 ## Detailed experiments
+
+### 2026-09-03: traverse sparse rigid-soft contacts with persistent workers
+
+**Problem.** During CUDA Graph capture, `vbd_soft/` cannot read the
+device-side soft-contact count to reduce a launch dimension. Its particle-side
+rigid-soft force/Hessian kernel therefore launched one thread for every
+allocated contact slot once per particle color and VBD iteration. In the
+realtime T-shirt fold this meant 289,620 threads per launch for only
+3,177--5,730 active records (1.10%--1.98% occupancy), repeated for nine colors,
+20 iterations, and ten substeps per displayed frame.
+
+**Retained implementation.** The legacy per-contact body is shared by the old
+capacity-sized kernel and a CUDA-only active-prefix kernel. The latter launches
+4,096 fixed workers and grid-strides over
+`min(soft_contact_count[0], soft_contact_max)`. It does not compact or reorder
+the contact stream, add host readback, allocate per-frame storage, or change
+CUDA Graph topology. Contact evaluation, per-color Gauss--Seidel order,
+barycentric distribution, atomics, material state, and overflow clamping are
+unchanged.
+
+Dispatch is deliberately conservative. The persistent traversal is selected
+only while capturing a CUDA Graph, only for non-differentiable models in
+`NOT_GUARANTEED` deterministic mode, and only when the captured capacity is at
+least eight times the 4,096-worker grid (32,768 records). Eager execution keeps
+the existing host-count-sized launch. CPU, `requires_grad`, deterministic, and
+smaller-capacity Graphs keep the legacy kernel. The complete `vbd/` backend is
+also unchanged; this experiment only covers the `vbd_soft/` scatter path that
+was measured.
+
+**Measurements.** Tests used an NVIDIA GeForce RTX 5060 Ti 8 GiB with Warp
+1.17.0.dev20260807, CUDA Toolkit 12.9, and Driver 13.3. The representative
+T-shirt scene had 6,436 particles, 12,736 triangles, 19,174 edges, nine particle
+colors, ten substeps per displayed frame, and 20 VBD iterations per substep.
+Both variants ran in one process with separately constructed examples and
+captured Graphs. The candidate ran first; both variants passed the example's
+final-state checks. The 120-frame comparison discarded three warm-up frames;
+the 360-frame comparison did the same and covers the full accelerated script.
+
+| T-shirt A/B window | Active-prefix wall time | Legacy wall time | Change |
+| --- | ---: | ---: | ---: |
+| 120 frames | 96.829577 ms/frame | 100.968758 ms/frame | 4.10% faster |
+| 360 frames | 110.060740 ms/frame | 113.929294 ms/frame | 3.40% faster |
+
+An isolated frozen-frame Graph measured one complete nine-color contact-force
+pass. The active count was 3,783 and the capacity was 289,620. Outputs from all
+tested worker widths were exactly equal to the legacy force and Hessian arrays.
+
+| Frozen nine-color pass | GPU time | Change |
+| --- | ---: | ---: |
+| Legacy capacity scan | 0.057044 ms | baseline |
+| 4,096-worker active prefix | 0.030767 ms | 46.07% faster |
+
+Earlier full-trajectory forward and reverse-order A/B runs with a wider
+persistent grid measured 3.74%--4.69% end-to-end gains, supporting that the
+same-process result is not solely an ordering artifact.
+
+**Generality check.** The 361-particle tablecloth example allocates 31,768
+soft-contact records, just below the gate, so both nominal variants dispatched
+the exact legacy kernel. Its 90-frame runs measured 17.273018 and 16.915756
+ms/frame and both passed `test_final()`; the difference is treated as run-order
+noise, not as an optimization result. The independent 300-frame cloth-twist
+example also passed in CUDA Graph test mode. This demonstrates that ordinary
+small scenes do not pay for the T-shirt specialization.
+
+**Correctness evidence.** Focused CUDA tests compare the new kernel with the
+legacy scatter for empty, partial, full, and overflow-clamped active prefixes.
+The existing MJVBDV2 contact-optimization suite passes all eleven tests. Dispatch
+tests cover the 32,768-record threshold and verify that eager, deterministic,
+and differentiable paths remain on the legacy implementation. The T-shirt and
+tablecloth final-state checks and the cloth-twist Graph regression passed.
+
+At frame 360, candidate-versus-legacy particle displacement had a 5.02 mm
+mean, 23.68 mm 95th percentile, and 92.53 mm maximum; the cloth centroid and
+AABB extrema differed by 2.46 mm and at most 8.85 mm. Two independent legacy
+runs already differed by 7.34 mm mean, 30.64 mm 95th percentile, and 80.89 mm
+maximum, with a 2.22 mm centroid difference and up to 20.31 mm AABB difference.
+The candidate drift is therefore within the existing run-to-run variation of
+this `NOT_GUARANTEED` atomic simulation rather than evidence of a changed fold.
+
+**Decision.** Retain with the automatic gate. The representative Graph gain is
+large enough to keep, while the fallback preserves solver coverage and avoids
+the small-scene regression risk observed during broader evaluation.
 
 ### 2026-08-28: reject canonical-owner detection with directed-row compatibility
 
