@@ -260,6 +260,32 @@ class TestMuJoCoVBDModes(unittest.TestCase):
     def test_public_solver_export(self):
         self.assertIs(newton.solvers.SolverMuJoCoVBD, SolverMuJoCoVBD)
 
+    def test_registered_builder_can_import_mjcf(self):
+        builder = newton.ModelBuilder()
+        SolverMuJoCoVBD.register_custom_attributes(builder)
+        builder.add_mjcf(
+            """
+            <mujoco>
+              <worldbody>
+                <body name="root">
+                  <geom type="sphere" size="0.05"/>
+                  <body name="link" pos="0 0 0.1">
+                    <joint name="hinge" type="hinge"/>
+                    <geom type="sphere" size="0.05"/>
+                  </body>
+                </body>
+              </worldbody>
+              <actuator>
+                <position name="hinge_drive" joint="hinge"/>
+              </actuator>
+            </mujoco>
+            """,
+            floating=False,
+        )
+        model = builder.finalize(device="cpu")
+        self.assertEqual(model.body_count, 2)
+        self.assertEqual(model.custom_frequency_counts["mujoco:actuator"], 1)
+
     def test_pure_vbd_soft_matches_mjvbd_v2_baseline(self):
         model = _static_particle_model()
         options = {"contact_mode": "soft", "vbd_options": {"iterations": 2}}

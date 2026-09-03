@@ -26,6 +26,7 @@ _MODULES = {
     "cloth_twist": "example_mujoco_vbd_cloth_twist",
     "push_chair": "example_mujoco_vbd_dexforce_realtime_push_chair",
     "gear_crusher": "example_mujoco_vbd_gear_crusher",
+    "microduck_soft_ball": "example_mujoco_vbd_microduck_kick_soft_ball",
 }
 _FORBIDDEN_IMPORTS = (
     "newton.examples.mjvbdv2",
@@ -105,23 +106,24 @@ class TestMuJoCoVBDExamples(unittest.TestCase):
             self.assertTrue(any(_is_main_guard(node) for node in tree.body), f"{path.name} has no __main__ guard")
 
     def test_every_local_solver_call_has_explicit_mode(self):
-        """Require explicit pure-VBD or one-way dispatch at every solver call."""
+        """Require every demo to select an unambiguous solver mode."""
         calls = []
         for path in sorted(_ROOT.rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for call in _solver_calls(tree):
                 calls.append((path, call))
                 keywords = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg}
-                is_one_way = "mujoco_articulations" in keywords or "mujoco_joints" in keywords
-                expected = (
-                    {"joint_mode": "kinematic", "coupling_mode": "one_way"}
-                    if is_one_way
-                    else {"joint_mode": "dynamic", "coupling_mode": "auto"}
-                )
-                for name, value in expected.items():
+                has_mujoco_ownership = "mujoco_articulations" in keywords or "mujoco_joints" in keywords
+                for name in ("joint_mode", "coupling_mode"):
                     self.assertIn(name, keywords, f"{path.name} omits {name}")
                     self.assertIsInstance(keywords[name], ast.Constant)
-                    self.assertEqual(keywords[name].value, value)
+                mode = (keywords["joint_mode"].value, keywords["coupling_mode"].value)
+                allowed = (
+                    {("kinematic", "one_way"), ("dynamic", "two_way")}
+                    if has_mujoco_ownership
+                    else {("dynamic", "auto")}
+                )
+                self.assertIn(mode, allowed, f"{path.name} uses inconsistent mode {mode}")
         self.assertGreater(len(calls), 0)
 
     def test_pneumatic_bag_uses_full_core_soft_pipeline_contract(self):
@@ -181,6 +183,10 @@ class TestMuJoCoVBDExamples(unittest.TestCase):
     def test_gear_crusher_pure_vbd_parity(self):
         """Register the standalone pure-VBD gear-crusher demo."""
         self._assert_demo("gear_crusher")
+
+    def test_microduck_soft_ball_two_way_demo(self):
+        """Register the dynamically coupled Microduck soft-ball demo."""
+        self._assert_demo("microduck_soft_ball")
 
 
 if __name__ == "__main__":

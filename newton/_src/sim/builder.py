@@ -3859,7 +3859,13 @@ class ModelBuilder:
         from ..solvers.mujoco.solver_mujoco import SolverMuJoCo  # noqa: PLC0415
         from ..utils.import_mjcf import parse_mjcf  # noqa: PLC0415
 
-        SolverMuJoCo.register_custom_attributes(self)
+        # ``add_mjcf()`` owns the default registration path, but an alternate
+        # MuJoCo-compatible solver may already have installed the same schema
+        # with its own parsing callbacks.  Re-registering the stock callbacks
+        # would reject that valid setup because callback identity is part of a
+        # custom-frequency definition.
+        if "mujoco:actuator" not in self.custom_frequencies:
+            SolverMuJoCo.register_custom_attributes(self)
         return parse_mjcf(
             self,
             source,

@@ -972,12 +972,16 @@ If you run the examples from a source checkout with uv, use
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mujoco_vbd_robot_hand_table_bounce.jpg" alt="MuJoCo/VBD Dexforce W1 Hand Table Bounce">
       </a>
     </td>
-    <td align="center" width="33%"></td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mujoco_vbd/example_mujoco_vbd_microduck_kick_soft_ball.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mujoco_vbd_microduck_kick_soft_ball.jpg" alt="MuJoCo/VBD Microduck Soft-Ball Kick">
+      </a>
+    </td>
     <td align="center" width="33%"></td>
   </tr>
   <tr>
     <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_robot_hand_table_bounce</code></td>
-    <td align="center" width="33%"></td>
+    <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_microduck_kick_soft_ball</code></td>
     <td align="center" width="33%"></td>
   </tr>
   <tr>

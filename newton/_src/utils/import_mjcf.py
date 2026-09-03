@@ -372,9 +372,12 @@ def parse_mjcf(
     # load shape defaults
     default_shape_density = builder.default_shape_cfg.density
 
-    # Register the MuJoCo custom attributes needed to preserve imported model
-    # properties. The operation is idempotent.
-    SolverMuJoCo.register_custom_attributes(builder)
+    # Register the default MuJoCo schema unless a compatible alternate solver
+    # installed it before calling the importer.  Custom-frequency callbacks
+    # are deliberately identity-sensitive, so replacing an alternate
+    # implementation's callbacks is neither idempotent nor necessary.
+    if "mujoco:actuator" not in builder.custom_frequencies:
+        SolverMuJoCo.register_custom_attributes(builder)
     # Bit 1 in one MJCF file may describe different shapes than bit 1 in
     # another. Give every add_mjcf() call a domain so those equal numbers are
     # not mistaken for one shared collision rule. The domain is only a source

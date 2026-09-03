@@ -249,3 +249,31 @@ acceptance measured 5.39 mm maximum signed contact penetration, an 800 N peak
 feedback-force norm, and a 0.39 m/s upward wrist rebound. The wrist never
 passed the tabletop, and the VBD table's fixed-joint pose drift remained below
 0.01 mm.
+
+## Microduck soft-ball kick tuning (2026-09-03)
+
+Added a fixed-base Microduck with fourteen dynamic MuJoCo servo joints kicking
+a 163-particle, 320-tetrahedron VBD ball. The visible `sole_right.stl` is also
+the sole particle collider; the scene has no hidden contact proxy or scripted
+ball force. Acceptance requires a right-sole contact, nonzero two-way feedback,
+0.5--12 mm deformation, at least 30 mm forward travel, and no ground
+penetration beyond 6 mm.
+
+Warm-cache RTX 5060 Ti measurements used CUDA Graph, a null viewer, and 180
+frames. The tuple is `(substeps, coupling iterations, VBD iterations)`:
+
+- `(8, 5, 12)`: about 4 FPS, 3.14 mm deformation, 207 N peak feedback,
+  94.6 mm forward travel;
+- `(4, 3, 8)`: 24.7 FPS, 7.95 mm deformation, 13.1 N peak feedback,
+  83.4 mm forward travel;
+- `(4, 2, 8)`: 36.7 FPS, 6.38 mm deformation, 15.4 N peak feedback,
+  98.7 mm forward travel;
+- `(3, 2, 6)` and `(2, 2, 6)`: 61.7--91.9 FPS, but 19.7--25.4 mm collapse
+  and 193--302 N peak feedback, so both were rejected;
+- `(3, 3, 8)`: 33.0 FPS, but 14.5 mm deformation and a 904 N feedback spike,
+  so it was rejected.
+
+The retained default is `(4, 2, 8)`: it is roughly nine times faster than the
+first conservative configuration while preserving the cleanest measured
+impact response and passing all contact, deformation, travel, and penetration
+checks.

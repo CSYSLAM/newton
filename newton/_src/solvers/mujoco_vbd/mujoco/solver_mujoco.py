@@ -108,6 +108,8 @@ from .kernels import (
     wake_changed_trees_kernel,
 )
 
+_MUJOCO_COLLISION_MASK_UNSET = -1
+
 if TYPE_CHECKING:
     from mujoco import MjData, MjModel
     from mujoco_warp import Data as MjWarpData
@@ -855,6 +857,40 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         # endregion custom frequencies
 
         # region geom attributes
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="contype",
+                frequency=AttributeFrequency.SHAPE,
+                assignment=AttributeAssignment.MODEL,
+                dtype=wp.int64,
+                default=_MUJOCO_COLLISION_MASK_UNSET,
+                namespace="mujoco",
+                usd_attribute_name="mjc:contype",
+                mjcf_attribute_name="contype",
+            )
+        )
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="conaffinity",
+                frequency=AttributeFrequency.SHAPE,
+                assignment=AttributeAssignment.MODEL,
+                dtype=wp.int64,
+                default=_MUJOCO_COLLISION_MASK_UNSET,
+                namespace="mujoco",
+                usd_attribute_name="mjc:conaffinity",
+                mjcf_attribute_name="conaffinity",
+            )
+        )
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="collision_mask_domain",
+                frequency=AttributeFrequency.SHAPE,
+                assignment=AttributeAssignment.MODEL,
+                dtype=wp.int64,
+                default=_MUJOCO_COLLISION_MASK_UNSET,
+                namespace="mujoco",
+            )
+        )
         builder.add_custom_attribute(
             ModelBuilder.CustomAttribute(
                 name="condim",
