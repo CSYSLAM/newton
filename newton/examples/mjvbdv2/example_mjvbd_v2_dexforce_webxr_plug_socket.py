@@ -7,8 +7,8 @@ The Quest Browser supplies the right-controller pose while Newton keeps the
 existing 60 FPS MJVBDV2 contact simulation. Hold the right grip button to
 clutch relative wrist motion, use the trigger to pinch, press A to pause or
 resume trajectory recording, press the right thumbstick to reset the physical
-scene in place, and press B to align the full W1 stereo scene with the live
-Newton desktop camera at the current headset pose.
+scene in place, press B to align the full W1 stereo scene with the live Newton
+desktop camera, and press X to switch to the W1 eye camera with head tracking.
 
 The one-command USB workflow avoids certificate setup::
 
@@ -43,6 +43,7 @@ from ._webxr_teleop import (
     WebXRServer,
     pack_scene_geometry,
 )
+from ._webxr_w1_head import FIRST_PERSON_VIEW_MODE, OBSERVER_VIEW_MODE, W1HeadController, serialize_head_pose
 
 FPS = plug_socket.FPS
 DEFAULT_STALE_SECONDS = 0.25
@@ -94,12 +95,18 @@ class Example(plug_socket.Example):
         self.exit_requested = False
         self.teleoperation_active = True
         self.simulation_active = True
+        self.view_mode = OBSERVER_VIEW_MODE
 
         super().__init__(viewer, args)
 
         self._initial_state = self.model.state()
         self._initial_state.assign(self.state_0)
         self._initial_ik_q = wp.clone(self.ik_q)
+        self._head_controller = W1HeadController(
+            self.model,
+            self.device,
+            plug_socket.ROBOT_BASE_ROTATION,
+        )
         self._robot_q_host_indices = tuple(int(index) for index in self.robot_q_indices.numpy())
         trajectory_path = self._trajectory_path(args.trajectory_output)
         self.trajectory_recorder = JsonlTrajectoryRecorder(
@@ -111,6 +118,7 @@ class Example(plug_socket.Example):
                 "robotUrdf": str(self.robot_urdf),
                 "robotJointLabels": list(self.model.joint_label),
                 "robotCoordinateIndices": list(self._robot_q_host_indices),
+                "headCoordinateIndices": self._head_controller.coordinate_indices_host.tolist(),
             },
             flush_every=int(args.record_flush_every),
         )
@@ -286,6 +294,17 @@ class Example(plug_socket.Example):
         """Consume only the newest Quest pose and solve the existing W1 IK."""
         frame = self.xr_state.snapshot(max_age_seconds=self.xr_stale_seconds) if self.teleoperation_active else None
         controller = None if frame is None else frame.controllers.get("right")
+        if not self.teleoperation_active:
+            self.view_mode = OBSERVER_VIEW_MODE
+            self._head_controller.set_desired_pose(self.view_mode, None)
+        elif frame is not None:
+            if frame.view_mode != self.view_mode:
+                self.view_mode = frame.view_mode
+                self.retargeter.reset()
+                print(f"Quest view mode changed to {self.view_mode}", flush=True)
+            self._head_controller.set_desired_pose(self.view_mode, frame.head_pose)
+        elif self.view_mode == FIRST_PERSON_VIEW_MODE:
+            self._head_controller.set_desired_pose(self.view_mode, None)
         if controller is None:
             self.retargeter.reset()
             self._record_button_pressed = False
@@ -322,6 +341,7 @@ class Example(plug_socket.Example):
         self._copy_ik_to_scene(self.frame_q_end)
         self._write_hand_pose(self._teleop_grasp, self.frame_q_end)
         self._write_root_pose(self.frame_q_end)
+        self._head_controller.write_targets(self.frame_q_end, self.frame_dt)
 
     def _process_controller_buttons(self, stream_id: str, sequence: int, controller) -> bool:
         """Handle record/reset edges once per newly received Quest frame."""
@@ -367,6 +387,8 @@ class Example(plug_socket.Example):
             self.phase = "teleoperation_resumed"
             print(f"Teleoperation resumed in existing process (request {request_id})", flush=True)
         elif simulation_active:
+            self.view_mode = OBSERVER_VIEW_MODE
+            self._head_controller.set_desired_pose(self.view_mode, None)
             self.phase = "teleoperation_standby"
             self.trajectory_recorder.pause()
             print(
@@ -374,6 +396,8 @@ class Example(plug_socket.Example):
                 flush=True,
             )
         else:
+            self.view_mode = OBSERVER_VIEW_MODE
+            self._head_controller.set_desired_pose(self.view_mode, None)
             self.phase = "teleoperation_parked"
             self.trajectory_recorder.pause()
             print(
@@ -399,6 +423,7 @@ class Example(plug_socket.Example):
             dtype=np.float32,
         )
         self._teleop_grasp = 0.0
+        self._head_controller.reset()
         self.retargeter.reset()
         self.phase = "scene_reset"
         self.episode_index += 1
@@ -458,6 +483,9 @@ class Example(plug_socket.Example):
                     "xrSequence": None if input_frame is None else input_frame.sequence,
                     "xrClientTimeMs": None if input_frame is None else input_frame.client_time_ms,
                     "xrControllerSpace": None if input_frame is None else input_frame.controller_space,
+                    "viewMode": self.view_mode,
+                    "headPose": serialize_head_pose(None if input_frame is None else input_frame.head_pose),
+                    "neckJointTargets": self._head_controller.targets.tolist(),
                     "phase": self.phase,
                     "targetPose": target_pose,
                     "grasp": float(self._teleop_grasp),
@@ -494,10 +522,12 @@ class Example(plug_socket.Example):
                 "sceneInfo": {
                     "kind": "plug-socket",
                     "title": "插头遥操作",
-                    "description": "Quest 双眼显示完整 W1、插头和插座, 右手柄控制机器人右手完成抓取与插接。",
+                    "description": "Quest 双眼显示完整 W1、插头和插座。也可切换机器人眼睛第一人称。",
                     "controls": [
                         ["右 Grip", "按住并移动机器人右手"],
                         ["右 Trigger", "控制拇指和食指捏合"],
+                        ["左摇杆", "观察模式下转动视角"],
+                        ["X / 视角按钮", "切换观察模式与机器人第一人称"],
                         ["A", "开始 / 暂停 / 继续轨迹录制"],
                         ["B", "用当前头部位姿重新对齐 Newton 相机"],
                         ["右摇杆按下", "原地复位物理场景"],
@@ -515,6 +545,14 @@ class Example(plug_socket.Example):
                 "targetPose": target_pose,
                 "plugPose": plug_pose,
                 "camera": self._viewer_camera_state(),
+                "firstPersonCamera": self._head_controller.camera_state(body_q),
+                "firstPersonHiddenBodies": list(self._head_controller.hidden_body_ids),
+                "viewMode": self.view_mode,
+                "neckJointTargets": self._head_controller.targets.tolist(),
+                "viewControls": {
+                    "leftThumbstickRotate": True,
+                    "firstPersonEnabled": True,
+                },
                 "bodyPoses": [
                     [body, *[float(value) for value in body_q[body]]]
                     for body in (*self._robot_body_ids, self.plug_body)

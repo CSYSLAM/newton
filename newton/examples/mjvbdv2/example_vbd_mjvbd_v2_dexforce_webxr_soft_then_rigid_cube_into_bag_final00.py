@@ -7,6 +7,7 @@ The right Quest grip clutches the W1 right wrist and the right trigger drives
 all ten right-hand finger coordinates through the recorded soft-cube grasp
 pose.  The same finger pose is used for both cubes, while the soft cube, rigid
 cube, and box bag all remain physical and are streamed from live Newton state.
+Press X to switch to the W1 eye camera and drive its neck from head motion.
 
 Use the guarded USB workflow from the repository root::
 
@@ -36,6 +37,7 @@ from ._webxr_teleop import (
     WebXRServer,
     pack_scene_geometry,
 )
+from ._webxr_w1_head import FIRST_PERSON_VIEW_MODE, OBSERVER_VIEW_MODE, W1HeadController, serialize_head_pose
 
 soft0 = cube_scene.soft0
 hand_reference = cube_scene.hand_reference
@@ -99,6 +101,7 @@ class Example(cube_scene.Example):
         self.exit_requested = False
         self.teleoperation_active = True
         self.simulation_active = True
+        self.view_mode = OBSERVER_VIEW_MODE
         self._startup_started_at = time.perf_counter()
 
         super().__init__(viewer, args)
@@ -120,6 +123,7 @@ class Example(cube_scene.Example):
         self._initial_state = self.model.state()
         self._initial_state.assign(self.state_0)
         self._initial_ik_q = wp.clone(self.ik_q)
+        self._head_controller = W1HeadController(self.model, self.device, self.base_rot)
         self._robot_q_host_indices = self._robot_coordinate_indices()
         self._robot_body_ids = tuple(range(self.robot_body_end))
         self._dynamic_body_ids = (*self._robot_body_ids, self.rigid_cube_body)
@@ -152,6 +156,7 @@ class Example(cube_scene.Example):
                 "robotUrdf": str(self.urdf_path),
                 "robotJointLabels": list(self.model.joint_label),
                 "robotCoordinateIndices": list(self._robot_q_host_indices),
+                "headCoordinateIndices": self._head_controller.coordinate_indices_host.tolist(),
                 "bagParticleStart": self.bag_particle_start,
                 "bagParticleCount": self.bag_particle_end - self.bag_particle_start,
                 "bagTriangleIndices": self._bag_local_indices.reshape(-1).tolist(),
@@ -569,6 +574,17 @@ class Example(cube_scene.Example):
         """Retarget the newest right Quest controller pose into W1 IK."""
         frame = self.xr_state.snapshot(max_age_seconds=self.xr_stale_seconds) if self.teleoperation_active else None
         controller = None if frame is None else frame.controllers.get("right")
+        if not self.teleoperation_active:
+            self.view_mode = OBSERVER_VIEW_MODE
+            self._head_controller.set_desired_pose(self.view_mode, None)
+        elif frame is not None:
+            if frame.view_mode != self.view_mode:
+                self.view_mode = frame.view_mode
+                self.retargeter.reset()
+                print(f"Quest view mode changed to {self.view_mode}", flush=True)
+            self._head_controller.set_desired_pose(self.view_mode, frame.head_pose)
+        elif self.view_mode == FIRST_PERSON_VIEW_MODE:
+            self._head_controller.set_desired_pose(self.view_mode, None)
         if controller is None:
             self.retargeter.reset()
             self._record_button_pressed = False
@@ -619,6 +635,7 @@ class Example(cube_scene.Example):
             ],
             device=self.device,
         )
+        self._head_controller.write_targets(self.frame_q_end, self.frame_dt)
 
     def _process_controller_buttons(self, stream_id: str, sequence: int, controller) -> bool:
         new_stream = stream_id != self._last_input_stream
@@ -660,6 +677,8 @@ class Example(cube_scene.Example):
             self.phase = "teleoperation_resumed"
             print(f"Soft/rigid-cube bag teleoperation resumed in existing process (request {request_id})", flush=True)
         elif simulation_active:
+            self.view_mode = OBSERVER_VIEW_MODE
+            self._head_controller.set_desired_pose(self.view_mode, None)
             self.phase = "teleoperation_standby"
             self.trajectory_recorder.pause()
             print(
@@ -667,6 +686,8 @@ class Example(cube_scene.Example):
                 flush=True,
             )
         else:
+            self.view_mode = OBSERVER_VIEW_MODE
+            self._head_controller.set_desired_pose(self.view_mode, None)
             self.phase = "teleoperation_parked"
             self.trajectory_recorder.pause()
             print(
@@ -688,6 +709,7 @@ class Example(cube_scene.Example):
         self._teleop_orientation = self._initial_target_orientation.copy()
         self._teleop_grasp = 0.0
         self._grasp_profile = "soft"
+        self._head_controller.reset()
         self._teleop_contact_key = None
         self._apply_teleop_contact_material(grasping=False)
         self.retargeter.reset()
@@ -761,6 +783,9 @@ class Example(cube_scene.Example):
                     "xrSequence": None if input_frame is None else input_frame.sequence,
                     "xrClientTimeMs": None if input_frame is None else input_frame.client_time_ms,
                     "xrControllerSpace": None if input_frame is None else input_frame.controller_space,
+                    "viewMode": self.view_mode,
+                    "headPose": serialize_head_pose(None if input_frame is None else input_frame.head_pose),
+                    "neckJointTargets": self._head_controller.targets.tolist(),
                     "phase": self.phase,
                     "graspProfile": self._grasp_profile,
                     "targetPose": target_pose,
@@ -802,12 +827,13 @@ class Example(cube_scene.Example):
                     "kind": "soft-rigid-cubes-into-bag",
                     "title": "软方块与硬方块入袋遥操作",
                     "description": (
-                        "Quest 双眼显示完整 W1、软方块、硬方块和实时变形袋子。两个方块统一使用软方块的抓取手型。"
+                        "Quest 双眼显示完整 W1、软方块、硬方块和实时变形袋子。也可切换机器人眼睛第一人称。"
                     ),
                     "controls": [
                         ["右 Grip", "按住并移动机器人右手"],
                         ["右 Trigger", "用软方块手型抓取任一方块"],
-                        ["左摇杆", "转动视角"],
+                        ["左摇杆", "观察模式下转动视角"],
+                        ["X / 视角按钮", "切换观察模式与机器人第一人称"],
                         ["A", "开始 / 暂停 / 继续轨迹录制"],
                         ["B", "用当前头部位姿重新对齐 Newton 相机"],
                         ["右摇杆按下", "原地复位 W1、两个方块和袋子"],
@@ -828,9 +854,14 @@ class Example(cube_scene.Example):
                 "rigidCubePose": rigid_cube_pose,
                 "softCubeCenter": self._soft_cube_center.tolist(),
                 "camera": self._viewer_camera_state(),
+                "firstPersonCamera": self._head_controller.camera_state(body_q),
+                "firstPersonHiddenBodies": list(self._head_controller.hidden_body_ids),
+                "viewMode": self.view_mode,
+                "neckJointTargets": self._head_controller.targets.tolist(),
                 "viewControls": {
                     "leftThumbstickRotate": True,
                     "cameraDollyMeters": WEBXR_CAMERA_DOLLY_METERS,
+                    "firstPersonEnabled": True,
                 },
                 "staticBoxes": self._static_boxes,
                 "deformableMeshes": [

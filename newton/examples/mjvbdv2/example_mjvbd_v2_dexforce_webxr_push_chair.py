@@ -6,7 +6,8 @@
 Newton keeps the full W1 and the free 8 kg WAIC chair in the existing
 MJVBDV2 scene. Each Quest grip clutches the corresponding arm, each trigger
 controls that hand's fingers, A pauses or resumes recording, B realigns the
-stereo scene, and the right thumbstick resets physics in place.
+stereo scene, X switches to the W1 eye camera with head tracking, and the right
+thumbstick resets physics in place.
 
 Use the guarded USB workflow from the repository root::
 
@@ -40,6 +41,7 @@ from ._webxr_teleop import (
     WebXRServer,
     pack_scene_geometry,
 )
+from ._webxr_w1_head import FIRST_PERSON_VIEW_MODE, OBSERVER_VIEW_MODE, W1HeadController, serialize_head_pose
 
 FPS = push_chair.FPS
 DEFAULT_STALE_SECONDS = 0.25
@@ -94,6 +96,7 @@ class Example(push_chair.Example):
         self.exit_requested = False
         self.teleoperation_active = True
         self.simulation_active = True
+        self.view_mode = OBSERVER_VIEW_MODE
         self._startup_started_at = time.perf_counter()
 
         super().__init__(viewer, args)
@@ -101,6 +104,11 @@ class Example(push_chair.Example):
         self._initial_state = self.model.state()
         self._initial_state.assign(self.state_0)
         self._initial_ik_q = wp.clone(self.ik_q)
+        self._head_controller = W1HeadController(
+            self.model,
+            self.device,
+            push_chair.ROBOT_BASE_ROTATION,
+        )
         self._robot_q_host_indices = self._robot_coordinate_indices()
         trajectory_path = self._trajectory_path(args.trajectory_output)
         self.trajectory_recorder = JsonlTrajectoryRecorder(
@@ -113,6 +121,7 @@ class Example(push_chair.Example):
                 "chairUrdf": str(self.chair_urdf),
                 "robotJointLabels": list(self.model.joint_label),
                 "robotCoordinateIndices": list(self._robot_q_host_indices),
+                "headCoordinateIndices": self._head_controller.coordinate_indices_host.tolist(),
             },
             flush_every=int(args.record_flush_every),
         )
@@ -386,6 +395,18 @@ class Example(push_chair.Example):
         """Retarget both newest Quest controller poses into the fixed W1 base."""
         frame = self.xr_state.snapshot(max_age_seconds=self.xr_stale_seconds) if self.teleoperation_active else None
         controllers = {} if frame is None else frame.controllers
+        if not self.teleoperation_active:
+            self.view_mode = OBSERVER_VIEW_MODE
+            self._head_controller.set_desired_pose(self.view_mode, None)
+        elif frame is not None:
+            if frame.view_mode != self.view_mode:
+                self.view_mode = frame.view_mode
+                for retargeter in self.retargeters.values():
+                    retargeter.reset()
+                print(f"Quest view mode changed to {self.view_mode}", flush=True)
+            self._head_controller.set_desired_pose(self.view_mode, frame.head_pose)
+        elif self.view_mode == FIRST_PERSON_VIEW_MODE:
+            self._head_controller.set_desired_pose(self.view_mode, None)
         if controllers and not self._has_seen_controller:
             self._has_seen_controller = True
             if self.args.record_on_connect:
@@ -446,6 +467,7 @@ class Example(push_chair.Example):
             self.frame_q_end,
         )
         self._write_root_pose(push_chair.ROBOT_BASE_GRASP, self.frame_q_end)
+        self._head_controller.write_targets(self.frame_q_end, self.frame_dt)
 
     def _process_controller_buttons(self, stream_id: str, sequence: int, controller) -> bool:
         new_stream = stream_id != self._last_input_stream
@@ -485,6 +507,8 @@ class Example(push_chair.Example):
             self.phase = "teleoperation_resumed"
             print(f"Chair teleoperation resumed in existing process (request {request_id})", flush=True)
         elif simulation_active:
+            self.view_mode = OBSERVER_VIEW_MODE
+            self._head_controller.set_desired_pose(self.view_mode, None)
             self.phase = "teleoperation_standby"
             self.trajectory_recorder.pause()
             print(
@@ -492,6 +516,8 @@ class Example(push_chair.Example):
                 flush=True,
             )
         else:
+            self.view_mode = OBSERVER_VIEW_MODE
+            self._head_controller.set_desired_pose(self.view_mode, None)
             self.phase = "teleoperation_parked"
             self.trajectory_recorder.pause()
             print(f"Chair teleoperation parked without destroying CUDA state (request {request_id})", flush=True)
@@ -513,6 +539,7 @@ class Example(push_chair.Example):
             "right": self._quat_array(push_chair.RIGHT_TCP_ROTATION),
         }
         self._teleop_grasps = dict.fromkeys(HANDS, 0.0)
+        self._head_controller.reset()
         for retargeter in self.retargeters.values():
             retargeter.reset()
         self.phase = "scene_reset"
@@ -573,6 +600,9 @@ class Example(push_chair.Example):
                     "xrSequence": None if input_frame is None else input_frame.sequence,
                     "xrClientTimeMs": None if input_frame is None else input_frame.client_time_ms,
                     "xrControllerSpace": None if input_frame is None else input_frame.controller_space,
+                    "viewMode": self.view_mode,
+                    "headPose": serialize_head_pose(None if input_frame is None else input_frame.head_pose),
+                    "neckJointTargets": self._head_controller.targets.tolist(),
                     "phase": self.phase,
                     "targetPoses": {hand: target_poses[index] for index, hand in enumerate(HANDS)},
                     "grasps": dict(self._teleop_grasps),
@@ -597,10 +627,12 @@ class Example(push_chair.Example):
                 "sceneInfo": {
                     "kind": "push-chair",
                     "title": "双手推椅遥操作",
-                    "description": "Quest 双眼显示完整 W1 与真实椅子网格, 左右手柄分别控制机器人双臂和手指。",
+                    "description": "Quest 双眼显示完整 W1 与真实椅子网格。也可切换机器人眼睛第一人称。",
                     "controls": [
                         ["左右 Grip", "按住并移动对应机器人手臂"],
                         ["左右 Trigger", "控制对应机器人手指抓握"],
+                        ["左摇杆", "观察模式下转动视角"],
+                        ["X / 视角按钮", "切换观察模式与机器人第一人称"],
                         ["A", "开始 / 暂停 / 继续轨迹录制"],
                         ["B", "用当前头部位姿重新对齐 Newton 相机"],
                         ["右摇杆按下", "原地复位 W1 和椅子"],
@@ -618,6 +650,14 @@ class Example(push_chair.Example):
                 "targetPoses": target_poses,
                 "chairPose": chair_pose,
                 "camera": self._viewer_camera_state(),
+                "firstPersonCamera": self._head_controller.camera_state(body_q),
+                "firstPersonHiddenBodies": list(self._head_controller.hidden_body_ids),
+                "viewMode": self.view_mode,
+                "neckJointTargets": self._head_controller.targets.tolist(),
+                "viewControls": {
+                    "leftThumbstickRotate": True,
+                    "firstPersonEnabled": True,
+                },
                 "bodyPoses": [
                     [body, *[float(value) for value in body_q[body]]]
                     for body in (*self._robot_body_ids, self.chair_body)

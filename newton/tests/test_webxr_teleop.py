@@ -36,6 +36,11 @@ from newton.examples.mjvbdv2._webxr_teleop import (
     XRFrame,
     pack_scene_geometry,
 )
+from newton.examples.mjvbdv2._webxr_w1_head import (
+    FIRST_PERSON_VIEW_MODE,
+    W1HeadController,
+    head_pose_to_neck_targets,
+)
 
 
 def _frame_payload(*, sequence=0, position=(0.0, 1.2, -0.5), orientation=(0.0, 0.0, 0.0, 1.0)):
@@ -253,6 +258,26 @@ class TestWebXRExampleConfiguration(unittest.TestCase):
         self.assertFalse(args.graph_capture)
         self.assertEqual(webxr_soft_rigid_bag_example.WEBXR_CAMERA_DOLLY_METERS, 1.8)
 
+    def test_remaining_scenes_publish_robot_first_person_head_tracking(self):
+        """Keep every Quest scene on the shared W1 eye-camera protocol."""
+        examples = (
+            webxr_example,
+            webxr_chair_example,
+            webxr_bag_example,
+            webxr_soft_rigid_bag_example,
+        )
+
+        for example in examples:
+            with self.subTest(example=example.__name__):
+                source = Path(example.__file__).read_text(encoding="utf-8")
+                self.assertIn("W1HeadController", source)
+                self.assertIn('"firstPersonCamera"', source)
+                self.assertIn('"firstPersonHiddenBodies"', source)
+                self.assertIn('"firstPersonEnabled": True', source)
+                self.assertIn('"viewMode"', source)
+                self.assertIn('"headPose"', source)
+                self.assertIn('"neckJointTargets"', source)
+
     def test_tshirt_parser_uses_separate_port_and_safe_defaults(self):
         args = webxr_tshirt_example.Example.create_parser().parse_args([])
 
@@ -359,7 +384,43 @@ class TestWebXRExampleConfiguration(unittest.TestCase):
 
         np.testing.assert_allclose(target_q.numpy()[[1, 3]], [0.23, 0.77], atol=1.0e-6)
 
-    def test_tshirt_head_pose_maps_webxr_yaw_and_pitch_to_neck(self):
+    def test_nut_bolt_adds_a_physical_table_below_the_prethreaded_pair(self):
+        """Support the initial threaded pair on one visible, physical table."""
+
+        class FakeBuilder:
+            def __init__(self):
+                self.box_call = None
+                self.filter_pairs = []
+
+            def add_shape_box(self, *args, **kwargs):
+                self.box_call = (args, kwargs)
+                return 41
+
+            def add_shape_collision_filter_pair(self, shape0, shape1):
+                self.filter_pairs.append((shape0, shape1))
+
+        example = object.__new__(webxr_nut_bolt_example.Example)
+        example.nut_thread_shape = 23
+        builder = FakeBuilder()
+
+        example._add_scene_support(builder)
+
+        self.assertEqual(example.table_shape, 41)
+        self.assertEqual(builder.filter_pairs, [(41, 23)])
+        self.assertEqual(builder.box_call[0], (-1,))
+        self.assertEqual(builder.box_call[1]["label"], "webxr_nut_bolt_table")
+        table = example._static_boxes[0]
+        self.assertEqual(table["role"], "table")
+        self.assertAlmostEqual(
+            table["position"][2] + 0.5 * table["scale"][2],
+            webxr_nut_bolt_example.TABLE_TOP_Z,
+        )
+        self.assertLess(
+            webxr_nut_bolt_example.TABLE_TOP_Z,
+            float(webxr_nut_bolt_example.nut_bolt.ASSEMBLY_ORIGIN[2]),
+        )
+
+    def test_shared_head_pose_maps_webxr_yaw_and_pitch_to_neck(self):
         yaw = np.deg2rad(30.0)
         yaw_pose = Pose(
             position=np.zeros(3, dtype=np.float32),
@@ -371,8 +432,8 @@ class TestWebXRExampleConfiguration(unittest.TestCase):
             orientation=np.array([np.sin(0.5 * pitch), 0.0, 0.0, np.cos(0.5 * pitch)], dtype=np.float32),
         )
 
-        yaw_target, neutral_pitch = webxr_tshirt_example.head_pose_to_neck_targets(yaw_pose)
-        neutral_yaw, pitch_target = webxr_tshirt_example.head_pose_to_neck_targets(pitch_pose)
+        yaw_target, neutral_pitch = head_pose_to_neck_targets(yaw_pose)
+        neutral_yaw, pitch_target = head_pose_to_neck_targets(pitch_pose)
 
         self.assertAlmostEqual(yaw_target, yaw, places=6)
         self.assertAlmostEqual(neutral_pitch, 0.0, places=6)
@@ -387,8 +448,42 @@ class TestWebXRExampleConfiguration(unittest.TestCase):
                 dtype=np.float32,
             ),
         )
-        clamped_yaw, _ = webxr_tshirt_example.head_pose_to_neck_targets(extreme_pose)
+        clamped_yaw, _ = head_pose_to_neck_targets(extreme_pose)
         self.assertAlmostEqual(clamped_yaw, 0.5 * np.pi, places=6)
+
+    def test_shared_head_controller_rate_limits_neck_and_anchors_both_eyes(self):
+        class FakeModel:
+            joint_label = ("W1/NECK1", "W1/NECK2")
+            body_label = ("W1/neck1", "W1/neck2")
+            joint_q_start = wp.array([0, 1, 2], dtype=wp.int32, device="cpu")
+            joint_qd_start = wp.array([0, 1, 2], dtype=wp.int32, device="cpu")
+            joint_q = wp.array([0.0, 0.0], dtype=wp.float32, device="cpu")
+            joint_limit_lower = wp.array([-2.0, -2.0], dtype=wp.float32, device="cpu")
+            joint_limit_upper = wp.array([2.0, 2.0], dtype=wp.float32, device="cpu")
+
+        yaw = np.deg2rad(45.0)
+        pose = Pose(
+            position=np.zeros(3, dtype=np.float32),
+            orientation=np.array([0.0, np.sin(0.5 * yaw), 0.0, np.cos(0.5 * yaw)], dtype=np.float32),
+        )
+        controller = W1HeadController(FakeModel(), "cpu", wp.quat_identity())
+        target_q = wp.zeros(2, dtype=wp.float32, device="cpu")
+
+        controller.set_desired_pose(FIRST_PERSON_VIEW_MODE, pose)
+        controller.write_targets(target_q, 0.1)
+
+        self.assertAlmostEqual(float(target_q.numpy()[0]), np.deg2rad(5.0), places=6)
+        self.assertAlmostEqual(float(target_q.numpy()[1]), 0.0, places=6)
+        body_q = np.array(
+            [
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                [1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        camera = controller.camera_state(body_q)
+        np.testing.assert_allclose(camera["position"], [1.091, 1.949, 3.0], atol=1.0e-6)
+        self.assertEqual(controller.hidden_body_ids, (0, 1))
 
     def test_tshirt_one_click_scripts_use_safe_handoff_service(self):
         """Keep the T-shirt wrappers on the shared safe-handoff protocol."""
@@ -683,6 +778,26 @@ class TestSafeStopScript(unittest.TestCase):
 
 
 class TestStagedReloadScript(unittest.TestCase):
+    def test_every_scene_has_a_dedicated_reload_wrapper(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        scenes = (
+            ("plug_socket", "start_quest_webxr_teleop.sh"),
+            ("chair", "start_quest_webxr_chair_teleop.sh"),
+            ("bag", "start_quest_webxr_bag_teleop.sh"),
+            ("soft_rigid_bag", "start_quest_webxr_soft_rigid_bag_teleop.sh"),
+        )
+
+        for scene, start_name in scenes:
+            with self.subTest(scene=scene):
+                reload_script = repo_root / "scripts" / f"reload_quest_webxr_{scene}_teleop.sh"
+                self.assertTrue(reload_script.is_file())
+                reload_source = reload_script.read_text(encoding="utf-8")
+                self.assertIn('exec "${script_dir}/reload_quest_webxr_teleop.sh"', reload_source)
+
+                start_source = (repo_root / "scripts" / start_name).read_text(encoding="utf-8")
+                self.assertIn(f"./scripts/reload_quest_webxr_{scene}_teleop.sh", start_source)
+                self.assertIn("_webxr_w1_head.py", start_source)
+
     def test_reload_drains_old_process_before_starting_updated_scene(self):
         repo_root = Path(__file__).resolve().parents[2]
         reload_script = repo_root / "scripts" / "reload_quest_webxr_teleop.sh"

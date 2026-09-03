@@ -6,8 +6,9 @@
 The right Quest grip clutches the W1 right wrist, the right trigger drives
 all right-hand finger coordinates between the source scene's open and
 recorded grasp poses, A toggles trajectory recording, B realigns the stereo
-view, and the right thumbstick resets the physical scene in place. The Quest
-renderer receives all 216 deforming bag vertices rather than a rigid proxy.
+view, X switches to the W1 eye camera with head tracking, and the right
+thumbstick resets the physical scene in place. The Quest renderer receives all
+216 deforming bag vertices rather than a rigid proxy.
 
 Use the guarded USB workflow from the repository root::
 
@@ -37,6 +38,7 @@ from ._webxr_teleop import (
     WebXRServer,
     pack_scene_geometry,
 )
+from ._webxr_w1_head import FIRST_PERSON_VIEW_MODE, OBSERVER_VIEW_MODE, W1HeadController, serialize_head_pose
 
 robot_reference = bag_scene.robot_reference
 bag_recorder = robot_reference.hand_reference.recorder
@@ -84,6 +86,7 @@ class Example(bag_scene.Example):
         self.exit_requested = False
         self.teleoperation_active = True
         self.simulation_active = True
+        self.view_mode = OBSERVER_VIEW_MODE
         self._startup_started_at = time.perf_counter()
 
         super().__init__(viewer, args)
@@ -99,6 +102,7 @@ class Example(bag_scene.Example):
         self._initial_state = self.model.state()
         self._initial_state.assign(self.state_0)
         self._initial_ik_q = wp.clone(self.ik_q)
+        self._head_controller = W1HeadController(self.model, self.device, self.base_rot)
         self._initial_edge_rest_angle = wp.clone(self.authored_edge_rest_angle)
         self._initial_edge_bending_properties = wp.clone(self.authored_edge_bending_properties)
         self._robot_q_host_indices = self._robot_coordinate_indices()
@@ -126,6 +130,7 @@ class Example(bag_scene.Example):
                 "robotUrdf": str(self.urdf_path),
                 "robotJointLabels": list(self.model.joint_label),
                 "robotCoordinateIndices": list(self._robot_q_host_indices),
+                "headCoordinateIndices": self._head_controller.coordinate_indices_host.tolist(),
                 "bagParticleStart": self.bag_particle_start,
                 "bagParticleCount": self.bag_particle_end - self.bag_particle_start,
                 "bagTriangleIndices": self._bag_local_indices.reshape(-1).tolist(),
@@ -362,6 +367,17 @@ class Example(bag_scene.Example):
         """Retarget the newest right Quest controller pose into W1 IK."""
         frame = self.xr_state.snapshot(max_age_seconds=self.xr_stale_seconds) if self.teleoperation_active else None
         controller = None if frame is None else frame.controllers.get("right")
+        if not self.teleoperation_active:
+            self.view_mode = OBSERVER_VIEW_MODE
+            self._head_controller.set_desired_pose(self.view_mode, None)
+        elif frame is not None:
+            if frame.view_mode != self.view_mode:
+                self.view_mode = frame.view_mode
+                self.retargeter.reset()
+                print(f"Quest view mode changed to {self.view_mode}", flush=True)
+            self._head_controller.set_desired_pose(self.view_mode, frame.head_pose)
+        elif self.view_mode == FIRST_PERSON_VIEW_MODE:
+            self._head_controller.set_desired_pose(self.view_mode, None)
         if controller is None:
             self.retargeter.reset()
             self._record_button_pressed = False
@@ -430,6 +446,7 @@ class Example(bag_scene.Example):
             ],
             device=self.device,
         )
+        self._head_controller.write_targets(self.frame_q_end, self.frame_dt)
 
     def _process_controller_buttons(self, stream_id: str, sequence: int, controller) -> bool:
         new_stream = stream_id != self._last_input_stream
@@ -471,6 +488,8 @@ class Example(bag_scene.Example):
             self.phase = "teleoperation_resumed"
             print(f"Plastic-bag teleoperation resumed in existing process (request {request_id})", flush=True)
         elif simulation_active:
+            self.view_mode = OBSERVER_VIEW_MODE
+            self._head_controller.set_desired_pose(self.view_mode, None)
             self.phase = "teleoperation_standby"
             self.trajectory_recorder.pause()
             print(
@@ -478,6 +497,8 @@ class Example(bag_scene.Example):
                 flush=True,
             )
         else:
+            self.view_mode = OBSERVER_VIEW_MODE
+            self._head_controller.set_desired_pose(self.view_mode, None)
             self.phase = "teleoperation_parked"
             self.trajectory_recorder.pause()
             print(
@@ -500,6 +521,7 @@ class Example(bag_scene.Example):
         self._teleop_position = self._initial_target_position.copy()
         self._teleop_orientation = self._initial_target_orientation.copy()
         self._teleop_grasp = 0.0
+        self._head_controller.reset()
         self._set_hand_material(released=False)
         self.retargeter.reset()
         self.maximum_soft_contact_count.zero_()
@@ -579,6 +601,9 @@ class Example(bag_scene.Example):
                     "xrSequence": None if input_frame is None else input_frame.sequence,
                     "xrClientTimeMs": None if input_frame is None else input_frame.client_time_ms,
                     "xrControllerSpace": None if input_frame is None else input_frame.controller_space,
+                    "viewMode": self.view_mode,
+                    "headPose": serialize_head_pose(None if input_frame is None else input_frame.head_pose),
+                    "neckJointTargets": self._head_controller.targets.tolist(),
                     "phase": self.phase,
                     "targetPose": target_pose,
                     "grasp": float(self._teleop_grasp),
@@ -608,10 +633,12 @@ class Example(bag_scene.Example):
                 "sceneInfo": {
                     "kind": "plastic-inflatable-bag",
                     "title": "充气塑料袋遥操作",
-                    "description": "Quest 双眼显示完整 W1、桌面和实时变形的充气塑料袋, 右手柄控制抓取与释放。",
+                    "description": "Quest 双眼显示完整 W1、桌面和实时变形袋子。也可切换机器人眼睛第一人称。",
                     "controls": [
                         ["右 Grip", "按住并移动机器人右手"],
                         ["右 Trigger", "控制右手全部手指抓握"],
+                        ["左摇杆", "观察模式下转动视角"],
+                        ["X / 视角按钮", "切换观察模式与机器人第一人称"],
                         ["A", "开始 / 暂停 / 继续轨迹录制"],
                         ["B", "用当前头部位姿重新对齐 Newton 相机"],
                         ["右摇杆按下", "原地复位 W1、袋子和塑性状态"],
@@ -631,6 +658,14 @@ class Example(bag_scene.Example):
                 "bagVolume": volume,
                 "bagAbsolutePressure": pressure,
                 "camera": self._viewer_camera_state(),
+                "firstPersonCamera": self._head_controller.camera_state(body_q),
+                "firstPersonHiddenBodies": list(self._head_controller.hidden_body_ids),
+                "viewMode": self.view_mode,
+                "neckJointTargets": self._head_controller.targets.tolist(),
+                "viewControls": {
+                    "leftThumbstickRotate": True,
+                    "firstPersonEnabled": True,
+                },
                 "staticBoxes": self._static_boxes,
                 "deformableMeshes": [
                     {

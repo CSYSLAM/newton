@@ -56,6 +56,18 @@ MAX_FINGER_CONTACT_SPEED_DEG_S = 30.0
 EYES_POSITION_IN_NECK2 = np.array((0.091, -0.051, 0.0), dtype=np.float32)
 ROBOT_FORWARD = np.array((1.0, 0.0, 0.0), dtype=np.float32)
 ROBOT_UP = np.array((0.0, 0.0, 1.0), dtype=np.float32)
+# The M20 nut contact envelope bottoms out at z=0.809948 m.  A 0.052 mm
+# initial overlap keeps the pre-threaded pair supported from the first step.
+TABLE_TOP_Z = float(nut_bolt.ASSEMBLY_ORIGIN[2] - 0.030)
+TABLE_HALF_EXTENTS = (0.38, 0.25, 0.03)
+TABLE_POSITION = np.array(
+    (float(nut_bolt.ASSEMBLY_ORIGIN[0] + 0.05), 0.20, TABLE_TOP_Z - TABLE_HALF_EXTENTS[2]),
+    dtype=np.float32,
+)
+TABLE_COLOR = (0.30, 0.36, 0.44)
+TABLE_CONTACT_KE = 3.0e5
+TABLE_CONTACT_KD = 3.0e2
+TABLE_CONTACT_MU = 0.8
 WORKSPACE_LOWER_OFFSET = np.array((-0.65, -0.65, -0.40), dtype=np.float32)
 WORKSPACE_UPPER_OFFSET = np.array((0.65, 0.65, 0.60), dtype=np.float32)
 OPEN_HAND_JOINT_DEGREES = {
@@ -158,6 +170,39 @@ class Example(nut_bolt.Example):
     """Drive both W1 hands against the physical threaded pair with Quest."""
 
     reset_in_place = True
+
+    def _add_scene_support(self, builder: newton.ModelBuilder) -> None:
+        """Place the pre-threaded pair on a physical tabletop."""
+        table_cfg = newton.ModelBuilder.ShapeConfig(
+            density=0.0,
+            ke=TABLE_CONTACT_KE,
+            kd=TABLE_CONTACT_KD,
+            mu=TABLE_CONTACT_MU,
+            margin=0.0,
+            gap=0.0,
+        )
+        self.table_shape = builder.add_shape_box(
+            -1,
+            xform=wp.transform(wp.vec3(*TABLE_POSITION), wp.quat_identity()),
+            hx=TABLE_HALF_EXTENTS[0],
+            hy=TABLE_HALF_EXTENTS[1],
+            hz=TABLE_HALF_EXTENTS[2],
+            cfg=table_cfg,
+            color=TABLE_COLOR,
+            label="webxr_nut_bolt_table",
+        )
+        # Use the convex nut envelope for tabletop contact.  The detailed
+        # nut SDF remains dedicated to the physical bolt threads.
+        builder.add_shape_collision_filter_pair(self.table_shape, self.nut_thread_shape)
+        self._static_boxes = [
+            {
+                "role": "table",
+                "position": TABLE_POSITION.tolist(),
+                "orientation": [0.0, 0.0, 0.0, 1.0],
+                "scale": [2.0 * float(value) for value in TABLE_HALF_EXTENTS],
+                "color": [float(value) for value in TABLE_COLOR],
+            }
+        ]
 
     def __init__(self, viewer, args):
         if args.graph_capture:
@@ -813,7 +858,7 @@ class Example(nut_bolt.Example):
                 "sceneInfo": {
                     "kind": "bimanual-nut-bolt",
                     "title": "双手螺母螺栓遥操作",
-                    "description": "Quest 双眼显示完整 W1、动态 M20 螺栓、螺母和实时物理螺纹接触。",
+                    "description": "Quest 双眼显示完整 W1、承托桌面、动态 M20 螺栓、螺母和实时物理螺纹接触。",
                     "controls": [
                         ["左右 Grip", "按住并移动对应机器人手臂"],
                         ["左右 Trigger", "缓慢闭合对应任务手型"],
@@ -848,6 +893,7 @@ class Example(nut_bolt.Example):
                     "cameraPitchOffsetDegrees": WEBXR_CAMERA_PITCH_OFFSET_DEGREES,
                     "firstPersonEnabled": True,
                 },
+                "staticBoxes": self._static_boxes,
                 "bodyPoses": [[body, *body_q[body].tolist()] for body in body_ids],
                 "robotBodies": [[body, *body_q[body].tolist()] for body in self._robot_body_ids],
                 "robotSegments": self._robot_segments,
