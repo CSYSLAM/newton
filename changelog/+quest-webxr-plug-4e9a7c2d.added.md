@@ -1,0 +1,1 @@
+Add a Quest WebXR teleoperation example for the realtime MJVBDV2 Dexforce plug-insertion scene with camera-aligned controller coordinates, exact W1/plug/socket mesh rendering, in-place physics reset, safely managed headless start/stop scripts, and episode-aware JSONL trajectory recording.

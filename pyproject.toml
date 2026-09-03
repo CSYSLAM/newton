@@ -81,6 +81,7 @@ examples = [
     "newton[sim]",          # include simulation dependencies
     "newton[importers]",    # include import dependencies
     "newton[onnx]",         # for RL policy examples
+    "aiohttp>=3.9,<4",      # for Quest WebXR HTTP/WebSocket teleoperation
     "pyglet>=2.1.6,<3",     # for OpenGL viewer
     "GitPython>=3.1.58",    # for downloading assets via newton.utils.download_asset()
     "imgui_bundle>=1.92.0", # for viewer GUI

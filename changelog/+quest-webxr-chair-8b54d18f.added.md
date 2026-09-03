@@ -1,0 +1,1 @@
+Add bimanual Quest WebXR teleoperation for the realtime MJVBDV2 Dexforce chair scene, including full W1/chair mesh rendering, independent hand control, trajectory recording, in-place reset, and guarded start/park scripts.
