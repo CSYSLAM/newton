@@ -397,6 +397,9 @@ class Example:
     RIGHT_ARM = ("RIGHT_J1", "RIGHT_J2", "RIGHT_J3", "RIGHT_J4", "RIGHT_J5", "RIGHT_J6", "RIGHT_J7")
     ROBOT_HAND_KEYWORDS = ("hand", "thumb", "index", "middle", "ring", "pinky")
 
+    def _add_scene_support(self, builder: newton.ModelBuilder) -> None:
+        """Allow derived scenes to add support geometry before finalization."""
+
     def __init__(self, viewer, args):
         newton.use_coord_layout_targets = True
         self.viewer = viewer
@@ -596,6 +599,7 @@ class Example:
         for shape in self.hand_shapes["RIGHT"]:
             if shape not in right_middle_shape_set:
                 builder.add_shape_collision_filter_pair(shape, self.nut_shape)
+        self._add_scene_support(builder)
         builder.color()
         self.model = builder.finalize(requires_grad=False)
         self.model.rigid_contact_max = RIGID_CONTACT_MAX

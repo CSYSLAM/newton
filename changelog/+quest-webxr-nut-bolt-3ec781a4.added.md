@@ -1,1 +1,1 @@
-Added Quest WebXR bimanual teleoperation, contact-aware finger closing, robot-eye first-person viewing, in-place reset, manual trajectory recording, and guarded launch scripts for the full-W1 M20 nut-and-bolt example.
+Added Quest WebXR bimanual teleoperation, a physical support table, contact-aware finger closing, robot-eye first-person viewing, in-place reset, manual trajectory recording, and guarded launch scripts for the full-W1 M20 nut-and-bolt example.

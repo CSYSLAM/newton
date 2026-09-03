@@ -8,6 +8,8 @@ cd /home/oem/code/repos/newton
 
 页面右上角的“隐藏面板”可在进入沉浸式遥操前后使用。隐藏后，场景信息和操作说明不再遮挡实时画面，只保留右上角的小型“显示面板”按钮；再次点击即可恢复完整面板。该开关不暂停物理仿真、遥操输入或轨迹录制。
 
+六个场景都支持机器人第一人称。进入 WebXR 后，点击“切换到机器人第一人称”或按左手柄 X，可把双眼放到 W1 的眼睛位置；之后头部左右转动驱动 `NECK1`，抬头和低头驱动 `NECK2`，视角随之变化。再次按 X 返回观察模式，观察模式下左摇杆可以转动视角。切换模式或按 B 时会重新建立头显与 Newton 相机的中立朝向。
+
 ## 插头/插座场景
 
 先连接 Quest 3S，并在头显里允许 USB 调试。然后执行：
@@ -26,6 +28,12 @@ cd /home/oem/code/repos/newton
 ./scripts/stop_quest_webxr_teleop.sh
 ```
 
+修改场景 Python 代码后，使用分阶段重载：
+
+```bash
+./scripts/reload_quest_webxr_plug_socket_teleop.sh
+```
+
 ## 双手推椅场景
 
 启动：
@@ -40,6 +48,12 @@ cd /home/oem/code/repos/newton
 
 ```bash
 ./scripts/stop_quest_webxr_chair_teleop.sh
+```
+
+修改代码后使用：
+
+```bash
+./scripts/reload_quest_webxr_chair_teleop.sh
 ```
 
 ## 充气塑料袋场景
@@ -58,6 +72,12 @@ cd /home/oem/code/repos/newton
 ./scripts/stop_quest_webxr_bag_teleop.sh
 ```
 
+修改代码后使用：
+
+```bash
+./scripts/reload_quest_webxr_bag_teleop.sh
+```
+
 启用录制后，袋子轨迹文件会额外保存逐帧粒子位置、速度、体积和绝对压力，所以文件增长速度高于插头和椅子场景。
 
 ## 软方块、硬方块依次入袋场景
@@ -74,6 +94,12 @@ cd /home/oem/code/repos/newton
 
 ```bash
 ./scripts/stop_quest_webxr_soft_rigid_bag_teleop.sh
+```
+
+修改代码后使用：
+
+```bash
+./scripts/reload_quest_webxr_soft_rigid_bag_teleop.sh
 ```
 
 端口为 `8768`。启用录制后，JSONL 同时保存 W1 关节、袋子粒子、软方块粒子以及硬方块位姿和速度。
@@ -116,7 +142,7 @@ cd /home/oem/code/repos/newton
 ./scripts/start_quest_webxr_nut_bolt_teleop.sh
 ```
 
-场景保留 `example_mjvbd_v2_bimanual_nut_bolt.py` 的完整 W1、动态 M20 螺母/螺栓、预旋入状态和真实 SDF 螺纹接触。左右 Grip 分别移动对应手根；左右 Trigger 从张开手型缓慢闭合到原例子的任务手型。手指无接触时限制为 90°/s，发生刚体接触后降为 30°/s。原例子的接触设计也保持不变：左手负责夹持螺栓，右手用中指末端沿螺母侧面作切向扫动。
+场景保留 `example_mjvbd_v2_bimanual_nut_bolt.py` 的完整 W1、动态 M20 螺母/螺栓、预旋入状态和真实 SDF 螺纹接触。头显版本在机器人前方增加了真实刚体桌面，桌面顶面与螺母接触包络从第一帧接触，未抓稳时预旋入组件也不会直接掉到地面；详细螺纹 SDF 与桌面之间已过滤，避免和螺母凸包产生重复承托力。左右 Grip 分别移动对应手根；左右 Trigger 从张开手型缓慢闭合到原例子的任务手型。手指无接触时限制为 90°/s，发生刚体接触后降为 30°/s。原例子的接触设计也保持不变：左手负责夹持螺栓，右手用中指末端沿螺母侧面作切向扫动。
 
 观察模式下左摇杆转动视角；点击“切换到机器人第一人称”或按左手柄 X 可切到 W1 眼睛位置，并用头部转动控制两个颈部关节。按右摇杆可原地复位 W1、螺母和螺栓。
 
@@ -164,7 +190,7 @@ cd /home/oem/code/repos/newton
 
 当前机器的 NVIDIA 595.71.05 驱动曾在 CUDA 工作突然停止后的设备电源或连接状态切换阶段触发整机硬锁。默认关闭脚本因此采用安全待机：禁用手柄输入、暂停录制并退出 Quest WebXR，但继续提交稳定物理帧，同时保留 ADB 映射、CUDA 进程和上下文。再次执行同一场景的启动脚本会恢复原进程，不会重新初始化 CUDA。
 
-因此，安全 `stop` 后再 `start` 不会加载期间修改的 Python 场景代码。启动器会比较运行进程和场景源码的时间戳；如果发现源码更新，会明确列出尚未加载的文件。T 恤场景可使用上面的分阶段重载脚本，在 CUDA guard 保持设备活跃的情况下替换旧进程；正常重启仍是出现驱动异常时最保守的恢复方式。启动器每次都会用唯一查询参数刷新 Quest Browser 中复用的 Newton 标签页，因此新的 HTML/JavaScript 不需要手动清缓存。
+因此，安全 `stop` 后再 `start` 不会加载期间修改的 Python 场景代码。启动器会比较运行进程和场景源码的时间戳；如果发现源码更新，会明确列出尚未加载的文件。六个场景都可使用各节列出的分阶段重载脚本，在 CUDA guard 保持设备活跃的情况下替换旧进程；正常重启仍是出现驱动异常时最保守的恢复方式。启动器每次都会用唯一查询参数刷新 Quest Browser 中复用的 Newton 标签页，因此新的 HTML/JavaScript 不需要手动清缓存。
 
 安全待机会继续占用 GPU 和电力。只有在另一个场景已经稳定运行后，目标启动脚本才会将旧场景降为不提交物理帧的停泊状态，使 GPU 总体上不会在切换窗口突然空闲。
 
@@ -178,6 +204,7 @@ NEWTON_WEBXR_TERMINATE=1 ./scripts/stop_quest_webxr_chair_teleop.sh
 NEWTON_WEBXR_TERMINATE=1 ./scripts/stop_quest_webxr_bag_teleop.sh
 NEWTON_WEBXR_TERMINATE=1 ./scripts/stop_quest_webxr_soft_rigid_bag_teleop.sh
 NEWTON_WEBXR_TERMINATE=1 ./scripts/stop_quest_webxr_tshirt_teleop.sh
+NEWTON_WEBXR_TERMINATE=1 ./scripts/stop_quest_webxr_nut_bolt_teleop.sh
 ```
 
 不要绕过这些启动脚本手工恢复多个场景；启动脚本会自动串行完成安全接棒。

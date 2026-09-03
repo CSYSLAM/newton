@@ -28,14 +28,18 @@ browser_launch_id="$(date '+%s%N')"
 quest_url_base="http://127.0.0.1:${port}/"
 quest_url="${quest_url_base}?launch=${browser_launch_id}"
 browser_application_id="${NEWTON_WEBXR_BROWSER_APPLICATION_ID:-org.newton.webxr.teleop}"
-reload_command="${NEWTON_WEBXR_RELOAD_COMMAND:-}"
+reload_command="${NEWTON_WEBXR_RELOAD_COMMAND:-./scripts/reload_quest_webxr_plug_socket_teleop.sh}"
 if [[ -v NEWTON_WEBXR_RELOAD_SOURCES ]]; then
   IFS=: read -r -a reload_sources <<< "${NEWTON_WEBXR_RELOAD_SOURCES}"
 else
   reload_sources=(
     "${repo_root}/newton/examples/mjvbdv2/_webxr_teleop.py"
-    "${repo_root}/newton/examples/mjvbdv2/example_${example_name}.py"
+    "${repo_root}/newton/examples/mjvbdv2/_webxr_w1_head.py"
   )
+  if [[ "${example_name}" == "mjvbd_v2_dexforce_webxr_plug_socket" ]]; then
+    reload_sources+=("${repo_root}/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_realtime_plug_socket.py")
+  fi
+  reload_sources+=("${repo_root}/newton/examples/mjvbdv2/example_${example_name}.py")
 fi
 
 command -v adb >/dev/null || { echo "错误：未找到 adb。" >&2; exit 1; }
