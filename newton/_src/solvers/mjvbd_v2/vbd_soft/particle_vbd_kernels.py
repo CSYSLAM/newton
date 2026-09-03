@@ -2386,8 +2386,9 @@ def apply_truncation_active_all_or_inactive_selected(
         pos_out[particle] = pos[particle] + displacement
 
 
-@wp.kernel
-def accumulate_particle_body_contact_force_and_hessian(
+@wp.func
+def _accumulate_particle_body_contact_force_and_hessian_at_contact(
+    t_id: int,
     # inputs
     dt: float,
     current_color: int,
@@ -2398,8 +2399,6 @@ def accumulate_particle_body_contact_force_and_hessian(
     friction_epsilon: float,
     particle_radius: wp.array[float],
     body_particle_contact_indices: wp.array[wp.vec3i],
-    body_particle_contact_count: wp.array[int],
-    body_particle_contact_max: int,
     # per-contact soft AVBD parameters for body-particle contacts (shared with rigid side)
     body_particle_contact_penalty_k: wp.array[float],
     body_particle_contact_material_ke: wp.array[float],
@@ -2421,17 +2420,11 @@ def accumulate_particle_body_contact_force_and_hessian(
     particle_forces: wp.array[wp.vec3],
     particle_hessians: wp.array[wp.mat33],
 ):
-    t_id = wp.tid()
-
     # One unified soft-contact stream. body_particle_contact_count[0] is the total soft-contact count;
     # each record self-describes via its -1-padded corner ids: (p, -1, -1) is a particle contact,
     # (v0, v1, -1) an edge, (v0, v1, v2) a face. A contact energy E(x) at x = sum_i bary[i]*pos[c_i]
     # contributes bary[i]*force to corner i and bary[i]^2*hessian to its block. VBD solves one color
     # per launch, so only scatter to this record's corners of the active color.
-    count = min(body_particle_contact_max, body_particle_contact_count[0])
-    if t_id >= count:
-        return
-
     corners = body_particle_contact_indices[t_id]
     # Per-contact AVBD penalty + material properties shared with the rigid side.
     contact_ke = body_particle_contact_penalty_k[t_id]
@@ -2499,6 +2492,138 @@ def accumulate_particle_body_contact_force_and_hessian(
                 if particle_colors[ci] == current_color:
                     wp.atomic_add(particle_forces, ci, w * ef_force)
                     wp.atomic_add(particle_hessians, ci, (w * w) * ef_hessian)
+
+
+@wp.kernel
+def accumulate_particle_body_contact_force_and_hessian(
+    # inputs
+    dt: float,
+    current_color: int,
+    pos_anchor: wp.array[wp.vec3],
+    pos: wp.array[wp.vec3],
+    particle_colors: wp.array[int],
+    friction_epsilon: float,
+    particle_radius: wp.array[float],
+    body_particle_contact_indices: wp.array[wp.vec3i],
+    body_particle_contact_count: wp.array[int],
+    body_particle_contact_max: int,
+    body_particle_contact_penalty_k: wp.array[float],
+    body_particle_contact_material_ke: wp.array[float],
+    body_particle_contact_material_kd: wp.array[float],
+    body_particle_contact_material_mu: wp.array[float],
+    shape_body: wp.array[int],
+    body_q: wp.array[wp.transform],
+    body_q_prev: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    contact_shape: wp.array[int],
+    contact_body_pos: wp.array[wp.vec3],
+    contact_body_vel: wp.array[wp.vec3],
+    contact_normal: wp.array[wp.vec3],
+    shape_margin: wp.array[float],
+    contact_barycentric: wp.array[wp.vec3],
+    # outputs
+    particle_forces: wp.array[wp.vec3],
+    particle_hessians: wp.array[wp.mat33],
+):
+    contact = wp.tid()
+    count = min(body_particle_contact_max, body_particle_contact_count[0])
+    if contact < count:
+        _accumulate_particle_body_contact_force_and_hessian_at_contact(
+            contact,
+            dt,
+            current_color,
+            pos_anchor,
+            pos,
+            particle_colors,
+            friction_epsilon,
+            particle_radius,
+            body_particle_contact_indices,
+            body_particle_contact_penalty_k,
+            body_particle_contact_material_ke,
+            body_particle_contact_material_kd,
+            body_particle_contact_material_mu,
+            shape_body,
+            body_q,
+            body_q_prev,
+            body_qd,
+            body_com,
+            contact_shape,
+            contact_body_pos,
+            contact_body_vel,
+            contact_normal,
+            shape_margin,
+            contact_barycentric,
+            particle_forces,
+            particle_hessians,
+        )
+
+
+@wp.kernel(enable_backward=False)
+def accumulate_particle_body_contact_force_and_hessian_active(
+    # inputs
+    dt: float,
+    current_color: int,
+    pos_anchor: wp.array[wp.vec3],
+    pos: wp.array[wp.vec3],
+    particle_colors: wp.array[int],
+    friction_epsilon: float,
+    particle_radius: wp.array[float],
+    body_particle_contact_indices: wp.array[wp.vec3i],
+    body_particle_contact_count: wp.array[int],
+    body_particle_contact_max: int,
+    contact_stride: int,
+    body_particle_contact_penalty_k: wp.array[float],
+    body_particle_contact_material_ke: wp.array[float],
+    body_particle_contact_material_kd: wp.array[float],
+    body_particle_contact_material_mu: wp.array[float],
+    shape_body: wp.array[int],
+    body_q: wp.array[wp.transform],
+    body_q_prev: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    contact_shape: wp.array[int],
+    contact_body_pos: wp.array[wp.vec3],
+    contact_body_vel: wp.array[wp.vec3],
+    contact_normal: wp.array[wp.vec3],
+    shape_margin: wp.array[float],
+    contact_barycentric: wp.array[wp.vec3],
+    # outputs
+    particle_forces: wp.array[wp.vec3],
+    particle_hessians: wp.array[wp.mat33],
+):
+    contact = wp.tid()
+    count = min(body_particle_contact_max, body_particle_contact_count[0])
+    while contact < count:
+        _accumulate_particle_body_contact_force_and_hessian_at_contact(
+            contact,
+            dt,
+            current_color,
+            pos_anchor,
+            pos,
+            particle_colors,
+            friction_epsilon,
+            particle_radius,
+            body_particle_contact_indices,
+            body_particle_contact_penalty_k,
+            body_particle_contact_material_ke,
+            body_particle_contact_material_kd,
+            body_particle_contact_material_mu,
+            shape_body,
+            body_q,
+            body_q_prev,
+            body_qd,
+            body_com,
+            contact_shape,
+            contact_body_pos,
+            contact_body_vel,
+            contact_normal,
+            shape_margin,
+            contact_barycentric,
+            particle_forces,
+            particle_hessians,
+        )
+        contact += contact_stride
 
 
 @wp.kernel(enable_backward=False)

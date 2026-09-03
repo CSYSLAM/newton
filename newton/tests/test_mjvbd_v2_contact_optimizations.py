@@ -291,6 +291,33 @@ def _launch_gather_contacts(kernels, data, contact_count, forces, hessians, devi
         )
 
 
+def _launch_active_soft_contacts(data, contact_count, forces, hessians, device):
+    worker_count = 3
+    for color, _color_group in enumerate(data["color_groups"]):
+        wp.launch(
+            soft_particle_kernels.accumulate_particle_body_contact_force_and_hessian_active,
+            dim=worker_count,
+            inputs=[
+                0.01,
+                color,
+                data["particle_q_prev"],
+                data["particle_q"],
+                data["particle_colors"],
+                1.0,
+                data["particle_radius"],
+                data["contact_indices"],
+                contact_count,
+                data["capacity"],
+                worker_count,
+                data["contact_penalty_k"],
+                data["contact_material_ke"],
+                *_contact_material_inputs(data)[1:],
+            ],
+            outputs=[forces, hessians],
+            device=device,
+        )
+
+
 def _make_dual_data(device, capacity=7):
     particle_count = 4
     return {
@@ -609,6 +636,39 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
                         np.testing.assert_allclose(gather_forces.numpy(), legacy_forces.numpy(), rtol=1.0e-6)
                         np.testing.assert_allclose(gather_hessians.numpy(), legacy_hessians.numpy(), rtol=1.0e-6)
 
+    @unittest.skipUnless(wp.is_cuda_available(), "Persistent contact traversal requires CUDA")
+    def test_persistent_particle_contact_force_matches_legacy_scatter(self):
+        """Match legacy scatter over empty, partial, full, and overflow-clamped prefixes."""
+        device = wp.get_device("cuda:0")
+        data = _make_point_contact_data(device)
+        for raw_count in (0, 1, 4, data["capacity"], data["capacity"] + 2):
+            with self.subTest(raw_count=raw_count):
+                contact_count = wp.array([raw_count], dtype=int, device=device)
+                legacy_forces = wp.array(data["base_forces"], dtype=wp.vec3, device=device)
+                legacy_hessians = wp.array(data["base_hessians"], dtype=wp.mat33, device=device)
+                active_forces = wp.array(data["base_forces"], dtype=wp.vec3, device=device)
+                active_hessians = wp.array(data["base_hessians"], dtype=wp.mat33, device=device)
+
+                _launch_legacy_contacts(
+                    soft_particle_kernels,
+                    False,
+                    data,
+                    contact_count,
+                    legacy_forces,
+                    legacy_hessians,
+                    device,
+                )
+                _launch_active_soft_contacts(
+                    data,
+                    contact_count,
+                    active_forces,
+                    active_hessians,
+                    device,
+                )
+
+                np.testing.assert_allclose(active_forces.numpy(), legacy_forces.numpy(), rtol=1.0e-6)
+                np.testing.assert_allclose(active_hessians.numpy(), legacy_hessians.numpy(), rtol=1.0e-6)
+
     def test_body_particle_dual_updates_active_prefix_once(self):
         """Update every clamped active-prefix contact once and preserve the inactive tail."""
         devices = [wp.get_device("cpu")]
@@ -829,17 +889,54 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
     @unittest.skipUnless(wp.is_cuda_available(), "CUDA batch threshold requires CUDA")
     def test_small_color_groups_keep_legacy_contact_path(self):
         """Keep single-scene color groups on the existing contact and dual paths."""
+        device = wp.get_device("cuda:0")
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         builder.add_shape_sphere(body=-1, radius=0.1)
         for particle in range(8):
             builder.add_particle(wp.vec3(0.02 * particle, 0.0, 0.2), wp.vec3(), 0.01, radius=0.01)
         builder.color()
-        model = builder.finalize(device="cuda:0")
+        model = builder.finalize(device=device)
         solver = SolverVBDSoft(model, iterations=1)
 
         self.assertFalse(solver._particle_contact_gather_supported)
         self.assertFalse(solver._use_active_soft_contact_prefix)
         self.assertEqual(solver._active_soft_contact_worker_dim(123), 123)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Persistent contact traversal requires CUDA")
+    def test_persistent_particle_contact_force_dispatch_gates(self):
+        """Restrict persistent traversal to large nondeterministic, non-gradient CUDA Graphs."""
+        device = wp.get_device("cuda:0")
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        builder.add_shape_sphere(body=-1, radius=0.1)
+        for particle in range(8):
+            builder.add_particle(wp.vec3(0.02 * particle, 0.0, 0.2), wp.vec3(), 0.01, radius=0.01)
+        builder.color()
+        model = builder.finalize(device=device)
+        solver = SolverVBDSoft(model, iterations=1)
+
+        self.assertTrue(solver._persistent_particle_contact_force_supported)
+        self.assertFalse(solver._should_use_persistent_particle_contact_force(289620))
+
+        deterministic_solver = SolverVBDSoft(
+            model,
+            iterations=1,
+            deterministic=wp.DeterministicMode.RUN_TO_RUN,
+        )
+        self.assertFalse(deterministic_solver._persistent_particle_contact_force_supported)
+
+        grad_builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        grad_builder.add_shape_sphere(body=-1, radius=0.1)
+        grad_builder.add_particle(wp.vec3(0.0, 0.0, 0.2), wp.vec3(), 0.01, radius=0.01)
+        grad_builder.color()
+        grad_model = grad_builder.finalize(device=device, requires_grad=True)
+        grad_solver = SolverVBDSoft(grad_model, iterations=1)
+        self.assertFalse(grad_solver._persistent_particle_contact_force_supported)
+
+        with wp.ScopedCapture(device=device) as capture:
+            self.assertFalse(solver._should_use_persistent_particle_contact_force(32767))
+            self.assertTrue(solver._should_use_persistent_particle_contact_force(32768))
+            solver.particle_forces.zero_()
+        wp.capture_launch(capture.graph)
 
     @unittest.skipUnless(wp.is_cuda_available(), "Particle-contact gather requires CUDA")
     def test_cuda_solvers_execute_forced_point_contact_gather(self):
