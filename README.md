@@ -933,12 +933,16 @@ If you run the examples from a source checkout with uv, use
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_mjvbd_v2_dexforce_bimanual_place_tablecloth_waic_house.jpg" alt="MuJoCo/VBD Dexforce Bimanual Tablecloth Placement">
       </a>
     </td>
-    <td align="center" width="33%"></td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mujoco_vbd/example_mujoco_vbd_two_way_coupled_scene.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mujoco_vbd_two_way_coupled_scene.jpg" alt="MuJoCo/VBD Two-Way Coupled Scene">
+      </a>
+    </td>
   </tr>
   <tr>
     <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_dexforce_realtime_plug_socket</code></td>
     <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_dexforce_bimanual_place_tablecloth_waic_house</code></td>
-    <td align="center" width="33%"></td>
+    <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_two_way_coupled_scene</code></td>
   </tr>
   <tr>
     <td align="center" width="33%">
@@ -961,6 +965,20 @@ If you run the examples from a source checkout with uv, use
     <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_cloth_twist</code></td>
     <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_dexforce_realtime_push_chair</code></td>
     <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_gear_crusher</code></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mujoco_vbd/example_mujoco_vbd_robot_hand_table_bounce.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mujoco_vbd_robot_hand_table_bounce.jpg" alt="MuJoCo/VBD Dexforce W1 Hand Table Bounce">
+      </a>
+    </td>
+    <td align="center" width="33%"></td>
+    <td align="center" width="33%"></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%"><code>python -m newton.examples mujoco_vbd_robot_hand_table_bounce</code></td>
+    <td align="center" width="33%"></td>
+    <td align="center" width="33%"></td>
   </tr>
   <tr>
     <td colspan="3"><h3>Multi-Physics Examples</h3></td>

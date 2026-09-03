@@ -79,6 +79,7 @@ class TwoWayBackend(MuJoCoVBDBackendBase):
             ownership,
             self.routing,
             static_contact_owner=self.coupling.static_contact_owner,
+            soft_contact_speculative_distance=self.coupling.soft_contact_speculative_distance,
             **dict(options.collision_options),
         )
         self.feedback = MuJoCoVBDFeedback(
@@ -144,11 +145,10 @@ class TwoWayBackend(MuJoCoVBDBackendBase):
                     self.runtime.mujoco_state_out,
                     self.runtime.wrench_relaxed,
                     dt,
-                    iteration,
                 )
 
                 self.collision_pipeline.collide_iteration(
-                    self.runtime.vbd_state_in, selected_contacts, iteration=iteration
+                    self.runtime.vbd_state_in, selected_contacts, iteration=iteration, dt=dt
                 )
                 self.collision_pipeline.record_overflow(selected_contacts, self._diagnostics)
                 self.vbd_backend.solve_iteration(self.runtime.vbd_state_out, control, selected_contacts, dt)

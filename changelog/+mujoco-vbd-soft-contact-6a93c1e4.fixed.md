@@ -1,0 +1,1 @@
+Prevent fast MuJoCo-owned colliders from tunneling through VBD soft bodies by synchronizing both solvers to the same substep interval, adding velocity-aware speculative point contacts, and warm-starting augmented-Lagrangian normal constraints. Add standalone coupled-scene and robot-hand/table impact examples for two-way acceptance testing.

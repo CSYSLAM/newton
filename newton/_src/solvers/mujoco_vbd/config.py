@@ -99,6 +99,14 @@ class MuJoCoVBDCouplingOptions:
     fail_on_overflow: bool = True
     fail_on_nonfinite: bool = True
     static_contact_owner: MuJoCoVBDStaticContactOwner | str = MuJoCoVBDStaticContactOwner.AUTO
+    soft_contact_speculative_distance: float = 5.0e-3
+    """Maximum velocity-predicted M-V soft-contact search extension [m]."""
+    soft_contact_augmented_lagrangian: bool = True
+    """Enable normal augmented-Lagrangian multipliers for M-V soft contacts."""
+    soft_contact_al_rho_scale: float = 0.25
+    """Multiplier update rate relative to the mixed normal contact stiffness."""
+    soft_contact_lambda_decay: float = 0.95
+    """Per-substep decay applied to matched M-V normal multipliers."""
 
     @property
     def relaxation_mode_int(self) -> int:
@@ -208,6 +216,18 @@ def validate_coupling_options(
             f"got min={inertia_min}, max={inertia_max}"
         )
 
+    speculative_distance = _require_finite(
+        "soft_contact_speculative_distance", options.soft_contact_speculative_distance
+    )
+    if speculative_distance < 0.0:
+        raise ValueError(f"soft_contact_speculative_distance must be non-negative, got {speculative_distance}")
+    al_rho_scale = _require_finite("soft_contact_al_rho_scale", options.soft_contact_al_rho_scale)
+    if al_rho_scale <= 0.0:
+        raise ValueError(f"soft_contact_al_rho_scale must be positive, got {al_rho_scale}")
+    lambda_decay = _require_finite("soft_contact_lambda_decay", options.soft_contact_lambda_decay)
+    if not (0.0 <= lambda_decay <= 1.0):
+        raise ValueError(f"soft_contact_lambda_decay must lie in [0, 1], got {lambda_decay}")
+
     return replace(
         options,
         iterations=iterations,
@@ -224,6 +244,10 @@ def validate_coupling_options(
         proxy_inertia_eigenvalue_min=inertia_min,
         proxy_inertia_eigenvalue_max=inertia_max,
         static_contact_owner=static_owner,
+        soft_contact_speculative_distance=speculative_distance,
+        soft_contact_augmented_lagrangian=bool(options.soft_contact_augmented_lagrangian),
+        soft_contact_al_rho_scale=al_rho_scale,
+        soft_contact_lambda_decay=lambda_decay,
     )
 
 

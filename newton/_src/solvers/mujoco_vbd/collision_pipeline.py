@@ -15,7 +15,11 @@ from ...geometry import ShapeFlags
 from ...sim import Contacts, Model, State
 from .config import MuJoCoVBDStaticContactOwner
 from .diagnostics import MuJoCoVBDDiagnostics
-from .point_contact_kernels import compute_shape_world_aabbs, create_soft_contacts_with_aabb
+from .point_contact_kernels import (
+    compute_shape_world_aabbs,
+    create_soft_contacts_with_aabb,
+    create_speculative_soft_contacts_with_aabb,
+)
 
 __all__ = ["MJVBDV2SoftContactPipeline", "MuJoCoVBDCollisionPipeline"]
 
@@ -306,6 +310,7 @@ class MuJoCoVBDCollisionPipeline:
         routing,
         *,
         static_contact_owner=MuJoCoVBDStaticContactOwner.AUTO,
+        soft_contact_speculative_distance: float = 0.0,
         **collision_options: object,
     ) -> None:
         from .full_contact_pipeline import MJVBDV2CollisionPipeline
@@ -313,6 +318,9 @@ class MuJoCoVBDCollisionPipeline:
         self.model = model
         self.ownership = ownership
         self.routing = routing
+        self.soft_contact_speculative_distance = float(soft_contact_speculative_distance)
+        if self.soft_contact_speculative_distance < 0.0:
+            raise ValueError("soft_contact_speculative_distance must be non-negative")
         self._construction_shape_flags = np.asarray(model.shape_flags.numpy(), dtype=np.int32).copy()
 
         # VBD owns V-V and M-V rigid contacts. Use an explicit immutable pair
@@ -389,10 +397,74 @@ class MuJoCoVBDCollisionPipeline:
                 "collision flag remains supported."
             )
 
-    def collide_iteration(self, state: State, contacts: Contacts, *, iteration: int) -> None:
+    def collide_iteration(self, state: State, contacts: Contacts, *, iteration: int, dt: float) -> None:
         _ = iteration
         contacts.clear()
+        # Contacts.clear() intentionally leaves this candidate map untouched in
+        # the fast path.  Speculative contacts and AL history require inactive
+        # candidates to be explicit every outer iteration.
+        contacts.soft_contact_tids.fill_(-1)
         self._pipeline.collide(state, contacts, soft_contact_margin=self._soft_contact_margin)
+        speculative_distance = self.soft_contact_speculative_distance
+        pipeline = self._pipeline
+        pair_count = pipeline.soft_rigid_contact_pair_count
+        if (
+            speculative_distance <= 0.0
+            or pair_count == 0
+            or state.particle_q is None
+            or state.particle_qd is None
+            or state.body_q is None
+            or state.body_qd is None
+        ):
+            return
+
+        model = self.model
+        wp.launch(
+            kernel=create_speculative_soft_contacts_with_aabb,
+            dim=pair_count,
+            inputs=[
+                pipeline.soft_rigid_contact_pairs,
+                state.particle_q,
+                state.particle_qd,
+                model.particle_radius,
+                model.particle_flags,
+                model.particle_world,
+                state.body_q,
+                state.body_qd,
+                model.body_com,
+                model.shape_transform,
+                model.shape_body,
+                model.shape_type,
+                model.shape_scale,
+                model.shape_source_ptr,
+                model._shape_mesh_properties,
+                model.shape_world,
+                self.ownership.shape_owner,
+                dt,
+                speculative_distance,
+                self._soft_contact_margin,
+                model.shape_margin,
+                contacts.soft_contact_max,
+                model.shape_flags,
+                model.shape_heightfield_index,
+                model.heightfield_data,
+                model.heightfield_elevations,
+                pipeline.narrow_phase.shape_aabb_lower,
+                pipeline.narrow_phase.shape_aabb_upper,
+            ],
+            outputs=[
+                contacts.soft_contact_count,
+                contacts.soft_contact_particle,
+                contacts.soft_contact_indices,
+                contacts.soft_contact_barycentric,
+                contacts.soft_contact_shape,
+                contacts.soft_contact_body_pos,
+                contacts.soft_contact_body_vel,
+                contacts.soft_contact_normal,
+                contacts.soft_contact_tids,
+            ],
+            device=model.device,
+        )
 
     def record_overflow(self, contacts: Contacts, diagnostics: MuJoCoVBDDiagnostics) -> None:
         """Latch every collision-pipeline overflow into public diagnostics.

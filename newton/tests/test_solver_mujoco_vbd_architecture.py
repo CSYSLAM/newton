@@ -15,16 +15,22 @@ import inspect
 import pathlib
 import unittest
 
+import numpy as np
 import warp as wp
 
 import newton
 from newton._src.solvers.mujoco_vbd import SolverMuJoCoVBD
-from newton._src.solvers.mujoco_vbd.config import MuJoCoVBDCouplingOptions
+from newton._src.solvers.mujoco_vbd.config import (
+    PROXY_RESPONSE_EFFECTIVE_MASS,
+    MuJoCoVBDCouplingOptions,
+    validate_coupling_options,
+)
 from newton._src.solvers.mujoco_vbd.dispatch import (
     MuJoCoVBDBackendKind,
     discover_features,
     select_backend_kind,
 )
+from newton._src.solvers.mujoco_vbd.kernels import sync_and_rewind_proxy_bodies_kernel
 from newton._src.solvers.mujoco_vbd.ownership import resolve_mujoco_vbd_ownership
 
 _PACKAGE_ROOT = pathlib.Path(newton.__file__).parent / "_src" / "solvers" / "mujoco_vbd"
@@ -99,6 +105,17 @@ def _select(model, *, joint_mode, coupling_mode="auto", contact_mode="auto", joi
 
 
 class TestMuJoCoVBDArchitecture(unittest.TestCase):
+    def test_soft_contact_robustness_options_validate(self):
+        options = validate_coupling_options(None)
+        self.assertGreater(options.soft_contact_speculative_distance, 0.0)
+        self.assertTrue(options.soft_contact_augmented_lagrangian)
+        with self.assertRaisesRegex(ValueError, "soft_contact_speculative_distance"):
+            validate_coupling_options({"soft_contact_speculative_distance": -1.0})
+        with self.assertRaisesRegex(ValueError, "soft_contact_al_rho_scale"):
+            validate_coupling_options({"soft_contact_al_rho_scale": 0.0})
+        with self.assertRaisesRegex(ValueError, "soft_contact_lambda_decay"):
+            validate_coupling_options({"soft_contact_lambda_decay": 1.1})
+
     # -- 23.1 independence --
 
     def test_production_package_has_no_forbidden_solver_imports(self):
@@ -191,6 +208,61 @@ class TestMuJoCoVBDArchitecture(unittest.TestCase):
         model = _cloth_only_builder().finalize()
         with self.assertRaises(ValueError):
             SolverMuJoCoVBD(model, coupling_options=MuJoCoVBDCouplingOptions(iterations=3))
+
+    def test_two_way_proxy_sync_reconstructs_substep_begin_pose(self):
+        """Prevent VBD from advancing the MuJoCo interval twice."""
+        device = "cpu"
+        dt = 0.25
+        proxy_body_ids = wp.array([0], dtype=wp.int32, device=device)
+        source_body_q = wp.array(
+            [wp.transform(wp.vec3(1.5, 2.75, 4.0), wp.quat_identity())], dtype=wp.transform, device=device
+        )
+        source_body_qd = wp.array(
+            [wp.spatial_vector(2.0, 3.0, 4.0, 0.0, 0.0, 0.0)], dtype=wp.spatial_vector, device=device
+        )
+        body_com = wp.zeros(1, dtype=wp.vec3, device=device)
+        body_inertia = wp.array([wp.mat33(1.0)], dtype=wp.mat33, device=device)
+        gravity = wp.array([wp.vec3(0.0, 0.0, -10.0)], dtype=wp.vec3, device=device)
+        wrench = wp.array([wp.spatial_vector(4.0, 5.0, 6.0, 7.0, 8.0, 9.0)], dtype=wp.spatial_vector, device=device)
+        inverse_mass = wp.array([0.5], dtype=float, device=device)
+        destination_body_q = wp.zeros(1, dtype=wp.transform, device=device)
+        destination_body_qd = wp.zeros(1, dtype=wp.spatial_vector, device=device)
+        destination_body_f = wp.zeros(1, dtype=wp.spatial_vector, device=device)
+        destination_body_q_prev = wp.zeros(1, dtype=wp.transform, device=device)
+        destination_body_q_prev_snapshot = wp.zeros(1, dtype=wp.transform, device=device)
+        proxy_qd_before = wp.zeros(1, dtype=wp.spatial_vector, device=device)
+
+        wp.launch(
+            sync_and_rewind_proxy_bodies_kernel,
+            dim=1,
+            inputs=[
+                dt,
+                proxy_body_ids,
+                source_body_q,
+                source_body_qd,
+                body_com,
+                body_inertia,
+                gravity,
+                wrench,
+                inverse_mass,
+                PROXY_RESPONSE_EFFECTIVE_MASS,
+                destination_body_q,
+                destination_body_qd,
+                destination_body_f,
+                destination_body_q_prev,
+                destination_body_q_prev_snapshot,
+                proxy_qd_before,
+            ],
+            device=device,
+        )
+
+        expected_pose = np.asarray([[1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+        np.testing.assert_allclose(destination_body_q.numpy(), expected_pose)
+        np.testing.assert_allclose(destination_body_q_prev.numpy(), expected_pose)
+        np.testing.assert_allclose(destination_body_q_prev_snapshot.numpy(), expected_pose)
+        np.testing.assert_allclose(destination_body_qd.numpy(), np.asarray([[2, 3, 4, 0, 0, 0]]))
+        np.testing.assert_allclose(proxy_qd_before.numpy(), np.asarray([[2, 3, 4, 0, 0, 0]]))
+        np.testing.assert_allclose(destination_body_f.numpy(), np.asarray([[-4, -5, 14, -7, -8, -9]]))
 
 
 if __name__ == "__main__":

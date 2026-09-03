@@ -24,6 +24,7 @@ __all__ = [
     "reconcile_owned_joint_state_kernel",
     "reconcile_owned_particle_state_kernel",
     "sync_and_rewind_proxy_bodies_kernel",
+    "sync_dirichlet_proxy_bodies_kernel",
     "update_relaxed_wrench_kernel",
 ]
 
@@ -63,53 +64,84 @@ def copy_particle_state_to_backends_kernel(
 
 
 @wp.kernel
-def sync_and_rewind_proxy_bodies_kernel(
-    dt: float,
+def sync_dirichlet_proxy_bodies_kernel(
     proxy_body_ids: wp.array[wp.int32],
     source_body_q: wp.array[wp.transform],
     source_body_qd: wp.array[wp.spatial_vector],
-    body_gravity_acceleration: wp.array[wp.vec3],
-    wrench_relaxed: wp.array[wp.spatial_vector],
-    proxy_inv_mass: wp.array[float],
-    proxy_inv_inertia: wp.array[wp.mat33],
-    response_mode: int,
     destination_body_q: wp.array[wp.transform],
     destination_body_qd: wp.array[wp.spatial_vector],
     proxy_qd_before: wp.array[wp.spatial_vector],
 ):
-    """Copy the solved MuJoCo pose to the VBD proxy and lagged-rewind velocity.
+    """Copy a prescribed source state into an immovable one-way proxy."""
+    body = proxy_body_ids[wp.tid()]
+    destination_body_q[body] = source_body_q[body]
+    destination_body_qd[body] = source_body_qd[body]
+    proxy_qd_before[body] = source_body_qd[body]
+
+
+@wp.kernel
+def sync_and_rewind_proxy_bodies_kernel(
+    dt: float,
+    proxy_body_ids: wp.array[wp.int32],
+    source_body_q_end: wp.array[wp.transform],
+    source_body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    body_inertia: wp.array[wp.mat33],
+    body_gravity_acceleration: wp.array[wp.vec3],
+    wrench_relaxed: wp.array[wp.spatial_vector],
+    proxy_inv_mass: wp.array[float],
+    response_mode: int,
+    destination_body_q: wp.array[wp.transform],
+    destination_body_qd: wp.array[wp.spatial_vector],
+    destination_body_f: wp.array[wp.spatial_vector],
+    destination_body_q_prev: wp.array[wp.transform],
+    destination_body_q_prev_snapshot: wp.array[wp.transform],
+    proxy_qd_before: wp.array[wp.spatial_vector],
+):
+    """Prepare a lagged VBD proxy from MuJoCo's end pose and velocity.
 
     See ``DESIGN.md`` section 10.2. ``DIRICHLET`` copies pose/velocity verbatim
-    and forbids VBD from updating the proxy. ``EFFECTIVE_MASS`` undoes the
-    previous iteration's coupling wrench so the same wrench is not applied twice.
+    and forbids VBD from updating the proxy. ``EFFECTIVE_MASS`` reconstructs
+    the begin pose and removes forces already applied by MuJoCo.
     """
     slot = wp.tid()
     body = proxy_body_ids[slot]
-    q = source_body_q[body]
+    q_end = source_body_q_end[body]
     qd = source_body_qd[body]
 
-    destination_body_q[body] = q
+    rotation_end = wp.transform_get_rotation(q_end)
+    angular_velocity = wp.spatial_bottom(qd)
+    rotation_begin = wp.normalize(rotation_end - wp.quat(angular_velocity, 0.0) * rotation_end * (0.5 * dt))
+    com_end = wp.transform_point(q_end, body_com[body])
+    com_begin = com_end - wp.spatial_top(qd) * dt
+    q_begin = wp.transform(com_begin - wp.quat_rotate(rotation_begin, body_com[body]), rotation_begin)
+
+    destination_body_q[body] = q_begin
+    destination_body_q_prev[body] = q_begin
+    destination_body_q_prev_snapshot[body] = q_begin
     proxy_qd_before[body] = qd
 
     if response_mode == PROXY_RESPONSE_DIRICHLET:
         destination_body_qd[body] = qd
         return
 
-    # EFFECTIVE_MASS: remove the previously applied coupling impulse so VBD's
-    # effective-mass response can re-derive the interface velocity increment.
+    # MuJoCo's end velocity already contains the relaxed interface wrench.
+    # Cancel it, and the gravity VBD would otherwise apply again, while keeping
+    # actuator and articulated motion embedded in qd.
     w = wrench_relaxed[body]
     force = wp.spatial_top(w)
     torque = wp.spatial_bottom(w)
-    rotation = wp.transform_get_rotation(q)
-    angular_acceleration = wp.quat_rotate(
-        rotation,
-        proxy_inv_inertia[slot] * wp.quat_rotate_inv(rotation, torque),
+    inv_mass = proxy_inv_mass[slot]
+    gravity_force = wp.vec3(0.0)
+    if inv_mass > 0.0:
+        gravity_force = body_gravity_acceleration[body] / inv_mass
+    angular_velocity_body = wp.quat_rotate_inv(rotation_begin, angular_velocity)
+    coriolis_torque = wp.quat_rotate(
+        rotation_begin,
+        wp.cross(angular_velocity_body, body_inertia[body] * angular_velocity_body),
     )
-    rewound = qd - wp.spatial_vector(
-        force * proxy_inv_mass[slot] * dt,
-        angular_acceleration * dt,
-    )
-    destination_body_qd[body] = rewound
+    destination_body_qd[body] = qd
+    destination_body_f[body] = wp.spatial_vector(-force - gravity_force, coriolis_torque - torque)
 
 
 @wp.kernel

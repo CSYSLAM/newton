@@ -186,3 +186,66 @@ the authored settings, null viewer, and a 3-second benchmark window:
 These results meet the parity decision: all behavior assertions pass and each
 independent solver path remains within normal short-window measurement noise of
 the MJVBD_V2 reference.
+
+## Two-way soft-contact robustness (2026-09-02)
+
+Retained three coupled changes: reconstruct VBD proxy begin poses from MuJoCo
+end states so both cores solve one physical interval, append velocity-aware
+speculative point contacts for separated M-V pairs predicted to cross during
+the substep, and persist scalar augmented-Lagrangian normal multipliers through
+the stable `soft_contact_tids` candidate map. The multiplier history participates
+in the outer-round transaction and therefore commits only once per substep.
+
+The deterministic acceptance scene is a finite-mass prismatic MuJoCo finger
+moving at 3 m/s toward a 2x2x2-cell tetrahedral VBD block. It starts with a
+35 mm gap and travels 50 mm during the first 1/60 s step:
+
+- legacy penalty path: 0 first-step contacts and less than 1e-6 m particle
+  displacement;
+- speculative + AL path: 9 first-step contacts, more than 1e-4 m deformation,
+  smaller measured first-step penetration, nonzero multiplier history, and a
+  second-step equal-and-opposite feedback force that reduces joint velocity
+  below 2.5 m/s;
+- speculative-only A/B: second-step joint velocity was 2.318 m/s, versus
+  1.097 m/s with AL warm starting; this isolates the retained multiplier's
+  effect from speculative candidate generation.
+
+Warm-cache RTX 5060 Ti null-viewer measurements used the dedicated acceptance
+scene, four coupling rounds, four VBD iterations, and a 3-second window:
+
+- robust path: 51.3 FPS;
+- `--legacy-contact`: 52.3 FPS;
+- measured cost: 1.9% in this deliberately tiny launch-bound scene.
+
+The fixed contact capacity is unchanged because actual and speculative
+predicates are disjoint for every candidate. CUDA Graph capture and two replays
+pass with the new launches and persistent history buffers. The first version is
+intentionally limited to particle-shape point candidates used by volumetric
+soft bodies; edge/face speculative full-surface contact remains unchanged.
+
+## Standalone multiphysics scene reproduction (2026-09-03)
+
+Added an independent `SolverMuJoCoVBD` acceptance scene derived from the
+generic multiphysics proxy-coupled example. It does not import
+`SolverCoupledProxy` or its example module.
+
+The proxy-coupling reproduction preserves the original three free rigid boxes,
+three-link pendulum, 30x30 pinned cloth, three tetrahedral bodies, eight
+substeps, and finite-mass two-way contact. A 30-frame CUDA Graph test observed
+19 simultaneous soft contacts and a nonzero peak MuJoCo feedback-force norm.
+It also rejects nonfinite state, excessive ground penetration, and deformable
+bounds explosions.
+
+The robot-hand/table impact scene exercises the rigid M-V path separately with
+the complete 40-body Dexforce W1 URDF. The gravity-compensated, fixed-base
+robot starts crouched with its right arm extended over a fixed VBD-owned
+table. `RIGHT_J2` receives one initial 0.35 rad/s velocity and is then passive;
+finite-stiffness drives hold the remaining joints. Only bounded convex parts
+derived from the W1 URDF's right-hand collision meshes collide, with no
+scripted velocity reversal or hidden contact proxy. Device-side substep
+reductions preserve the acceptance metrics under CUDA Graph capture. With 24
+substeps, eight coupling rounds, and compliant rigid contact, the 60-frame
+acceptance measured 5.39 mm maximum signed contact penetration, an 800 N peak
+feedback-force norm, and a 0.39 m/s upward wrist rebound. The wrist never
+passed the tabletop, and the VBD table's fixed-joint pose drift remained below
+0.01 mm.

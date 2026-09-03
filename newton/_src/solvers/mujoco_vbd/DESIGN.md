@@ -1005,14 +1005,19 @@ def copy_owned_state_to_backends_kernel(
 def sync_and_rewind_proxy_bodies_kernel(
     dt: float,
     proxy_body_ids: wp.array[wp.int32],
-    source_body_q: wp.array[wp.transform],
+    source_body_q_end: wp.array[wp.transform],
     source_body_qd: wp.array[wp.spatial_vector],
-    source_body_f: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    body_inertia: wp.array[wp.mat33],
     body_gravity_acceleration: wp.array[wp.vec3],
     wrench_relaxed: wp.array[wp.spatial_vector],
+    proxy_inv_mass: wp.array[float],
     response_mode: int,
     destination_body_q: wp.array[wp.transform],
     destination_body_qd: wp.array[wp.spatial_vector],
+    destination_body_f: wp.array[wp.spatial_vector],
+    destination_body_q_prev: wp.array[wp.transform],
+    destination_body_q_prev_snapshot: wp.array[wp.transform],
     proxy_qd_before: wp.array[wp.spatial_vector],
 ): ...
 ```
@@ -1025,6 +1030,20 @@ def sync_and_rewind_proxy_bodies_kernel(
 - `EFFECTIVE_MASS` 模式按上一轮 feedback、外力和重力执行 lagged rewind，防止
   同一 wrench 在两个后端重复应用；
 - 所有计算保持同一 world 和 body id。
+
+#### 10.2.1 Substep time synchronization (implemented)
+
+The two-way backend treats MuJoCo and VBD as two nonlinear solves of the same
+physical interval, not as two consecutive integrators.  MuJoCo provides an end
+pose and end velocity.  Before VBD starts, `sync_and_rewind_proxy_bodies_kernel`
+reconstructs the begin-of-substep COM pose with the end velocity, installs it in
+`body_q`, `body_q_prev`, and `_coupling_body_q_prev_snapshot`, then lets VBD
+integrate exactly once back toward the MuJoCo end state.  The relaxed interface
+wrench and gravity already included by MuJoCo are cancelled from VBD's external
+force input; the rigid-body gyroscopic term is cancelled as well so angular
+velocity is not advanced twice. Actuator and articulated motion remain embedded in the copied end
+velocity. One-way Dirichlet synchronization uses a separate verbatim-copy
+kernel and is not rewound.
 
 ### 10.3 Wrench 写入 MuJoCo
 
@@ -1203,6 +1222,34 @@ cone、ellipsoid 和 infinite plane 使用解析 SDF。
 
 `rigid_soft_full_surface_shape_indices` 默认只包含 `M-V` 中真正可能碰软体的机器人
 collision shapes，不能把 visual mesh 自动加入。
+
+### 12.2 Velocity-aware M-V point contacts and AL history (implemented)
+
+For each VBD particle / MuJoCo-owned shape candidate, the ordinary narrow phase
+still emits actual contacts first. A second fixed-topology kernel appends a
+record only when the pair is currently separated and its relative normal
+velocity predicts crossing during the current `dt`:
+
+```text
+extension = min(configured_max, max(0, -dot(n, v_particle - v_shape_point) * dt))
+actual_threshold <= signed_distance < actual_threshold + extension
+```
+
+Actual and speculative predicates are disjoint, so the existing maximum
+capacity and one-record-per-candidate bound do not change. Static and VBD-owned
+shapes retain the legacy path. The first implementation deliberately targets
+point contacts used by volumetric soft bodies; edge/face full-surface contact is
+unchanged and requires separate validation before extension.
+
+The normal force for enabled M-V records is
+`max(0, k * penetration + lambda_n)`. Before each VBD primal sweep, the dual is
+updated with `lambda_n = max(0, lambda_n + rho_scale * material_ke * penetration)`.
+The Hessian remains `k*n*n^T`, and Coulomb friction uses the same augmented
+normal load. `Contacts.soft_contact_tids` is the stable candidate key: a fixed
+device array persists one scalar multiplier per candidate, restores matched
+active records with configurable decay, and clears disappeared candidates.
+The history array is included in the outer-iteration transaction snapshot, so
+only the selected final coupling round commits it.
 
 ## 13. Feedback harvest
 

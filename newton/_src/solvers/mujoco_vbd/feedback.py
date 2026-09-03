@@ -52,6 +52,7 @@ def harvest_unified_soft_proxy_wrenches_kernel(
     shape_margin: wp.array[float],
     body_to_proxy_slot: wp.array[wp.int32],
     contact_penalty_k: wp.array[float],
+    contact_lambda: wp.array[float],
     contact_material_kd: wp.array[float],
     contact_material_mu: wp.array[float],
     friction_epsilon: float,
@@ -95,6 +96,7 @@ def harvest_unified_soft_proxy_wrenches_kernel(
         shape_body,
         friction_epsilon,
         contact_penalty_k,
+        contact_lambda,
         contact_material_kd,
         contact_material_mu,
         soft_contact_indices,
@@ -192,7 +194,8 @@ class MuJoCoVBDFeedback:
         penalty = self.vbd_backend.body_particle_contact_penalty_k()
         material_kd = self.vbd_backend.body_particle_contact_material_kd()
         material_mu = self.vbd_backend.body_particle_contact_material_mu()
-        if penalty is None or material_kd is None or material_mu is None:
+        contact_lambda = self.vbd_backend.body_particle_contact_lambda()
+        if penalty is None or contact_lambda is None or material_kd is None or material_mu is None:
             raise RuntimeError(
                 "Two-way feedback requires VBD body-particle contact material/penalty state; it is "
                 "not available for the current contact set. This is a construction/topology error, "
@@ -231,6 +234,7 @@ class MuJoCoVBDFeedback:
                     self.model.shape_margin,
                     self.ownership.body_to_proxy_slot,
                     penalty,
+                    contact_lambda,
                     material_kd,
                     material_mu,
                     self.friction_epsilon,

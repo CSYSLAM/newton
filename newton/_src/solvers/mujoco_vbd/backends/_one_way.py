@@ -21,10 +21,10 @@ import numpy as np
 import warp as wp
 
 from ....sim import BodyFlags, Contacts, Control, JointType, ModelFlags, State, StateFlags
-from ..config import PROXY_RESPONSE_DIRICHLET, MuJoCoVBDResolvedOptions
+from ..config import MuJoCoVBDResolvedOptions
 from ..contact_routing import build_contact_routing
 from ..diagnostics import allocate_diagnostics
-from ..kernels import reconcile_owned_body_state_kernel, sync_and_rewind_proxy_bodies_kernel
+from ..kernels import reconcile_owned_body_state_kernel, sync_dirichlet_proxy_bodies_kernel
 from ..model_overlay import build_model_overlays
 from ..ownership import MuJoCoVBDOwnership
 from .base import MuJoCoVBDBackendBase
@@ -146,14 +146,7 @@ class OneWayBackend(MuJoCoVBDBackendBase):
 
         self._vbd_state_in = self.overlays.vbd.state()
         self._vbd_state_out = self.overlays.vbd.state()
-        proxy_inv_mass = np.asarray(self.overlays.vbd.body_inv_mass.numpy(), dtype=np.float32)[
-            list(ownership.proxy_bodies)
-        ]
-        self._proxy_inv_mass = wp.array(proxy_inv_mass, dtype=float, device=self.device)
-        self._proxy_inv_inertia = wp.zeros(max(len(proxy_inv_mass), 1), dtype=wp.mat33, device=self.device)
         self._proxy_qd_before = wp.zeros(max(int(model.body_count), 1), dtype=wp.spatial_vector, device=self.device)
-        self._zero_wrench = wp.zeros(max(int(model.body_count), 1), dtype=wp.spatial_vector, device=self.device)
-        self._zero_gravity = wp.zeros(max(int(model.body_count), 1), dtype=wp.vec3, device=self.device)
         self._diagnostics = allocate_diagnostics(model, backend=None, feedback_enabled=False)
 
     @property
@@ -206,18 +199,12 @@ class OneWayBackend(MuJoCoVBDBackendBase):
         if n_proxy == 0:
             return
         wp.launch(
-            sync_and_rewind_proxy_bodies_kernel,
+            sync_dirichlet_proxy_bodies_kernel,
             dim=n_proxy,
             inputs=[
-                dt,
                 self.ownership.proxy_body_ids,
                 source_state.body_q,
                 source_state.body_qd,
-                self._zero_gravity,  # gravity channel unused for verbatim copy
-                self._zero_wrench,
-                self._proxy_inv_mass,
-                self._proxy_inv_inertia,
-                PROXY_RESPONSE_DIRICHLET,
                 self._vbd_state_in.body_q,
                 self._vbd_state_in.body_qd,
                 self._proxy_qd_before,

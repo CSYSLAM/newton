@@ -817,6 +817,7 @@ def evaluate_rigid_contact_from_collision(
 @wp.func
 def _compute_body_particle_contact_force(
     penetration_depth: float,
+    normal_lambda: float,
     n: wp.vec3,
     relative_translation: wp.vec3,
     ke: float,
@@ -831,7 +832,7 @@ def _compute_body_particle_contact_force(
     resolved by the caller.  This function only computes the contact force and
     Hessian from those scalar/vector inputs.
     """
-    f_n = penetration_depth * ke
+    f_n = wp.max(0.0, penetration_depth * ke + normal_lambda)
     force = n * f_n
     hessian = ke * wp.outer(n, n)
 
@@ -854,6 +855,7 @@ def _eval_body_particle_contact(
     particle_pos: wp.vec3,
     particle_prev_pos: wp.vec3,
     contact_index: int,
+    normal_lambda: float,
     body_particle_contact_ke: float,
     body_particle_contact_kd: float,
     friction_mu: float,
@@ -891,7 +893,7 @@ def _eval_body_particle_contact(
 
     margin = shape_margin[shape_index] if shape_margin.shape[0] > 0 else 0.0
     penetration_depth = -(wp.dot(n, particle_pos - bx) - particle_radius[particle_index] - margin)
-    if penetration_depth > 0.0:
+    if penetration_depth * body_particle_contact_ke + normal_lambda > 0.0:
         dx = particle_pos - particle_prev_pos
 
         if body_q_prev:
@@ -913,6 +915,7 @@ def _eval_body_particle_contact(
 
         return _compute_body_particle_contact_force(
             penetration_depth,
+            normal_lambda,
             n,
             relative_translation,
             body_particle_contact_ke,
@@ -933,6 +936,7 @@ def _eval_soft_ef_contact(
     pos: wp.array[wp.vec3],
     pos_prev: wp.array[wp.vec3],
     particle_radius: wp.array[float],
+    normal_lambda: float,
     contact_ke: float,
     contact_kd: float,
     contact_mu: float,
@@ -994,7 +998,7 @@ def _eval_soft_ef_contact(
     hessian = wp.mat33(0.0)
 
     penetration_depth = -(wp.dot(n, x - bx) - radius - margin)
-    if penetration_depth > 0.0:
+    if penetration_depth * contact_ke + normal_lambda > 0.0:
         dx = x - x_prev
 
         if body_q_prev:
@@ -1018,6 +1022,7 @@ def _eval_soft_ef_contact(
         # cached by init_body_particle_contacts) -- the same source the particle path uses.
         force, hessian = _compute_body_particle_contact_force(
             penetration_depth,
+            normal_lambda,
             n,
             relative_translation,
             contact_ke,
@@ -1067,6 +1072,7 @@ def evaluate_body_particle_contact(
         particle_pos,
         particle_prev_pos,
         contact_index,
+        0.0,
         body_particle_contact_ke,
         body_particle_contact_kd,
         mixed_mu,
@@ -3177,6 +3183,7 @@ def _evaluate_body_particle_contact_reaction(
     shape_body: wp.array[int],
     friction_epsilon: float,
     body_particle_contact_penalty_k: wp.array[float],
+    body_particle_contact_lambda: wp.array[float],
     body_particle_contact_material_kd: wp.array[float],
     body_particle_contact_material_mu: wp.array[float],
     soft_contact_indices: wp.array[wp.vec3i],
@@ -3206,7 +3213,8 @@ def _evaluate_body_particle_contact_reaction(
         shape_idx = body_particle_contact_shape[contact_idx]
         margin = shape_margin[shape_idx] if shape_idx >= 0 and shape_margin.shape[0] > 0 else 0.0
         penetration_depth = -(wp.dot(n, particle_pos - cp_world) - radius - margin)
-        if penetration_depth <= 0.0:
+        normal_lambda = body_particle_contact_lambda[contact_idx]
+        if penetration_depth * body_particle_contact_penalty_k[contact_idx] + normal_lambda <= 0.0:
             return _zero_force_hessian()
 
         bx_prev = wp.transform_point(X_wb_prev, cp_local)
@@ -3216,6 +3224,7 @@ def _evaluate_body_particle_contact_reaction(
         relative_translation = particle_pos - particle_q_prev[particle_idx] - body_velocity * dt
         f_soft, h_soft = _compute_body_particle_contact_force(
             penetration_depth,
+            normal_lambda,
             n,
             relative_translation,
             body_particle_contact_penalty_k[contact_idx],
@@ -3232,6 +3241,7 @@ def _evaluate_body_particle_contact_reaction(
             particle_q,
             particle_q_prev,
             particle_radius,
+            body_particle_contact_lambda[contact_idx],
             body_particle_contact_penalty_k[contact_idx],
             body_particle_contact_material_kd[contact_idx],
             body_particle_contact_material_mu[contact_idx],
@@ -3280,6 +3290,7 @@ def accumulate_body_particle_contacts_per_body(
     # AVBD body-particle soft contact penalties and material properties
     friction_epsilon: float,
     body_particle_contact_penalty_k: wp.array[float],
+    body_particle_contact_lambda: wp.array[float],
     body_particle_contact_material_ke: wp.array[float],
     body_particle_contact_material_kd: wp.array[float],
     body_particle_contact_material_mu: wp.array[float],
@@ -3372,6 +3383,7 @@ def accumulate_body_particle_contacts_per_body(
             shape_body,
             friction_epsilon,
             body_particle_contact_penalty_k,
+            body_particle_contact_lambda,
             body_particle_contact_material_kd,
             body_particle_contact_material_mu,
             soft_contact_indices,
@@ -3411,6 +3423,7 @@ def accumulate_body_particle_contact_dense_partials(
     shape_body: wp.array[int],
     friction_epsilon: float,
     body_particle_contact_penalty_k: wp.array[float],
+    body_particle_contact_lambda: wp.array[float],
     body_particle_contact_material_kd: wp.array[float],
     body_particle_contact_material_mu: wp.array[float],
     body_particle_contact_count: wp.array[int],
@@ -3473,6 +3486,7 @@ def accumulate_body_particle_contact_dense_partials(
                 shape_body,
                 friction_epsilon,
                 body_particle_contact_penalty_k,
+                body_particle_contact_lambda,
                 body_particle_contact_material_kd,
                 body_particle_contact_material_mu,
                 soft_contact_indices,
@@ -4356,6 +4370,48 @@ def update_duals_body_body_contacts(
         contact_penalty_k[idx] = wp.min(contact_material_ke[idx], contact_penalty_k[idx] + beta * C_n)
 
 
+@wp.kernel(enable_backward=False)
+def restore_body_particle_contact_lambda(
+    soft_contact_tids: wp.array[int],
+    soft_contact_shape: wp.array[int],
+    shape_body: wp.array[int],
+    al_body_mask: wp.array[wp.uint8],
+    decay: float,
+    lambda_history: wp.array[float],
+    contact_lambda: wp.array[float],
+):
+    """Restore a normal multiplier through the stable candidate-TID map."""
+    tid = wp.tid()
+    contact = soft_contact_tids[tid]
+    if contact < 0 or contact >= contact_lambda.shape[0]:
+        return
+    shape = soft_contact_shape[contact]
+    body = shape_body[shape] if shape >= 0 else -1
+    if body >= 0 and al_body_mask[body] != wp.uint8(0):
+        contact_lambda[contact] = decay * lambda_history[tid]
+
+
+@wp.kernel(enable_backward=False)
+def persist_body_particle_contact_lambda(
+    soft_contact_tids: wp.array[int],
+    soft_contact_shape: wp.array[int],
+    shape_body: wp.array[int],
+    al_body_mask: wp.array[wp.uint8],
+    contact_lambda: wp.array[float],
+    lambda_history: wp.array[float],
+):
+    """Commit matched M-V multipliers and release disappeared contacts."""
+    tid = wp.tid()
+    contact = soft_contact_tids[tid]
+    value = 0.0
+    if contact >= 0 and contact < contact_lambda.shape[0]:
+        shape = soft_contact_shape[contact]
+        body = shape_body[shape] if shape >= 0 else -1
+        if body >= 0 and al_body_mask[body] != wp.uint8(0):
+            value = contact_lambda[contact]
+    lambda_history[tid] = value
+
+
 @wp.kernel
 def update_duals_body_particle_contacts(
     body_particle_contact_count: wp.array[int],
@@ -4373,7 +4429,11 @@ def update_duals_body_particle_contacts(
     body_q: wp.array[wp.transform],
     body_particle_contact_material_ke: wp.array[float],
     beta: float,
+    al_enabled: int,
+    al_rho_scale: float,
+    al_body_mask: wp.array[wp.uint8],
     body_particle_contact_penalty_k: wp.array[float],
+    body_particle_contact_lambda: wp.array[float],
 ):
     """
     Update AVBD penalty parameters for body-particle soft contacts (per-iteration).
@@ -4418,6 +4478,11 @@ def update_duals_body_particle_contacts(
                 radius = wp.max(radius, particle_radius[c2])
 
         penetration = -(wp.dot(n, contact_pos - cp_world) - radius - margin)
+        if al_enabled != 0 and body_idx >= 0 and al_body_mask[body_idx] != wp.uint8(0):
+            body_particle_contact_lambda[idx] = wp.max(
+                0.0,
+                body_particle_contact_lambda[idx] + al_rho_scale * stiffness * penetration,
+            )
         penetration = wp.max(0.0, penetration)
         k = body_particle_contact_penalty_k[idx]
         body_particle_contact_penalty_k[idx] = wp.min(k + beta * penetration, stiffness)

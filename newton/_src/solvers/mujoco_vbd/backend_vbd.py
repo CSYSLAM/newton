@@ -11,9 +11,10 @@ the sole committed history update.
 
 from __future__ import annotations
 
+import numpy as np
 import warp as wp
 
-from ...sim import Contacts, Control, Model, ModelFlags, State, StateFlags
+from ...sim import Contacts, Control, Model, ModelFlags, State
 from .config import PROXY_RESPONSE_EFFECTIVE_MASS, MuJoCoVBDCouplingOptions
 from .diagnostics import MuJoCoVBDDiagnostics, record_vbd_contact_overflow
 from .kernels import (
@@ -43,6 +44,7 @@ _PERSISTENT_VBD_ARRAYS = (
     "body_body_contact_C0",
     "body_body_contact_stick_flag",
     "body_particle_contact_penalty_k",
+    "body_particle_contact_lambda_history",
     "_prev_contact_lambda",
     "_prev_contact_stick_flag",
     "_prev_contact_penalty_k",
@@ -86,7 +88,14 @@ class VBDCouplingBackend:
         # Two-way proxies must respond to feedback, so proxy bodies are NOT one-way.
         kwargs["integrate_with_external_rigid_solver"] = False
         kwargs.pop("one_way_proxy_bodies", None)
+        kwargs["body_particle_contact_augmented_lagrangian"] = options.soft_contact_augmented_lagrangian
+        kwargs["body_particle_contact_al_rho_scale"] = options.soft_contact_al_rho_scale
+        kwargs["body_particle_contact_lambda_decay"] = options.soft_contact_lambda_decay
         self.solver = SolverVBD(model, **kwargs)
+        al_body_mask = np.zeros(model.body_count, dtype=np.uint8)
+        if options.soft_contact_augmented_lagrangian and ownership.proxy_bodies:
+            al_body_mask[list(ownership.proxy_bodies)] = 1
+        self.solver.body_particle_contact_al_body_mask = wp.array(al_body_mask, dtype=wp.uint8, device=self.device)
         self._state_in = state_in
         self._state_snapshot = state_snapshot
         self._proxy_qd_before_cache = proxy_qd_before
@@ -110,6 +119,9 @@ class VBDCouplingBackend:
         if soft_max > 0 and self.solver.body_particle_contact_penalty_k.shape[0] < soft_max:
             self.solver._init_body_particle_contact_state(soft_max)
             self.solver._ensure_particle_contact_adjacency_capacity(soft_max)
+        soft_tid_count = int(getattr(contacts.soft_contact_tids, "shape", (0,))[0])
+        if self.solver.body_particle_contact_augmented_lagrangian and soft_tid_count > 0:
+            self.solver._ensure_body_particle_contact_history_capacity(soft_tid_count)
         if self.solver.rigid_contact_history and rigid_max > 0:
             previous = self.solver._prev_contact_lambda
             if previous is None or previous.shape[0] < rigid_max:
@@ -171,9 +183,8 @@ class VBDCouplingBackend:
         mujoco_state_out: State,
         relaxed_wrench: wp.array,
         dt: float,
-        iteration: int,
     ) -> None:
-        """Copy solved MuJoCo pose to the VBD proxy and lagged-rewind velocity."""
+        """Prepare VBD proxies from MuJoCo solved states without double stepping."""
         n_proxy = int(self.ownership.proxy_body_ids.shape[0])
         if n_proxy == 0:
             return
@@ -189,24 +200,22 @@ class VBDCouplingBackend:
                 self.ownership.proxy_body_ids,
                 mujoco_state_out.body_q,
                 mujoco_state_out.body_qd,
+                self.model.body_com,
+                self.model.body_inertia,
                 self.model.body_gravity_acceleration
                 if hasattr(self.model, "body_gravity_acceleration")
                 else wp.zeros(max(int(self.model.body_count), 1), dtype=wp.vec3, device=self.device),
                 relaxed_wrench,
                 self._proxy_inv_mass,
-                self._proxy_inv_inertia,
                 PROXY_RESPONSE_EFFECTIVE_MASS,
                 vbd_state.body_q,
                 vbd_state.body_qd,
+                vbd_state.body_f,
+                self.solver.body_q_prev,
+                self.solver._coupling_body_q_prev_snapshot,
                 proxy_qd_before,
             ],
             device=self.device,
-        )
-        self.solver.coupling_notify_input_state_update(
-            vbd_state,
-            StateFlags.BODY_Q | StateFlags.BODY_QD,
-            iteration_restart=iteration > 0,
-            dt=dt,
         )
 
     # -- transaction lifecycle (DESIGN 9.2) --
@@ -272,6 +281,9 @@ class VBDCouplingBackend:
 
     def body_particle_contact_material_kd(self):
         return getattr(self.solver, "body_particle_contact_material_kd", None)
+
+    def body_particle_contact_lambda(self):
+        return getattr(self.solver, "body_particle_contact_lambda", None)
 
     def body_particle_contact_material_mu(self):
         return getattr(self.solver, "body_particle_contact_material_mu", None)

@@ -64,6 +64,46 @@ def _kinematic_particle_model(device="cpu", particle_x=0.0, particle_count=1):
     return builder.finalize(device=device), articulation
 
 
+def _dynamic_finger_soft_block_model(device="cpu"):
+    """Small crossing-contact scene used for deterministic A/B acceptance."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    _register(builder)
+    finger = builder.add_link(label="dynamic_finger")
+    builder.add_shape_box(
+        finger,
+        hx=0.09,
+        hy=0.09,
+        hz=0.1,
+        cfg=newton.ModelBuilder.ShapeConfig(density=100.0, ke=2.0e4, kd=50.0, mu=0.5),
+    )
+    joint = builder.add_joint_prismatic(
+        parent=-1,
+        child=finger,
+        axis=wp.vec3(0.0, 0.0, 1.0),
+        parent_xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()),
+    )
+    articulation = builder.articulation_count
+    builder.add_articulation([joint])
+    builder.add_soft_grid(
+        pos=wp.vec3(-0.1, -0.1, 1.145),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(),
+        dim_x=2,
+        dim_y=2,
+        dim_z=2,
+        cell_x=0.1,
+        cell_y=0.1,
+        cell_z=0.1,
+        density=100.0,
+        k_mu=2.0e3,
+        k_lambda=3.0e3,
+        k_damp=10.0,
+        particle_radius=0.01,
+    )
+    builder.color()
+    return builder.finalize(device=device), articulation
+
+
 def _multiworld_kinematic_particle_model(device="cpu", particle_x=0.08):
     world = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81))
     _register(world)
@@ -408,6 +448,72 @@ class TestMuJoCoVBDModes(unittest.TestCase):
         self.assertGreater(abs(float(state_out.joint_qd.numpy()[0])), 1.0e-4)
         self.assertEqual(solver.mujoco_solver._step, 1)
         _assert_states_close(self, state_in, state_before)
+
+    def test_two_way_speculative_contact_and_al_acceptance_scene(self):
+        """A crossing dynamic finger must not miss a deformable block for one whole step."""
+
+        def run_first_step(speculative_distance, augmented_lagrangian):
+            model, articulation = _dynamic_finger_soft_block_model()
+            solver = SolverMuJoCoVBD(
+                model,
+                mujoco_articulations=[articulation],
+                joint_mode="dynamic",
+                coupling_mode="two_way",
+                contact_mode="soft",
+                coupling_options={
+                    "iterations": 4,
+                    "relaxation": "fixed",
+                    "soft_contact_speculative_distance": speculative_distance,
+                    "soft_contact_augmented_lagrangian": augmented_lagrangian,
+                },
+                mujoco_options={"use_mujoco_cpu": True},
+                vbd_options={"iterations": 4},
+            )
+            state_in = model.state()
+            state_in.joint_qd.assign([3.0])
+            newton.eval_fk(model, state_in.joint_q, state_in.joint_qd, state_in)
+            initial_particles = state_in.particle_q.numpy().copy()
+            state_out = model.state()
+            solver.step(state_in, state_out, model.control(), None, 1.0 / 60.0)
+            wp.synchronize()
+            return model, solver, state_out, initial_particles
+
+        _, legacy, legacy_out, legacy_particles = run_first_step(0.0, False)
+        speculative_model, speculative, speculative_out, _ = run_first_step(0.08, False)
+        model, robust, robust_out, robust_particles = run_first_step(0.08, True)
+
+        self.assertEqual(int(legacy.contacts.soft_contact_count.numpy()[0]), 0)
+        self.assertGreaterEqual(int(robust.contacts.soft_contact_count.numpy()[0]), 1)
+        legacy_displacement = float(np.max(np.abs(legacy_out.particle_q.numpy() - legacy_particles)))
+        robust_displacement = float(np.max(np.abs(robust_out.particle_q.numpy() - robust_particles)))
+        self.assertLess(legacy_displacement, 1.0e-6)
+        self.assertGreater(robust_displacement, 1.0e-4)
+
+        def max_bottom_penetration(state):
+            finger_top = float(state.body_q.numpy()[0, 2]) + 0.1
+            bottom_surface = state.particle_q.numpy()[:9, 2] - 0.01
+            return max(0.0, finger_top - float(np.min(bottom_surface)))
+
+        self.assertLess(max_bottom_penetration(robust_out), max_bottom_penetration(legacy_out))
+        history = robust._backend.vbd_solver.body_particle_contact_lambda_history.numpy()
+        self.assertGreater(float(np.max(history)), 1.0e-3)
+
+        # A second physical substep consumes the persisted multiplier and sends
+        # a nonzero equal-and-opposite reaction back through the MuJoCo joint.
+        next_out = model.state()
+        robust.step(robust_out, next_out, model.control(), None, 1.0 / 60.0)
+        speculative_next = speculative_model.state()
+        speculative.step(
+            speculative_out,
+            speculative_next,
+            speculative_model.control(),
+            None,
+            1.0 / 60.0,
+        )
+        wp.synchronize()
+        self.assertGreater(abs(float(robust.diagnostics.feedback_wrench_raw.numpy()[0, 2])), 1.0)
+        self.assertLess(float(next_out.joint_qd.numpy()[0]), 2.5)
+        self.assertLess(float(next_out.joint_qd.numpy()[0]), float(speculative_next.joint_qd.numpy()[0]) - 0.5)
 
     def test_two_way_multiworld_cpu_falls_back_to_warp_and_advances_every_world(self):
         model, articulations = _multiworld_kinematic_particle_model()
