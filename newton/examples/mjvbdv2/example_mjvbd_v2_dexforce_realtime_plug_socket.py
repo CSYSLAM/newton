@@ -251,6 +251,9 @@ class Example:
         "RIGHT_HAND_THUMB2": 1.4,
     }
 
+    def _trace_startup(self, phase: str) -> None:
+        """Allow specialized frontends to report expensive startup phases."""
+
     def __init__(self, viewer, args):
         self.viewer = viewer
         self.args = args
@@ -274,6 +277,9 @@ class Example:
         self.robot_urdf = Path(args.robot_urdf).expanduser().resolve()
         self.plug_mesh_path = Path(args.plug_mesh).expanduser().resolve()
         self.socket_mesh_path = Path(args.socket_mesh).expanduser().resolve()
+        self.sdf_cache_dir = None
+        if args.sdf_cache_dir is not None:
+            self.sdf_cache_dir = Path(args.sdf_cache_dir).expanduser().resolve()
         assets = (
             ("Dexforce W1 URDF", self.robot_urdf),
             ("WAIC plug mesh", self.plug_mesh_path),
@@ -283,12 +289,16 @@ class Example:
             if not path.is_file():
                 raise FileNotFoundError(f"{label} not found: {path}")
 
+        self._trace_startup("scene construction started")
         self._build_scene()
+        self._trace_startup("scene construction complete")
         self.device = self.model.device
+        self._trace_startup("robot and IK initialization started")
         self._build_robot_coordinate_sets()
         self._build_hand_pose_control()
         self._build_ik()
         self._initialize_pose()
+        self._trace_startup("robot and IK initialization complete")
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -296,6 +306,7 @@ class Example:
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_1)
 
+        self._trace_startup("MJVBDV2 solver initialization started")
         self.solver = SolverMJVBDV2(
             self.model,
             mujoco_articulations=self.robot_articulations,
@@ -324,6 +335,7 @@ class Example:
                 "Rigid plug/socket insertion requires the vbd_kinematic_full backend, "
                 f"got {self.solver.features.backend}"
             )
+        self._trace_startup("MJVBDV2 solver initialization complete")
 
         self.frame_q_start = wp.zeros_like(self.model.joint_q)
         self.frame_q_end = wp.zeros_like(self.model.joint_q)
@@ -351,6 +363,7 @@ class Example:
         SolverMJVBDV2.register_custom_attributes(builder)
 
         robot_articulation_start = builder.articulation_count
+        self._trace_startup("W1 URDF import started")
         builder.add_urdf(
             str(self.robot_urdf),
             xform=wp.transform(ROBOT_BASE_POSITION, ROBOT_BASE_ROTATION),
@@ -360,6 +373,7 @@ class Example:
             parse_visuals_as_colliders=False,
             force_show_colliders=False,
         )
+        self._trace_startup("W1 URDF import complete")
         self.robot_articulations = tuple(range(robot_articulation_start, builder.articulation_count))
         if len(self.robot_articulations) != 1:
             raise RuntimeError(f"Expected one W1 articulation, got {self.robot_articulations}")
@@ -368,16 +382,22 @@ class Example:
         for body in range(self.robot_body_end):
             builder.body_flags[body] = int(newton.BodyFlags.KINEMATIC)
         self._set_builder_posture(builder)
+        self._trace_startup("W1 hand collider decomposition started")
         self._decompose_hand_collision_meshes(builder)
+        self._trace_startup("W1 hand collider decomposition complete")
         self.robot_shape_end = builder.shape_count
         self._configure_robot_collision_flags(builder)
 
         plug_mesh = newton.Mesh.create_from_file(str(self.plug_mesh_path), compute_inertia=True, is_solid=True)
+        cache_label = "disabled" if self.sdf_cache_dir is None else str(self.sdf_cache_dir)
+        self._trace_startup(f"plug SDF cache/load started ({cache_label})")
         plug_mesh.build_sdf(
             narrow_band_range=(-PLUG_SDF_BAND, PLUG_SDF_BAND),
             max_resolution=PLUG_SDF_RESOLUTION,
             margin=CONTACT_MARGIN + CONTACT_GAP,
+            cache_dir=self.sdf_cache_dir,
         )
+        self._trace_startup("plug SDF cache/load complete")
         plug_cfg = newton.ModelBuilder.ShapeConfig(
             density=PLUG_DENSITY,
             ke=CONTACT_KE,
@@ -452,7 +472,9 @@ class Example:
         builder.add_ground_plane(height=0.0, cfg=ground_cfg, color=GROUND_COLOR, label="plug_socket_ground")
 
         builder.color(balance_colors=True)
+        self._trace_startup("model finalization started")
         self.model = builder.finalize(requires_grad=False)
+        self._trace_startup("model finalization complete")
         self.root_q_start = self._robot_root_q_start()
 
     def _set_builder_posture(self, builder: newton.ModelBuilder) -> None:
@@ -978,6 +1000,12 @@ class Example:
         parser.add_argument("--robot-urdf", type=Path, default=DEFAULT_ROBOT_URDF)
         parser.add_argument("--plug-mesh", type=Path, default=DEFAULT_PLUG_MESH)
         parser.add_argument("--socket-mesh", type=Path, default=DEFAULT_SOCKET_MESH)
+        parser.add_argument(
+            "--sdf-cache-dir",
+            type=Path,
+            default=None,
+            help="Persist the cooked plug SDF here so later CUDA starts can reuse it.",
+        )
         parser.add_argument("--substeps", type=int, default=DEFAULT_SUBSTEPS)
         parser.add_argument("--vbd-iterations", type=int, default=DEFAULT_VBD_ITERATIONS)
         parser.add_argument(

@@ -1,0 +1,1 @@
+Added Quest WebXR bimanual teleoperation, responsive contact-aware finger closing, robot-eye first-person head tracking, live cloth rendering, manual trajectory recording, and guarded scene handoff for the WAIC-house T-shirt folding example.

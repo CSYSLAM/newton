@@ -1,0 +1,1 @@
+Add Quest WebXR teleoperation for the full-W1 plastic inflatable-bag scene, including live deformable-mesh rendering, complete right-hand control, physical trajectory recording, in-place reset, and guarded start/park scripts.

@@ -137,6 +137,89 @@ class TestRenderFPSCLI(unittest.TestCase):
         self.assertEqual(throttle_calls, [(11.0, 30.0)])
         self.assertTrue(viewer.closed)
 
+    def test_run_uses_opt_in_in_place_reset(self):
+        """A scene can preserve external sessions when the toolbar requests Reset."""
+
+        class DummyViewer:
+            def __init__(self):
+                self._running = [True, True, False]
+                self.closed = False
+
+            def is_running(self):
+                return self._running.pop(0)
+
+            def should_step(self):
+                return False
+
+            def close(self):
+                self.closed = True
+
+        class DummyExample:
+            reset_in_place = True
+
+            def __init__(self, viewer):
+                self.viewer = viewer
+                self.reset_count = 0
+                self.render_count = 0
+
+            def reset_physics(self, *, source):
+                self.reset_count += 1
+                self.reset_source = source
+
+            def render(self):
+                self.render_count += 1
+
+        class DummyBrowser:
+            switch_target = None
+
+            def __init__(self):
+                self._reset_requested = True
+
+            def reset(self, _example_class):
+                raise AssertionError("opt-in reset must not reconstruct the example")
+
+        viewer = DummyViewer()
+        example = DummyExample(viewer)
+        browser = DummyBrowser()
+        args = SimpleNamespace(render_fps=None, test=False)
+
+        with (
+            patch.object(examples_module, "_ExampleBrowser", return_value=browser),
+            patch.object(examples_module, "_throttle_render_fps", return_value=0.0),
+        ):
+            examples_module.run(example, args)
+
+        self.assertEqual(example.reset_count, 1)
+        self.assertEqual(example.reset_source, "viewer")
+        self.assertEqual(example.render_count, 1)
+        self.assertTrue(viewer.closed)
+
+    def test_run_honors_example_exit_request(self):
+        """An example can leave the loop so the viewer closes synchronously."""
+
+        class DummyViewer:
+            def __init__(self):
+                self.closed = False
+
+            def is_running(self):
+                return True
+
+            def should_step(self):
+                raise AssertionError("exit request must stop before stepping")
+
+            def close(self):
+                self.closed = True
+
+        viewer = DummyViewer()
+        example = SimpleNamespace(viewer=viewer, exit_requested=True)
+        args = SimpleNamespace(render_fps=None, test=False)
+        browser = SimpleNamespace(switch_target=None, _reset_requested=False)
+
+        with patch.object(examples_module, "_ExampleBrowser", return_value=browser):
+            examples_module.run(example, args)
+
+        self.assertTrue(viewer.closed)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
