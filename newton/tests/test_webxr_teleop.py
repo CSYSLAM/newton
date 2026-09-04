@@ -17,6 +17,9 @@ import warp as wp
 from newton.examples.mjvbdv2 import (
     example_cloth_mjvbd_v2_dexforce_webxr_bimanual_fold_tshirt_waic_house_final00 as webxr_tshirt_example,
 )
+from newton.examples.mjvbdv2 import (
+    example_mjvbd_v2_dexforce_webxr_nonwoven_bag_table_drop as webxr_nonwoven_bag_example,
+)
 from newton.examples.mjvbdv2 import example_mjvbd_v2_dexforce_webxr_plug_socket as webxr_example
 from newton.examples.mjvbdv2 import example_mjvbd_v2_dexforce_webxr_push_chair as webxr_chair_example
 from newton.examples.mjvbdv2 import example_mjvbd_v2_webxr_bimanual_nut_bolt as webxr_nut_bolt_example
@@ -218,6 +221,7 @@ class TestWebXRExampleConfiguration(unittest.TestCase):
             webxr_soft_rigid_bag_example,
             webxr_tshirt_example,
             webxr_nut_bolt_example,
+            webxr_nonwoven_bag_example,
         )
 
         for example in examples:
@@ -265,6 +269,7 @@ class TestWebXRExampleConfiguration(unittest.TestCase):
             webxr_chair_example,
             webxr_bag_example,
             webxr_soft_rigid_bag_example,
+            webxr_nonwoven_bag_example,
         )
 
         for example in examples:
@@ -352,6 +357,46 @@ class TestWebXRExampleConfiguration(unittest.TestCase):
         self.assertFalse(args.graph_capture)
         self.assertFalse(args.record_on_connect)
         self.assertIsNotNone(args.sdf_cache_dir)
+
+    def test_nonwoven_bag_parser_uses_dedicated_port_and_safe_defaults(self):
+        """Keep the new bimanual bag scene live-input safe and opt-in for recording."""
+        args = webxr_nonwoven_bag_example.Example.create_parser().parse_args([])
+
+        self.assertEqual(args.webxr_port, 8771)
+        self.assertFalse(args.graph_capture)
+        self.assertFalse(args.record_on_connect)
+        self.assertEqual(args.xr_max_translation, 0.80)
+        self.assertEqual(webxr_nonwoven_bag_example.MAX_FINGER_SPEED_DEG_S, 90.0)
+        self.assertEqual(webxr_nonwoven_bag_example.MAX_FINGER_CONTACT_SPEED_DEG_S, 30.0)
+
+    def test_nonwoven_bag_fingers_slow_on_soft_contact(self):
+        """Rate-limit opening and closing further when the corresponding hand touches cloth."""
+        current_q = wp.array([0.0, 0.2, 0.0, 0.8], dtype=wp.float32, device="cpu")
+        finger_indices = wp.array([1, 3], dtype=wp.int32, device="cpu")
+        desired_q = wp.array([1.0, 0.0], dtype=wp.float32, device="cpu")
+        contact_count = wp.array([1], dtype=wp.int32, device="cpu")
+        contact_shape = wp.array([1], dtype=wp.int32, device="cpu")
+        hand_shape_mask = wp.array([0, 1], dtype=wp.int32, device="cpu")
+        target_q = wp.clone(current_q)
+
+        wp.launch(
+            webxr_nonwoven_bag_example._limit_hand_target_step,
+            finger_indices.shape[0],
+            [
+                current_q,
+                finger_indices,
+                desired_q,
+                contact_count,
+                contact_shape,
+                hand_shape_mask,
+                0.1,
+                0.03,
+                target_q,
+            ],
+            device="cpu",
+        )
+
+        np.testing.assert_allclose(target_q.numpy()[[1, 3]], [0.23, 0.77], atol=1.0e-6)
 
     def test_nut_bolt_fingers_slow_on_rigid_contact(self):
         """Reduce both closing and opening steps when either rigid-contact shape is a hand."""
@@ -546,6 +591,47 @@ class TestWebXRExampleConfiguration(unittest.TestCase):
         ):
             peer_source = (repo_root / "scripts" / peer_script_name).read_text(encoding="utf-8")
             self.assertIn("newton-quest-webxr-nut-bolt.service:8770", peer_source)
+
+    def test_nonwoven_bag_one_click_scripts_use_safe_handoff_service(self):
+        """Wire nonwoven-bag start, stop, and reload wrappers into every peer scene."""
+        repo_root = Path(__file__).resolve().parents[2]
+        scripts = repo_root / "scripts"
+        start_script = scripts / "start_quest_webxr_nonwoven_bag_teleop.sh"
+        stop_script = scripts / "stop_quest_webxr_nonwoven_bag_teleop.sh"
+        reload_script = scripts / "reload_quest_webxr_nonwoven_bag_teleop.sh"
+
+        self.assertTrue(start_script.is_file())
+        self.assertTrue(stop_script.is_file())
+        self.assertTrue(reload_script.is_file())
+        start_source = start_script.read_text(encoding="utf-8")
+        stop_source = stop_script.read_text(encoding="utf-8")
+        reload_source = reload_script.read_text(encoding="utf-8")
+        self.assertIn('NEWTON_WEBXR_PORT="${NEWTON_WEBXR_PORT:-8771}"', start_source)
+        self.assertIn('NEWTON_WEBXR_UNIT="newton-quest-webxr-nonwoven-bag.service"', start_source)
+        self.assertIn("example_mjvbd_v2_nonwoven_bag_table_drop.py", start_source)
+        self.assertIn("_webxr_w1_head.py", start_source)
+        self.assertIn('exec "${script_dir}/start_quest_webxr_teleop.sh"', start_source)
+        self.assertIn('exec "${script_dir}/stop_quest_webxr_teleop.sh"', stop_source)
+        self.assertIn('exec "${script_dir}/reload_quest_webxr_teleop.sh"', reload_source)
+        for peer_script_name in (
+            "start_quest_webxr_teleop.sh",
+            "start_quest_webxr_chair_teleop.sh",
+            "start_quest_webxr_bag_teleop.sh",
+            "start_quest_webxr_soft_rigid_bag_teleop.sh",
+            "start_quest_webxr_tshirt_teleop.sh",
+            "start_quest_webxr_nut_bolt_teleop.sh",
+        ):
+            peer_source = (scripts / peer_script_name).read_text(encoding="utf-8")
+            self.assertIn("newton-quest-webxr-nonwoven-bag.service:8771", peer_source)
+        for peer in (
+            "newton-quest-webxr.service:8765",
+            "newton-quest-webxr-chair.service:8766",
+            "newton-quest-webxr-bag.service:8767",
+            "newton-quest-webxr-soft-rigid-bag.service:8768",
+            "newton-quest-webxr-tshirt.service:8769",
+            "newton-quest-webxr-nut-bolt.service:8770",
+        ):
+            self.assertIn(peer, start_source)
 
 
 class TestWebXRClientRendering(unittest.TestCase):
@@ -785,6 +871,7 @@ class TestStagedReloadScript(unittest.TestCase):
             ("chair", "start_quest_webxr_chair_teleop.sh"),
             ("bag", "start_quest_webxr_bag_teleop.sh"),
             ("soft_rigid_bag", "start_quest_webxr_soft_rigid_bag_teleop.sh"),
+            ("nonwoven_bag", "start_quest_webxr_nonwoven_bag_teleop.sh"),
         )
 
         for scene, start_name in scenes:
