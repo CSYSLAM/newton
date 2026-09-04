@@ -36,6 +36,13 @@ def _build_cloth(device, *, dim_x=16, dim_y=4, fix_left=True, requires_grad=Fals
 
 
 class TestMJVBDV2ParticleMultilevel(unittest.TestCase):
+    def test_invalid_automatic_mode_is_rejected(self):
+        model = _build_cloth("cpu")
+        for solver_type in (SolverVBDComplete, SolverVBDSoft):
+            with self.subTest(solver=solver_type.__module__):
+                with self.assertRaisesRegex(ValueError, "particle_enable_multilevel_correction"):
+                    solver_type(model, iterations=2, particle_enable_multilevel_correction="sometimes")
+
     def test_cpu_uses_original_vbd_path(self):
         model = _build_cloth("cpu")
         for solver_type in (SolverVBDComplete, SolverVBDSoft):
@@ -84,6 +91,44 @@ class TestMJVBDV2ParticleMultilevel(unittest.TestCase):
         fine_to_coarse = _build_clusters(model, 2)[0]
         self.assertTrue(np.all(fine_to_coarse[:4] == -1))
         self.assertTrue(np.all(fine_to_coarse[4:] >= 0))
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Particle multilevel correction requires CUDA")
+    def test_automatic_mode_uses_conservative_topology_and_scale_gate(self):
+        device = wp.get_device("cuda:0")
+        small_model = _build_cloth(device)
+        eligible_model = _build_cloth(device, dim_x=64, dim_y=15)
+
+        for solver_type in (SolverVBDComplete, SolverVBDSoft):
+            with self.subTest(solver=solver_type.__module__, scale="small"):
+                solver = solver_type(
+                    small_model,
+                    iterations=2,
+                    particle_enable_multilevel_correction="auto",
+                )
+                self.assertIsNone(solver.particle_multilevel)
+                self.assertEqual(solver.particle_multilevel_auto_rejection_reason, "too_few_active_particles")
+
+            with self.subTest(solver=solver_type.__module__, scale="eligible"):
+                solver = solver_type(
+                    eligible_model,
+                    iterations=2,
+                    particle_enable_multilevel_correction="auto",
+                )
+                self.assertIsNotNone(solver.particle_multilevel)
+                self.assertIsNone(solver.particle_multilevel_auto_rejection_reason)
+
+            with self.subTest(solver=solver_type.__module__, scale="self_contact"):
+                solver = solver_type(
+                    eligible_model,
+                    iterations=2,
+                    particle_enable_multilevel_correction="auto",
+                    particle_enable_self_contact=True,
+                )
+                self.assertIsNone(solver.particle_multilevel)
+                self.assertEqual(
+                    solver.particle_multilevel_auto_rejection_reason,
+                    "self_contact_requires_explicit_enable",
+                )
 
     @unittest.skipUnless(wp.is_cuda_available(), "Particle multilevel correction requires CUDA")
     def test_cuda_graph_executes_in_both_private_vbd_solvers(self):
@@ -156,6 +201,79 @@ class TestMJVBDV2ParticleMultilevel(unittest.TestCase):
 
         self.assertLess(coarse_error, plain_error)
         self.assertGreater(coarse_middle_motion, plain_middle_motion + 1.0e-5)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Particle multilevel correction requires CUDA")
+    def test_excessive_clamping_rejects_correction_transactionally(self):
+        device = wp.get_device("cuda:0")
+        dim_x = 32
+        dim_y = 4
+        model = _build_cloth(device, dim_x=dim_x, dim_y=dim_y)
+        forces = np.zeros_like(model.particle_q.numpy())
+        right_edge = np.arange(dim_y + 1) * (dim_x + 1) + dim_x
+        forces[right_edge, 0] = 1.0
+
+        def simulate(
+            solver_type,
+            *,
+            iterations=8,
+            multilevel,
+            max_clamp_fraction=1.0,
+            fallback_iterations=None,
+        ):
+            state_in = model.state()
+            state_out = model.state()
+            state_in.particle_f.assign(forces)
+            solver = solver_type(
+                model,
+                iterations=iterations,
+                particle_enable_multilevel_correction=multilevel,
+                particle_multilevel_max_radius_fraction=1.0e-6,
+                particle_multilevel_max_clamp_fraction=max_clamp_fraction,
+                particle_multilevel_fallback_iterations=fallback_iterations,
+            )
+            solver.step(state_in, state_out, model.control(), None, 1.0 / 60.0)
+            return state_out.particle_q.numpy().copy(), solver
+
+        for solver_type in (SolverVBDComplete, SolverVBDSoft):
+            with self.subTest(solver=solver_type.__module__):
+                plain_positions, _plain_solver = simulate(solver_type, multilevel=False)
+                rejected_positions, rejected_solver = simulate(
+                    solver_type,
+                    multilevel=True,
+                    max_clamp_fraction=0.0,
+                )
+
+                correction = rejected_solver.particle_multilevel
+                self.assertIsNotNone(correction)
+                self.assertGreater(float(correction.runtime_metrics.numpy()[2]), 0.0)
+                self.assertNotEqual(int(correction.runtime_status.numpy()[0]), 0)
+                np.testing.assert_array_equal(rejected_positions, plain_positions)
+
+                reference_positions, _reference_solver = simulate(solver_type, iterations=12, multilevel=False)
+                fallback_positions, _fallback_solver = simulate(
+                    solver_type,
+                    multilevel=True,
+                    max_clamp_fraction=0.0,
+                    fallback_iterations=12,
+                )
+                np.testing.assert_array_equal(fallback_positions, reference_positions)
+
+                graph_state_in = model.state()
+                graph_state_out = model.state()
+                graph_state_in.particle_f.assign(forces)
+                graph_solver = solver_type(
+                    model,
+                    iterations=8,
+                    particle_enable_multilevel_correction=True,
+                    particle_multilevel_max_radius_fraction=1.0e-6,
+                    particle_multilevel_max_clamp_fraction=0.0,
+                    particle_multilevel_fallback_iterations=12,
+                )
+                with wp.ScopedCapture(device=device) as capture:
+                    graph_solver.step(graph_state_in, graph_state_out, model.control(), None, 1.0 / 60.0)
+                wp.capture_launch(capture.graph)
+                wp.synchronize_device(device)
+                np.testing.assert_array_equal(graph_state_out.particle_q.numpy(), reference_positions)
 
 
 if __name__ == "__main__":

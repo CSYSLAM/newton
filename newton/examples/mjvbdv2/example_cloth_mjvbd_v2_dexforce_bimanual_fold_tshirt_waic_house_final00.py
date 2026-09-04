@@ -210,6 +210,9 @@ class Example:
             vbd_options={
                 "iterations": VBD_ITERATIONS,
                 "particle_enable_multilevel_correction": True,
+                "particle_multilevel_min_residual_reduction": 1.0e-4,
+                "particle_multilevel_max_clamp_fraction": 0.5,
+                "particle_multilevel_fallback_iterations": 20,
                 "particle_enable_self_contact": True,
                 "particle_self_contact_radius": SELF_RADIUS,
                 "particle_self_contact_margin": SELF_MARGIN,

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from collections import deque
+from typing import Literal
 
 import numpy as np
 import warp as wp
@@ -15,6 +16,42 @@ from ...geometry import ParticleFlags
 __all__ = ["ParticleMultilevelCorrection"]
 
 _COARSE_PCG_BLOCK_DIM = 256
+_AUTO_MIN_ACTIVE_PARTICLES = 1024
+_AUTO_MIN_CLUSTER_COUNT = 128
+_AUTO_MAX_CLUSTER_COUNT = 1500
+
+_RUNTIME_STATUS_NONFINITE_RHS = 1
+_RUNTIME_STATUS_NONFINITE_SOLUTION = 2
+_RUNTIME_STATUS_RESIDUAL_NOT_REDUCED = 4
+_RUNTIME_STATUS_EXCESSIVE_RADIUS_CLAMP = 8
+
+ParticleMultilevelMode = Literal["off", "on", "auto"]
+
+
+def _normalize_multilevel_mode(enabled: bool | Literal["auto"]) -> ParticleMultilevelMode:
+    """Normalize the backward-compatible multilevel option."""
+    if enabled is False:
+        return "off"
+    if enabled is True:
+        return "on"
+    if enabled == "auto":
+        return "auto"
+    raise ValueError(f"particle_enable_multilevel_correction must be False, True, or 'auto', got {enabled!r}")
+
+
+def _automatic_rejection_reason(model, correction: ParticleMultilevelCorrection) -> str | None:
+    """Return why the conservative automatic policy rejected a hierarchy."""
+    if model.tet_count > 0:
+        return "tetrahedra_present"
+    if model.world_count > 1:
+        return "multiple_worlds"
+    if correction.active_particle_count < _AUTO_MIN_ACTIVE_PARTICLES:
+        return "too_few_active_particles"
+    if correction.cluster_count < _AUTO_MIN_CLUSTER_COUNT:
+        return "too_few_clusters"
+    if correction.cluster_count > _AUTO_MAX_CLUSTER_COUNT:
+        return "too_many_clusters"
+    return None
 
 
 @wp.kernel(enable_backward=False)
@@ -87,18 +124,25 @@ def _solve_coarse_pcg_persistent(
     dt: float,
     coupling: float,
     iterations: int,
+    validate_residual: bool,
+    minimum_residual_reduction: float,
     solution: wp.array[wp.vec3],
     residual: wp.array[wp.vec3],
     preconditioned_residual: wp.array[wp.vec3],
     direction: wp.array[wp.vec3],
     product: wp.array[wp.vec3],
     diagonal: wp.array[float],
+    runtime_status: wp.array[wp.int32],
+    runtime_metrics: wp.array[float],
+    runtime_counters: wp.array[wp.int32],
 ):
     """Solve the coarse system in one block to avoid per-PCG-step launches."""
     lane = wp.tid()
     stride = wp.block_dim()
     inv_dt_sq = 1.0 / (dt * dt)
     rz_local = float(0.0)
+    initial_residual_norm_sq_local = float(0.0)
+    nonfinite_rhs_local = float(0.0)
     cluster = lane
     while cluster < coarse_count:
         begin = coarse_neighbor_offsets[cluster]
@@ -124,9 +168,16 @@ def _solve_coarse_pcg_persistent(
         direction[cluster] = z
         diagonal[cluster] = diagonal_value
         rz_local += wp.dot(r, z)
+        initial_residual_norm_sq_local += wp.dot(r, r)
+        if not (wp.isfinite(r[0]) and wp.isfinite(r[1]) and wp.isfinite(r[2])):
+            nonfinite_rhs_local += 1.0
         cluster += stride
 
     rz = wp.tile_sum(wp.tile(rz_local))[0]
+    initial_residual_norm_sq = wp.tile_sum(wp.tile(initial_residual_norm_sq_local))[0]
+    nonfinite_rhs_count = wp.tile_sum(wp.tile(nonfinite_rhs_local))[0]
+    if lane == 0:
+        runtime_metrics[4] = rz
     for _iteration in range(iterations):
         direction_product_local = float(0.0)
         cluster = lane
@@ -169,6 +220,8 @@ def _solve_coarse_pcg_persistent(
             cluster += stride
 
         new_rz = wp.tile_sum(wp.tile(new_rz_local))[0]
+        if lane == 0:
+            runtime_metrics[5 + _iteration] = new_rz
         beta = float(0.0)
         if rz > 1.0e-20:
             beta = new_rz / rz
@@ -186,28 +239,101 @@ def _solve_coarse_pcg_persistent(
         if direction_norm <= 1.0e-30:
             rz = 0.0
 
+    final_residual_norm_sq_local = float(0.0)
+    nonfinite_solution_local = float(0.0)
+    cluster = lane
+    while cluster < coarse_count:
+        final_residual = residual[cluster]
+        coarse_solution = solution[cluster]
+        final_residual_norm_sq_local += wp.dot(final_residual, final_residual)
+        if not (
+            wp.isfinite(final_residual[0])
+            and wp.isfinite(final_residual[1])
+            and wp.isfinite(final_residual[2])
+            and wp.isfinite(coarse_solution[0])
+            and wp.isfinite(coarse_solution[1])
+            and wp.isfinite(coarse_solution[2])
+        ):
+            nonfinite_solution_local += 1.0
+        cluster += stride
+
+    final_residual_norm_sq = wp.tile_sum(wp.tile(final_residual_norm_sq_local))[0]
+    nonfinite_solution_count = wp.tile_sum(wp.tile(nonfinite_solution_local))[0]
+    if lane == 0:
+        status = wp.int32(0)
+        if nonfinite_rhs_count > 0.0 or not wp.isfinite(initial_residual_norm_sq):
+            status = status | wp.int32(_RUNTIME_STATUS_NONFINITE_RHS)
+        if nonfinite_solution_count > 0.0 or not wp.isfinite(final_residual_norm_sq):
+            status = status | wp.int32(_RUNTIME_STATUS_NONFINITE_SOLUTION)
+        if validate_residual and initial_residual_norm_sq > 1.0e-30 and wp.isfinite(final_residual_norm_sq):
+            residual_reduction = 1.0 - final_residual_norm_sq / initial_residual_norm_sq
+            if residual_reduction < minimum_residual_reduction:
+                status = status | wp.int32(_RUNTIME_STATUS_RESIDUAL_NOT_REDUCED)
+        runtime_status[0] = status
+        runtime_metrics[0] = initial_residual_norm_sq
+        runtime_metrics[1] = final_residual_norm_sq
+        runtime_metrics[2] = 0.0
+        runtime_metrics[3] = 0.0
+        runtime_counters[0] = 0
+        runtime_counters[1] = 0
+
 
 @wp.kernel(enable_backward=False)
-def _prolong_coarse_corrections(
+def _prepare_prolonged_corrections(
     active_particles: wp.array[wp.int32],
     fine_to_coarse: wp.array[wp.int32],
     particle_radius: wp.array[float],
     coarse_correction: wp.array[wp.vec3],
     relaxation: float,
     max_radius_fraction: float,
-    particle_displacements: wp.array[wp.vec3],
+    runtime_counters: wp.array[wp.int32],
+    fine_correction: wp.array[wp.vec3],
 ):
     particle = active_particles[wp.tid()]
     cluster = fine_to_coarse[particle]
     correction = relaxation * coarse_correction[cluster]
+    if not (wp.isfinite(correction[0]) and wp.isfinite(correction[1]) and wp.isfinite(correction[2])):
+        wp.atomic_add(runtime_counters, 1, 1)
+        fine_correction[particle] = wp.vec3(0.0)
+        return
     correction_length = wp.length(correction)
     max_length = max_radius_fraction * particle_radius[particle]
     if correction_length > max_length:
+        wp.atomic_add(runtime_counters, 0, 1)
         if max_length > 0.0:
             correction *= max_length / correction_length
         else:
             correction = wp.vec3(0.0)
-    particle_displacements[particle] += correction
+    fine_correction[particle] = correction
+
+
+@wp.kernel(enable_backward=False)
+def _commit_prolonged_corrections(
+    active_particles: wp.array[wp.int32],
+    active_particle_count: int,
+    fine_correction: wp.array[wp.vec3],
+    max_clamp_fraction: float,
+    runtime_counters: wp.array[wp.int32],
+    runtime_status: wp.array[wp.int32],
+    runtime_metrics: wp.array[float],
+    particle_displacements: wp.array[wp.vec3],
+):
+    active_index = wp.tid()
+    status = runtime_status[0]
+    clamp_fraction = float(runtime_counters[0]) / float(active_particle_count)
+    if runtime_counters[1] > 0:
+        status = status | wp.int32(_RUNTIME_STATUS_NONFINITE_SOLUTION)
+    if clamp_fraction > max_clamp_fraction:
+        status = status | wp.int32(_RUNTIME_STATUS_EXCESSIVE_RADIUS_CLAMP)
+
+    if active_index == 0:
+        runtime_status[0] = status
+        runtime_metrics[2] = clamp_fraction
+        runtime_metrics[3] = float(status == 0)
+
+    if status == 0:
+        particle = active_particles[active_index]
+        particle_displacements[particle] += fine_correction[particle]
 
 
 def _particle_topology_edges(model) -> np.ndarray:
@@ -252,6 +378,7 @@ def _build_clusters(
     masses = np.asarray(model.particle_mass.numpy(), dtype=np.float32)
     flags = np.asarray(model.particle_flags.numpy(), dtype=np.int32)
     movable = (masses > 0.0) & ((flags & int(ParticleFlags.ACTIVE)) != 0)
+    movable &= np.fromiter((bool(particle_neighbors) for particle_neighbors in neighbors), dtype=bool)
     # Piecewise-constant cluster translations improve long-wave propagation
     # for cloth and shells, but cannot represent the affine modes required by
     # tetrahedral solids. Leave tet vertices on the original VBD path.
@@ -364,6 +491,8 @@ class ParticleMultilevelCorrection:
         coupling: float,
         relaxation: float,
         max_radius_fraction: float,
+        minimum_residual_reduction: float | None,
+        max_clamp_fraction: float,
     ):
         if cluster_size < 2:
             raise ValueError(f"particle multilevel cluster_size must be at least 2, got {cluster_size}")
@@ -375,6 +504,12 @@ class ParticleMultilevelCorrection:
             raise ValueError(f"particle multilevel relaxation must be in (0, 1], got {relaxation}")
         if max_radius_fraction <= 0.0:
             raise ValueError(f"particle multilevel max_radius_fraction must be positive, got {max_radius_fraction}")
+        if minimum_residual_reduction is not None and not 0.0 <= minimum_residual_reduction < 1.0:
+            raise ValueError(
+                f"particle multilevel minimum_residual_reduction must be in [0, 1), got {minimum_residual_reduction}"
+            )
+        if not 0.0 <= max_clamp_fraction <= 1.0:
+            raise ValueError(f"particle multilevel max_clamp_fraction must be in [0, 1], got {max_clamp_fraction}")
 
         (
             fine_to_coarse,
@@ -392,6 +527,9 @@ class ParticleMultilevelCorrection:
         self.coupling = coupling
         self.relaxation = relaxation
         self.max_radius_fraction = max_radius_fraction
+        self.validate_residual = minimum_residual_reduction is not None
+        self.minimum_residual_reduction = 0.0 if minimum_residual_reduction is None else minimum_residual_reduction
+        self.max_clamp_fraction = max_clamp_fraction
         self.fine_to_coarse = wp.array(fine_to_coarse, dtype=wp.int32, device=model.device)
         self.active_particles = wp.array(cluster_particles, dtype=wp.int32, device=model.device)
         self.cluster_particle_offsets = wp.array(cluster_offsets, dtype=wp.int32, device=model.device)
@@ -419,6 +557,13 @@ class ParticleMultilevelCorrection:
         self.coarse_direction = wp.zeros(self.cluster_count, dtype=wp.vec3, device=model.device)
         self.coarse_product = wp.zeros(self.cluster_count, dtype=wp.vec3, device=model.device)
         self.coarse_diagonal = wp.zeros(self.cluster_count, dtype=float, device=model.device)
+        self.fine_correction = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        self.runtime_status = wp.zeros(1, dtype=wp.int32, device=model.device)
+        # Initial/final Euclidean residual squared, radius-clamp fraction,
+        # acceptance, then the initial and per-iteration preconditioned residuals.
+        self.runtime_metrics = wp.zeros(5 + coarse_iterations, dtype=float, device=model.device)
+        # Radius-clamp count and non-finite fine-correction count.
+        self.runtime_counters = wp.zeros(2, dtype=wp.int32, device=model.device)
 
     @property
     def enabled(self) -> bool:
@@ -467,6 +612,8 @@ class ParticleMultilevelCorrection:
                 dt,
                 self.coupling,
                 self.coarse_iterations,
+                self.validate_residual,
+                self.minimum_residual_reduction,
             ],
             outputs=[
                 self.coarse_solution,
@@ -475,11 +622,14 @@ class ParticleMultilevelCorrection:
                 self.coarse_direction,
                 self.coarse_product,
                 self.coarse_diagonal,
+                self.runtime_status,
+                self.runtime_metrics,
+                self.runtime_counters,
             ],
             device=model.device,
         )
         wp.launch(
-            _prolong_coarse_corrections,
+            _prepare_prolonged_corrections,
             dim=self.active_particle_count,
             inputs=[
                 self.active_particles,
@@ -488,6 +638,22 @@ class ParticleMultilevelCorrection:
                 self.coarse_solution,
                 self.relaxation,
                 self.max_radius_fraction,
+                self.runtime_counters,
+            ],
+            outputs=[self.fine_correction],
+            device=model.device,
+        )
+        wp.launch(
+            _commit_prolonged_corrections,
+            dim=self.active_particle_count,
+            inputs=[
+                self.active_particles,
+                self.active_particle_count,
+                self.fine_correction,
+                self.max_clamp_fraction,
+                self.runtime_counters,
+                self.runtime_status,
+                self.runtime_metrics,
             ],
             outputs=[particle_displacements],
             device=model.device,

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import warnings
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import warp as wp
@@ -28,7 +28,11 @@ from ...solver import SolverBase
 from ...xpbd import kernels as xpbd_kernels
 from ...xpbd.kernels import apply_joint_forces
 from ..collision_pipeline import _count_world_compatible_particle_shape_pairs
-from ..particle_multilevel import ParticleMultilevelCorrection
+from ..particle_multilevel import (
+    ParticleMultilevelCorrection,
+    _automatic_rejection_reason,
+    _normalize_multilevel_mode,
+)
 from . import particle_vbd_kernels, rigid_vbd_kernels, vbd_coupling_kernels
 from .particle_vbd_kernels import (
     NUM_THREADS_PER_COLLISION_PRIMITIVE,
@@ -244,16 +248,21 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_collision_detection_interval: int = 0,
         particle_edge_parallel_epsilon: float = 1e-5,
         particle_enable_tile_solve: bool = True,
-        particle_enable_multilevel_correction: bool = False,
+        particle_enable_multilevel_correction: bool | Literal["auto"] = False,
         particle_multilevel_cluster_size: int = 8,
         particle_multilevel_coarse_iterations: int = 8,
         particle_multilevel_coupling: float = 0.5,
         particle_multilevel_relaxation: float = 0.1,
         particle_multilevel_max_radius_fraction: float = 0.05,
+        particle_multilevel_min_residual_reduction: float | None = None,
+        particle_multilevel_max_clamp_fraction: float | None = None,
+        particle_multilevel_fallback_iterations: int | None = None,
         particle_topological_contact_filter_threshold: int = 2,
         particle_rest_shape_contact_exclusion_radius: float = 0.0,
         particle_external_vertex_contact_filtering_map: dict | None = None,
         particle_external_edge_contact_filtering_map: dict | None = None,
+        # Pneumatic parameters
+        pneumatic_enable_incremental_volume: bool = False,
         # Rigid body parameters - AVBD hyperparameters
         rigid_avbd_alpha: float = 0.95,  # C0 stabilization strength (C_stab = C - alpha * C0)
         rigid_avbd_joint_alpha: float | None = None,  # Joint alpha override; None uses rigid_avbd_alpha
@@ -315,14 +324,23 @@ class SolverVBD(SolverBase, CouplingInterface):
             particle_edge_parallel_epsilon: Threshold to detect near-parallel edges in edge-edge collision handling.
             particle_enable_tile_solve: Whether to accelerate the particle solver using tile API.
             particle_enable_multilevel_correction: Enable one contact-aware two-level particle correction after the
-                final ordinary VBD iteration. The correction is available only for non-differentiable,
-                non-deterministic CUDA models. Tetrahedral vertices remain on the ordinary VBD path because the
-                current coarse basis contains translational surface modes only.
+                final ordinary VBD iteration. Pass ``"auto"`` to apply a conservative surface-topology and
+                hierarchy-size policy. The correction is available only for non-differentiable, non-deterministic
+                CUDA models. Automatic mode leaves self-contact and pneumatic scenes unchanged until they are
+                validated explicitly. Tetrahedral vertices remain on the ordinary VBD path because the current coarse
+                basis contains translational surface modes only.
             particle_multilevel_cluster_size: Target number of topologically adjacent particles per coarse cluster.
             particle_multilevel_coarse_iterations: Number of fixed PCG iterations on the coarse graph.
             particle_multilevel_coupling: Neighbor coupling used by the coarse graph operator.
             particle_multilevel_relaxation: Fraction of the prolonged coarse correction applied to fine particles.
             particle_multilevel_max_radius_fraction: Maximum correction length as a fraction of particle radius.
+            particle_multilevel_min_residual_reduction: Minimum required coarse-PCG residual reduction. ``None``
+                selects ``1e-4`` in automatic mode and disables this guard when explicitly enabled.
+            particle_multilevel_max_clamp_fraction: Maximum fraction of fine corrections allowed to hit the radius
+                clamp. ``None`` selects ``0.5`` in automatic mode and ``1.0`` when explicitly enabled.
+            particle_multilevel_fallback_iterations: Total ordinary VBD iteration count to execute when a candidate
+                correction is rejected. ``None`` disables the conditional fallback. CUDA Graphs keep both branches
+                captured while selecting the fallback entirely on the device.
             particle_topological_contact_filter_threshold: Maximum topological distance (measured in rings) under which candidate
                 self-contacts are discarded. Set to a higher value to tolerate contacts between more closely connected mesh
                 elements. Only used when `particle_enable_self_contact` is `True`. Note that setting this to a value larger than 3 will
@@ -336,6 +354,12 @@ class SolverVBD(SolverBase, CouplingInterface):
             particle_external_edge_contact_filtering_map: Optional dictionary used to exclude additional edge-edge pairs during contact
                 generation. Keys must be edge primitive ids (integers), and each value must be a `list` or `set`
                 containing the edges to be filtered out. Only used when `particle_enable_self_contact` is `True`.
+
+            Pneumatic parameters:
+
+            pneumatic_enable_incremental_volume: Cache per-face cavity-volume contributions and update only the unique
+                faces incident to the particle color that just moved. The optimized path is currently available only
+                for non-differentiable, non-deterministic CUDA models and otherwise uses full volume recomputation.
 
             Rigid body parameters:
 
@@ -490,6 +514,19 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         # Common parameters
         self.iterations = iterations
+        if particle_multilevel_fallback_iterations is not None:
+            if not isinstance(particle_multilevel_fallback_iterations, int) or isinstance(
+                particle_multilevel_fallback_iterations, bool
+            ):
+                raise TypeError("particle_multilevel_fallback_iterations must be an integer or None")
+            if particle_multilevel_fallback_iterations < iterations:
+                raise ValueError(
+                    "particle_multilevel_fallback_iterations must be at least the ordinary iteration count, "
+                    f"got {particle_multilevel_fallback_iterations} < {iterations}"
+                )
+        self.particle_multilevel_fallback_iterations = (
+            iterations if particle_multilevel_fallback_iterations is None else particle_multilevel_fallback_iterations
+        )
         self.friction_epsilon = friction_epsilon
         self._soft_contact_materials = wp.empty(0, dtype=wp.vec3, device=self.device)
         self._soft_contact_material_index = wp.empty(0, dtype=wp.int32, device=self.device)
@@ -525,6 +562,8 @@ class SolverVBD(SolverBase, CouplingInterface):
             particle_multilevel_coupling,
             particle_multilevel_relaxation,
             particle_multilevel_max_radius_fraction,
+            particle_multilevel_min_residual_reduction,
+            particle_multilevel_max_clamp_fraction,
             particle_topological_contact_filter_threshold,
             particle_rest_shape_contact_exclusion_radius,
             particle_external_vertex_contact_filtering_map,
@@ -536,6 +575,8 @@ class SolverVBD(SolverBase, CouplingInterface):
         self._pneumatic_enabled = False
         self._pneumatic_cavity_count = 0
         self._pneumatic_face_count = 0
+        self._pneumatic_incremental_volume_enabled = False
+        self._pneumatic_single_cavity_force_fusion_enabled = False
         pneumatic_cavity_count, pneumatic_face_count = _get_pneumatic_counts(model)
         if pneumatic_cavity_count > 0:
             self._init_pneumatic_system(
@@ -543,6 +584,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 pneumatic_cavity_count,
                 pneumatic_face_count,
                 effective_deterministic,
+                pneumatic_enable_incremental_volume,
             )
 
         # Initialize rigid body system and rigid-particle (body-particle) interaction state
@@ -589,20 +631,29 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_collision_detection_interval: int,
         particle_edge_parallel_epsilon: float,
         particle_enable_tile_solve: bool,
-        particle_enable_multilevel_correction: bool,
+        particle_enable_multilevel_correction: bool | Literal["auto"],
         particle_multilevel_cluster_size: int,
         particle_multilevel_coarse_iterations: int,
         particle_multilevel_coupling: float,
         particle_multilevel_relaxation: float,
         particle_multilevel_max_radius_fraction: float,
+        particle_multilevel_min_residual_reduction: float | None,
+        particle_multilevel_max_clamp_fraction: float | None,
         particle_topological_contact_filter_threshold: int,
         particle_rest_shape_contact_exclusion_radius: float,
         particle_external_vertex_contact_filtering_map: dict | None,
         particle_external_edge_contact_filtering_map: dict | None,
     ):
         """Initialize particle-specific data structures and settings."""
+        multilevel_mode = _normalize_multilevel_mode(particle_enable_multilevel_correction)
+        self.particle_multilevel_mode = multilevel_mode
+        self.particle_multilevel = None
+        self.particle_multilevel_auto_rejection_reason = None
+
         # Early exit if no particles
         if model.particle_count == 0:
+            if multilevel_mode == "auto":
+                self.particle_multilevel_auto_rejection_reason = "no_particles"
             return
 
         self.particle_collision_detection_interval = particle_collision_detection_interval
@@ -650,24 +701,43 @@ class SolverVBD(SolverBase, CouplingInterface):
             and all(group.size >= TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE for group in elasticity_groups)
         )
         multilevel_supported = (
-            particle_enable_multilevel_correction
+            multilevel_mode != "off"
             and model.device.is_cuda
             and not model.requires_grad
             and self._effective_deterministic == wp.DeterministicMode.NOT_GUARANTEED
-            and model.particle_count > 0
         )
-        self.particle_multilevel = (
-            ParticleMultilevelCorrection(
+        if multilevel_supported:
+            minimum_residual_reduction = particle_multilevel_min_residual_reduction
+            if minimum_residual_reduction is None:
+                minimum_residual_reduction = 1.0e-4 if multilevel_mode == "auto" else None
+            max_clamp_fraction = particle_multilevel_max_clamp_fraction
+            if max_clamp_fraction is None:
+                max_clamp_fraction = 0.5 if multilevel_mode == "auto" else 1.0
+            correction = ParticleMultilevelCorrection(
                 model,
                 cluster_size=particle_multilevel_cluster_size,
                 coarse_iterations=particle_multilevel_coarse_iterations,
                 coupling=particle_multilevel_coupling,
                 relaxation=particle_multilevel_relaxation,
                 max_radius_fraction=particle_multilevel_max_radius_fraction,
+                minimum_residual_reduction=minimum_residual_reduction,
+                max_clamp_fraction=max_clamp_fraction,
             )
-            if multilevel_supported
-            else None
-        )
+            if multilevel_mode == "auto":
+                self.particle_multilevel_auto_rejection_reason = _automatic_rejection_reason(model, correction)
+                if self.particle_multilevel_auto_rejection_reason is None and particle_enable_self_contact:
+                    self.particle_multilevel_auto_rejection_reason = "self_contact_requires_explicit_enable"
+                if self.particle_multilevel_auto_rejection_reason is None and _get_pneumatic_counts(model)[0] > 0:
+                    self.particle_multilevel_auto_rejection_reason = "pneumatics_require_explicit_enable"
+            if self.particle_multilevel_auto_rejection_reason is None:
+                self.particle_multilevel = correction
+        elif multilevel_mode == "auto":
+            if not model.device.is_cuda:
+                self.particle_multilevel_auto_rejection_reason = "device_not_cuda"
+            elif model.requires_grad:
+                self.particle_multilevel_auto_rejection_reason = "requires_grad"
+            else:
+                self.particle_multilevel_auto_rejection_reason = "deterministic_mode"
         if particle_enable_self_contact:
             if particle_self_contact_margin < particle_self_contact_radius:
                 raise ValueError(
@@ -766,6 +836,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         cavity_count: int,
         face_count: int,
         deterministic: wp.DeterministicMode,
+        enable_incremental_volume: bool,
     ) -> None:
         """Initialize optional closed-cavity pressure state."""
         from . import pneumatic_kernels  # noqa: PLC0415
@@ -831,6 +902,62 @@ class SolverVBD(SolverBase, CouplingInterface):
         self._pneumatic_particle_face_offsets = wp.array(offsets, dtype=wp.int32, device=self.device)
         self._pneumatic_particle_faces = wp.array(particle_faces[order], dtype=wp.int32, device=self.device)
 
+        self._pneumatic_incremental_volume_enabled = (
+            enable_incremental_volume
+            and model.device.is_cuda
+            and not model.requires_grad
+            and deterministic == wp.DeterministicMode.NOT_GUARANTEED
+        )
+        if self._pneumatic_incremental_volume_enabled:
+            particle_colors = np.asarray(model.particle_colors.numpy(), dtype=np.int32)
+            cavity_faces: list[list[int]] = [[] for _ in range(cavity_count)]
+            color_cavity_faces: list[list[int]] = [[] for _ in range(len(model.particle_color_groups) * cavity_count)]
+            for face, triangle in enumerate(face_triangles):
+                cavity_faces[int(face_cavities[face])].append(face)
+                vertices = triangle_indices[triangle]
+                for color in np.unique(particle_colors[vertices]):
+                    if 0 <= color < len(model.particle_color_groups):
+                        row = int(color) * cavity_count + int(face_cavities[face])
+                        color_cavity_faces[row].append(face)
+
+            cavity_face_offsets = np.zeros(cavity_count + 1, dtype=np.int32)
+            cavity_face_offsets[1:] = np.cumsum([len(faces) for faces in cavity_faces], dtype=np.int32)
+            flat_cavity_faces = np.concatenate([np.asarray(faces, dtype=np.int32) for faces in cavity_faces])
+            color_cavity_face_offsets = np.zeros(len(color_cavity_faces) + 1, dtype=np.int32)
+            if color_cavity_faces:
+                color_cavity_face_offsets[1:] = np.cumsum(
+                    [len(faces) for faces in color_cavity_faces],
+                    dtype=np.int32,
+                )
+            flat_color_cavity_faces = (
+                np.concatenate([np.asarray(faces, dtype=np.int32) for faces in color_cavity_faces])
+                if any(color_cavity_faces)
+                else np.empty(0, dtype=np.int32)
+            )
+            self._pneumatic_cavity_face_offsets = wp.array(
+                cavity_face_offsets,
+                dtype=wp.int32,
+                device=self.device,
+            )
+            self._pneumatic_cavity_faces = wp.array(flat_cavity_faces, dtype=wp.int32, device=self.device)
+            self._pneumatic_color_cavity_face_offsets = wp.array(
+                color_cavity_face_offsets,
+                dtype=wp.int32,
+                device=self.device,
+            )
+            self._pneumatic_color_cavity_faces = wp.array(
+                flat_color_cavity_faces,
+                dtype=wp.int32,
+                device=self.device,
+            )
+            self._pneumatic_face_volume_contribution = wp.zeros(face_count, dtype=float, device=self.device)
+            self._pneumatic_cavity_anchor_positions = wp.zeros(cavity_count, dtype=wp.vec3, device=self.device)
+            largest_color = max((group.size for group in model.particle_color_groups), default=0)
+            self._pneumatic_single_cavity_force_fusion_enabled = (
+                cavity_count == 1
+                and largest_color <= self._pneumatic_kernels._PNEUMATIC_SINGLE_CAVITY_FUSED_MAX_PARTICLES
+            )
+
     def _evaluate_pneumatic_cavities(self, particle_q: wp.array[wp.vec3], control: Control, dt: float) -> None:
         """Evaluate cavity volume and pressure at the current VBD iterate."""
         pneumatic = self.model.pneumatic
@@ -838,21 +965,69 @@ class SolverVBD(SolverBase, CouplingInterface):
         if control_pneumatic is None:
             raise ValueError("Control is missing pneumatic inputs; create it with model.control().")
 
-        self._pneumatic_volume.zero_()
-        wp.launch(
-            kernel=self._pneumatic_kernels.accumulate_cavity_volume,
-            dim=self._pneumatic_face_count,
-            inputs=[
-                particle_q,
-                self.model.tri_indices,
-                pneumatic.face_cavity,
-                pneumatic.face_triangle,
-                pneumatic.face_sign,
-                pneumatic.anchor_particle,
-                self._pneumatic_volume,
-            ],
-            device=self.device,
-        )
+        if self._pneumatic_incremental_volume_enabled:
+            wp.launch(
+                kernel=self._pneumatic_kernels.initialize_cavity_volume_and_pressure,
+                dim=self._pneumatic_cavity_count * self._pneumatic_kernels._PNEUMATIC_CAVITY_INITIALIZE_BLOCK_DIM,
+                block_dim=self._pneumatic_kernels._PNEUMATIC_CAVITY_INITIALIZE_BLOCK_DIM,
+                inputs=[
+                    self._pneumatic_cavity_count,
+                    particle_q,
+                    self.model.tri_indices,
+                    pneumatic.face_triangle,
+                    pneumatic.face_sign,
+                    pneumatic.anchor_particle,
+                    self._pneumatic_cavity_face_offsets,
+                    self._pneumatic_cavity_faces,
+                    dt,
+                    pneumatic.mode,
+                    pneumatic.rest_volume,
+                    pneumatic.reference_absolute_pressure,
+                    pneumatic.ambient_pressure,
+                    pneumatic.heat_capacity_ratio,
+                    pneumatic.target_volume,
+                    pneumatic.volume_stiffness,
+                    pneumatic.bulk_damping,
+                    pneumatic.min_volume,
+                    pneumatic.max_absolute_pressure,
+                    self._pneumatic_previous_volume,
+                    control_pneumatic.pressure_scale,
+                    control_pneumatic.prescribed_gauge_pressure,
+                    control_pneumatic.target_volume_scale,
+                ],
+                outputs=[
+                    self._pneumatic_cavity_anchor_positions,
+                    self._pneumatic_face_volume_contribution,
+                    self._pneumatic_volume,
+                    self._pneumatic_absolute_pressure,
+                    self._pneumatic_gauge_pressure,
+                    self._pneumatic_curvature,
+                    self._pneumatic_volume_rate,
+                    self._pneumatic_clamp_flags,
+                ],
+                device=self.device,
+            )
+        else:
+            self._pneumatic_volume.zero_()
+            wp.launch(
+                kernel=self._pneumatic_kernels.accumulate_cavity_volume,
+                dim=self._pneumatic_face_count,
+                inputs=[
+                    particle_q,
+                    self.model.tri_indices,
+                    pneumatic.face_cavity,
+                    pneumatic.face_triangle,
+                    pneumatic.face_sign,
+                    pneumatic.anchor_particle,
+                    self._pneumatic_volume,
+                ],
+                device=self.device,
+            )
+            self._evaluate_pneumatic_pressure(control_pneumatic, dt)
+
+    def _evaluate_pneumatic_pressure(self, control_pneumatic, dt: float) -> None:
+        """Update pressure observables from the current cavity volumes."""
+        pneumatic = self.model.pneumatic
         wp.launch(
             kernel=self._pneumatic_kernels.evaluate_pressure,
             dim=self._pneumatic_cavity_count,
@@ -878,6 +1053,121 @@ class SolverVBD(SolverBase, CouplingInterface):
                 self._pneumatic_curvature,
                 self._pneumatic_volume_rate,
                 self._pneumatic_clamp_flags,
+            ],
+            device=self.device,
+        )
+
+    def _update_pneumatic_cavities_after_color(
+        self,
+        particle_q: wp.array[wp.vec3],
+        control: Control,
+        dt: float,
+        color: int,
+    ) -> None:
+        """Increment cached cavity volumes after one Gauss--Seidel color update."""
+        control_pneumatic = getattr(control, "pneumatic", None)
+        if control_pneumatic is None:
+            raise ValueError("Control is missing pneumatic inputs; create it with model.control().")
+        pneumatic = self.model.pneumatic
+        wp.launch(
+            kernel=self._pneumatic_kernels.update_cavity_volume_and_pressure_by_color,
+            dim=self._pneumatic_cavity_count * self._pneumatic_kernels._PNEUMATIC_CAVITY_UPDATE_BLOCK_DIM,
+            block_dim=self._pneumatic_kernels._PNEUMATIC_CAVITY_UPDATE_BLOCK_DIM,
+            inputs=[
+                color,
+                self._pneumatic_cavity_count,
+                particle_q,
+                self.model.tri_indices,
+                pneumatic.face_cavity,
+                pneumatic.face_triangle,
+                pneumatic.face_sign,
+                self._pneumatic_cavity_anchor_positions,
+                self._pneumatic_color_cavity_face_offsets,
+                self._pneumatic_color_cavity_faces,
+                dt,
+                pneumatic.mode,
+                pneumatic.rest_volume,
+                pneumatic.reference_absolute_pressure,
+                pneumatic.ambient_pressure,
+                pneumatic.heat_capacity_ratio,
+                pneumatic.target_volume,
+                pneumatic.volume_stiffness,
+                pneumatic.bulk_damping,
+                pneumatic.min_volume,
+                pneumatic.max_absolute_pressure,
+                self._pneumatic_previous_volume,
+                control_pneumatic.pressure_scale,
+                control_pneumatic.prescribed_gauge_pressure,
+                control_pneumatic.target_volume_scale,
+            ],
+            outputs=[
+                self._pneumatic_face_volume_contribution,
+                self._pneumatic_volume,
+                self._pneumatic_absolute_pressure,
+                self._pneumatic_gauge_pressure,
+                self._pneumatic_curvature,
+                self._pneumatic_volume_rate,
+                self._pneumatic_clamp_flags,
+            ],
+            device=self.device,
+        )
+
+    def _update_pneumatic_cavity_and_accumulate_forces(
+        self,
+        particle_q: wp.array[wp.vec3],
+        particle_ids: wp.array[wp.int32],
+        control: Control,
+        dt: float,
+        update_color: int,
+    ) -> None:
+        """Fuse a single-cavity color update with the next pressure-force pass."""
+        control_pneumatic = getattr(control, "pneumatic", None)
+        if control_pneumatic is None:
+            raise ValueError("Control is missing pneumatic inputs; create it with model.control().")
+        pneumatic = self.model.pneumatic
+        wp.launch(
+            kernel=self._pneumatic_kernels.update_single_cavity_volume_pressure_and_accumulate_force,
+            dim=self._pneumatic_kernels._PNEUMATIC_CAVITY_UPDATE_BLOCK_DIM,
+            block_dim=self._pneumatic_kernels._PNEUMATIC_CAVITY_UPDATE_BLOCK_DIM,
+            inputs=[
+                update_color,
+                particle_ids,
+                particle_q,
+                self.model.tri_indices,
+                pneumatic.face_cavity,
+                pneumatic.face_triangle,
+                pneumatic.face_sign,
+                self._pneumatic_cavity_anchor_positions,
+                self._pneumatic_color_cavity_face_offsets,
+                self._pneumatic_color_cavity_faces,
+                dt,
+                pneumatic.mode,
+                pneumatic.rest_volume,
+                pneumatic.reference_absolute_pressure,
+                pneumatic.ambient_pressure,
+                pneumatic.heat_capacity_ratio,
+                pneumatic.target_volume,
+                pneumatic.volume_stiffness,
+                pneumatic.bulk_damping,
+                pneumatic.min_volume,
+                pneumatic.max_absolute_pressure,
+                self._pneumatic_previous_volume,
+                control_pneumatic.pressure_scale,
+                control_pneumatic.prescribed_gauge_pressure,
+                control_pneumatic.target_volume_scale,
+                self._pneumatic_particle_face_offsets,
+                self._pneumatic_particle_faces,
+            ],
+            outputs=[
+                self._pneumatic_face_volume_contribution,
+                self._pneumatic_volume,
+                self._pneumatic_absolute_pressure,
+                self._pneumatic_gauge_pressure,
+                self._pneumatic_curvature,
+                self._pneumatic_volume_rate,
+                self._pneumatic_clamp_flags,
+                self.particle_forces,
+                self.particle_hessians,
             ],
             device=self.device,
         )
@@ -2259,6 +2549,16 @@ class SolverVBD(SolverBase, CouplingInterface):
             self._solve_rigid_body_iteration(state_in, state_out, control, contacts, dt)
             self._solve_particle_iteration(state_in, state_out, control, contacts, dt, iter_num)
 
+        correction = self.particle_multilevel
+        if correction is not None and self.particle_multilevel_fallback_iterations > self.iterations:
+
+            def run_fallback_iterations():
+                for iter_num in range(self.iterations, self.particle_multilevel_fallback_iterations):
+                    self._solve_rigid_body_iteration(state_in, state_out, control, contacts, dt)
+                    self._solve_particle_iteration(state_in, state_out, control, contacts, dt, iter_num)
+
+            wp.capture_if(correction.runtime_status, on_true=run_fallback_iterations)
+
         if self.model.particle_count:
             wp.copy(state_out.particle_q, state_in.particle_q)
 
@@ -3089,16 +3389,28 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_contact_gather_ready = (
             self._should_gather_particle_contacts(contacts) and self._particle_contact_adjacency_initialized
         )
+        if self._pneumatic_incremental_volume_enabled:
+            self._evaluate_pneumatic_cavities(state_in.particle_q, control, dt)
 
         # Iterate over color groups
         for color in range(len(self.model.particle_color_groups)):
             use_particle_contact_gather = particle_contact_gather_ready
             if self._pneumatic_enabled:
-                self._evaluate_pneumatic_cavities(state_in.particle_q, control, dt)
-                self._accumulate_pneumatic_forces(
-                    state_in.particle_q,
-                    self.model.particle_color_groups[color],
-                )
+                if not self._pneumatic_incremental_volume_enabled:
+                    self._evaluate_pneumatic_cavities(state_in.particle_q, control, dt)
+                if self._pneumatic_single_cavity_force_fusion_enabled and color > 0:
+                    self._update_pneumatic_cavity_and_accumulate_forces(
+                        state_in.particle_q,
+                        self.model.particle_color_groups[color],
+                        control,
+                        dt,
+                        color - 1,
+                    )
+                else:
+                    self._accumulate_pneumatic_forces(
+                        state_in.particle_q,
+                        self.model.particle_color_groups[color],
+                    )
             if contacts is not None and contacts.soft_contact_max > 0:
                 if use_particle_contact_gather:
                     wp.launch(
@@ -3316,6 +3628,12 @@ class SolverVBD(SolverBase, CouplingInterface):
                     device=self.device,
                 )
             self._penetration_free_truncation(state_in.particle_q)
+            if (
+                self._pneumatic_incremental_volume_enabled
+                and not self._pneumatic_single_cavity_force_fusion_enabled
+                and color + 1 < len(self.model.particle_color_groups)
+            ):
+                self._update_pneumatic_cavities_after_color(state_in.particle_q, control, dt, color)
 
         if self.particle_multilevel is not None and iter_num + 1 == self.iterations:
             self._apply_particle_multilevel_correction(

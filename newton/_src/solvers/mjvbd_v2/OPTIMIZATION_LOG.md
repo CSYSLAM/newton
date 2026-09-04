@@ -38,6 +38,9 @@ Status values are:
 
 | Date | Change | Affected path | Status | Evidence |
 | --- | --- | --- | --- | --- |
+| 2026-09-04 | Add conservative eligibility and device-side rejection to the particle multilevel correction | CUDA `vbd/` and `vbd_soft/` cloth/shell paths | **Retained, opt-in** | A graph scale scan bounded the current one-block PCG policy to 128--1,500 clusters; all 120 sampled T-shirt frames passed the residual/finite/clamp guards, while unsafe plastic-bag settings were detected and left on their explicitly validated policy |
+| 2026-09-04 | Incrementally update pneumatic volume by unique color-cavity faces | CUDA `vbd/` pneumatic surfaces | **Retained, gated** | Two alternating 50-frame plastic inflatable-bag runs reduced mean summed GPU kernel time from 28.169 to 25.785 ms/frame (8.46%) and pneumatic kernels from 7.366 to 5.254 ms/frame (28.67%); two 300-frame CUDA Graph runs reduced mean wall time from 25.142 to 22.595 ms/frame (10.13%) |
+| 2026-09-04 | Cache rigid-soft contact color masks in the optimized soft backend | CUDA `vbd_soft/` contact-major particle contact scatter | **Rejected, reverted** | An isolated mixed-contact graph improved 8.60%–10.96%, but real fixed-frame examples measured -1.0% for gear crusher, +1.0% for nonwoven bag, and -0.5% for kinematic T-shirt; the added mask build did not produce a reliable end-to-end gain |
 | 2026-09-04 | Add one contact-aware two-level correction after the final surface-particle VBD sweep | CUDA `vbd/` and `vbd_soft/` cloth/shell paths | **Retained, opt-in** | The 300-frame T-shirt comparison reduced wall time 30.3% while cutting the 12-sweep error against 20 sweeps by 41.4%; the plastic-bag final improved from 17.3 to 20.1 FPS while cutting the 8-sweep error against 12 sweeps by 41.7% |
 | 2026-09-04 | Temporally warm-start stable mesh-SDF face contacts, with bounded reuse and exact fallback | CUDA `full` contact backends with full-surface mesh-SDF contact | **Retained, gated** | The Armadillo frozen-state collision Graph fell from 3.653 to 2.575 ms (41.9%) with all 27,444 contact keys preserved; the 240-frame plastic-bag scene remained 17.5 FPS and passed with the cache both enabled and disabled |
 | 2026-09-03 | Build particle self-contact adjacency and gather VT/EE force/Hessian per colored particle, with and without fusion into the cloth tile | CUDA `vbd_soft/` surface self-contact solve | **Rejected, reverted** | The T-shirt Graph fell from 10.1 FPS to 7.40 FPS with tile fusion and 5.39 FPS with a separate gather kernel; duplicated narrow phase, divergent lists, and tile register pressure outweighed removed atomics and row scans |
@@ -73,6 +76,206 @@ Status values are:
 | 2026-08-10 | Articulation-only dispatch shortcut (`89002b52`) | `pure_mujoco` and `kinematic_passthrough` | **Retained** | Structurally removes VBD construction and execution; no standardized timing archive |
 
 ## Detailed experiments
+
+### 2026-09-04: retain guarded particle multilevel correction
+
+**Problem.** The initial two-level correction was deliberately opt-in, but it
+had no automatic size policy and committed a coarse candidate before checking
+whether PCG converged or most fine corrections hit their radius cap. This made
+it too easy to apply the single-block coarse solve outside its measured range
+or to silently accept an unhelpful correction.
+
+**Implementation.** The solver now accepts
+`particle_enable_multilevel_correction="auto"`. Automatic mode requires CUDA,
+non-differentiable and non-deterministic execution, one particle world, no
+tetrahedra, at least 1,024 topologically active surface particles, and 128 to
+1,500 coarse clusters. Self-contact and pneumatic scenes still require an
+explicit enable because their contact-growth and cavity-volume rejection tests
+are not yet transactional. Isolated particles are excluded from the hierarchy.
+
+The persistent PCG writes a device-side status and squared initial/final
+residuals. Prolongation first writes a candidate buffer and counts non-finite
+and radius-clamped corrections; it mutates the real displacement only if the
+residual, finite-value, and configurable clamp-fraction checks all pass. An
+optional `particle_multilevel_fallback_iterations` captures additional ordinary
+VBD sweeps and selects them with `wp.capture_if` when the device status rejects
+the candidate. The fallback runs in the same substep, which is more
+conservative than waiting until the next substep and does not add a host
+readback or change CUDA Graph topology.
+
+**Scale evidence.** On an NVIDIA GeForce RTX 5090 D v2, Warp
+1.17.0.dev20260807, CUDA Toolkit 12.9, and Driver 13.2, one correction was
+captured and replayed after 20 warm-ups. Each result below is the mean of 500
+replays through 512 clusters and 200 replays above that size.
+
+| Particles | Clusters | Correction Graph |
+| ---: | ---: | ---: |
+| 520 | 65 | 0.042430 ms |
+| 1,032 | 128 | 0.049689 ms |
+| 2,056 | 257 | 0.056633 ms |
+| 4,104 | 512 | 0.071493 ms |
+| 8,008 | 1,001 | 0.138156 ms |
+| 12,008 | 1,500 | 0.184706 ms |
+| 16,008 | 2,000 | 0.237782 ms |
+| 24,008 | 3,000 | 0.360834 ms |
+
+The near-linear scan shows that the current block remains fast beyond 1,500
+clusters on this GPU, but it does not establish good occupancy or batched-world
+scaling there. Automatic mode therefore keeps the conservative 1,500-cluster
+ceiling pending a multi-block PCG comparison.
+
+**Runtime evidence.** The 6,436-particle, 996-cluster T-shirt scene passed all
+120 sampled frames: status was zero and no fine correction hit the radius cap.
+Its median final-to-initial squared residual ratio was `3.44e-5`, with a
+95th percentile of `1.23e-3`. That measured example explicitly enables the
+guards and falls back from 12 to 20 ordinary sweeps on rejection. Applying the
+same provisional guards to the 5,886-particle plastic-bag/rod scene rejected 77
+of 120 frames: its median clamp fraction was 0.728 and its Euclidean residual
+was not monotone. That example therefore retains the previously measured
+explicit correction behavior instead of silently changing its trajectory.
+
+**Correctness evidence.** Nine focused tests pass across the complete and soft
+private VBD implementations. They cover invalid modes, CPU/gradient/tet
+fallback, scale eligibility, conservative self-contact rejection, fixed
+anchors, long-range propagation, transactional clamp rejection, extra-sweep
+fallback, and CUDA Graph capture/replay. A forced clamp rejection is bitwise
+equal to ordinary VBD, including through the conditional Graph branch.
+
+**Decision.** Retain automatic eligibility and transactional residual/finite/
+radius-clamp checks as an opt-in policy. Do not broaden automatic mode to
+self-contact, pneumatic, multi-world, tetrahedral, or more than 1,500-cluster
+models until their specific rejection checks and scaling paths are measured.
+
+### 2026-09-04: retain incremental pneumatic volume updates
+
+**Problem.** The plastic inflatable-bag profile evaluated every cavity face and
+pressure law once per particle color. In an eager 3-warm-up/5-sample profile,
+volume accumulation and pressure evaluation consumed 14.86% of total GPU
+kernel time; including pressure force/Hessian accumulation, pneumatics consumed
+29.54%. This exceeds the 5% implementation gate.
+
+**Implementation.** Construction builds a unique CSR row for each
+`(particle color, cavity)` pair, plus a cavity-to-face CSR. At the beginning of
+each VBD iteration, one block per cavity freezes the numerical anchor, computes
+the full volume, and caches one contribution per face. After a color moves,
+only its unique incident faces recompute their contribution and add the delta
+to that cavity before the next color reads pressure. A face containing two
+vertices of the same color appears only once in that row, preserving
+Gauss--Seidel pressure semantics.
+
+Initialization fuses full volume and pressure evaluation. Single-cavity models
+whose largest color contains at most 512 particles additionally fuse the
+previous color's volume update, pressure evaluation, and the next color's
+pressure force/Hessian pass into one block. Multiple cavities retain one block
+per cavity and the ordinary parallel force kernel. The option is available
+only on non-differentiable, non-deterministic CUDA models; every other model
+uses the original full recomputation. The measured full-W1 plastic inflatable-
+bag example enables it.
+
+**Performance.** On the same RTX 5090 D v2 software stack, the full-W1 plastic
+inflatable-bag scene used 216 particles, 428 cavity faces, one cavity, eight
+colors, five substeps, and 12 VBD iterations. Runs disabled CUDA Graph capture
+to expose individual kernel costs, discarded 15 frames, and timed the next 50
+frames with `wp.ScopedTimer(cuda_filter=wp.TIMING_KERNEL)`. Baseline and
+candidate processes were alternated.
+
+| Run | Full recomputation | Incremental |
+| --- | ---: | ---: |
+| A, summed GPU kernels | 28.220272 ms/frame | 25.679576 ms/frame |
+| B, summed GPU kernels | 28.118220 ms/frame | 25.890692 ms/frame |
+| Mean | 28.169246 ms/frame | 25.785134 ms/frame |
+| Mean pneumatic kernels | 7.366125 ms/frame | 5.254412 ms/frame |
+
+The candidate reduced summed GPU kernel time by 8.46% and pneumatic time by
+28.67%. The first unfused prototype regressed because it replaced arithmetic
+with the same number of tiny launches; it was superseded by the fused path and
+must not be restored.
+
+The production CUDA Graph path was measured separately with 90 warm-up frames
+followed by 300 timed frames spanning the lift through release phases. Reverse-
+ordered runs gave 24.871605 and 25.412919 ms/frame for full recomputation versus
+22.569273 and 22.621135 ms/frame for the incremental path. Mean end-to-end wall
+time fell from 25.142262 to 22.595204 ms/frame, a 10.13% reduction including IK,
+collision detection, and Python frame orchestration.
+
+**Correctness evidence.** A sealed-shell regression matches ten eager steps to
+`2e-6`, and a two-world/two-cavity regression verifies color-cavity indexing.
+A 120-frame dual-instance full-W1 comparison bounded maximum particle-position
+difference to 1.08 mm, cavity-volume relative difference to 0.093%, and
+pressure relative difference to 0.63%; this nondeterministic path changes
+floating-point reduction order. The candidate completed the full 720-frame
+CUDA Graph trajectory. The current branch's pre-existing example assertions
+also fail with full recomputation: both variants first exceed the 0.5 mm IK
+tolerance at frame 265 with the same 0.535 mm error, and their minimum volume
+ratios are respectively 0.792163 and 0.792113 against a stale 0.85 threshold.
+
+**Decision.** Retain the CUDA-gated incremental path and enable it in the
+measured plastic inflatable-bag example. Keep full recomputation as the solver
+default and as the deterministic, differentiable, CPU, and unsupported-size
+fallback.
+
+### 2026-09-04: final00 guarded-acceleration applicability sweep
+
+The guarded multilevel and incremental-pneumatic paths were checked across all
+five `mjvbdv2/*final00.py` examples on the same RTX 5090 D v2. CUDA Graph wall
+times below use 60 warm-up plus 180 measured frames, except for the inflatable
+bag's two reverse-ordered 90-warm-up/300-measured-frame pairs.
+
+| Example | Reference | Candidate | Result | Decision |
+| --- | ---: | ---: | ---: | --- |
+| W1 T-shirt fold | 20 ordinary sweeps, 72.829 ms/frame | 12 sweeps + guarded multilevel, 50.643 ms/frame | 30.5% lower wall time | Keep; the complete 900-frame test passes |
+| W1 plastic bag + rod | 12 ordinary sweeps, 36.190 ms/frame | 8 sweeps + multilevel, 28.722 ms/frame | 20.6% lower wall time | Keep explicit policy; the built-in 240-frame test passes |
+| W1 inflatable plastic bag | Full cavity recomputation, 25.142 ms/frame | Incremental/fused cavity path, 22.595 ms/frame | 10.13% lower wall time | Keep; the complete 720-frame CUDA Graph trajectory runs |
+| Soft then rigid cube into bag | 12 ordinary sweeps, 40.347 ms/frame | 8 sweeps + multilevel, 35.313 ms/frame | 12.5% lower than 12 sweeps, but 1.6% slower than plain 8 sweeps | Reject; the coarse correction worsened 240-frame RMS error |
+| Armadillo gear crusher | Existing 10 sweeps, 95.793 ms/frame | Automatic multilevel | No active coarse clusters | Reject; all 15,228 particles belong to 62,770 tetrahedra |
+
+For the T-shirt, two guarded 180-frame windows averaged 49.863 ms/frame and
+two otherwise identical unguarded windows averaged 48.916 ms/frame. The new
+transactional checks therefore cost about 1.9% in this scene; they are a safety
+mechanism, not an additional speedup. The guarded configuration still retains
+roughly the previously measured 30% advantage over the 20-sweep reference.
+
+The mixed soft/rigid-cube candidate built 255 clusters only for the surface bag
+while leaving the 720 tetrahedra on ordinary VBD. Against a 12-sweep reference
+at frame 240, plain 8 sweeps had 3.114 mm all-particle RMS error and the coarse
+candidate had 3.775 mm, 21.2% worse. Its bag-only RMS likewise increased from
+3.293 to 3.993 mm, while the tetrahedral cube changed by less than 1%. Do not
+enable multilevel for this example merely to reduce its sweep count.
+
+The Armadillo probe confirmed `tetrahedra_present` as the automatic rejection
+reason and produced zero coarse clusters. The example remains finite through
+the measured 240-frame window. These two negative results validate keeping
+tetrahedral and mixed volumetric scenes outside the automatic policy.
+
+### 2026-09-04: reject rigid-soft color masks in the optimized soft backend
+
+**Hypothesis.** Port the complete `vbd/` backend's per-contact particle-color
+mask into `vbd_soft/`, building one `uint32` mask per contact refresh and using
+it to reject contacts before loading their geometry and material data during
+each color sweep.
+
+**Isolated result.** On an RTX 5090 D v2, a synthetic CUDA Graph containing
+5,886 particles, 9,880 mixed point/edge/face contacts, eight colors, and 12
+VBD iterations improved the contact stage by 8.60% on the ordinary traversal
+and 10.96% on the overallocated persistent traversal. Masked and unmasked
+force/Hessian tests matched on CPU and CUDA.
+
+**Real-example result.** Fixed-frame headless runs alternated the unmodified
+commit `37ad664c` and the mask implementation. Medians were 24.25 versus 24.50
+FPS for the 360-frame gear crusher (-1.0%), 19.4 versus 19.2 FPS for the
+180-frame nonwoven-bag table drop (+1.0%), and 21.7 versus 21.8 FPS for the
+180-frame kinematic T-shirt fold (-0.5%). Individual runs varied by roughly
+the same magnitude as the measured differences, so none established the 5%
+end-to-end threshold. The dynamic T-shirt run was stopped after these results
+already rejected the broad enablement rule.
+
+**Decision.** Revert the mask storage, construction kernel, solver wiring,
+tests, and changelog fragment. The isolated workload overrepresented
+edge/face contacts and contact-stage share; current `vbd_soft/` examples use
+mostly point contacts, where rebuilding masks adds work without removing
+enough whole-frame cost. Reconsider only with a real full-surface
+`vbd_soft/` workload and a runtime policy based on measured contact mix, not
+particle-color count alone.
 
 ### 2026-09-04: retain a contact-aware surface multilevel correction
 

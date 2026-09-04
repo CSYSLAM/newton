@@ -357,6 +357,15 @@ add per-frame host reads merely to choose a branch inside a captured graph. The
 complete `vbd/` path does not currently share this fast path; its measured port
 was rejected and is recorded in `OPTIMIZATION_LOG.md`.
 
+The optional particle multilevel correction has a conservative automatic mode
+for CUDA surface models. It excludes gradients, deterministic execution,
+tetrahedra, multiple worlds, self-contact, pneumatics, small hierarchies, and
+hierarchies above the measured single-block range. Its persistent PCG and
+prolongation write a device-side validity status. Non-finite values, insufficient
+residual reduction, or excessive radius clamping reject the candidate before it
+mutates the real particle displacement. A configured ordinary-sweep fallback
+uses a device-side conditional so captured graphs never synchronize to the host.
+
 ## 8. CUDA Graph and runtime material changes
 
 Both VBD implementations are graph-capture compatible when all capacity is
@@ -402,6 +411,14 @@ history, including world-masked resets.
 Any cavity forces use of the complete `vbd/` implementation, including on an
 otherwise soft-only kinematic or coupled scene. A model with zero cavities
 must not import or allocate the pneumatic execution module.
+
+The optional CUDA incremental-volume path caches one signed volume contribution
+per cavity face. Construction maps every graph color to the unique faces it can
+move, partitioned by cavity. Each iteration still starts with one full volume
+evaluation; subsequent colors update only affected contributions before
+evaluating the next pressure. Single-cavity models with small color groups fuse
+that update with the following pressure force/Hessian pass. CPU, deterministic,
+differentiable, and disabled configurations retain full recomputation.
 
 ## 10. Sleeping
 

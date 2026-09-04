@@ -7,6 +7,46 @@ from __future__ import annotations
 
 import warp as wp
 
+_PNEUMATIC_CAVITY_INITIALIZE_BLOCK_DIM = 256
+_PNEUMATIC_CAVITY_UPDATE_BLOCK_DIM = 128
+_PNEUMATIC_SINGLE_CAVITY_FUSED_MAX_PARTICLES = 512
+
+
+@wp.func
+def _cavity_face_volume_contribution_from_anchor(
+    face: int,
+    particle_q: wp.array[wp.vec3],
+    tri_indices: wp.array2d[wp.int32],
+    face_triangle: wp.array[wp.int32],
+    face_sign: wp.array[float],
+    anchor: wp.vec3,
+):
+    triangle = face_triangle[face]
+    p0 = particle_q[tri_indices[triangle, 0]] - anchor
+    p1 = particle_q[tri_indices[triangle, 1]] - anchor
+    p2 = particle_q[tri_indices[triangle, 2]] - anchor
+    return face_sign[face] * wp.dot(p0, wp.cross(p1, p2)) / 6.0
+
+
+@wp.func
+def _cavity_face_volume_contribution(
+    face: int,
+    particle_q: wp.array[wp.vec3],
+    tri_indices: wp.array2d[wp.int32],
+    face_cavity: wp.array[wp.int32],
+    face_triangle: wp.array[wp.int32],
+    face_sign: wp.array[float],
+    cavity_anchor_positions: wp.array[wp.vec3],
+):
+    return _cavity_face_volume_contribution_from_anchor(
+        face,
+        particle_q,
+        tri_indices,
+        face_triangle,
+        face_sign,
+        cavity_anchor_positions[face_cavity[face]],
+    )
+
 
 @wp.kernel
 def accumulate_cavity_volume(
@@ -55,6 +95,58 @@ def evaluate_pressure(
 ):
     """Evaluate the pressure law and its positive scalar curvature."""
     cavity = wp.tid()
+    _evaluate_pressure_for_cavity(
+        cavity,
+        dt,
+        mode,
+        rest_volume,
+        reference_absolute_pressure,
+        ambient_pressure,
+        heat_capacity_ratio,
+        target_volume,
+        volume_stiffness,
+        bulk_damping,
+        min_volume,
+        max_absolute_pressure,
+        current_volume,
+        previous_volume,
+        pressure_scale,
+        prescribed_gauge_pressure,
+        target_volume_scale,
+        absolute_pressure,
+        gauge_pressure,
+        curvature,
+        volume_rate,
+        clamp_flags,
+    )
+
+
+@wp.func
+def _evaluate_pressure_for_cavity(
+    cavity: int,
+    dt: float,
+    mode: wp.array[wp.int32],
+    rest_volume: wp.array[float],
+    reference_absolute_pressure: wp.array[float],
+    ambient_pressure: wp.array[float],
+    heat_capacity_ratio: wp.array[float],
+    target_volume: wp.array[float],
+    volume_stiffness: wp.array[float],
+    bulk_damping: wp.array[float],
+    min_volume: wp.array[float],
+    max_absolute_pressure: wp.array[float],
+    current_volume: wp.array[float],
+    previous_volume: wp.array[float],
+    pressure_scale: wp.array[float],
+    prescribed_gauge_pressure: wp.array[float],
+    target_volume_scale: wp.array[float],
+    absolute_pressure: wp.array[float],
+    gauge_pressure: wp.array[float],
+    curvature: wp.array[float],
+    volume_rate: wp.array[float],
+    clamp_flags: wp.array[wp.int32],
+):
+    """Evaluate one cavity pressure from its current volume."""
     raw_volume = current_volume[cavity]
     minimum = min_volume[cavity]
     volume = wp.max(raw_volume, minimum)
@@ -114,8 +206,186 @@ def evaluate_pressure(
 
 
 @wp.kernel
-def accumulate_pressure_force_and_hessian(
-    particle_ids: wp.array[wp.int32],
+def initialize_cavity_volume_and_pressure(
+    cavity_count: int,
+    particle_q: wp.array[wp.vec3],
+    tri_indices: wp.array2d[wp.int32],
+    face_triangle: wp.array[wp.int32],
+    face_sign: wp.array[float],
+    anchor_particle: wp.array[wp.int32],
+    cavity_face_offsets: wp.array[wp.int32],
+    cavity_faces: wp.array[wp.int32],
+    dt: float,
+    mode: wp.array[wp.int32],
+    rest_volume: wp.array[float],
+    reference_absolute_pressure: wp.array[float],
+    ambient_pressure: wp.array[float],
+    heat_capacity_ratio: wp.array[float],
+    target_volume: wp.array[float],
+    volume_stiffness: wp.array[float],
+    bulk_damping: wp.array[float],
+    min_volume: wp.array[float],
+    max_absolute_pressure: wp.array[float],
+    previous_volume: wp.array[float],
+    pressure_scale: wp.array[float],
+    prescribed_gauge_pressure: wp.array[float],
+    target_volume_scale: wp.array[float],
+    cavity_anchor_positions: wp.array[wp.vec3],
+    face_volume_contribution: wp.array[float],
+    current_volume: wp.array[float],
+    absolute_pressure: wp.array[float],
+    gauge_pressure: wp.array[float],
+    curvature: wp.array[float],
+    volume_rate: wp.array[float],
+    clamp_flags: wp.array[wp.int32],
+):
+    """Initialize cached face volumes and pressure in one block per cavity."""
+    tid = wp.tid()
+    block_dim = wp.block_dim()
+    cavity = tid // block_dim
+    lane = tid - cavity * block_dim
+    anchor = particle_q[anchor_particle[cavity]]
+    begin = cavity_face_offsets[cavity]
+    end = cavity_face_offsets[cavity + 1]
+    volume = float(0.0)
+    slot = begin + lane
+    while slot < end:
+        face = cavity_faces[slot]
+        contribution = _cavity_face_volume_contribution_from_anchor(
+            face,
+            particle_q,
+            tri_indices,
+            face_triangle,
+            face_sign,
+            anchor,
+        )
+        face_volume_contribution[face] = contribution
+        volume += contribution
+        slot += block_dim
+
+    cavity_volume = wp.tile_sum(wp.tile(volume))[0]
+    if lane == 0:
+        cavity_anchor_positions[cavity] = anchor
+        current_volume[cavity] = cavity_volume
+        _evaluate_pressure_for_cavity(
+            cavity,
+            dt,
+            mode,
+            rest_volume,
+            reference_absolute_pressure,
+            ambient_pressure,
+            heat_capacity_ratio,
+            target_volume,
+            volume_stiffness,
+            bulk_damping,
+            min_volume,
+            max_absolute_pressure,
+            current_volume,
+            previous_volume,
+            pressure_scale,
+            prescribed_gauge_pressure,
+            target_volume_scale,
+            absolute_pressure,
+            gauge_pressure,
+            curvature,
+            volume_rate,
+            clamp_flags,
+        )
+
+
+@wp.kernel
+def update_cavity_volume_and_pressure_by_color(
+    color: int,
+    cavity_count: int,
+    particle_q: wp.array[wp.vec3],
+    tri_indices: wp.array2d[wp.int32],
+    face_cavity: wp.array[wp.int32],
+    face_triangle: wp.array[wp.int32],
+    face_sign: wp.array[float],
+    cavity_anchor_positions: wp.array[wp.vec3],
+    color_cavity_face_offsets: wp.array[wp.int32],
+    color_cavity_faces: wp.array[wp.int32],
+    dt: float,
+    mode: wp.array[wp.int32],
+    rest_volume: wp.array[float],
+    reference_absolute_pressure: wp.array[float],
+    ambient_pressure: wp.array[float],
+    heat_capacity_ratio: wp.array[float],
+    target_volume: wp.array[float],
+    volume_stiffness: wp.array[float],
+    bulk_damping: wp.array[float],
+    min_volume: wp.array[float],
+    max_absolute_pressure: wp.array[float],
+    previous_volume: wp.array[float],
+    pressure_scale: wp.array[float],
+    prescribed_gauge_pressure: wp.array[float],
+    target_volume_scale: wp.array[float],
+    face_volume_contribution: wp.array[float],
+    current_volume: wp.array[float],
+    absolute_pressure: wp.array[float],
+    gauge_pressure: wp.array[float],
+    curvature: wp.array[float],
+    volume_rate: wp.array[float],
+    clamp_flags: wp.array[wp.int32],
+):
+    """Update one color's unique faces and pressure in one block per cavity."""
+    tid = wp.tid()
+    block_dim = wp.block_dim()
+    cavity = tid // block_dim
+    lane = tid - cavity * block_dim
+    row = color * cavity_count + cavity
+    begin = color_cavity_face_offsets[row]
+    end = color_cavity_face_offsets[row + 1]
+    delta = float(0.0)
+    slot = begin + lane
+    while slot < end:
+        face = color_cavity_faces[slot]
+        previous = face_volume_contribution[face]
+        current = _cavity_face_volume_contribution(
+            face,
+            particle_q,
+            tri_indices,
+            face_cavity,
+            face_triangle,
+            face_sign,
+            cavity_anchor_positions,
+        )
+        face_volume_contribution[face] = current
+        delta += current - previous
+        slot += block_dim
+
+    volume_delta = wp.tile_sum(wp.tile(delta))[0]
+    if lane == 0:
+        current_volume[cavity] += volume_delta
+        _evaluate_pressure_for_cavity(
+            cavity,
+            dt,
+            mode,
+            rest_volume,
+            reference_absolute_pressure,
+            ambient_pressure,
+            heat_capacity_ratio,
+            target_volume,
+            volume_stiffness,
+            bulk_damping,
+            min_volume,
+            max_absolute_pressure,
+            current_volume,
+            previous_volume,
+            pressure_scale,
+            prescribed_gauge_pressure,
+            target_volume_scale,
+            absolute_pressure,
+            gauge_pressure,
+            curvature,
+            volume_rate,
+            clamp_flags,
+        )
+
+
+@wp.func
+def _accumulate_pressure_force_for_particle(
+    particle: int,
     particle_q: wp.array[wp.vec3],
     tri_indices: wp.array2d[wp.int32],
     face_cavity: wp.array[wp.int32],
@@ -128,8 +398,6 @@ def accumulate_pressure_force_and_hessian(
     particle_forces: wp.array[wp.vec3],
     particle_hessians: wp.array[wp.mat33],
 ):
-    """Accumulate pressure terms once for each particle in a color group."""
-    particle = particle_ids[wp.tid()]
     force = wp.vec3(0.0)
     hessian = wp.mat33(0.0)
     for adjacent_index in range(particle_face_offsets[particle], particle_face_offsets[particle + 1]):
@@ -145,6 +413,149 @@ def accumulate_pressure_force_and_hessian(
 
     particle_forces[particle] += force
     particle_hessians[particle] += hessian
+
+
+@wp.kernel
+def update_single_cavity_volume_pressure_and_accumulate_force(
+    update_color: int,
+    particle_ids: wp.array[wp.int32],
+    particle_q: wp.array[wp.vec3],
+    tri_indices: wp.array2d[wp.int32],
+    face_cavity: wp.array[wp.int32],
+    face_triangle: wp.array[wp.int32],
+    face_sign: wp.array[float],
+    cavity_anchor_positions: wp.array[wp.vec3],
+    color_cavity_face_offsets: wp.array[wp.int32],
+    color_cavity_faces: wp.array[wp.int32],
+    dt: float,
+    mode: wp.array[wp.int32],
+    rest_volume: wp.array[float],
+    reference_absolute_pressure: wp.array[float],
+    ambient_pressure: wp.array[float],
+    heat_capacity_ratio: wp.array[float],
+    target_volume: wp.array[float],
+    volume_stiffness: wp.array[float],
+    bulk_damping: wp.array[float],
+    min_volume: wp.array[float],
+    max_absolute_pressure: wp.array[float],
+    previous_volume: wp.array[float],
+    pressure_scale: wp.array[float],
+    prescribed_gauge_pressure: wp.array[float],
+    target_volume_scale: wp.array[float],
+    particle_face_offsets: wp.array[wp.int32],
+    particle_faces: wp.array[wp.int32],
+    face_volume_contribution: wp.array[float],
+    current_volume: wp.array[float],
+    absolute_pressure: wp.array[float],
+    gauge_pressure: wp.array[float],
+    curvature: wp.array[float],
+    volume_rate: wp.array[float],
+    clamp_flags: wp.array[wp.int32],
+    particle_forces: wp.array[wp.vec3],
+    particle_hessians: wp.array[wp.mat33],
+):
+    """Update one cavity, then accumulate the next color's pressure terms."""
+    lane = wp.tid()
+    block_dim = wp.block_dim()
+    begin = color_cavity_face_offsets[update_color]
+    end = color_cavity_face_offsets[update_color + 1]
+    delta = float(0.0)
+    slot = begin + lane
+    while slot < end:
+        face = color_cavity_faces[slot]
+        previous = face_volume_contribution[face]
+        current = _cavity_face_volume_contribution(
+            face,
+            particle_q,
+            tri_indices,
+            face_cavity,
+            face_triangle,
+            face_sign,
+            cavity_anchor_positions,
+        )
+        face_volume_contribution[face] = current
+        delta += current - previous
+        slot += block_dim
+
+    volume_delta = wp.tile_sum(wp.tile(delta))[0]
+    if lane == 0:
+        current_volume[0] += volume_delta
+        _evaluate_pressure_for_cavity(
+            0,
+            dt,
+            mode,
+            rest_volume,
+            reference_absolute_pressure,
+            ambient_pressure,
+            heat_capacity_ratio,
+            target_volume,
+            volume_stiffness,
+            bulk_damping,
+            min_volume,
+            max_absolute_pressure,
+            current_volume,
+            previous_volume,
+            pressure_scale,
+            prescribed_gauge_pressure,
+            target_volume_scale,
+            absolute_pressure,
+            gauge_pressure,
+            curvature,
+            volume_rate,
+            clamp_flags,
+        )
+
+    # The reduction is a block barrier after lane zero updates pressure.
+    pressure_ready = wp.tile_sum(wp.tile(float(lane == 0)))[0]
+    particle_index = lane
+    while particle_index < particle_ids.shape[0] and pressure_ready > 0.0:
+        _accumulate_pressure_force_for_particle(
+            particle_ids[particle_index],
+            particle_q,
+            tri_indices,
+            face_cavity,
+            face_triangle,
+            face_sign,
+            particle_face_offsets,
+            particle_faces,
+            gauge_pressure,
+            curvature,
+            particle_forces,
+            particle_hessians,
+        )
+        particle_index += block_dim
+
+
+@wp.kernel
+def accumulate_pressure_force_and_hessian(
+    particle_ids: wp.array[wp.int32],
+    particle_q: wp.array[wp.vec3],
+    tri_indices: wp.array2d[wp.int32],
+    face_cavity: wp.array[wp.int32],
+    face_triangle: wp.array[wp.int32],
+    face_sign: wp.array[float],
+    particle_face_offsets: wp.array[wp.int32],
+    particle_faces: wp.array[wp.int32],
+    gauge_pressure: wp.array[float],
+    curvature: wp.array[float],
+    particle_forces: wp.array[wp.vec3],
+    particle_hessians: wp.array[wp.mat33],
+):
+    """Accumulate pressure terms once for each particle in a color group."""
+    _accumulate_pressure_force_for_particle(
+        particle_ids[wp.tid()],
+        particle_q,
+        tri_indices,
+        face_cavity,
+        face_triangle,
+        face_sign,
+        particle_face_offsets,
+        particle_faces,
+        gauge_pressure,
+        curvature,
+        particle_forces,
+        particle_hessians,
+    )
 
 
 @wp.kernel

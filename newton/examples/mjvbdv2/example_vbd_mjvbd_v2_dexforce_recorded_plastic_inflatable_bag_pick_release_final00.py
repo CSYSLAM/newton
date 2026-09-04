@@ -38,6 +38,12 @@ from newton.examples.mjvbdv2 import (
 class Example(robot_reference.Example):
     """Track the v1 plastic-bag trajectory with realtime full-W1 IK."""
 
+    def _solver_vbd_options(self):
+        """Enable the measured incremental cavity-volume path on CUDA."""
+        options = super()._solver_vbd_options()
+        options["pneumatic_enable_incremental_volume"] = True
+        return options
+
     def __init__(self, viewer, args):
         self.plasticity_enabled = bool(args.plastic)
         yield_angle_deg = plastic_reference._validate_nonnegative(

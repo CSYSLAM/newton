@@ -1020,6 +1020,83 @@ class TestMJVBDV2(unittest.TestCase):
         self.assertAlmostEqual(float(pressure), 102_000.0, places=2)
         self.assertTrue(np.all(np.isfinite(state_1.particle_q.numpy())))
 
+    @unittest.skipUnless(wp.is_cuda_available(), "Incremental pneumatic volume requires CUDA")
+    def test_incremental_pneumatic_volume_matches_full_recompute(self):
+        """Preserve per-color pressure semantics with cached face contributions."""
+        model, _handle, _ = _build_pneumatic_shell_model("cuda:0")
+        reference_state_0 = model.state()
+        reference_state_1 = model.state()
+        incremental_state_0 = model.state()
+        incremental_state_1 = model.state()
+        control = model.control()
+        reference = SolverMJVBDV2(model, vbd_options={"iterations": 4})
+        incremental = SolverMJVBDV2(
+            model,
+            vbd_options={"iterations": 4, "pneumatic_enable_incremental_volume": True},
+        )
+
+        self.assertTrue(incremental.vbd_solver._pneumatic_incremental_volume_enabled)
+        self.assertTrue(incremental.vbd_solver._pneumatic_single_cavity_force_fusion_enabled)
+        for _ in range(10):
+            reference.step(reference_state_0, reference_state_1, control, None, 1.0e-3)
+            incremental.step(incremental_state_0, incremental_state_1, control, None, 1.0e-3)
+            reference_state_0, reference_state_1 = reference_state_1, reference_state_0
+            incremental_state_0, incremental_state_1 = incremental_state_1, incremental_state_0
+
+        np.testing.assert_allclose(
+            incremental_state_0.particle_q.numpy(),
+            reference_state_0.particle_q.numpy(),
+            rtol=2.0e-6,
+            atol=2.0e-6,
+        )
+        np.testing.assert_allclose(
+            incremental_state_0.pneumatic.volume.numpy(),
+            reference_state_0.pneumatic.volume.numpy(),
+            rtol=2.0e-6,
+            atol=1.0e-8,
+        )
+        np.testing.assert_allclose(
+            incremental_state_0.pneumatic.absolute_pressure.numpy(),
+            reference_state_0.pneumatic.absolute_pressure.numpy(),
+            rtol=2.0e-6,
+            atol=2.0e-2,
+        )
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Incremental pneumatic volume requires CUDA")
+    def test_incremental_pneumatic_volume_handles_multiple_cavities(self):
+        """Update each color-cavity row exactly once in multi-world models."""
+        model = _build_multiworld_pneumatic_model("cuda:0")
+        reference_state_0 = model.state()
+        reference_state_1 = model.state()
+        incremental_state_0 = model.state()
+        incremental_state_1 = model.state()
+        control = model.control()
+        reference = SolverMJVBDV2(model, vbd_options={"iterations": 3})
+        incremental = SolverMJVBDV2(
+            model,
+            vbd_options={"iterations": 3, "pneumatic_enable_incremental_volume": True},
+        )
+
+        self.assertFalse(incremental.vbd_solver._pneumatic_single_cavity_force_fusion_enabled)
+        for _ in range(4):
+            reference.step(reference_state_0, reference_state_1, control, None, 1.0e-3)
+            incremental.step(incremental_state_0, incremental_state_1, control, None, 1.0e-3)
+            reference_state_0, reference_state_1 = reference_state_1, reference_state_0
+            incremental_state_0, incremental_state_1 = incremental_state_1, incremental_state_0
+
+        np.testing.assert_allclose(
+            incremental_state_0.particle_q.numpy(),
+            reference_state_0.particle_q.numpy(),
+            rtol=2.0e-6,
+            atol=2.0e-6,
+        )
+        np.testing.assert_allclose(
+            incremental_state_0.pneumatic.volume.numpy(),
+            reference_state_0.pneumatic.volume.numpy(),
+            rtol=2.0e-6,
+            atol=1.0e-8,
+        )
+
     def test_pneumatic_reset_restores_cavity_history(self):
         """Restore pneumatic observables and previous-volume history on reset."""
         model, handle, _ = _build_pneumatic_shell_model("cpu")
