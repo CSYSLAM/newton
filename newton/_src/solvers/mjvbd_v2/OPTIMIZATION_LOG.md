@@ -1608,6 +1608,138 @@ controlled evidence. Revisit the threshold only with additional MJVBDV2
 multiworld A/B measurements across batch sizes; do not infer a per-scene
 speedup from PR 3995's 1,024-environment aggregate result.
 
+### 2026-09-04: reject fixed-point iteration accelerators
+
+VBD's fixed particle-color order gives every nonlinear Gauss--Seidel sweep the
+same propagation direction.  A prototype alternated forward and backward
+color traversal between iterations without changing launch count, per-color
+contact refresh, DAT ordering, or CUDA Graph topology.  Short surface tests
+looked promising, but complete trajectories and tetrahedral tests rejected
+the change.  All prototype code was removed.
+
+An NVIDIA GeForce RTX 5060 Ti A/B of the 62,770-tet Armadillo crusher scene
+showed that reducing from 10 to 8 iterations increased the position/edge error
+from 4.714 mm/0.036 mm with forward traversal to 7.207 mm/0.080 mm with
+alternating traversal.  Restricting the prototype to surface-only systems
+avoided that regression, but did not solve the long-trajectory surface issue.
+
+Surface results were measured by comparing a lower iteration count with a
+higher-count reference using the same traversal policy.  These are evolving
+nonlinear trajectories, so the position RMS is a convergence proxy rather
+than an error against a known analytic solution.
+
+| Scene and frames | Traversal | Candidate/reference | Wall time | Position RMS | Edge-length MAE |
+| --- | --- | ---: | ---: | ---: | ---: |
+| T-shirt, 100 | forward | 12/20 | 6.522 s | 6.137 mm | 0.155 mm |
+| T-shirt, 100 | alternating | 12/20 | 6.674 s | 4.477 mm | 0.126 mm |
+| T-shirt, 100 | alternating | 10/20 | 5.883 s | 5.789 mm | 0.160 mm |
+| Plastic bag, 120 | forward | 8/12 | 4.751 s | 21.164 mm | 0.187 mm |
+| Plastic bag, 120 | alternating | 8/12 | 4.695 s | 10.584 mm | 0.074 mm |
+| Plastic bag, 120 | alternating | 7/12 | 4.480 s | 13.974 mm | 0.098 mm |
+
+The 300-frame T-shirt check is the limiting case.  Alternating 12/20 produced
+11.248 mm position RMS and 0.325 mm edge MAE in 22.736/33.653 s.  Dropping to
+11 iterations increased those errors to 15.477 mm and 0.354 mm, while 10
+iterations reached 16.225 mm and 0.392 mm in a separate run.  Therefore the
+T-shirt demo remains at 12 iterations.  The shorter tests demonstrate better
+surface propagation, but do not justify a global iteration-count reduction.
+
+The complete 240-frame plastic-bag manipulation reversed the short-window
+result.  Forward 8/12 produced 9.189 mm position RMS and 0.109 mm edge MAE;
+alternating 8/12 produced 25.060 mm and 0.204 mm.  Their eight-iteration wall
+times were respectively 10.219 s and 10.241 s, so there was no performance
+gain to offset the accuracy loss.  Alternating 7/12 reached 22.365 mm and
+0.188 mm in 9.815 s and was also rejected.
+
+The following accelerators were implemented and removed during the same
+investigation:
+
+- A six-DOF translation/rotation cluster basis improved synthetic twist and
+  bend tests, but on the T-shirt its 12-iteration position RMS regressed from
+  7.41 mm to 7.79 mm against the same 20-iteration reference.  Smoothed
+  aggregation and post-smoothing did not recover the loss.  The approximate
+  rotational operator was not accurate enough to retain.
+- A device-side adaptive `capture_while` loop stopped the T-shirt at six
+  iterations with a loose relative-update threshold and saved about 12%, but
+  introduced 2.504 mm RMS and 0.119 mm edge error relative to fixed 12.  Strict
+  thresholds ran all 12 iterations and were slower because of reductions and
+  conditional-graph overhead.
+- Successive over-relaxation at 1.10 let a 10-iteration, 100-frame T-shirt run
+  reach 5.870 mm RMS versus 6.292 mm for ordinary 12 iterations, and reduced
+  wall time from 6.668 s to 5.610 s.  Stronger settings produced NaNs in a
+  multi-step nonlinear cloth stress test.  Without a cheap monotonicity
+  safeguard, fixed SOR is not sufficiently general and was removed.
+- Applying the translation-only coarse correction both mid-solve and at the
+  end improved the 100-frame 10/20 T-shirt proxy to 5.299 mm, but regressed to
+  17.817 mm over 300 frames.  Multiple applications amplify coarse-operator
+  error during long contact sequences, so the retained multilevel path still
+  performs one final correction.
+
+**Decision.** Reject all four prototypes and retain the original forward
+color order, fixed iteration count, one final translation-only coarse
+correction, and unit local Newton step.  Do not lower a demo's iteration count
+solely from a short trajectory; require its complete manipulation sequence to
+meet both position and strain metrics.
+
+### 2026-09-04: reject adaptive sweep plus multilevel control
+
+A second adaptive prototype tested block-level CUDA Graph conditionals rather
+than the earlier `capture_while` maximum-update loop.  It retained the configured
+12/20-iteration ceiling, grouped two complete color sweeps per conditional
+branch, required two consecutive passes, and always ran one coarse correction
+after the conditional blocks.  The first checkpoint initialized history and
+could not stop the solve.
+
+The prototype measured the untruncated local Newton candidate written by the
+elasticity solve, the change in the force-element normal-correction scale, a
+device flag set by any significant DAT or maximum-displacement truncation, and
+pneumatic volume change/clamp validity.  All decisions and statistics stayed on
+the device.  Warp 1.17's `capture_if` was verified separately to skip every CUDA
+node in a false branch on the local CUDA 12.9 system; this was a real graph-node
+skip, not a per-kernel inactive return.
+
+For scenes containing VBD-owned dynamic rigid bodies, an inactive particle
+branch continued the original number of AVBD and body-particle dual iterations.
+This avoided using a particle residual as a rigid convergence test.  The final
+coarse particle correction therefore saw the latest rigid pose.  CPU,
+differentiable, deterministic, uncaptured, and non-multilevel paths retained the
+ordinary fixed loop throughout the prototype.
+
+The captured T-shirt scene used 10 substeps per frame and 12 maximum particle
+iterations.  Timings below cover graph replay after construction and capture on
+an NVIDIA GeForce RTX 5060 Ti.  Contact atomic ordering is non-deterministic: a
+100-frame fixed/fixed repeat differed by 1.464 mm position RMS and 0.046 mm
+edge-length MAE, so position differences near that level are noise rather than
+an adaptive accuracy claim.
+
+| T-shirt run | Fixed | Adaptive | Mean sweeps | Position RMS | Edge MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 100 frames, local 0.005, contact check disabled | 6.608 s | 6.058 s | 9.996/12 | 1.796 mm | 0.055 mm |
+| 300 frames, local 0.005, contact 0.005 | 22.364 s | 23.551 s | 11.958/12 | 11.523 mm | 0.230 mm |
+
+The loose 100-frame diagnostic showed that node skipping can save 9.1% when
+contact convergence is deliberately ignored: 298 of 1,000 substeps stopped at
+six sweeps.  It is not a valid production configuration.  With all checks
+enabled over 300 frames, only 21 of 3,000 substeps stopped early and the added
+checkpoint/conditional nodes made the run 5.3% slower.  The long-horizon state
+difference is reported for completeness, but nonlinear non-deterministic
+trajectory divergence prevents attributing it to the 21 early stops.
+
+The full-contact plastic-bag/rod scene used an eight-sweep ceiling.  During a
+30-frame captured check, all 174 measured substeps ran all eight particle
+sweeps.  Fixed and adaptive wall times were 1.503 s and 1.481 s; the 1.4%
+difference is treated as noise because no particle work was skipped.  Position
+RMS and edge-length MAE were 0.164 mm and 0.003 mm.
+
+**Decision.** No-Go; all runtime, kernel, option, test, and benchmark prototype
+code was removed.  Conservative residuals correctly refuse to stop during the
+representative continuously driven contact phases, so per-checkpoint graph work
+adds overhead without removing sweeps.  Do not restore this design merely by
+loosening contact or local thresholds.  A future tiered-graph attempt first
+needs evidence that a cheap prior-substep signal predicts sustained 4/8/12/20
+sweep regimes; otherwise graph selection only moves the same overhead outside
+the loop.
+
 ## Reconstructed retained history
 
 The following changes predate standardized performance logging. They remain
