@@ -8,7 +8,7 @@ cd /home/oem/code/repos/newton
 
 页面右上角的“隐藏面板”可在进入沉浸式遥操前后使用。隐藏后，场景信息和操作说明不再遮挡实时画面，只保留右上角的小型“显示面板”按钮；再次点击即可恢复完整面板。该开关不暂停物理仿真、遥操输入或轨迹录制。
 
-六个场景都支持机器人第一人称。进入 WebXR 后，点击“切换到机器人第一人称”或按左手柄 X，可把双眼放到 W1 的眼睛位置；之后头部左右转动驱动 `NECK1`，抬头和低头驱动 `NECK2`，视角随之变化。再次按 X 返回观察模式，观察模式下左摇杆可以转动视角。切换模式或按 B 时会重新建立头显与 Newton 相机的中立朝向。
+七个场景都支持机器人第一人称。进入 WebXR 后，点击“切换到机器人第一人称”或按左手柄 X，可把双眼放到 W1 的眼睛位置；之后头部左右转动驱动 `NECK1`，抬头和低头驱动 `NECK2`，视角随之变化。再次按 X 返回观察模式，观察模式下左摇杆可以转动视角。切换模式或按 B 时会重新建立头显与 Newton 相机的中立朝向。
 
 ## 插头/插座场景
 
@@ -160,17 +160,43 @@ cd /home/oem/code/repos/newton
 
 该场景使用端口 `8770`，并在通用 WebXR 缓存目录持久保存螺母和螺栓的 SDF。首次缺少外部 IsaacGymEnvs 网格或 SDF 缓存时启动会明显更久；后续启动会复用缓存。启用录制后，JSONL 保存双手目标、抓握、W1 关节、颈部目标以及螺母/螺栓的逐帧位姿和速度。
 
+## 双手抓无纺布袋场景
+
+启动或从其他遥操场景安全切换：
+
+```bash
+./scripts/start_quest_webxr_nonwoven_bag_teleop.sh
+```
+
+场景使用正常站立、双手张开的完整 W1，袋子位于机器人前方 0.85 m 高的有限桌面上。左右 Grip 分别移动对应手臂，左右 Trigger 独立闭合对应手指；手指无接触时限制为 90°/s，接触袋子后降为 30°/s，以减少穿模。首次按住任一 Grip 或 Trigger 后，会解除袋子用于保持初始直立造型的世界坐标恢复力，使袋子可以被抓起、转动和搬运；物理复位会恢复袋子初态与定型状态。
+
+Quest 渲染完整 W1、桌面与桌腿，以及实时更新的双面无纺布袋。观察模式下左摇杆转动视角；点击“切换到机器人第一人称”或按左手柄 X 可切到 W1 眼睛位置。按右摇杆可原地复位 W1 和袋子。
+
+退出沉浸模式并进入安全待机：
+
+```bash
+./scripts/stop_quest_webxr_nonwoven_bag_teleop.sh
+```
+
+修改 Python 代码后需要加载新版本时使用分阶段重载：
+
+```bash
+./scripts/reload_quest_webxr_nonwoven_bag_teleop.sh
+```
+
+该场景使用端口 `8771`。默认不录制；按右手柄 A 后，JSONL 保存双手目标、抓握、W1 关节、颈部目标以及袋子全部粒子的逐帧位置和速度。
+
 ## 轨迹录制
 
-六个遥操场景默认都不自动录制轨迹。需要录制时，按右手柄 A 键开始；再次按 A 键可暂停或继续。也可以在启动命令末尾添加 `--record-on-connect`，显式恢复连接手柄后自动开始录制的行为。
+七个遥操场景默认都不自动录制轨迹。需要录制时，按右手柄 A 键开始；再次按 A 键可暂停或继续。也可以在启动命令末尾添加 `--record-on-connect`，显式恢复连接手柄后自动开始录制的行为。
 
 未按 A 键且未传入 `--record-on-connect` 时，不会写入逐帧轨迹数据。此设置减少的是本机 JSONL 写盘；WebXR 实时画面、控制状态和袋子网格更新仍会正常传输。
 
 ## Quest Browser 标签页复用
 
-六个启动脚本使用同一个浏览器应用标识。重复启动同一场景或切换场景时，Quest Browser 会在原有 Newton 标签页中导航，不再为每次启动创建新的标签页和渲染进程。
+七个启动脚本使用同一个浏览器应用标识。重复启动同一场景或切换场景时，Quest Browser 会在原有 Newton 标签页中导航，不再为每次启动创建新的标签页和渲染进程。
 
-旧版脚本已经创建的标签页没有这个标识，无法被新版脚本自动接管。首次使用新版脚本前，在 Quest Browser 中手动关闭已有的 `127.0.0.1:8765`、`127.0.0.1:8766`、`127.0.0.1:8767`、`127.0.0.1:8768`、`127.0.0.1:8769` 和 `127.0.0.1:8770` 标签页；如果此前已经提示 WebGL 不可用，可以关闭全部旧 Newton 标签页并重启一次 Quest Browser。此操作不需要停止或销毁 Newton CUDA 进程。
+旧版脚本已经创建的标签页没有这个标识，无法被新版脚本自动接管。首次使用新版脚本前，在 Quest Browser 中手动关闭已有的 `127.0.0.1:8765`、`127.0.0.1:8766`、`127.0.0.1:8767`、`127.0.0.1:8768`、`127.0.0.1:8769`、`127.0.0.1:8770` 和 `127.0.0.1:8771` 标签页；如果此前已经提示 WebGL 不可用，可以关闭全部旧 Newton 标签页并重启一次 Quest Browser。此操作不需要停止或销毁 Newton CUDA 进程。
 
 ## 安全切换遥操场景
 
@@ -190,7 +216,7 @@ cd /home/oem/code/repos/newton
 
 当前机器的 NVIDIA 595.71.05 驱动曾在 CUDA 工作突然停止后的设备电源或连接状态切换阶段触发整机硬锁。默认关闭脚本因此采用安全待机：禁用手柄输入、暂停录制并退出 Quest WebXR，但继续提交稳定物理帧，同时保留 ADB 映射、CUDA 进程和上下文。再次执行同一场景的启动脚本会恢复原进程，不会重新初始化 CUDA。
 
-因此，安全 `stop` 后再 `start` 不会加载期间修改的 Python 场景代码。启动器会比较运行进程和场景源码的时间戳；如果发现源码更新，会明确列出尚未加载的文件。六个场景都可使用各节列出的分阶段重载脚本，在 CUDA guard 保持设备活跃的情况下替换旧进程；正常重启仍是出现驱动异常时最保守的恢复方式。启动器每次都会用唯一查询参数刷新 Quest Browser 中复用的 Newton 标签页，因此新的 HTML/JavaScript 不需要手动清缓存。
+因此，安全 `stop` 后再 `start` 不会加载期间修改的 Python 场景代码。启动器会比较运行进程和场景源码的时间戳；如果发现源码更新，会明确列出尚未加载的文件。七个场景都可使用各节列出的分阶段重载脚本，在 CUDA guard 保持设备活跃的情况下替换旧进程；正常重启仍是出现驱动异常时最保守的恢复方式。启动器每次都会用唯一查询参数刷新 Quest Browser 中复用的 Newton 标签页，因此新的 HTML/JavaScript 不需要手动清缓存。
 
 安全待机会继续占用 GPU 和电力。只有在另一个场景已经稳定运行后，目标启动脚本才会将旧场景降为不提交物理帧的停泊状态，使 GPU 总体上不会在切换窗口突然空闲。
 
@@ -205,6 +231,7 @@ NEWTON_WEBXR_TERMINATE=1 ./scripts/stop_quest_webxr_bag_teleop.sh
 NEWTON_WEBXR_TERMINATE=1 ./scripts/stop_quest_webxr_soft_rigid_bag_teleop.sh
 NEWTON_WEBXR_TERMINATE=1 ./scripts/stop_quest_webxr_tshirt_teleop.sh
 NEWTON_WEBXR_TERMINATE=1 ./scripts/stop_quest_webxr_nut_bolt_teleop.sh
+NEWTON_WEBXR_TERMINATE=1 ./scripts/stop_quest_webxr_nonwoven_bag_teleop.sh
 ```
 
 不要绕过这些启动脚本手工恢复多个场景；启动脚本会自动串行完成安全接棒。
@@ -253,6 +280,13 @@ NEWTON_WEBXR_TERMINATE=1 ./scripts/stop_quest_webxr_nut_bolt_teleop.sh
 ./scripts/start_quest_webxr_nut_bolt_teleop.sh
 ```
 
+双手抓无纺布袋场景对应为：
+
+```bash
+./scripts/stop_quest_webxr_nonwoven_bag_teleop.sh
+./scripts/start_quest_webxr_nonwoven_bag_teleop.sh
+```
+
 ## 检查运行状态和日志
 
 ```bash
@@ -299,6 +333,14 @@ tail -f "${XDG_STATE_HOME:-$HOME/.local/state}/newton-webxr-tshirt-teleop/latest
 systemctl --user status newton-quest-webxr-nut-bolt.service --no-pager
 curl --fail http://127.0.0.1:8770/healthz
 tail -f "${XDG_STATE_HOME:-$HOME/.local/state}/newton-webxr-nut-bolt-teleop/latest.log"
+```
+
+双手抓无纺布袋场景：
+
+```bash
+systemctl --user status newton-quest-webxr-nonwoven-bag.service --no-pager
+curl --fail http://127.0.0.1:8771/healthz
+tail -f "${XDG_STATE_HOME:-$HOME/.local/state}/newton-webxr-nonwoven-bag-teleop/latest.log"
 ```
 
 安全待机后，`healthz` 中应显示 `teleoperationActive=false`、`simulationActive=true` 和 `operationMode=standby`。新场景接棒后，旧场景应显示 `simulationActive=false` 和 `operationMode=parked`；当前活动场景应显示两个 active 字段均为 `true`。
