@@ -1,0 +1,1 @@
+Refresh MJVBD_V2 joint material caches after `JOINT_DOF_PROPERTIES` notifications, map split ROD materials to its legacy stretch/bend slots, cap proxy-body reaction harvesting to contacts consumed by the destination solve, and clamp self-contact traversal to valid candidate counts.
