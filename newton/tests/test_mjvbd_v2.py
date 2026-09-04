@@ -4,6 +4,7 @@
 """Focused tests for SolverMJVBDV2 ownership and stepping."""
 
 import unittest
+import warnings
 from unittest import mock
 
 import numpy as np
@@ -363,6 +364,28 @@ def _build_falling_articulation_model(device):
 
 
 class TestMJVBDV2(unittest.TestCase):
+    def test_backends_use_rod_joint_name(self):
+        """Avoid the deprecated cable-joint alias in both VBD paths."""
+        full_model, _, _, _, full_articulation = _build_partition_model("cpu")
+        soft_model, soft_articulation = _build_kinematic_particle_model("cpu")
+
+        for label, model, articulation in (
+            ("full", full_model, full_articulation),
+            ("soft", soft_model, soft_articulation),
+        ):
+            with self.subTest(backend=label), warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "error",
+                    message=r".*JointType\.CABLE.*",
+                    category=DeprecationWarning,
+                )
+                SolverMJVBDV2(
+                    model,
+                    mujoco_articulations=[articulation],
+                    joint_mode="kinematic",
+                    vbd_options={"iterations": 1},
+                )
+
     def test_full_contact_backend_uses_private_pipeline(self):
         """Keep the full-contact collision implementation inside MJVBDV2."""
         model, _ = _build_pure_vbd_model("cpu")

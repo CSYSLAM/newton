@@ -321,8 +321,8 @@ class _KinematicFullVBDBackend(SolverBase):
         joint_enabled[joint_indices] = False
         view.joint_enabled = wp.array(joint_enabled, dtype=wp.bool, device=model.device)
         joint_type = np.asarray(model.joint_type.numpy(), dtype=np.int32).copy()
-        cable_mask = joint_type[joint_indices] == int(JointType.CABLE)
-        joint_type[joint_indices[cable_mask]] = int(JointType.D6)
+        rod_mask = joint_type[joint_indices] == int(JointType.ROD)
+        joint_type[joint_indices[rod_mask]] = int(JointType.D6)
         view.joint_type = wp.array(joint_type, dtype=wp.int32, device=model.device)
         self.view = view
 

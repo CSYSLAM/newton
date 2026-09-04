@@ -135,11 +135,11 @@ class SolverVBD(SolverBase, CouplingInterface):
     slot at runtime via :meth:`set_joint_constraint_mode`.
 
     Joint limitations:
-        - Supported joint types: BALL, FIXED, FREE, REVOLUTE, PRISMATIC, D6, CABLE.
+        - Supported joint types: BALL, FIXED, FREE, REVOLUTE, PRISMATIC, D6, ROD.
           DISTANCE joints are not supported.
         - :attr:`~newton.Model.joint_enabled` is supported for all joint types.
         - :attr:`~newton.Model.joint_target_ke`/:attr:`~newton.Model.joint_target_kd` are supported
-          for REVOLUTE, PRISMATIC, D6 (as drives), and CABLE (as stretch/bend stiffness and damping).
+          for REVOLUTE, PRISMATIC, D6 (as drives), and ROD (as stretch/bend stiffness and damping).
           VBD interprets ``kd`` as absolute damping in physical units.
         - :attr:`~newton.Model.joint_limit_lower`/:attr:`~newton.Model.joint_limit_upper` and
           :attr:`~newton.Model.joint_limit_ke`/:attr:`~newton.Model.joint_limit_kd` are supported
@@ -210,7 +210,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         """Named constraint slot indices for :meth:`set_joint_constraint_mode`.
 
         The first two solver constraint slots are structural where present:
-          - CABLE: LINEAR/STRETCH -> stretch, ANGULAR/BEND -> bend
+          - ROD: LINEAR/STRETCH -> stretch, ANGULAR/BEND -> bend
           - BALL: LINEAR only
           - FIXED/REVOLUTE/PRISMATIC/D6: LINEAR and ANGULAR
 
@@ -1638,7 +1638,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         """Initialize VBD-owned joint constraint indexing.
 
         VBD stores and adapts penalty stiffness values for scalar constraint components:
-          - CABLE: 2 scalars (stretch/linear, bend/angular)
+          - ROD: 2 scalars (stretch/linear, bend/angular)
           - BALL:  1 scalar (isotropic linear anchor-coincidence)
           - FIXED: 2 scalars (isotropic linear + isotropic angular)
           - REVOLUTE:  3 scalars (isotropic linear + 2-DOF perpendicular angular + angular drive/limit)
@@ -1657,7 +1657,7 @@ class SolverVBD(SolverBase, CouplingInterface):
 
             dim_np = np.zeros((n_j,), dtype=np.int32)
             for j in range(n_j):
-                if jt[j] == JointType.CABLE:
+                if jt[j] == JointType.ROD:
                     dim_np[j] = 2
                 elif jt[j] == JointType.BALL:
                     dim_np[j] = 1
@@ -1673,7 +1673,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     if jt[j] != JointType.FREE:
                         raise NotImplementedError(
                             f"SolverVBD rigid joints: JointType.{JointType(jt[j]).name} is not implemented yet "
-                            "(only CABLE, BALL, FIXED, REVOLUTE, PRISMATIC, and D6 are supported)."
+                            "(only ROD, BALL, FIXED, REVOLUTE, PRISMATIC, and D6 are supported)."
                         )
                     dim_np[j] = 0
 
@@ -1747,12 +1747,12 @@ class SolverVBD(SolverBase, CouplingInterface):
 
             n_j = self.model.joint_count
             for j in range(n_j):
-                if jt[j] == JointType.CABLE:
+                if jt[j] == JointType.ROD:
                     c0 = int(jc_start[j])
                     dof0 = int(jdofs[j])
                     if dof0 < 0 or (dof0 + 1) >= len(jtarget_ke) or (dof0 + 1) >= len(jtarget_kd):
                         raise RuntimeError(
-                            "SolverVBD _init_joint_penalty_k: JointType.CABLE requires 2 DOF entries in "
+                            "SolverVBD _init_joint_penalty_k: JointType.ROD requires 2 DOF entries in "
                             "model.joint_target_ke/kd starting at joint_qd_start[j]. "
                             f"Got joint_index={j}, joint_qd_start={dof0}, "
                             f"len(joint_target_ke)={len(jtarget_ke)}, len(joint_target_kd)={len(jtarget_kd)}."
