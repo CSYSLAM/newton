@@ -69,6 +69,7 @@ from .rigid_vbd_kernels import (
     init_body_body_contact_materials,
     init_body_body_contacts_avbd,
     init_body_particle_contacts,
+    refresh_joint_penalty_params,
     reset_rigid_state,
     snapshot_body_body_contact_history,
     solve_rigid_body,
@@ -126,20 +127,22 @@ class SolverVBD(SolverBase, CouplingInterface):
     by the AVBD beta parameters. Hard contacts and hard joint slots additionally
     use augmented-Lagrangian state.
 
-    Non-cable structural joint slots default to **hard mode** (augmented Lagrangian
-    with persistent lambda and C0 stabilization). Cable stretch and bend default to
+    Non-rod structural joint slots default to **hard mode** (augmented Lagrangian
+    with persistent lambda and C0 stabilization). Rod stretch and bend default to
     **soft mode**. Joint hard/soft mode is initialized from the optional
     ``model.vbd.joint_is_hard`` custom attribute; author values at joint creation,
     before constructing the solver. The hard/soft mode can also be changed per
     slot at runtime via :meth:`set_joint_constraint_mode`.
 
     Joint limitations:
-        - Supported joint types: BALL, FIXED, FREE, REVOLUTE, PRISMATIC, D6, CABLE.
+        - Supported joint types: BALL, FIXED, FREE, REVOLUTE, PRISMATIC, D6, ROD.
           DISTANCE joints are not supported.
         - :attr:`~newton.Model.joint_enabled` is supported for all joint types.
         - :attr:`~newton.Model.joint_target_ke`/:attr:`~newton.Model.joint_target_kd` are supported
-          for REVOLUTE, PRISMATIC, D6 (as drives), and CABLE (as stretch/bend stiffness and damping).
+          for REVOLUTE, PRISMATIC, D6 (as drives), and ROD (as stretch/bend stiffness and damping).
           VBD interprets ``kd`` as absolute damping in physical units.
+          This private backend retains the legacy isotropic ROD approximation: it reads the
+          stretch and bend slots but does not model independent shear or twist stiffness.
         - :attr:`~newton.Model.joint_limit_lower`/:attr:`~newton.Model.joint_limit_upper` and
           :attr:`~newton.Model.joint_limit_ke`/:attr:`~newton.Model.joint_limit_kd` are supported
           for REVOLUTE, PRISMATIC, and D6 joints.
@@ -209,12 +212,12 @@ class SolverVBD(SolverBase, CouplingInterface):
         """Named constraint slot indices for :meth:`set_joint_constraint_mode`.
 
         The first two solver constraint slots are structural where present:
-          - CABLE: LINEAR/STRETCH -> stretch, ANGULAR/BEND -> bend
+          - ROD: LINEAR/STRETCH -> stretch, ANGULAR/BEND -> bend
           - BALL: LINEAR only
           - FIXED/REVOLUTE/PRISMATIC/D6: LINEAR and ANGULAR
 
         Drive/limit slots start at slot 2 and are not represented here.
-        STRETCH and BEND are cable-only aliases for LINEAR and ANGULAR.
+        STRETCH and BEND are rod-only aliases for LINEAR and ANGULAR.
         """
 
         LINEAR = 0
@@ -1194,12 +1197,43 @@ class SolverVBD(SolverBase, CouplingInterface):
         self._apply_module_options()
         if flags & (ModelFlags.BODY_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES):
             self._refresh_kinematic_state()
+        if (
+            flags & ModelFlags.JOINT_DOF_PROPERTIES
+            and not self.integrate_with_external_rigid_solver
+            and self.model.joint_count > 0
+        ):
+            self._refresh_joint_penalty_params()
         if flags & (ModelFlags.MODEL_PROPERTIES | ModelFlags.SHAPE_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES):
             if self.model.particle_count:
                 (
                     self.surface_tile_skip_active_checks,
                     self.surface_tile_skip_material_checks,
                 ) = self._compute_surface_tile_fast_path_flags()
+
+    def _refresh_joint_penalty_params(self) -> None:
+        """Refresh model-derived AVBD joint material caches in place."""
+        wp.launch(
+            kernel=refresh_joint_penalty_params,
+            dim=self.model.joint_count,
+            inputs=[
+                self.model.joint_type,
+                self.model.joint_qd_start,
+                self.model.joint_dof_dim,
+                self.joint_constraint_start,
+                self.model.joint_target_ke,
+                self.model.joint_target_kd,
+                self.model.joint_limit_ke,
+                self.rigid_joint_linear_k_start if self.rigid_joint_linear_k_start is not None else -1.0,
+                self.rigid_joint_angular_k_start if self.rigid_joint_angular_k_start is not None else -1.0,
+            ],
+            outputs=[
+                self.joint_penalty_k,
+                self.joint_penalty_k_min,
+                self.joint_penalty_k_max,
+                self.joint_penalty_kd,
+            ],
+            device=self.device,
+        )
 
     @override
     def coupling_supports_inertial_property_refresh(self) -> bool:
@@ -1358,9 +1392,11 @@ class SolverVBD(SolverBase, CouplingInterface):
             )
 
         if contacts.soft_contact_max > 0 and self.body_particle_contact_penalty_k.shape[0] >= contacts.soft_contact_max:
+            # Mirror the capped per-body list used by the destination solve so
+            # harvested reaction forces cannot include discarded contacts.
             wp.launch(
                 _harvest_vbd_body_particle_contact_forces_on_proxy_bodies_kernel,
-                dim=contacts.soft_contact_max,
+                dim=self.model.body_count * _NUM_CONTACT_THREADS_PER_BODY,
                 inputs=[
                     float(dt),
                     body_local_to_proxy_global,
@@ -1383,6 +1419,9 @@ class SolverVBD(SolverBase, CouplingInterface):
                     contacts.soft_contact_normal,
                     self.model.shape_margin,
                     self.model.shape_body,
+                    self.body_particle_contact_buffer_pre_alloc,
+                    self.body_particle_contact_counts,
+                    self.body_particle_contact_indices,
                     out_body_f,
                 ],
                 device=self.device,
@@ -1589,7 +1628,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         """Initialize VBD-owned joint constraint indexing.
 
         VBD stores and adapts penalty stiffness values for scalar constraint components:
-          - CABLE: 2 scalars (stretch/linear, bend/angular)
+          - ROD: 2 solver scalars (stretch/linear, bend/angular)
           - BALL:  1 scalar (isotropic linear anchor-coincidence)
           - FIXED: 2 scalars (isotropic linear + isotropic angular)
           - REVOLUTE:  3 scalars (isotropic linear + 2-DOF perpendicular angular + angular drive/limit)
@@ -1608,7 +1647,7 @@ class SolverVBD(SolverBase, CouplingInterface):
 
             dim_np = np.zeros((n_j,), dtype=np.int32)
             for j in range(n_j):
-                if jt[j] == JointType.CABLE:
+                if jt[j] == JointType.ROD:
                     dim_np[j] = 2
                 elif jt[j] == JointType.BALL:
                     dim_np[j] = 1
@@ -1624,7 +1663,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     if jt[j] != JointType.FREE:
                         raise NotImplementedError(
                             f"SolverVBD rigid joints: JointType.{JointType(jt[j]).name} is not implemented yet "
-                            "(only CABLE, BALL, FIXED, REVOLUTE, PRISMATIC, and D6 are supported)."
+                            "(only ROD, BALL, FIXED, REVOLUTE, PRISMATIC, and D6 are supported)."
                         )
                     dim_np[j] = 0
 
@@ -1698,24 +1737,34 @@ class SolverVBD(SolverBase, CouplingInterface):
 
             n_j = self.model.joint_count
             for j in range(n_j):
-                if jt[j] == JointType.CABLE:
+                if jt[j] == JointType.ROD:
                     c0 = int(jc_start[j])
                     dof0 = int(jdofs[j])
-                    if dof0 < 0 or (dof0 + 1) >= len(jtarget_ke) or (dof0 + 1) >= len(jtarget_kd):
+                    linear_count = int(jdof_dim[j, 0])
+                    angular_count = int(jdof_dim[j, 1])
+                    bend_dof = dof0 + linear_count
+                    if (
+                        dof0 < 0
+                        or linear_count < 1
+                        or angular_count < 1
+                        or bend_dof >= len(jtarget_ke)
+                        or bend_dof >= len(jtarget_kd)
+                    ):
                         raise RuntimeError(
-                            "SolverVBD _init_joint_penalty_k: JointType.CABLE requires 2 DOF entries in "
-                            "model.joint_target_ke/kd starting at joint_qd_start[j]. "
+                            "SolverVBD _init_joint_penalty_k: JointType.ROD requires stretch and bend entries in "
+                            "model.joint_target_ke/kd. "
                             f"Got joint_index={j}, joint_qd_start={dof0}, "
+                            f"joint_dof_dim={tuple(jdof_dim[j])}, "
                             f"len(joint_target_ke)={len(jtarget_ke)}, len(joint_target_kd)={len(jtarget_kd)}."
                         )
                     ke_stretch = jtarget_ke[dof0]
-                    ke_bend = jtarget_ke[dof0 + 1]
+                    ke_bend = jtarget_ke[bend_dof]
                     joint_k_max_np[c0] = ke_stretch
                     joint_k_max_np[c0 + 1] = ke_bend
                     joint_k_init_np[c0] = ke_stretch if lin_k_start is None else min(lin_k_start, ke_stretch)
                     joint_k_init_np[c0 + 1] = ke_bend if ang_k_start is None else min(ang_k_start, ke_bend)
                     joint_kd_np[c0] = jtarget_kd[dof0]
-                    joint_kd_np[c0 + 1] = jtarget_kd[dof0 + 1]
+                    joint_kd_np[c0 + 1] = jtarget_kd[bend_dof]
                 elif jt[j] == JointType.BALL:
                     c0 = int(jc_start[j])
                     joint_k_max_np[c0] = structural_linear_ke

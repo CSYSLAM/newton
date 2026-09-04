@@ -464,7 +464,7 @@ def evaluate_angular_constraint_force_hessian(
     kappa is kappa - alpha*C0_ang (initial violation snapshot).
 
     Special cases by projector:
-      - P = I: isotropic (CABLE bend, FIXED angular)
+      - P = I: isotropic (ROD bend, FIXED angular)
       - P = I - a*a^T: revolute (1 free angular axis)
       - arbitrary P: D6 (0-3 free angular axes)
 
@@ -548,7 +548,7 @@ def evaluate_linear_constraint_force_hessian(
     constraint violation is C - alpha*C0 (initial violation snapshot).
 
     Special cases by projector:
-      - P = I: isotropic (BALL, CABLE stretch, FIXED linear, REVOLUTE linear)
+      - P = I: isotropic (BALL, ROD stretch, FIXED linear, REVOLUTE linear)
       - P = I - a*a^T: prismatic (1 free linear axis)
       - arbitrary P: D6 (0-3 free linear axes)
 
@@ -1212,6 +1212,72 @@ def _zero_force_hessian():
     return wp.vec3(0.0), wp.vec3(0.0), wp.mat33(0.0), wp.mat33(0.0), wp.mat33(0.0)
 
 
+@wp.kernel
+def refresh_joint_penalty_params(
+    joint_type: wp.array[int],
+    joint_qd_start: wp.array[int],
+    joint_dof_dim: wp.array2d[int],
+    joint_constraint_start: wp.array[wp.int32],
+    joint_target_ke: wp.array[float],
+    joint_target_kd: wp.array[float],
+    joint_limit_ke: wp.array[float],
+    linear_k_start: float,
+    angular_k_start: float,
+    joint_penalty_k: wp.array[float],
+    joint_penalty_k_min: wp.array[float],
+    joint_penalty_k_max: wp.array[float],
+    joint_penalty_kd: wp.array[float],
+):
+    """Refresh model-derived legacy AVBD stiffness and damping in place."""
+    joint_id = wp.tid()
+    jt = joint_type[joint_id]
+    constraint_start = joint_constraint_start[joint_id]
+    dof_start = joint_qd_start[joint_id]
+
+    if jt == JointType.ROD:
+        # The private legacy solver retains its isotropic two-constraint
+        # approximation. Map the split model layout to stretch and bend; the
+        # first angular slot follows all linear material slots.
+        bend_dof_offset = joint_dof_dim[joint_id, 0]
+        for slot in range(2):
+            dof = dof_start
+            seed = linear_k_start
+            if slot == 1:
+                dof = dof_start + bend_dof_offset
+                seed = angular_k_start
+            stiffness = joint_target_ke[dof]
+            if joint_penalty_k_max[constraint_start + slot] != stiffness:
+                seeded_stiffness = wp.min(seed, stiffness) if seed >= 0.0 else stiffness
+                joint_penalty_k[constraint_start + slot] = seeded_stiffness
+                joint_penalty_k_min[constraint_start + slot] = seeded_stiffness
+                joint_penalty_k_max[constraint_start + slot] = stiffness
+            joint_penalty_kd[constraint_start + slot] = joint_target_kd[dof]
+        return
+
+    linear_count = int(0)
+    angular_count = int(0)
+    if jt == JointType.PRISMATIC:
+        linear_count = 1
+    elif jt == JointType.REVOLUTE:
+        angular_count = 1
+    elif jt == JointType.D6:
+        linear_count = joint_dof_dim[joint_id, 0]
+        angular_count = joint_dof_dim[joint_id, 1]
+    else:
+        return
+
+    slot_start = constraint_start + 2
+    for axis in range(linear_count + angular_count):
+        dof = dof_start + axis
+        stiffness = wp.max(joint_target_ke[dof], joint_limit_ke[dof])
+        if joint_penalty_k_max[slot_start + axis] != stiffness:
+            seed = linear_k_start if axis < linear_count else angular_k_start
+            seeded_stiffness = wp.min(seed, stiffness) if seed >= 0.0 else stiffness
+            joint_penalty_k[slot_start + axis] = seeded_stiffness
+            joint_penalty_k_min[slot_start + axis] = seeded_stiffness
+            joint_penalty_k_max[slot_start + axis] = stiffness
+
+
 @wp.func
 def evaluate_joint_force_hessian(
     body_index: int,
@@ -1256,13 +1322,13 @@ def evaluate_joint_force_hessian(
 ):
     """Compute AVBD joint force and Hessian contributions for one body.
 
-    Supported joint types: CABLE, BALL, FIXED, REVOLUTE, PRISMATIC, D6.
+    Supported joint types: ROD, BALL, FIXED, REVOLUTE, PRISMATIC, D6.
     Uses unified projector-based constraint evaluators for all joint types.
 
     Indexing:
         joint_constraint_start[j] is a solver-owned start offset into the per-constraint
         arrays (joint_penalty_k, joint_penalty_kd). Layout per joint type:
-          - CABLE: 2 scalars -> [stretch, bend]
+          - ROD: 2 legacy solver scalars -> [stretch, bend]
           - BALL:  1 scalar  -> [linear]
           - FIXED: 2 scalars -> [linear, angular]
           - REVOLUTE:  3 scalars -> [linear, angular, ang_drive_limit]
@@ -1273,7 +1339,7 @@ def evaluate_joint_force_hessian(
     """
     jt = joint_type[joint_index]
     if (
-        jt != JointType.CABLE
+        jt != JointType.ROD
         and jt != JointType.BALL
         and jt != JointType.FIXED
         and jt != JointType.REVOLUTE
@@ -1352,7 +1418,7 @@ def evaluate_joint_force_hessian(
         ang_C0 = joint_C0_ang[joint_index]
         ang_alpha = avbd_alpha
 
-    if jt == JointType.CABLE:
+    if jt == JointType.ROD:
         k_stretch = joint_penalty_k[c_start]
         k_bend = joint_penalty_k[c_start + 1]
         kd_stretch = joint_penalty_kd[c_start]
@@ -2724,7 +2790,7 @@ def compute_cable_dahl_parameters(
     j = wp.tid()
 
     # Only cable joints own Dahl state.
-    if joint_type[j] != JointType.CABLE:
+    if joint_type[j] != JointType.ROD:
         joint_sigma_start[j] = wp.vec3(0.0)
         joint_C_fric[j] = wp.vec3(0.0)
         return
@@ -3652,7 +3718,7 @@ def update_duals_joint(
 
     jt = joint_type[j]
     if (
-        jt != JointType.CABLE
+        jt != JointType.ROD
         and jt != JointType.BALL
         and jt != JointType.FIXED
         and jt != JointType.REVOLUTE
@@ -3674,8 +3740,8 @@ def update_duals_joint(
     X_wc = body_q[child] * joint_X_c[j]
     X_wc_rest = body_q_rest[child] * joint_X_c[j]
 
-    # CABLE joint: isotropic stretch + isotropic bend penalties (2 scalars).
-    if jt == JointType.CABLE:
+    # ROD joint: legacy isotropic stretch + bend penalties (2 scalars).
+    if jt == JointType.ROD:
         q_wp = wp.transform_get_rotation(X_wp)
         q_wc = wp.transform_get_rotation(X_wc)
         q_wp_rest = wp.transform_get_rotation(X_wp_rest)
@@ -4357,7 +4423,7 @@ def update_cable_dahl_state(
     j = wp.tid()
 
     # Only update cable joints
-    if joint_type[j] != JointType.CABLE:
+    if joint_type[j] != JointType.ROD:
         return
 
     # Get parent and child body indices

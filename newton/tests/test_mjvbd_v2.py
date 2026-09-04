@@ -11,6 +11,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.mjvbd_v2.ownership import resolve_ownership
+from newton._src.solvers.mjvbd_v2.vbd.solver_vbd import SolverVBD as SolverVBDFull
 from newton._src.solvers.mjvbd_v2.vbd_soft.solver_vbd import SolverVBD as SolverVBDSoft
 from newton.solvers import SolverMJVBD, SolverMJVBDV2
 
@@ -362,7 +363,198 @@ def _build_falling_articulation_model(device):
     return builder.finalize(device=device), root, articulation
 
 
+def _harvest_private_vbd_proxy_wrench(solver_cls, buffer_size, particle_count, device="cpu"):
+    """Harvest one body's reaction to a configurable number of soft contacts."""
+    radius = 0.05
+    depth = 0.01
+    dt = 1.0 / 60.0
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    body = builder.add_body(mass=1.0e6, inertia=wp.mat33(np.eye(3) * 1.0e6))
+    builder.add_shape_box(
+        body=body,
+        hx=5.0,
+        hy=5.0,
+        hz=0.5,
+        xform=wp.transform(wp.vec3(0.0, 0.0, -0.5), wp.quat_identity()),
+    )
+    for particle in range(particle_count):
+        builder.add_particle(
+            pos=(2.0 * radius * (particle - 0.5 * (particle_count - 1)), 0.0, radius - depth),
+            vel=(0.0, 0.0, 0.0),
+            mass=1.0,
+            radius=radius,
+        )
+    builder.color()
+    model = builder.finalize(device=device)
+    solver = solver_cls(
+        model,
+        iterations=1,
+        rigid_body_particle_contact_buffer_size=buffer_size,
+    )
+    state_in = model.state()
+    state_out = model.state()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
+    collision_pipeline.collide(state_in, contacts)
+    solver.step(state_in, state_out, None, contacts, dt)
+
+    out_body_f = wp.zeros(1, dtype=wp.spatial_vector, device=model.device)
+    solver.coupling_harvest_proxy_wrenches(
+        wp.array([0], dtype=int, device=model.device),
+        out_body_f,
+        body_qd_before=state_in.body_qd,
+        state=state_in,
+        state_out=state_out,
+        contacts=contacts,
+        dt=dt,
+    )
+    return {
+        "contact_count": int(contacts.soft_contact_count.numpy()[0]),
+        "listed_count": int(solver.body_particle_contact_counts.numpy()[0]),
+        "overflow_max": int(solver.body_particle_contact_overflow_max.numpy()[0]),
+        "wrench": out_body_f.numpy()[0],
+    }
+
+
 class TestMJVBDV2(unittest.TestCase):
+    def _assert_private_vbd_proxy_wrench_respects_contact_cap(self, device):
+        particle_count = 12
+        cap = 4
+        for solver_cls in (SolverVBDFull, SolverVBDSoft):
+            with self.subTest(backend=solver_cls.__module__, device=device):
+                full = _harvest_private_vbd_proxy_wrench(solver_cls, particle_count, particle_count, device)
+                capped = _harvest_private_vbd_proxy_wrench(solver_cls, cap, particle_count, device)
+
+                self.assertEqual(full["contact_count"], particle_count)
+                self.assertEqual(full["listed_count"], particle_count)
+                self.assertEqual(full["overflow_max"], 0)
+                self.assertGreater(abs(full["wrench"][2]), 0.0)
+                self.assertGreater(capped["overflow_max"], cap)
+                np.testing.assert_allclose(
+                    capped["wrench"][:3],
+                    full["wrench"][:3] * (cap / particle_count),
+                    rtol=1.0e-5,
+                    atol=1.0e-6,
+                )
+
+    def test_private_vbd_proxy_wrench_respects_contact_cap(self):
+        """Harvest only body-particle contacts consumed by the CPU solve."""
+        self._assert_private_vbd_proxy_wrench_respects_contact_cap("cpu")
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA is unavailable")
+    def test_private_vbd_proxy_wrench_respects_contact_cap_cuda(self):
+        """Harvest only body-particle contacts consumed by the CUDA solve."""
+        self._assert_private_vbd_proxy_wrench_respects_contact_cap("cuda:0")
+
+    def test_private_vbd_refreshes_joint_drive_stiffness(self):
+        """Refresh cached drive stiffness without reallocating solver arrays."""
+        for solver_cls in (SolverVBDFull, SolverVBDSoft):
+            with self.subTest(backend=solver_cls.__module__):
+                builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+                body = builder.add_link()
+                builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05)
+                joint = builder.add_joint_revolute(
+                    -1,
+                    body,
+                    target_ke=50.0,
+                    limit_ke=10.0,
+                )
+                builder.add_articulation([joint])
+                builder.color()
+                model = builder.finalize(device="cpu")
+                solver = solver_cls(model, rigid_avbd_beta=5.0)
+
+                slot = int(solver.joint_constraint_start.numpy()[joint]) + 2
+                self.assertAlmostEqual(float(solver.joint_penalty_k_max.numpy()[slot]), 50.0)
+
+                penalty_k = solver.joint_penalty_k.numpy()
+                penalty_k[slot] = 31.0
+                solver.joint_penalty_k.assign(penalty_k)
+                ptrs = {
+                    name: getattr(solver, name).ptr
+                    for name in ("joint_penalty_k", "joint_penalty_k_min", "joint_penalty_k_max")
+                }
+
+                model.joint_limit_ke.assign([20.0])
+                solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
+                self.assertAlmostEqual(float(solver.joint_penalty_k.numpy()[slot]), 31.0)
+
+                model.joint_limit_ke.assign([80.0])
+                solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
+                self.assertAlmostEqual(float(solver.joint_penalty_k.numpy()[slot]), 10.0)
+                self.assertAlmostEqual(float(solver.joint_penalty_k_min.numpy()[slot]), 10.0)
+                self.assertAlmostEqual(float(solver.joint_penalty_k_max.numpy()[slot]), 80.0)
+                for name, ptr in ptrs.items():
+                    self.assertEqual(getattr(solver, name).ptr, ptr)
+
+    def test_private_vbd_maps_and_refreshes_split_rod_materials(self):
+        """Map split ROD data to legacy stretch and bend constraint slots."""
+        for solver_cls in (SolverVBDFull, SolverVBDSoft):
+            with self.subTest(backend=solver_cls.__module__):
+                builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+                body = builder.add_link()
+                builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05)
+                joint = builder.add_joint_rod(
+                    -1,
+                    body,
+                    stretch_stiffness=100.0,
+                    stretch_damping=1.0,
+                    shear_stiffness=200.0,
+                    shear_damping=2.0,
+                    bend_stiffness=300.0,
+                    bend_damping=3.0,
+                    twist_stiffness=400.0,
+                    twist_damping=4.0,
+                )
+                builder.add_articulation([joint])
+                builder.color()
+                model = builder.finalize(device="cpu")
+                solver = solver_cls(model, rigid_avbd_beta=5.0)
+
+                start = int(solver.joint_constraint_start.numpy()[joint])
+                np.testing.assert_allclose(solver.joint_penalty_k_max.numpy()[start : start + 2], [100.0, 300.0])
+                np.testing.assert_allclose(solver.joint_penalty_kd.numpy()[start : start + 2], [1.0, 3.0])
+                ptrs = {
+                    name: getattr(solver, name).ptr
+                    for name in (
+                        "joint_penalty_k",
+                        "joint_penalty_k_min",
+                        "joint_penalty_k_max",
+                        "joint_penalty_kd",
+                    )
+                }
+
+                model.joint_target_ke.assign([500.0, 600.0, 700.0, 800.0])
+                model.joint_target_kd.assign([5.0, 6.0, 7.0, 8.0])
+                solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
+
+                np.testing.assert_allclose(solver.joint_penalty_k.numpy()[start : start + 2], [100.0, 10.0])
+                np.testing.assert_allclose(solver.joint_penalty_k_min.numpy()[start : start + 2], [100.0, 10.0])
+                np.testing.assert_allclose(solver.joint_penalty_k_max.numpy()[start : start + 2], [500.0, 700.0])
+                np.testing.assert_allclose(solver.joint_penalty_kd.numpy()[start : start + 2], [5.0, 7.0])
+                for name, ptr in ptrs.items():
+                    self.assertEqual(getattr(solver, name).ptr, ptr)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA is unavailable")
+    def test_private_vbd_joint_refresh_runs_on_cuda(self):
+        """Run the private joint material refresh kernel on CUDA."""
+        for solver_cls in (SolverVBDFull, SolverVBDSoft):
+            with self.subTest(backend=solver_cls.__module__):
+                builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+                body = builder.add_link()
+                builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05)
+                joint = builder.add_joint_revolute(-1, body, target_ke=50.0, limit_ke=10.0)
+                builder.add_articulation([joint])
+                builder.color()
+                model = builder.finalize(device="cuda:0")
+                solver = solver_cls(model, rigid_avbd_beta=5.0)
+
+                model.joint_limit_ke.assign([80.0])
+                solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
+
+                slot = int(solver.joint_constraint_start.numpy()[joint]) + 2
+                self.assertAlmostEqual(float(solver.joint_penalty_k_max.numpy()[slot]), 80.0)
+
     def test_full_contact_backend_uses_private_pipeline(self):
         """Keep the full-contact collision implementation inside MJVBDV2."""
         model, _ = _build_pure_vbd_model("cpu")
