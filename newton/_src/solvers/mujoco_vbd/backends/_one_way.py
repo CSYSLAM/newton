@@ -24,7 +24,11 @@ from ....sim import BodyFlags, Contacts, Control, JointType, ModelFlags, State, 
 from ..config import MuJoCoVBDResolvedOptions
 from ..contact_routing import build_contact_routing
 from ..diagnostics import allocate_diagnostics
-from ..kernels import reconcile_owned_body_state_kernel, sync_dirichlet_proxy_bodies_kernel
+from ..kernels import (
+    reconcile_owned_body_state_kernel,
+    reconcile_owned_joint_state_kernel,
+    sync_dirichlet_proxy_bodies_kernel,
+)
 from ..model_overlay import build_model_overlays
 from ..ownership import MuJoCoVBDOwnership
 from .base import MuJoCoVBDBackendBase
@@ -226,8 +230,9 @@ class OneWayBackend(MuJoCoVBDBackendBase):
             self.vbd.step(state_in, state_out, control, selected_contacts, dt)
             return
 
-        # Seed the VBD input from the caller's public state.
-        self._copy_public_state(self._vbd_state_in, state_in)
+        # Seed every VBD-owned state field, including custom namespaces such as
+        # pneumatic volume and pressure, from the caller's public state.
+        self._vbd_state_in.assign(state_in)
 
         if self._source_is_dynamic and self.mujoco is not None:
             self.mujoco.step(state_in, self._mujoco_state_out, control, None, dt)
@@ -240,7 +245,10 @@ class OneWayBackend(MuJoCoVBDBackendBase):
         self.pipeline.collide(self._vbd_state_in, selected_contacts)
         self.vbd.step(self._vbd_state_in, self._vbd_state_out, control, selected_contacts, dt)
 
-        # Reconcile: source bodies from the source solve, VBD bodies/particles from VBD.
+        # VBD owns particles, pneumatic observables, and other custom state.
+        # Start with its complete output, then overwrite MuJoCo-owned rows from
+        # the prescribed/dynamic source without disturbing VBD-owned joints.
+        state_out.assign(self._vbd_state_out)
         if self.model.body_count:
             wp.launch(
                 reconcile_owned_body_state_kernel,
@@ -256,13 +264,25 @@ class OneWayBackend(MuJoCoVBDBackendBase):
                 ],
                 device=self.device,
             )
-        if self.model.particle_count and state_out.particle_q is not None:
-            wp.copy(state_out.particle_q, self._vbd_state_out.particle_q)
-            wp.copy(state_out.particle_qd, self._vbd_state_out.particle_qd)
-        if state_out.joint_q is not None and source_state.joint_q is not None:
-            wp.copy(state_out.joint_q, source_state.joint_q)
-        if state_out.joint_qd is not None and source_state.joint_qd is not None:
-            wp.copy(state_out.joint_qd, source_state.joint_qd)
+        if self.model.joint_count and state_out.joint_q is not None:
+            wp.launch(
+                reconcile_owned_joint_state_kernel,
+                dim=self.model.joint_count,
+                inputs=[
+                    self.ownership.joint_owner,
+                    self.model.joint_q_start,
+                    self.model.joint_qd_start,
+                    self.model.joint_coord_count,
+                    self.model.joint_dof_count,
+                    source_state.joint_q,
+                    source_state.joint_qd,
+                    self._vbd_state_out.joint_q,
+                    self._vbd_state_out.joint_qd,
+                    state_out.joint_q,
+                    state_out.joint_qd,
+                ],
+                device=self.device,
+            )
 
     def reset(self, state, world_mask: wp.array | None = None, flags: StateFlags | int | None = None) -> None:
         self.vbd.reset(state, world_mask=world_mask, flags=flags)

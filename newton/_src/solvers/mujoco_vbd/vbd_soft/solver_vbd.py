@@ -792,6 +792,12 @@ class SolverVBD(SolverBase, CouplingInterface):
         self.rigid_contact_stick_freeze_translation_eps = rigid_contact_stick_freeze_translation_eps
         self.rigid_contact_stick_freeze_angular_eps = rigid_contact_stick_freeze_angular_eps
 
+        # Keep overflow diagnostics queryable when rigid integration is delegated
+        # to MuJoCo.  One-way kinematic examples still report these counters even
+        # though this solver does not build rigid-side contact lists in that mode.
+        self.body_body_contact_overflow_max = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self.body_particle_contact_overflow_max = wp.zeros(1, dtype=wp.int32, device=self.device)
+
         # Joint constraint stiffness and damping for non-cable structural joints
         self.rigid_joint_linear_ke = rigid_joint_linear_ke
         self.rigid_joint_angular_ke = rigid_joint_angular_ke
@@ -843,7 +849,6 @@ class SolverVBD(SolverBase, CouplingInterface):
             self.body_body_contact_indices = wp.zeros(
                 model.body_count * bb_pre_alloc, dtype=wp.int32, device=self.device
             )
-            self.body_body_contact_overflow_max = wp.zeros(1, dtype=wp.int32, device=self.device)
 
             bp_pre_alloc = (
                 rigid_body_particle_contact_buffer_size if model.shape_count > 0 and model.particle_count > 0 else 0
@@ -853,7 +858,6 @@ class SolverVBD(SolverBase, CouplingInterface):
             self.body_particle_contact_indices = wp.zeros(
                 model.body_count * bp_pre_alloc, dtype=wp.int32, device=self.device
             )
-            self.body_particle_contact_overflow_max = wp.zeros(1, dtype=wp.int32, device=self.device)
 
             # Joint constraint layout + penalty stiffness (mutable k, frozen bounds)
             self._init_joint_constraint_layout()

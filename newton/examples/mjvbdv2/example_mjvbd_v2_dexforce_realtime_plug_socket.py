@@ -285,6 +285,13 @@ class Example:
 
         self._build_scene()
         self.device = self.model.device
+        # This narrow, high-friction insertion was authored against the serial
+        # FK reduction order.  CUDA level-parallel FK is equivalent up to
+        # roundoff, but those last-bit pose differences select a different
+        # rigid-contact branch during the pinch and make the plug miss the
+        # socket.  Keep only the contact-driving scene FK deterministic; the IK
+        # model remains on the parallel CUDA path.
+        self.model._fk_articulation_level_start = None
         self._build_robot_coordinate_sets()
         self._build_hand_pose_control()
         self._build_ik()

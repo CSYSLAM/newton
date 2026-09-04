@@ -64,6 +64,33 @@ def _kinematic_particle_model(device="cpu", particle_x=0.0, particle_count=1):
     return builder.finalize(device=device), articulation
 
 
+def _kinematic_pneumatic_model(device="cpu"):
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    _register(builder)
+    link = builder.add_link(label="kinematic_link")
+    builder.add_shape_box(link, hx=0.05, hy=0.05, hz=0.05)
+    joint = builder.add_joint_revolute(
+        parent=-1,
+        child=link,
+        axis=wp.vec3(0.0, 1.0, 0.0),
+        parent_xform=wp.transform(wp.vec3(3.0, 0.0, 0.0), wp.quat_identity()),
+    )
+    articulation = builder.articulation_count
+    builder.add_articulation([joint])
+    for position in (
+        wp.vec3(0.0, 0.0, 0.0),
+        wp.vec3(1.0, 0.0, 0.0),
+        wp.vec3(0.0, 1.0, 0.0),
+        wp.vec3(0.0, 0.0, 1.0),
+    ):
+        builder.add_particle(position, wp.vec3(), 1.0)
+    for triangle in ((0, 2, 1), (0, 1, 3), (1, 2, 3), (2, 0, 3)):
+        builder.add_triangle(*triangle, tri_ke=2.0e3, tri_ka=2.0e3, tri_kd=5.0)
+    newton.solvers.add_pneumatic_cavity(builder, range(4))
+    builder.color()
+    return builder.finalize(device=device), articulation
+
+
 def _dynamic_finger_soft_block_model(device="cpu"):
     """Small crossing-contact scene used for deterministic A/B acceptance."""
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -326,6 +353,24 @@ class TestMuJoCoVBDModes(unittest.TestCase):
         self.assertFalse(new_solver.features.feedback_enabled)
         _assert_states_close(self, new_state, old_state)
 
+    def test_one_way_kinematic_exposes_contact_overflow_diagnostic(self):
+        """Keep example-facing contact diagnostics available in proxy mode."""
+        for contact_mode in ("soft", "full"):
+            with self.subTest(contact_mode=contact_mode):
+                model, articulation = _kinematic_particle_model()
+                solver = SolverMuJoCoVBD(
+                    model,
+                    mujoco_articulations=[articulation],
+                    joint_mode="kinematic",
+                    coupling_mode="one_way",
+                    contact_mode=contact_mode,
+                    vbd_options={"iterations": 1},
+                )
+
+                overflow = solver.vbd_solver.body_particle_contact_overflow_max
+                self.assertEqual(overflow.shape, (1,))
+                self.assertEqual(int(overflow.numpy()[0]), 0)
+
     def test_one_way_kinematic_full_matches_mjvbd_v2_baseline(self):
         model, articulation = _partition_model()
         common = {
@@ -340,6 +385,30 @@ class TestMuJoCoVBDModes(unittest.TestCase):
         _, old_state = _step(old_solver, model)
         self.assertEqual(new_solver.backend_kind, MuJoCoVBDBackendKind.ONE_WAY_KINEMATIC_FULL)
         _assert_states_close(self, new_state, old_state)
+
+    def test_one_way_full_commits_pneumatic_state(self):
+        """Commit VBD-owned custom state namespaces to the public output."""
+        model, articulation = _kinematic_pneumatic_model()
+        solver = SolverMuJoCoVBD(
+            model,
+            mujoco_articulations=[articulation],
+            joint_mode="kinematic",
+            coupling_mode="one_way",
+            contact_mode="full",
+            vbd_options={"iterations": 1},
+        )
+        state_in = model.state()
+        state_out = model.state()
+        state_out.pneumatic.volume.fill_(-1.0)
+
+        solver.step(state_in, state_out, model.control(), None, 1.0 / 120.0)
+        wp.synchronize()
+
+        self.assertGreater(float(state_out.pneumatic.volume.numpy()[0]), 0.0)
+        np.testing.assert_allclose(
+            state_out.pneumatic.volume.numpy(),
+            solver._backend._vbd_state_out.pneumatic.volume.numpy(),
+        )
 
     def test_pure_vbd_tet_and_spring_are_finite(self):
         for kind in ("tet", "spring"):
@@ -398,6 +467,23 @@ class TestMuJoCoVBDModes(unittest.TestCase):
         self.assertTrue(solver.features.iteration_transaction_enabled)
         self.assertTrue(np.isfinite(state_out.particle_q.numpy()).all())
         self.assertTrue(np.isfinite(state_out.body_q.numpy()).all())
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Two-way FK stability regression requires CUDA")
+    def test_two_way_uses_serial_fk_for_iteration_reproducibility(self):
+        """Keep fixed-point feedback independent of CUDA FK roundoff."""
+        model, articulation = _kinematic_particle_model(device="cuda:0", particle_x=0.08)
+        self.assertIsNotNone(model._fk_articulation_level_start)
+        solver = SolverMuJoCoVBD(
+            model,
+            mujoco_articulations=[articulation],
+            joint_mode="dynamic",
+            coupling_mode="two_way",
+            contact_mode="soft",
+            coupling_options={"iterations": 2},
+            vbd_options={"iterations": 1},
+        )
+
+        self.assertIsNone(solver.mujoco_solver.model._fk_articulation_level_start)
 
     def test_two_way_reset_restores_particle_state(self):
         model, articulation = _kinematic_particle_model(particle_x=0.08)

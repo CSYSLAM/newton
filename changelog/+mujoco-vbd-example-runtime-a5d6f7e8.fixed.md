@@ -1,0 +1,1 @@
+Restore one-way MuJoCo-VBD pneumatic-state transfer and full-surface inflatable-bag contact, keep contact-overflow diagnostics available with external rigid integration, and stabilize two-way feedback and narrow plug insertion against CUDA forward-kinematics roundoff.

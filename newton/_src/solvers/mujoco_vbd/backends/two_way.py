@@ -49,6 +49,13 @@ class TwoWayBackend(MuJoCoVBDBackendBase):
             static_contact_owner=self.coupling.static_contact_owner,
         )
         self.overlays = build_model_overlays(model, ownership, self.routing, self.coupling)
+        # A two-way fixed-point round must reproduce the same MuJoCo body state
+        # from an identical transaction snapshot.  CUDA's level-parallel FK is
+        # mathematically equivalent to the serial kernel, but its last-bit
+        # roundoff can select a different stiff contact branch and then be
+        # amplified by feedback on later rounds.  Keep the private MuJoCo view
+        # on the serial path; the public model remains eligible for parallel FK.
+        self.overlays.mujoco._fk_articulation_level_start = None
 
         self._diagnostics = allocate_diagnostics(model, backend=None, feedback_enabled=True)
         self.runtime = allocate_runtime(model, self.overlays, ownership, self.coupling)

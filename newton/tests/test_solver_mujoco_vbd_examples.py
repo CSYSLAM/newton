@@ -126,19 +126,24 @@ class TestMuJoCoVBDExamples(unittest.TestCase):
                 self.assertIn(mode, allowed, f"{path.name} uses inconsistent mode {mode}")
         self.assertGreater(len(calls), 0)
 
-    def test_pneumatic_bag_uses_full_core_soft_pipeline_contract(self):
-        """Keep the pneumatic bag on the full-core, soft-contact branch."""
+    def test_pneumatic_bag_uses_full_surface_contact_contract(self):
+        """Keep the public pneumatic bag on the full-surface contact branch."""
         path = _ROOT / f"{_MODULES['pneumatic_bag']}.py"
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        calls = list(_solver_calls(tree))
-        contact_modes = []
-        for call in calls:
-            keywords = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg}
-            contact_modes.append(ast.literal_eval(keywords["contact_mode"]))
-        self.assertIn("soft", contact_modes)
         source = path.read_text(encoding="utf-8")
-        self.assertRegex(source, r"features\.vbd_core != [\"']full[\"']")
-        self.assertRegex(source, r"features\.contact_pipeline != [\"']soft[\"']")
+        tree = ast.parse(source)
+        implementation = next(
+            node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "_m3_Example"
+        )
+        calls = list(_solver_calls(implementation))
+        self.assertEqual(len(calls), 1)
+        keywords = {keyword.arg: keyword.value for keyword in calls[0].keywords if keyword.arg}
+        self.assertEqual(ast.literal_eval(keywords["contact_mode"]), "full")
+
+        implementation_source = ast.get_source_segment(source, implementation)
+        self.assertIsNotNone(implementation_source)
+        self.assertRegex(implementation_source, r"features\.vbd_core != [\"']full[\"']")
+        self.assertRegex(implementation_source, r"features\.contact_pipeline != [\"']full[\"']")
+        self.assertIn("enable_rigid_soft_full_surface_contact", implementation_source)
 
     def test_tshirt_one_way_parity(self):
         """Register the standalone T-shirt folding demo."""

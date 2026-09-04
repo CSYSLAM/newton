@@ -1036,6 +1036,12 @@ class SolverVBD(SolverBase, CouplingInterface):
         self._body_particle_partial_hessian_al = wp.empty(0, dtype=wp.mat33, device=self.device)
         self._body_particle_partial_hessian_aa = wp.empty(0, dtype=wp.mat33, device=self.device)
 
+        # Keep overflow diagnostics queryable when rigid integration is delegated
+        # to MuJoCo.  One-way kinematic examples still report these counters even
+        # though this solver does not build rigid-side contact lists in that mode.
+        self.body_body_contact_overflow_max = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self.body_particle_contact_overflow_max = wp.zeros(1, dtype=wp.int32, device=self.device)
+
         # -------------------------------------------------------------
         # Rigid-only AVBD state (used when SolverVBD integrates bodies)
         # -------------------------------------------------------------
@@ -1081,7 +1087,6 @@ class SolverVBD(SolverBase, CouplingInterface):
             self.body_body_contact_indices = wp.zeros(
                 model.body_count * bb_pre_alloc, dtype=wp.int32, device=self.device
             )
-            self.body_body_contact_overflow_max = wp.zeros(1, dtype=wp.int32, device=self.device)
 
             bp_pre_alloc = (
                 rigid_body_particle_contact_buffer_size if model.shape_count > 0 and model.particle_count > 0 else 0
@@ -1091,7 +1096,6 @@ class SolverVBD(SolverBase, CouplingInterface):
             self.body_particle_contact_indices = wp.zeros(
                 model.body_count * bp_pre_alloc, dtype=wp.int32, device=self.device
             )
-            self.body_particle_contact_overflow_max = wp.zeros(1, dtype=wp.int32, device=self.device)
 
             # Joint constraint layout + penalty stiffness (mutable k, frozen bounds)
             self._init_joint_constraint_layout()
