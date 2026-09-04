@@ -29,7 +29,14 @@ __all__ = ["MJVBDV2CollisionPipeline"]
 _COMPACT_SOFT_SURFACE_BLOCK_DIM = 128
 _COMPACT_SOFT_SURFACE_BLOCKS_PER_SM = 2
 _ENABLE_COMPACT_SOFT_SURFACE_PAIRS = True
+_ENABLE_TEMPORAL_SOFT_FACE_CACHE = True
 _SOFT_SURFACE_AABB_SAFETY_MARGIN = 1.0e-6
+_SOFT_FACE_CACHE_BYTES_PER_PAIR = 13
+_SOFT_FACE_CACHE_MAX_BYTES = 64 * 1024 * 1024
+_SOFT_FACE_CACHE_CONTACT_SLOP = 5.0e-4
+_SOFT_FACE_CACHE_REFINEMENT_ITERS = 2
+_SOFT_FACE_CACHE_REUSE_LIMIT = 3
+_SOFT_FACE_CACHE_STATIONARITY_TOLERANCE = 2.5e-4
 
 
 def _shape_major_pairs(pairs: wp.array[wp.vec2i]) -> wp.array[wp.vec2i]:
@@ -56,6 +63,50 @@ def _aabb_overlap(
         and lower_a[2] <= upper_b[2]
         and upper_a[2] >= lower_b[2]
     )
+
+
+@wp.func
+def _refine_cached_face_sdf(
+    geo: wp.int32,
+    scale: wp.vec3,
+    a: wp.vec3,
+    b: wp.vec3,
+    c: wp.vec3,
+    barycentric: wp.vec3,
+    shape_sdf_index: wp.int32,
+    texture_sdf_table: wp.array[TextureSDFData],
+    ls_iters: wp.int32,
+):
+    """Refine a cached face point and evaluate its Frank-Wolfe stationarity gap."""
+    for _i in range(_SOFT_FACE_CACHE_REFINEMENT_ITERS):
+        x = barycentric[0] * a + barycentric[1] * b + barycentric[2] * c
+        _phi_lower, _phi, grad = eval_shape_sdf(geo, scale, x, shape_sdf_index, texture_sdf_table)
+        da = wp.dot(grad, a)
+        db = wp.dot(grad, b)
+        dc = wp.dot(grad, c)
+        target_barycentric = wp.vec3(1.0, 0.0, 0.0)
+        if db <= da and db <= dc:
+            target_barycentric = wp.vec3(0.0, 1.0, 0.0)
+        elif dc <= da and dc <= db:
+            target_barycentric = wp.vec3(0.0, 0.0, 1.0)
+        target = target_barycentric[0] * a + target_barycentric[1] * b + target_barycentric[2] * c
+        gamma, _line_x, _line_phi, _line_grad = optimize_edge_sdf(
+            geo,
+            scale,
+            x,
+            target,
+            shape_sdf_index,
+            texture_sdf_table,
+            ls_iters,
+        )
+        barycentric = (1.0 - gamma) * barycentric + gamma * target_barycentric
+
+    x = barycentric[0] * a + barycentric[1] * b + barycentric[2] * c
+    _phi_lower, phi, grad = eval_shape_sdf(geo, scale, x, shape_sdf_index, texture_sdf_table)
+    linear_x = wp.dot(grad, x)
+    linear_min = wp.min(wp.dot(grad, a), wp.min(wp.dot(grad, b), wp.dot(grad, c)))
+    stationarity_gap = wp.max(linear_x - linear_min, 0.0)
+    return barycentric, x, phi, grad, stationarity_gap
 
 
 @wp.kernel(enable_backward=False)
@@ -121,6 +172,8 @@ def _mark_soft_face_pairs_active(
     compact_pair_indices: wp.array[wp.int32],
     compact_counts: wp.array[wp.int32],
     compact_count_index: wp.int32,
+    use_temporal_cache: bool,
+    cache_state: wp.array[wp.uint8],
     active: wp.array[wp.uint8],
 ):
     tid = wp.tid()
@@ -129,6 +182,8 @@ def _mark_soft_face_pairs_active(
     shape = pair[1]
     if (shape_flags[shape] & ShapeFlags.COLLIDE_PARTICLES) == 0:
         active[tid] = wp.uint8(0)
+        if use_temporal_cache:
+            cache_state[tid] = wp.uint8(0)
         return
 
     v0 = tri_indices[face, 0]
@@ -148,6 +203,8 @@ def _mark_soft_face_pairs_active(
         shape_aabb_upper[shape] - shrink_vector,
     )
     active[tid] = wp.uint8(is_active)
+    if use_temporal_cache and not is_active:
+        cache_state[tid] = wp.uint8(0)
     if compact_pairs and is_active:
         compact_index = wp.atomic_add(compact_counts, compact_count_index, 1)
         compact_pair_indices[compact_index] = tid
@@ -387,6 +444,9 @@ def _create_soft_face_contact_at_pair(
     shape_margin: wp.array[float],
     sdf_face_iters: wp.int32,
     sdf_ls_iters: wp.int32,
+    use_temporal_cache: bool,
+    cached_barycentric: wp.array[wp.vec3],
+    cache_state: wp.array[wp.uint8],
     margin: float,
     tid_base: wp.int32,
     soft_contact_max: wp.int32,
@@ -404,10 +464,14 @@ def _create_soft_face_contact_at_pair(
     face = pair[0]
     shape = pair[1]
     if (shape_flags[shape] & ShapeFlags.COLLIDE_PARTICLES) == 0:
+        if use_temporal_cache:
+            cache_state[tid] = wp.uint8(0)
         return
     geo = shape_type[shape]
     sdf_index = shape_sdf_index[shape]
     if (not _is_analytic(geo)) and sdf_index < 0:
+        if use_temporal_cache:
+            cache_state[tid] = wp.uint8(0)
         return
 
     v0 = tri_indices[face, 0]
@@ -428,19 +492,57 @@ def _create_soft_face_contact_at_pair(
     )
     reach = wp.max(wp.length(p - centroid), wp.max(wp.length(q - centroid), wp.length(r - centroid)))
     if phi_centroid > threshold + reach:
+        if use_temporal_cache:
+            cache_state[tid] = wp.uint8(0)
         return
 
-    barycentric, x, phi, grad = optimize_face_sdf(
-        geo,
-        scale,
-        p,
-        q,
-        r,
-        sdf_index,
-        texture_sdf_table,
-        sdf_face_iters,
-        sdf_ls_iters,
-    )
+    barycentric = wp.vec3(0.0)
+    x = wp.vec3(0.0)
+    phi = float(0.0)
+    grad = wp.vec3(0.0)
+    cache_hit = False
+    if (
+        use_temporal_cache
+        and cache_state[tid] != wp.uint8(0)
+        and cache_state[tid] <= wp.uint8(_SOFT_FACE_CACHE_REUSE_LIMIT)
+        and not _is_analytic(geo)
+    ):
+        barycentric = cached_barycentric[tid]
+        barycentric, x, phi, grad, stationarity_gap = _refine_cached_face_sdf(
+            geo,
+            scale,
+            p,
+            q,
+            r,
+            barycentric,
+            sdf_index,
+            texture_sdf_table,
+            sdf_ls_iters,
+        )
+        cache_hit = (
+            phi < threshold - _SOFT_FACE_CACHE_CONTACT_SLOP
+            and stationarity_gap <= _SOFT_FACE_CACHE_STATIONARITY_TOLERANCE
+        )
+    if not cache_hit:
+        barycentric, x, phi, grad = optimize_face_sdf(
+            geo,
+            scale,
+            p,
+            q,
+            r,
+            sdf_index,
+            texture_sdf_table,
+            sdf_face_iters,
+            sdf_ls_iters,
+        )
+    if use_temporal_cache:
+        cached_barycentric[tid] = barycentric
+        if phi < threshold:
+            cache_state[tid] = wp.uint8(1)
+            if cache_hit:
+                cache_state[tid] += wp.uint8(1)
+        else:
+            cache_state[tid] = wp.uint8(0)
     if phi < threshold:
         y = x - phi * grad
         _emit_soft_ef_contact(
@@ -483,6 +585,9 @@ def _create_soft_face_contacts(
     shape_margin: wp.array[float],
     sdf_face_iters: wp.int32,
     sdf_ls_iters: wp.int32,
+    use_temporal_cache: bool,
+    cached_barycentric: wp.array[wp.vec3],
+    cache_state: wp.array[wp.uint8],
     margin: float,
     tid_base: wp.int32,
     soft_contact_max: wp.int32,
@@ -516,6 +621,9 @@ def _create_soft_face_contacts(
         shape_margin,
         sdf_face_iters,
         sdf_ls_iters,
+        use_temporal_cache,
+        cached_barycentric,
+        cache_state,
         margin,
         tid_base,
         soft_contact_max,
@@ -552,6 +660,9 @@ def _create_compact_soft_face_contacts(
     shape_margin: wp.array[float],
     sdf_face_iters: wp.int32,
     sdf_ls_iters: wp.int32,
+    use_temporal_cache: bool,
+    cached_barycentric: wp.array[wp.vec3],
+    cache_state: wp.array[wp.uint8],
     margin: float,
     tid_base: wp.int32,
     soft_contact_max: wp.int32,
@@ -587,6 +698,9 @@ def _create_compact_soft_face_contacts(
             shape_margin,
             sdf_face_iters,
             sdf_ls_iters,
+            use_temporal_cache,
+            cached_barycentric,
+            cache_state,
             margin,
             tid_base,
             soft_contact_max,
@@ -619,6 +733,9 @@ def _launch_soft_surface_contacts(
     edge_worker_count: int,
     face_worker_count: int,
     particle_pair_count: int,
+    use_face_temporal_cache: bool,
+    face_cached_barycentric: wp.array[wp.vec3],
+    face_cache_state: wp.array[wp.uint8],
 ) -> None:
     """Generate edge and face contacts after conservative AABB pruning."""
     edge_pair_count = int(edge_pairs.shape[0])
@@ -707,6 +824,9 @@ def _launch_soft_surface_contacts(
                     *shape_args,
                     SDF_FACE_ITERS,
                     SDF_LS_ITERS,
+                    use_face_temporal_cache,
+                    face_cached_barycentric,
+                    face_cache_state,
                     margin,
                     particle_pair_count + edge_pair_count,
                     contacts.soft_contact_max,
@@ -727,6 +847,9 @@ def _launch_soft_surface_contacts(
                     *shape_args,
                     SDF_FACE_ITERS,
                     SDF_LS_ITERS,
+                    use_face_temporal_cache,
+                    face_cached_barycentric,
+                    face_cache_state,
                     margin,
                     particle_pair_count + edge_pair_count,
                     contacts.soft_contact_max,
@@ -762,6 +885,15 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
         self._soft_surface_compact_counts = wp.zeros(compact_count, dtype=wp.int32, device=model.device)
         self._soft_edge_compact_pair_indices = wp.empty(edge_compact_size, dtype=wp.int32, device=model.device)
         self._soft_face_compact_pair_indices = wp.empty(face_compact_size, dtype=wp.int32, device=model.device)
+        self._use_soft_face_temporal_cache = bool(
+            _ENABLE_TEMPORAL_SOFT_FACE_CACHE
+            and self._use_soft_surface_aabb
+            and not self.requires_grad
+            and face_mask_size * _SOFT_FACE_CACHE_BYTES_PER_PAIR <= _SOFT_FACE_CACHE_MAX_BYTES
+        )
+        face_cache_size = face_mask_size if self._use_soft_face_temporal_cache else 0
+        self._soft_face_cached_barycentric = wp.empty(face_cache_size, dtype=wp.vec3, device=model.device)
+        self._soft_face_cache_state = wp.zeros(face_cache_size, dtype=wp.uint8, device=model.device)
         max_workers = (
             model.device.sm_count * _COMPACT_SOFT_SURFACE_BLOCKS_PER_SM * _COMPACT_SOFT_SURFACE_BLOCK_DIM
             if self._use_soft_surface_compaction
@@ -843,6 +975,8 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
                     self._soft_face_compact_pair_indices,
                     self._soft_surface_compact_counts,
                     1,
+                    self._use_soft_face_temporal_cache,
+                    self._soft_face_cache_state,
                 ],
                 outputs=[self._soft_face_pair_active],
                 device=model.device,
@@ -864,4 +998,7 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
             self._soft_edge_compact_worker_count,
             self._soft_face_compact_worker_count,
             self.soft_rigid_contact_pair_count,
+            self._use_soft_face_temporal_cache,
+            self._soft_face_cached_barycentric,
+            self._soft_face_cache_state,
         )

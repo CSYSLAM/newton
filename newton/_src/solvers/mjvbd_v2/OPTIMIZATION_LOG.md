@@ -38,6 +38,9 @@ Status values are:
 
 | Date | Change | Affected path | Status | Evidence |
 | --- | --- | --- | --- | --- |
+| 2026-09-04 | Add one contact-aware two-level correction after the final surface-particle VBD sweep | CUDA `vbd/` and `vbd_soft/` cloth/shell paths | **Retained, opt-in** | The 300-frame T-shirt comparison reduced wall time 30.3% while cutting the 12-sweep error against 20 sweeps by 41.4%; the plastic-bag final improved from 17.3 to 20.1 FPS while cutting the 8-sweep error against 12 sweeps by 41.7% |
+| 2026-09-04 | Temporally warm-start stable mesh-SDF face contacts, with bounded reuse and exact fallback | CUDA `full` contact backends with full-surface mesh-SDF contact | **Retained, gated** | The Armadillo frozen-state collision Graph fell from 3.653 to 2.575 ms (41.9%) with all 27,444 contact keys preserved; the 240-frame plastic-bag scene remained 17.5 FPS and passed with the cache both enabled and disabled |
+| 2026-09-03 | Build particle self-contact adjacency and gather VT/EE force/Hessian per colored particle, with and without fusion into the cloth tile | CUDA `vbd_soft/` surface self-contact solve | **Rejected, reverted** | The T-shirt Graph fell from 10.1 FPS to 7.40 FPS with tile fusion and 5.39 FPS with a separate gather kernel; duplicated narrow phase, divergent lists, and tile register pressure outweighed removed atomics and row scans |
 | 2026-09-03 | Traverse an overallocated rigid-soft contact stream with a fixed active-prefix worker grid | CUDA Graph `vbd_soft/` particle-side rigid-soft scatter | **Retained, gated** | The 6,436-particle T-shirt Graph improved 3.40%--4.10% in same-process A/B runs; the unchanged 31,768-capacity tablecloth path and a 300-frame cloth-twist regression passed |
 | 2026-08-28 | Let one canonical EE owner evaluate both directed filter sides and write the legacy rows | Complete `vbd/` and optimized `vbd_soft/` self-contact | **Rejected, reverted** | Exact directed rows were preserved, but dense 28-by-28 two-layer EE detection regressed 46.6% without rest exclusion and 26.1% with a 0.03 m rest exclusion because dual atomic row updates outweighed the saved narrow phase |
 | 2026-08-28 | Schedule VT/EE source queries in static rest-space Morton order | Complete `vbd/` and optimized `vbd_soft/` self-contact | **Rejected, reverted** | Dense two-layer cloth detection regressed 4.6%; a sparse supermarket-bag state improved only 1.7%--2.3%, about 0.01 ms, because scattered row/filter writes offset more coherent BVH traversal |
@@ -70,6 +73,193 @@ Status values are:
 | 2026-08-10 | Articulation-only dispatch shortcut (`89002b52`) | `pure_mujoco` and `kinematic_passthrough` | **Retained** | Structurally removes VBD construction and execution; no standardized timing archive |
 
 ## Detailed experiments
+
+### 2026-09-04: retain a contact-aware surface multilevel correction
+
+**Problem.** Particle VBD communicates information only through successive
+colored vertex sweeps. Stiff cloth therefore needs many sweeps before a load or
+contact response reaches distant vertices. Simply reducing the iteration count
+improves throughput but changes large-scale motion even when local stretch
+remains small.
+
+The retained prototype builds a fixed rest-topology hierarchy at solver
+construction. Breadth-first clusters contain eight movable surface particles
+by default and never cross particle worlds. Zero-mass vertices remain coarse
+anchors. Vertices belonging to tetrahedra are deliberately excluded: the
+current piecewise-constant translation basis cannot represent volumetric
+rotation and affine deformation accurately. Spring endpoints participate in
+the topology graph.
+
+After the final ordinary VBD sweep, contacts are evaluated once at the final
+particle positions. A local elasticity solve supplies the fine residual and
+block-diagonal Hessian. Restriction forms cluster residual, mass, elastic
+stiffness, and contact-diagonal terms. Eight fixed PCG steps solve a scalar
+mass-plus-topology-Laplacian approximation for three displacement components,
+then prolong one relaxed translation per cluster. The default relaxation is
+0.1 and each fine correction is capped at 5% of particle radius. Existing DAT
+runs on the combined fine and coarse displacement.
+
+The coarse PCG is one persistent 256-thread CUDA block. Each lane processes a
+grid-stride subset of clusters and tile reductions provide its block-wide
+reductions and barriers. This produced exactly the same coarse result as the
+original 42-launch implementation in a 71-cluster comparison (`max_abs=0`),
+while avoiding the small-kernel scheduling cost. Storage and launches are
+fixed at construction, so CUDA Graph topology remains fixed. The feature is
+off by default and falls back to ordinary VBD on CPU, `requires_grad`, and
+deterministic runs.
+
+**Rejected intermediate variants.** Applying four contact-blind corrections
+per substep caused late self-contact growth in the complete 900-frame T-shirt
+trajectory: even a capped conservative variant fell to 5.62 FPS. A single
+contact-blind correction completed at 13.3 FPS but differed from the 20-sweep
+reference by 38.7 mm RMS after 300 frames, versus 19.6 mm for ordinary
+12-sweep VBD. Re-evaluating rigid-soft and self-contact force/Hessian at the
+final iterate, treating contact stiffness as a coarse diagonal anchor, and
+applying only one correction removed this failure. These failed schedules are
+not exposed as options.
+
+**Measurements.** All measurements used an NVIDIA GeForce RTX 5060 Ti, CUDA
+Graphs, and the same scripted trajectory within each comparison. Viewer-null
+benchmarks discard the first three frames. State-error comparisons ran the
+variants consecutively in one process and compare particle positions at the
+same frame against the original higher-sweep configuration.
+
+| Scene | Topology and settings | Reference | Retained configuration | Performance result | State result |
+| --- | --- | --- | --- | --- | --- |
+| W1 T-shirt fold final00 | 6,436 particles, 12,736 triangles, 19,174 edges, 88 shapes, 10 substeps | 20 sweeps | 12 sweeps + one coarse correction | 300-frame wall time 31.579 to 22.001 s, 30.3% lower | At frame 300, RMS error was 11.46 mm; ordinary 12 sweeps was 19.56 mm. Mean triangle-edge error was 0.251 mm versus 0.418 mm. |
+| W1 plastic-bag rod final00 | 5,886 particles, 11,512 triangles, 17,399 edges, 90 shapes, 6 substeps | 12 sweeps | 8 sweeps + one coarse correction | 300-frame benchmark 17.3 to 20.1 FPS, 16.2% faster | At frame 300, RMS error was 20.60 mm; ordinary 8 sweeps was 35.30 mm. Mean triangle-edge error was 0.160 mm versus 0.302 mm. |
+| Armadillo gear-crusher final00 | 15,228 tet vertices, 62,770 tetrahedra, 120 frames | 10 sweeps | Experimental 8 sweeps + coarse translation | 5.12 to 5.36 FPS before the tet gate | RMS error regressed from 2.11 to 25.25 mm, so tet vertices are excluded and this scene retains its original solver path. |
+
+**Correctness evidence.** Dedicated tests verify fixed-vertex anchors,
+tetrahedral exclusion, improved long-range response against a 100-sweep
+cantilever reference, deterministic fallback, and CUDA Graph capture/replay in
+both private VBD implementations. All 12 existing MJVBDV2 contact-optimization
+tests also pass. The two validated final00 examples enable the feature while
+reducing their ordinary sweep counts; unmeasured examples keep their existing
+configuration.
+
+**Decision.** Retain as an opt-in surface correction and enable it only in the
+two measured final00 examples. Do not claim a volumetric multigrid method: a
+tet-capable coarse basis needs at least rotational/affine modes and a matching
+Galerkin operator. Keep ordinary VBD as the default until more cloth and shell
+scenes establish a broadly safe automatic iteration policy.
+
+### 2026-09-04: retain bounded temporal mesh-SDF face warm starts
+
+**Hypothesis.** Full-surface face contacts solve the same 24-step
+Frank--Wolfe problem, with a 16-step SDF line search at every step, on every
+collision call. Consecutive substeps usually leave a retained mesh-SDF face
+near its previous minimizer. Reusing that barycentric point after a short
+warm-start refinement should remove most texture-SDF queries without changing
+the candidate set, contact threshold, output stream, or CUDA Graph topology.
+
+The retained path stores one `vec3` barycentric coordinate and one byte of
+state per shape-major face pair. A cached point receives two Frank--Wolfe
+refinement steps and is accepted only when its evaluated SDF is at least
+0.5 mm inside the contact threshold and its stationarity gap is at most
+0.25 mm. A failure always executes the original 24-by-16 optimizer; the cache
+never rejects a candidate. At most three consecutive calls can reuse a result
+before a mandatory full refresh. AABB-inactive and disabled-shape pairs clear
+their state.
+
+The optimization is private to MJVBDV2's CUDA full-surface pipeline and only
+handles non-analytic texture SDFs. CPU, `requires_grad`, shared Newton
+collision, analytic primitives, and every non-full contact backend retain the
+old path. Cache storage is fixed at construction and capped at 64 MiB; models
+above the cap fall back completely. No count, allocation, or launch is added
+during Graph replay.
+
+**Isolated performance.** The representative Armadillo crusher scene was
+advanced for 240 frames, then both variants captured collision-only Graphs at
+the same frozen state. The NVIDIA GeForce RTX 5060 Ti 8 GiB used Warp
+1.17.0.dev20260807, CUDA Toolkit 12.9, and Driver 13.3. Each result is the
+median of seven samples of 80 warmed Graph replays.
+
+| Face optimizer | Collision Graph | Change |
+| --- | ---: | ---: |
+| Original 24-by-16 solve on every active pair | 3.652919 ms | baseline |
+| Bounded two-step temporal warm start | 2.575027 ms | 41.86% faster |
+
+Both variants emitted 27,444 contacts with identical sorted
+`(shape, particle, indices)` keys. Across the complete stream, the 99th
+percentile differences in shape-surface position and normal were respectively
+`8.83e-9 m` and `3.22e-7`; the means were `4.37e-6 m` and `5.27e-4`. Rare
+texture-SDF local-minimum switches reached `5.11e-3 m` and `0.474`, so bounded
+reuse and periodic exact refresh are part of the retained correctness guard,
+not optional tuning.
+
+**End-to-end cross-check.** The 240-frame W1 plastic-bag/rod full-contact demo
+measured 237 post-warm-up frames in separate processes. Cache enabled and
+disabled both rounded to 17.5 FPS (13.55 and 13.57 seconds). Both configurations
+also completed their full null-viewer functional test. This scene establishes
+no speedup, but it rules out a measurable regression at its current topology.
+
+The focused MJVBDV2 optimization suite passes all 12 CPU/CUDA tests. New
+coverage compares shared and private mesh-SDF contact keys across a static
+repeat, a particle displacement, and complete AABB separation; it also checks
+that analytic primitives do not use the cache and inactive pairs invalidate
+state. The representative Armadillo run remained finite through frame 240.
+
+**Decision.** Retain the guarded cache. Its isolated collision gain is large
+enough even though collision is only part of the frame, and the neutral bag
+result is preferable to imposing a full-frame percentage gate on a local
+hotspot. Do not enable it for analytic, differentiable, CPU, or over-capacity
+configurations without separate numerical and performance evidence.
+
+### 2026-09-03: reject particle-centric self-contact gather and tile fusion
+
+**Hypothesis.** Preserve the existing per-vertex and per-edge detector rows,
+then build a device linked list from every retained directed EE row to its two
+owner-edge vertices and from every retained VT row to its four incident
+vertices. Each graph color could gather only the rows incident to its particles
+instead of launching four threads per primitive and filtering the complete row
+set. Gathering directly inside `solve_surface_elasticity_tile` could also remove
+one force/Hessian launch and the intermediate self-contact writes.
+
+The prototype kept directed EE ownership, asymmetric filters, current-position
+contact reevaluation, material selection, color order, overflow clamping, and
+the independent planar DAT path. The adjacency used deterministic slots backed
+by the existing fixed row capacities, a device-side head array, and atomic
+linked-list construction after each detector refresh. It was gated to CUDA,
+non-gradient, nondeterministic, surface-only tiled solves and capped adjacency
+storage at 64 MiB; all other configurations retained the original scatter.
+
+**Numerical check.** A frozen two-layer 12-by-12 cloth used one detector result
+for both implementations. After accumulating every color, gathered force
+differed from scatter by at most `9.281559e-5` against a maximum force norm of
+`2.0054703e2`. Hessian entries differed by at most `0.625` against a maximum
+absolute entry of `1.5345574e6`. These relative differences are consistent
+with the changed CUDA summation order. A one-step 24-by-24 two-layer smoke test
+compiled the fused Warp kernel, reported active contact, and produced finite
+particle positions.
+
+**End-to-end Go/No-Go.** The representative 6,436-particle T-shirt example ran
+with its normal ten substeps, 20 iterations, nine colors, CUDA Graphs, null
+viewer, and 120 requested frames on an NVIDIA GeForce RTX 5060 Ti 8 GiB with
+Warp 1.17.0.dev20260807, CUDA Toolkit 12.9, and Driver 13.3. The benchmark
+measured 117 post-warm-up frames. Runs were separate processes and are therefore
+not precision performance evidence, but the regressions are much larger than
+the retain threshold.
+
+| Self-contact force path | Wall time | Rate | Change from legacy |
+| --- | ---: | ---: | ---: |
+| Legacy primitive-row scatter | 11.62 s / 117 frames | 10.1 FPS | baseline |
+| Particle gather fused into 16-thread elasticity tile | 15.81 s / 117 frames | 7.40 FPS | 36.1% slower per frame |
+| Separate particle gather before the existing tile | 21.70 s / 117 frames | 5.39 FPS | 86.7% slower per frame |
+
+The fused kernel serializes each particle's contacts on tile lane zero while
+the other lanes wait, and the added contact code increases register pressure
+for the elasticity kernel. The separate gather avoids that coupling but still
+recomputes a VT narrow phase once per incident particle rather than once per
+distinct active color; its linked-list traversal is also divergent and
+noncoalesced. Those costs dominate the saved color checks, atomics, and
+primitive-row traversal in this single-scene cloth workload.
+
+**Decision.** Reject and completely revert both forms. A future particle-
+centric attempt needs a compact contiguous CSR plus a contact representation
+that shares one narrow-phase evaluation across incident vertices; rebuilding
+the same linked-list gather or embedding the current large evaluators in the
+elasticity tile is not justified. DAT remains unchanged.
 
 ### 2026-09-03: traverse sparse rigid-soft contacts with persistent workers
 

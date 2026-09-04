@@ -547,7 +547,15 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
         private_pipeline._use_soft_surface_compaction = False
         private_pipeline.collide(state, private_contacts)
         assert_record_tuples_equal(compact_records, sorted_records(private_contacts))
+        self.assertEqual(int(np.count_nonzero(private_pipeline._soft_face_cache_state.numpy() == 2)), 0)
         private_pipeline._use_soft_surface_compaction = True
+
+        particle_q = state.particle_q.numpy()
+        particle_q[:, 2] += 1.0e-4
+        state.particle_q.assign(particle_q)
+        shared_pipeline.collide(state, shared_contacts)
+        private_pipeline.collide(state, private_contacts)
+        assert_records_equal()
 
         model.shape_margin.zero_()
         shared_pipeline.collide(state, shared_contacts, soft_contact_margin=0.1)
@@ -576,6 +584,71 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
         wp.capture_launch(capture.graph)
         self.assertEqual(int(private_contacts.soft_contact_count.numpy()[0]), expected_count)
         self.assertTrue(private_contacts._enable_rigid_soft_full_surface_contact)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Temporal face cache requires CUDA texture SDFs")
+    def test_private_full_surface_face_cache_preserves_contact_keys(self):
+        """Reuse consecutive mesh-SDF face contacts without changing emitted keys."""
+        device = wp.get_device("cuda:0")
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        shape_cfg = newton.ModelBuilder.ShapeConfig(margin=0.02)
+        shape_cfg.configure_sdf(force_sdf=True)
+        shape = builder.add_shape_mesh(
+            body=-1,
+            mesh=newton.Mesh.create_box(0.5, 0.5, 0.5),
+            cfg=shape_cfg,
+        )
+        builder.shape_sdf_max_resolution[shape] = 16
+        builder.add_cloth_grid(
+            pos=wp.vec3(-0.4, -0.4, 0.45),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(),
+            dim_x=4,
+            dim_y=4,
+            cell_x=0.2,
+            cell_y=0.2,
+            mass=0.1,
+            particle_radius=0.01,
+        )
+        builder.color()
+        model = builder.finalize(device=device)
+        options = {
+            "broad_phase": "nxn",
+            "soft_contact_margin": 0.1,
+            "enable_rigid_soft_full_surface_contact": True,
+        }
+        shared_pipeline = newton.CollisionPipeline(model, **options)
+        private_pipeline = MJVBDV2CollisionPipeline(model, **options)
+        shared_contacts = shared_pipeline.contacts()
+        private_contacts = private_pipeline.contacts()
+        state = model.state()
+
+        def contact_keys(contacts):
+            count = min(int(contacts.soft_contact_count.numpy()[0]), contacts.soft_contact_max)
+            particles = contacts.soft_contact_particle.numpy()[:count]
+            shapes = contacts.soft_contact_shape.numpy()[:count]
+            indices = contacts.soft_contact_indices.numpy()[:count]
+            return sorted(
+                (int(shape_id), int(particle), *(int(index) for index in corner_ids))
+                for particle, shape_id, corner_ids in zip(particles, shapes, indices, strict=True)
+            )
+
+        private_pipeline.collide(state, private_contacts)
+        private_pipeline.collide(state, private_contacts)
+        self.assertGreater(int(np.count_nonzero(private_pipeline._soft_face_cache_state.numpy() > 1)), 0)
+        shared_pipeline.collide(state, shared_contacts)
+        self.assertEqual(contact_keys(private_contacts), contact_keys(shared_contacts))
+
+        particle_q = state.particle_q.numpy()
+        particle_q[:, 2] += 1.0e-4
+        state.particle_q.assign(particle_q)
+        private_pipeline.collide(state, private_contacts)
+        shared_pipeline.collide(state, shared_contacts)
+        self.assertEqual(contact_keys(private_contacts), contact_keys(shared_contacts))
+
+        particle_q[:, 2] += 2.0
+        state.particle_q.assign(particle_q)
+        private_pipeline.collide(state, private_contacts)
+        self.assertEqual(int(np.count_nonzero(private_pipeline._soft_face_cache_state.numpy())), 0)
 
     def test_solver_contact_preallocation_excludes_cross_world_pairs(self):
         """Preallocate contact state from world-compatible pairs instead of a Cartesian product."""

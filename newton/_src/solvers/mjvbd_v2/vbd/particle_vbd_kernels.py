@@ -1547,7 +1547,7 @@ def accumulate_self_contact_force_and_hessian(
 
                 c_e1_v1 = particle_colors[e1_v1]
                 c_e1_v2 = particle_colors[e1_v2]
-                if c_e1_v1 == current_color or c_e1_v2 == current_color:
+                if current_color < 0 or c_e1_v1 == current_color or c_e1_v2 == current_color:
                     soft_material = _select_soft_contact_material(
                         soft_contact_ke,
                         soft_contact_kd,
@@ -1575,10 +1575,10 @@ def accumulate_self_contact_force_and_hessian(
 
                     if has_contact:
                         # here we only handle the e1 side, because e2 will also detection this contact and add force and hessian on its own
-                        if c_e1_v1 == current_color:
+                        if current_color < 0 or c_e1_v1 == current_color:
                             wp.atomic_add(particle_forces, e1_v1, collision_force_0)
                             wp.atomic_add(particle_hessians, e1_v1, collision_hessian_0)
-                        if c_e1_v2 == current_color:
+                        if current_color < 0 or c_e1_v2 == current_color:
                             wp.atomic_add(particle_forces, e1_v2, collision_force_1)
                             wp.atomic_add(particle_hessians, e1_v2, collision_hessian_1)
             collision_buffer_counter += NUM_THREADS_PER_COLLISION_PRIMITIVE
@@ -1605,7 +1605,8 @@ def accumulate_self_contact_force_and_hessian(
                 c_tri_c = particle_colors[tri_c]
 
                 if (
-                    c_v == current_color
+                    current_color < 0
+                    or c_v == current_color
                     or c_tri_a == current_color
                     or c_tri_b == current_color
                     or c_tri_c == current_color
@@ -1644,22 +1645,22 @@ def accumulate_self_contact_force_and_hessian(
 
                     if has_contact:
                         # particle
-                        if c_v == current_color:
+                        if current_color < 0 or c_v == current_color:
                             wp.atomic_add(particle_forces, particle_idx, collision_force_3)
                             wp.atomic_add(particle_hessians, particle_idx, collision_hessian_3)
 
                         # tri_a
-                        if c_tri_a == current_color:
+                        if current_color < 0 or c_tri_a == current_color:
                             wp.atomic_add(particle_forces, tri_a, collision_force_0)
                             wp.atomic_add(particle_hessians, tri_a, collision_hessian_0)
 
                         # tri_b
-                        if c_tri_b == current_color:
+                        if current_color < 0 or c_tri_b == current_color:
                             wp.atomic_add(particle_forces, tri_b, collision_force_1)
                             wp.atomic_add(particle_hessians, tri_b, collision_hessian_1)
 
                         # tri_c
-                        if c_tri_c == current_color:
+                        if current_color < 0 or c_tri_c == current_color:
                             wp.atomic_add(particle_forces, tri_c, collision_force_2)
                             wp.atomic_add(particle_hessians, tri_c, collision_hessian_2)
             collision_buffer_counter += NUM_THREADS_PER_COLLISION_PRIMITIVE
@@ -1788,7 +1789,7 @@ def accumulate_spring_force_and_hessian(
         c_v1 = particle_colors[v1]
 
         # Only evaluate if at least one vertex has the current color
-        if c_v0 == current_color or c_v1 == current_color:
+        if current_color < 0 or c_v0 == current_color or c_v1 == current_color:
             _, _, force_v0, force_v1, hessian = evaluate_spring_force_and_hessian_both_vertices(
                 spring_idx,
                 dt,
@@ -1801,10 +1802,10 @@ def accumulate_spring_force_and_hessian(
             )
 
             # Only add to vertices with the current color
-            if c_v0 == current_color:
+            if current_color < 0 or c_v0 == current_color:
                 wp.atomic_add(particle_forces, v0, force_v0)
                 wp.atomic_add(particle_hessians, v0, hessian)
-            if c_v1 == current_color:
+            if current_color < 0 or c_v1 == current_color:
                 wp.atomic_add(particle_forces, v1, force_v1)
                 wp.atomic_add(particle_hessians, v1, hessian)
 
@@ -2388,7 +2389,7 @@ def accumulate_particle_body_contact_force_and_hessian(
     if t_id >= count:
         return
 
-    if use_contact_color_masks:
+    if use_contact_color_masks and current_color >= 0:
         color_bit = wp.uint32(1) << wp.uint32(current_color)
         if (contact_color_masks[t_id] & color_bit) == wp.uint32(0):
             return
@@ -2402,7 +2403,7 @@ def accumulate_particle_body_contact_force_and_hessian(
     if corners[1] < 0:
         # Particle contact (p, -1, -1): single-vertex path, unchanged from the pre-unification code.
         particle_idx = corners[0]
-        if particle_colors[particle_idx] == current_color:
+        if current_color < 0 or particle_colors[particle_idx] == current_color:
             body_contact_force, body_contact_hessian = _eval_body_particle_contact(
                 particle_idx,
                 pos[particle_idx],
@@ -2457,7 +2458,7 @@ def accumulate_particle_body_contact_force_and_hessian(
             ci = corners[i]
             if ci >= 0:
                 w = bary[i]
-                if particle_colors[ci] == current_color:
+                if current_color < 0 or particle_colors[ci] == current_color:
                     wp.atomic_add(particle_forces, ci, w * ef_force)
                     wp.atomic_add(particle_hessians, ci, (w * w) * ef_hessian)
 
@@ -2572,6 +2573,8 @@ def solve_elasticity_tile(
     particle_adjacency: MeshAdjacencyData,
     particle_forces: wp.array[wp.vec3],
     particle_hessians: wp.array[wp.mat33],
+    write_local_hessian: bool,
+    local_hessians: wp.array[wp.mat33],
     # output
     particle_displacements: wp.array[wp.vec3],
 ):
@@ -2583,6 +2586,8 @@ def solve_elasticity_tile(
     if not particle_flags[particle_index] & ParticleFlags.ACTIVE or mass[particle_index] == 0:
         if thread_idx == 0:
             particle_displacements[particle_index] = wp.vec3(0.0)
+            if write_local_hessian:
+                local_hessians[particle_index] = wp.mat33(0.0)
         return
 
     dt_sqr_reciprocal = 1.0 / (dt * dt)
@@ -2703,6 +2708,8 @@ def solve_elasticity_tile(
             + mass[particle_index] * dt_sqr_reciprocal * wp.identity(n=3, dtype=float)
             + particle_hessians[particle_index]
         )
+        if write_local_hessian:
+            local_hessians[particle_index] = h_total
         if abs(wp.determinant(h_total)) > 1e-8:
             h_inv = wp.inverse(h_total)
             f_total = (

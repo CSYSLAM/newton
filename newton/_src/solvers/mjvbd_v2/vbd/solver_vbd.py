@@ -28,6 +28,7 @@ from ...solver import SolverBase
 from ...xpbd import kernels as xpbd_kernels
 from ...xpbd.kernels import apply_joint_forces
 from ..collision_pipeline import _count_world_compatible_particle_shape_pairs
+from ..particle_multilevel import ParticleMultilevelCorrection
 from . import particle_vbd_kernels, rigid_vbd_kernels, vbd_coupling_kernels
 from .particle_vbd_kernels import (
     NUM_THREADS_PER_COLLISION_PRIMITIVE,
@@ -243,6 +244,12 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_collision_detection_interval: int = 0,
         particle_edge_parallel_epsilon: float = 1e-5,
         particle_enable_tile_solve: bool = True,
+        particle_enable_multilevel_correction: bool = False,
+        particle_multilevel_cluster_size: int = 8,
+        particle_multilevel_coarse_iterations: int = 8,
+        particle_multilevel_coupling: float = 0.5,
+        particle_multilevel_relaxation: float = 0.1,
+        particle_multilevel_max_radius_fraction: float = 0.05,
         particle_topological_contact_filter_threshold: int = 2,
         particle_rest_shape_contact_exclusion_radius: float = 0.0,
         particle_external_vertex_contact_filtering_map: dict | None = None,
@@ -307,6 +314,15 @@ class SolverVBD(SolverBase, CouplingInterface):
                 iterations.
             particle_edge_parallel_epsilon: Threshold to detect near-parallel edges in edge-edge collision handling.
             particle_enable_tile_solve: Whether to accelerate the particle solver using tile API.
+            particle_enable_multilevel_correction: Enable one contact-aware two-level particle correction after the
+                final ordinary VBD iteration. The correction is available only for non-differentiable,
+                non-deterministic CUDA models. Tetrahedral vertices remain on the ordinary VBD path because the
+                current coarse basis contains translational surface modes only.
+            particle_multilevel_cluster_size: Target number of topologically adjacent particles per coarse cluster.
+            particle_multilevel_coarse_iterations: Number of fixed PCG iterations on the coarse graph.
+            particle_multilevel_coupling: Neighbor coupling used by the coarse graph operator.
+            particle_multilevel_relaxation: Fraction of the prolonged coarse correction applied to fine particles.
+            particle_multilevel_max_radius_fraction: Maximum correction length as a fraction of particle radius.
             particle_topological_contact_filter_threshold: Maximum topological distance (measured in rings) under which candidate
                 self-contacts are discarded. Set to a higher value to tolerate contacts between more closely connected mesh
                 elements. Only used when `particle_enable_self_contact` is `True`. Note that setting this to a value larger than 3 will
@@ -503,6 +519,12 @@ class SolverVBD(SolverBase, CouplingInterface):
             particle_collision_detection_interval,
             particle_edge_parallel_epsilon,
             particle_enable_tile_solve,
+            particle_enable_multilevel_correction,
+            particle_multilevel_cluster_size,
+            particle_multilevel_coarse_iterations,
+            particle_multilevel_coupling,
+            particle_multilevel_relaxation,
+            particle_multilevel_max_radius_fraction,
             particle_topological_contact_filter_threshold,
             particle_rest_shape_contact_exclusion_radius,
             particle_external_vertex_contact_filtering_map,
@@ -567,6 +589,12 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_collision_detection_interval: int,
         particle_edge_parallel_epsilon: float,
         particle_enable_tile_solve: bool,
+        particle_enable_multilevel_correction: bool,
+        particle_multilevel_cluster_size: int,
+        particle_multilevel_coarse_iterations: int,
+        particle_multilevel_coupling: float,
+        particle_multilevel_relaxation: float,
+        particle_multilevel_max_radius_fraction: float,
         particle_topological_contact_filter_threshold: int,
         particle_rest_shape_contact_exclusion_radius: float,
         particle_external_vertex_contact_filtering_map: dict | None,
@@ -620,6 +648,25 @@ class SolverVBD(SolverBase, CouplingInterface):
             particle_enable_tile_solve
             and model.device.is_cuda
             and all(group.size >= TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE for group in elasticity_groups)
+        )
+        multilevel_supported = (
+            particle_enable_multilevel_correction
+            and model.device.is_cuda
+            and not model.requires_grad
+            and self._effective_deterministic == wp.DeterministicMode.NOT_GUARANTEED
+            and model.particle_count > 0
+        )
+        self.particle_multilevel = (
+            ParticleMultilevelCorrection(
+                model,
+                cluster_size=particle_multilevel_cluster_size,
+                coarse_iterations=particle_multilevel_coarse_iterations,
+                coupling=particle_multilevel_coupling,
+                relaxation=particle_multilevel_relaxation,
+                max_radius_fraction=particle_multilevel_max_radius_fraction,
+            )
+            if multilevel_supported
+            else None
         )
         if particle_enable_self_contact:
             if particle_self_contact_margin < particle_self_contact_radius:
@@ -839,6 +886,8 @@ class SolverVBD(SolverBase, CouplingInterface):
         self,
         particle_q: wp.array[wp.vec3],
         particle_ids: wp.array[wp.int32],
+        particle_forces: wp.array[wp.vec3] | None = None,
+        particle_hessians: wp.array[wp.mat33] | None = None,
     ) -> None:
         """Add cavity pressure terms to the current particle color."""
         pneumatic = self.model.pneumatic
@@ -856,8 +905,8 @@ class SolverVBD(SolverBase, CouplingInterface):
                 self._pneumatic_particle_faces,
                 self._pneumatic_gauge_pressure,
                 self._pneumatic_curvature,
-                self.particle_forces,
-                self.particle_hessians,
+                self.particle_forces if particle_forces is None else particle_forces,
+                self.particle_hessians if particle_hessians is None else particle_hessians,
             ],
             device=self.device,
         )
@@ -3228,6 +3277,8 @@ class SolverVBD(SolverBase, CouplingInterface):
                             self.particle_adjacency,
                             self.particle_forces,
                             self.particle_hessians,
+                            False,
+                            self.particle_hessians,
                         ],
                         outputs=[self.particle_displacements],
                         device=self.device,
@@ -3265,6 +3316,159 @@ class SolverVBD(SolverBase, CouplingInterface):
                     device=self.device,
                 )
             self._penetration_free_truncation(state_in.particle_q)
+
+        if self.particle_multilevel is not None and iter_num + 1 == self.iterations:
+            self._apply_particle_multilevel_correction(
+                state_in,
+                control,
+                contacts,
+                body_q_for_particles,
+                body_q_prev_for_particles,
+                body_qd_for_particles,
+                dt,
+            )
+
+    def _apply_particle_multilevel_correction(
+        self,
+        state_in: State,
+        control: Control,
+        contacts: Contacts | None,
+        body_q_for_particles: wp.array,
+        body_q_prev_for_particles: wp.array | None,
+        body_qd_for_particles: wp.array,
+        dt: float,
+    ) -> None:
+        """Apply one contact-aware coarse correction at the final particle iterate."""
+        correction = self.particle_multilevel
+        if correction is None or not correction.enabled:
+            return
+        correction.contact_forces.zero_()
+        correction.contact_hessians.zero_()
+        if self._pneumatic_enabled:
+            self._evaluate_pneumatic_cavities(state_in.particle_q, control, dt)
+            self._accumulate_pneumatic_forces(
+                state_in.particle_q,
+                correction.active_particles,
+                correction.contact_forces,
+                correction.contact_hessians,
+            )
+        if contacts is not None and contacts.soft_contact_max > 0:
+            wp.launch(
+                kernel=accumulate_particle_body_contact_force_and_hessian,
+                dim=contacts.soft_contact_max,
+                inputs=[
+                    dt,
+                    -1,
+                    self.particle_q_prev,
+                    state_in.particle_q,
+                    self.model.particle_colors,
+                    self.particle_body_contact_color_masks,
+                    False,
+                    self.friction_epsilon,
+                    self.model.particle_radius,
+                    contacts.soft_contact_indices,
+                    contacts.soft_contact_count,
+                    contacts.soft_contact_max,
+                    self.body_particle_contact_penalty_k,
+                    self.body_particle_contact_material_ke,
+                    self.body_particle_contact_material_kd,
+                    self.body_particle_contact_material_mu,
+                    self.model.shape_body,
+                    body_q_for_particles,
+                    body_q_prev_for_particles,
+                    body_qd_for_particles,
+                    self.model.body_com,
+                    contacts.soft_contact_shape,
+                    contacts.soft_contact_body_pos,
+                    contacts.soft_contact_body_vel,
+                    contacts.soft_contact_normal,
+                    self.model.shape_margin,
+                    contacts.soft_contact_barycentric,
+                ],
+                outputs=[correction.contact_forces, correction.contact_hessians],
+                device=self.device,
+            )
+        if self.model.spring_count:
+            wp.launch(
+                kernel=accumulate_spring_force_and_hessian,
+                dim=self.model.spring_count,
+                inputs=[
+                    dt,
+                    -1,
+                    self.particle_q_prev,
+                    state_in.particle_q,
+                    self.model.particle_colors,
+                    self.model.spring_count,
+                    self.model.spring_indices,
+                    self.model.spring_rest_length,
+                    self.model.spring_stiffness,
+                    self.model.spring_damping,
+                ],
+                outputs=[correction.contact_forces, correction.contact_hessians],
+                device=self.device,
+            )
+        if self.particle_enable_self_contact:
+            wp.launch(
+                kernel=accumulate_self_contact_force_and_hessian,
+                dim=self.particle_self_contact_evaluation_kernel_launch_size,
+                inputs=[
+                    dt,
+                    -1,
+                    self.particle_q_prev,
+                    state_in.particle_q,
+                    self.model.particle_colors,
+                    self.model.tri_indices,
+                    self.model.edge_indices,
+                    self.trimesh_collision_info,
+                    self.particle_self_contact_radius,
+                    self.model.soft_contact_ke,
+                    self.model.soft_contact_kd,
+                    self.model.soft_contact_mu,
+                    self._soft_contact_materials,
+                    self._soft_contact_material_index,
+                    self._use_soft_contact_material_source,
+                    self.friction_epsilon,
+                    self.trimesh_collision_detector.edge_edge_parallel_epsilon,
+                ],
+                outputs=[correction.contact_forces, correction.contact_hessians],
+                device=self.device,
+                max_blocks=self.model.device.sm_count,
+            )
+        correction.local_correction.zero_()
+        wp.launch(
+            kernel=solve_elasticity_tile,
+            dim=correction.active_particle_count * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+            block_dim=TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+            inputs=[
+                dt,
+                correction.active_particles,
+                self.particle_q_prev,
+                state_in.particle_q,
+                self.model.particle_mass,
+                self.inertia,
+                self.model.particle_flags,
+                self.model.tri_indices,
+                self.model.tri_poses,
+                self.model.tri_materials,
+                self.model.tri_areas,
+                self.model.edge_indices,
+                self.model.edge_rest_angle,
+                self.model.edge_rest_length,
+                self.model.edge_bending_properties,
+                self.model.tet_indices,
+                self.model.tet_poses,
+                self.model.tet_materials,
+                self.particle_adjacency,
+                correction.contact_forces,
+                correction.contact_hessians,
+                True,
+                correction.local_hessians,
+            ],
+            outputs=[correction.local_correction],
+            device=self.device,
+        )
+        correction.restrict_and_prolong(self.model, self.particle_displacements, dt)
+        self._penetration_free_truncation(state_in.particle_q)
 
     def _solve_rigid_body_iteration(
         self, state_in: State, state_out: State, control: Control, contacts: Contacts | None, dt: float

@@ -55,7 +55,7 @@ RADIUS = 0.008
 SOFT_MARGIN = 0.008
 SELF_RADIUS = 0.002
 SELF_MARGIN = 0.002
-VBD_ITERATIONS = 20
+VBD_ITERATIONS = 12
 IK_ITERATIONS = 24
 ROBOT_CONTACT_KE = 9.0e5
 LEGACY_SOFT_CONTACT_KD = 5.0e-2
@@ -209,6 +209,7 @@ class Example:
             collision_options={"soft_contact_margin": SOFT_MARGIN},
             vbd_options={
                 "iterations": VBD_ITERATIONS,
+                "particle_enable_multilevel_correction": True,
                 "particle_enable_self_contact": True,
                 "particle_self_contact_radius": SELF_RADIUS,
                 "particle_self_contact_margin": SELF_MARGIN,

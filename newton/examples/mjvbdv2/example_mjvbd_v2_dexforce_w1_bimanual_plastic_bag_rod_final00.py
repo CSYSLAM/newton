@@ -31,6 +31,8 @@ from newton.examples.mjvbdv2 import (
 )
 from newton.solvers import SolverMJVBDV2
 
+VBD_ITERATIONS = 8
+
 ROBOT_URDF = hand_reference.ASSET_ROOT / "DexforceW1V021" / "DexforceW1V021.urdf"
 ROBOT_BASE_POSITION = wp.vec3(0.0, -0.28, -0.18)
 ROBOT_BASE_ROTATION = wp.quat(0.0, 0.0, 0.70710677, 0.70710677)
@@ -156,7 +158,8 @@ class Example:
             joint_mode="kinematic",
             contact_mode="full",
             vbd_options={
-                "iterations": hand_reference.VBD_ITERATIONS,
+                "iterations": VBD_ITERATIONS,
+                "particle_enable_multilevel_correction": True,
                 "friction_epsilon": 1.0e-4,
                 "rigid_body_contact_buffer_size": 2048,
                 "particle_enable_self_contact": True,
