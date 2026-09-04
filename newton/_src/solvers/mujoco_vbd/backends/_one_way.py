@@ -190,8 +190,8 @@ class OneWayBackend(MuJoCoVBDBackendBase):
             overlay.joint_enabled = wp.array(joint_enabled, dtype=wp.bool, device=model.device)
 
             joint_type = np.asarray(overlay.joint_type.numpy(), dtype=np.int32).copy()
-            cable = joint_type[joint_indices] == int(JointType.CABLE)
-            joint_type[joint_indices[cable]] = int(JointType.D6)
+            rod = joint_type[joint_indices] == int(JointType.ROD)
+            joint_type[joint_indices[rod]] = int(JointType.D6)
             overlay.joint_type = wp.array(joint_type, dtype=wp.int32, device=model.device)
 
     def _sync_proxy_from_source(self, source_state: State, dt: float) -> None:

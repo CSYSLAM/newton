@@ -3024,7 +3024,8 @@ def accumulate_contact_force_and_hessian(
 
         collision_buffer_counter = t_id_current_primitive
         collision_buffer_offset = collision_info.edge_colliding_edges_offsets[primitive_id]
-        while collision_buffer_counter < collision_info.edge_colliding_edges_buffer_sizes[primitive_id]:
+        collision_count = get_edge_colliding_edges_count(collision_info, primitive_id)
+        while collision_buffer_counter < collision_count:
             e2_idx = collision_info.edge_colliding_edges[2 * (collision_buffer_offset + collision_buffer_counter) + 1]
 
             if e1_idx != -1 and e2_idx != -1:
@@ -3066,7 +3067,8 @@ def accumulate_contact_force_and_hessian(
         particle_idx = primitive_id
         collision_buffer_counter = t_id_current_primitive
         collision_buffer_offset = collision_info.vertex_colliding_triangles_offsets[primitive_id]
-        while collision_buffer_counter < collision_info.vertex_colliding_triangles_buffer_sizes[primitive_id]:
+        collision_count = get_vertex_colliding_triangles_count(collision_info, primitive_id)
+        while collision_buffer_counter < collision_count:
             tri_idx = collision_info.vertex_colliding_triangles[
                 (collision_buffer_offset + collision_buffer_counter) * 2 + 1
             ]

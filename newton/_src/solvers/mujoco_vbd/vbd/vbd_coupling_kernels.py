@@ -13,7 +13,11 @@ from .particle_vbd_kernels import (
     evaluate_edge_edge_contact_2_vertices,
     evaluate_vertex_triangle_collision_force_hessian_4_vertices,
 )
-from .rigid_vbd_kernels import _eval_body_particle_contact, _select_soft_contact_material
+from .rigid_vbd_kernels import (
+    _NUM_CONTACT_THREADS_PER_BODY,
+    _eval_body_particle_contact,
+    _select_soft_contact_material,
+)
 from .tri_mesh_collision import TriMeshCollisionInfo
 
 wp.set_module_options({"enable_backward": False})
@@ -170,57 +174,74 @@ def _harvest_vbd_body_particle_contact_forces_on_proxy_bodies_kernel(
     body_particle_contact_normal: wp.array[wp.vec3],
     shape_margin: wp.array[float],
     shape_body: wp.array[wp.int32],
+    body_particle_contact_buffer_pre_alloc: int,
+    body_particle_contact_counts: wp.array[wp.int32],
+    body_particle_contact_indices: wp.array[wp.int32],
     out_body_f: wp.array[wp.spatial_vector],
 ):
-    contact_idx = wp.tid()
-    if contact_idx >= body_particle_contact_count[0]:
-        return
-
-    shape_idx = body_particle_contact_shape[contact_idx]
-    if shape_idx < 0 or shape_idx >= shape_body.shape[0]:
-        return
-
-    body_idx = shape_body[shape_idx]
-    if body_idx < 0 or body_idx >= body_local_to_proxy_global.shape[0]:
+    """Harvest exactly the capped body-particle contacts consumed by VBD."""
+    tid = wp.tid()
+    body_idx = tid // _NUM_CONTACT_THREADS_PER_BODY
+    thread_id_within_body = tid % _NUM_CONTACT_THREADS_PER_BODY
+    if body_idx >= body_local_to_proxy_global.shape[0]:
         return
 
     proxy_global = body_local_to_proxy_global[body_idx]
     if proxy_global < 0 or proxy_global >= out_body_f.shape[0]:
         return
 
-    particle_idx = body_particle_contact_particle[contact_idx]
-    if particle_idx < 0 or particle_idx >= particle_q.shape[0]:
+    contact_count = body_particle_contact_counts[body_idx]
+    if contact_count > body_particle_contact_buffer_pre_alloc:
+        contact_count = body_particle_contact_buffer_pre_alloc
+    if contact_count == 0:
         return
 
-    force_on_particle, _ = _eval_body_particle_contact(
-        particle_idx,
-        particle_q[particle_idx],
-        particle_q_prev[particle_idx],
-        contact_idx,
-        0.0,
-        body_particle_contact_penalty_k[contact_idx],
-        body_particle_contact_material_kd[contact_idx],
-        body_particle_contact_material_mu[contact_idx],
-        friction_epsilon,
-        particle_radius,
-        shape_body,
-        body_q,
-        body_q_prev,
-        body_qd,
-        body_com,
-        body_particle_contact_shape,
-        body_particle_contact_body_pos,
-        body_particle_contact_body_vel,
-        body_particle_contact_normal,
-        shape_margin,
-        dt,
-    )
-
-    force_on_body = -force_on_particle
-    cp_world = wp.transform_point(body_q[body_idx], body_particle_contact_body_pos[contact_idx])
+    max_contact_count = body_particle_contact_count[0]
     com_world = wp.transform_point(body_q[body_idx], body_com[body_idx])
-    torque_on_body = wp.cross(cp_world - com_world, force_on_body)
-    wp.atomic_add(out_body_f, proxy_global, wp.spatial_vector(force_on_body, torque_on_body))
+    force_accumulator = wp.vec3(0.0)
+    torque_accumulator = wp.vec3(0.0)
+
+    contact_slot = thread_id_within_body
+    while contact_slot < contact_count:
+        contact_idx = body_particle_contact_indices[body_idx * body_particle_contact_buffer_pre_alloc + contact_slot]
+        contact_slot += _NUM_CONTACT_THREADS_PER_BODY
+        if contact_idx < 0 or contact_idx >= max_contact_count:
+            continue
+
+        particle_idx = body_particle_contact_particle[contact_idx]
+        if particle_idx < 0 or particle_idx >= particle_q.shape[0]:
+            continue
+
+        force_on_particle, _ = _eval_body_particle_contact(
+            particle_idx,
+            particle_q[particle_idx],
+            particle_q_prev[particle_idx],
+            contact_idx,
+            0.0,
+            body_particle_contact_penalty_k[contact_idx],
+            body_particle_contact_material_kd[contact_idx],
+            body_particle_contact_material_mu[contact_idx],
+            friction_epsilon,
+            particle_radius,
+            shape_body,
+            body_q,
+            body_q_prev,
+            body_qd,
+            body_com,
+            body_particle_contact_shape,
+            body_particle_contact_body_pos,
+            body_particle_contact_body_vel,
+            body_particle_contact_normal,
+            shape_margin,
+            dt,
+        )
+
+        force_on_body = -force_on_particle
+        contact_point = wp.transform_point(body_q[body_idx], body_particle_contact_body_pos[contact_idx])
+        force_accumulator += force_on_body
+        torque_accumulator += wp.cross(contact_point - com_world, force_on_body)
+
+    wp.atomic_add(out_body_f, proxy_global, wp.spatial_vector(force_accumulator, torque_accumulator))
 
 
 @wp.func
