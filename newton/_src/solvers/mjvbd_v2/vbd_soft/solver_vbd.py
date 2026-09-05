@@ -31,14 +31,19 @@ from .. import particle_surface_cache, particle_truncation_cache
 from ..collision_pipeline import _count_world_compatible_particle_shape_pairs
 from ..particle_multilevel import (
     ParticleMultilevelCorrection,
+    _assess_particle_cleanup,
     _automatic_rejection_reason,
     _normalize_multilevel_mode,
     _normalize_multilevel_operator,
+    _particle_topology_edges,
 )
 from . import particle_vbd_kernels, rigid_vbd_kernels, vbd_coupling_kernels
 from .particle_vbd_kernels import (
     NUM_THREADS_PER_COLLISION_PRIMITIVE,
     TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+    # Solver kernels (particle VBD)
+    accelerate_particle_iteration_chebyshev,
+    accelerate_particle_iteration_chebyshev_guarded,
     # Topological filtering helper functions
     accumulate_particle_body_contact_force_and_hessian,
     accumulate_particle_body_contact_force_and_hessian_active,
@@ -51,9 +56,10 @@ from .particle_vbd_kernels import (
     apply_truncation_ts,
     build_particle_body_contact_adjacency_active,
     detect_any_active_self_contacts,
-    # Solver kernels (particle VBD)
+    expand_particle_iteration_chebyshev_exclusions,
     forward_step,
     gather_particle_body_contact_force_and_hessian,
+    mark_particle_iteration_chebyshev_exclusions,
     solve_elasticity,
     solve_elasticity_tile,
     solve_surface_elasticity_tile,
@@ -245,6 +251,12 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_surface_relaxation: float = 1.0,
         particle_enable_surface_cache: bool = False,
         particle_enable_truncation_cache: bool = False,
+        particle_chebyshev_spectral_radius: float | None = None,
+        particle_chebyshev_max_radius_fraction: float = 1.0,
+        particle_chebyshev_warmup_iterations: int = 0,
+        particle_chebyshev_polish_iterations: int = 0,
+        particle_chebyshev_contact_rings: int = 0,
+        particle_chebyshev_cleanup_max_radius_fraction: float | None = None,
         particle_enable_multilevel_correction: bool | Literal["auto"] = False,
         particle_multilevel_operator: Literal["graph", "galerkin"] = "graph",
         particle_multilevel_cluster_size: int = 8,
@@ -332,6 +344,17 @@ class SolverVBD(SolverBase, CouplingInterface):
                 Refreshes after every collision detection and retains displacement-dependent plane offsets.
                 Uses up to 256 MiB; larger caches raise an error. Disabled for differentiable and deterministic
                 models. Defaults to disabled; scalar execution is unchanged.
+            particle_chebyshev_spectral_radius: Estimated spectral radius for contact-aware Chebyshev acceleration.
+                ``None`` disables the experimental accelerator and preserves the ordinary VBD iteration path.
+                Differentiable models always use the ordinary path.
+            particle_chebyshev_max_radius_fraction: Maximum Chebyshev correction per sweep as a fraction of particle
+                radius. Self-contact DAT can impose a tighter bound.
+            particle_chebyshev_warmup_iterations: Ordinary particle sweeps before Chebyshev acceleration begins.
+            particle_chebyshev_polish_iterations: Ordinary particle sweeps after Chebyshev acceleration ends.
+            particle_chebyshev_contact_rings: Number of elasticity-topology rings around contact, spring, or DAT-limited
+                particles that remain on ordinary VBD updates. Zero disables topology dilation.
+            particle_chebyshev_cleanup_max_radius_fraction: Request the configured multilevel fallback sweeps when the
+                final local Newton correction exceeds this fraction of particle radius. ``None`` disables the check.
             particle_enable_multilevel_correction: Enable the experimental two-level particle propagation correction.
                 Pass ``"auto"`` to apply a conservative surface-topology and hierarchy-size policy. The correction is
                 available only for non-differentiable, non-deterministic CUDA models and otherwise falls back to
@@ -550,6 +573,11 @@ class SolverVBD(SolverBase, CouplingInterface):
         self.particle_multilevel_fallback_iterations = (
             iterations if particle_multilevel_fallback_iterations is None else particle_multilevel_fallback_iterations
         )
+        if (
+            particle_chebyshev_cleanup_max_radius_fraction is not None
+            and self.particle_multilevel_fallback_iterations <= iterations
+        ):
+            raise ValueError("Chebyshev cleanup requires fallback iterations beyond the primary iteration count")
         self.friction_epsilon = friction_epsilon
         self._soft_contact_materials = wp.empty(0, dtype=wp.vec3, device=self.device)
         self._soft_contact_material_index = wp.empty(0, dtype=wp.int32, device=self.device)
@@ -579,6 +607,12 @@ class SolverVBD(SolverBase, CouplingInterface):
             particle_collision_detection_interval,
             particle_edge_parallel_epsilon,
             particle_enable_tile_solve,
+            particle_chebyshev_spectral_radius,
+            particle_chebyshev_max_radius_fraction,
+            particle_chebyshev_warmup_iterations,
+            particle_chebyshev_polish_iterations,
+            particle_chebyshev_contact_rings,
+            particle_chebyshev_cleanup_max_radius_fraction,
             particle_enable_multilevel_correction,
             particle_multilevel_operator,
             particle_multilevel_cluster_size,
@@ -673,6 +707,12 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_collision_detection_interval: int,
         particle_edge_parallel_epsilon: float,
         particle_enable_tile_solve: bool,
+        particle_chebyshev_spectral_radius: float | None,
+        particle_chebyshev_max_radius_fraction: float,
+        particle_chebyshev_warmup_iterations: int,
+        particle_chebyshev_polish_iterations: int,
+        particle_chebyshev_contact_rings: int,
+        particle_chebyshev_cleanup_max_radius_fraction: float | None,
         particle_enable_multilevel_correction: bool | Literal["auto"],
         particle_multilevel_operator: Literal["graph", "galerkin"],
         particle_multilevel_cluster_size: int,
@@ -693,6 +733,8 @@ class SolverVBD(SolverBase, CouplingInterface):
         self.particle_multilevel_mode = multilevel_mode
         self.particle_multilevel = None
         self.particle_multilevel_auto_rejection_reason = None
+        if particle_chebyshev_cleanup_max_radius_fraction is not None and multilevel_mode == "off":
+            raise ValueError("Chebyshev cleanup requires particle_enable_multilevel_correction")
 
         # Early exit if no particles
         if model.particle_count == 0:
@@ -703,6 +745,48 @@ class SolverVBD(SolverBase, CouplingInterface):
         self.particle_collision_detection_interval = particle_collision_detection_interval
         self.particle_topological_contact_filter_threshold = particle_topological_contact_filter_threshold
         self.particle_rest_shape_contact_exclusion_radius = particle_rest_shape_contact_exclusion_radius
+        if particle_chebyshev_spectral_radius is not None and not 0.0 < particle_chebyshev_spectral_radius < 1.0:
+            raise ValueError(
+                f"particle_chebyshev_spectral_radius must be in (0, 1), got {particle_chebyshev_spectral_radius}"
+            )
+        if particle_chebyshev_max_radius_fraction <= 0.0:
+            raise ValueError(
+                f"particle_chebyshev_max_radius_fraction must be positive, got {particle_chebyshev_max_radius_fraction}"
+            )
+        for name, value in (
+            ("particle_chebyshev_warmup_iterations", particle_chebyshev_warmup_iterations),
+            ("particle_chebyshev_polish_iterations", particle_chebyshev_polish_iterations),
+            ("particle_chebyshev_contact_rings", particle_chebyshev_contact_rings),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a nonnegative integer, got {value}")
+        accelerated_iterations = (
+            self.iterations - particle_chebyshev_warmup_iterations - particle_chebyshev_polish_iterations
+        )
+        if particle_chebyshev_spectral_radius is not None and accelerated_iterations < 1:
+            raise ValueError("Chebyshev warm-up and polish sweeps must leave at least one accelerated iteration")
+        if particle_chebyshev_cleanup_max_radius_fraction is not None:
+            if not np.isfinite(particle_chebyshev_cleanup_max_radius_fraction) or (
+                particle_chebyshev_cleanup_max_radius_fraction <= 0.0
+            ):
+                raise ValueError("particle_chebyshev_cleanup_max_radius_fraction must be positive and finite")
+            if particle_chebyshev_spectral_radius is None:
+                raise ValueError("Chebyshev cleanup requires particle_chebyshev_spectral_radius")
+        self.particle_chebyshev_spectral_radius = particle_chebyshev_spectral_radius
+        self.particle_chebyshev_max_radius_fraction = particle_chebyshev_max_radius_fraction
+        self.particle_chebyshev_warmup_iterations = particle_chebyshev_warmup_iterations
+        self.particle_chebyshev_polish_iterations = particle_chebyshev_polish_iterations
+        self.particle_chebyshev_contact_rings = particle_chebyshev_contact_rings
+        self.particle_chebyshev_cleanup_max_radius_fraction = particle_chebyshev_cleanup_max_radius_fraction
+        self.particle_chebyshev_guarded = bool(
+            particle_chebyshev_warmup_iterations
+            or particle_chebyshev_polish_iterations
+            or particle_chebyshev_contact_rings
+        )
+        self.particle_chebyshev_weights = self._build_particle_chebyshev_weights(
+            particle_chebyshev_spectral_radius, accelerated_iterations
+        )
+        self.particle_chebyshev_enabled = bool(self.particle_chebyshev_weights) and not model.requires_grad
 
         # Particle state storage
         self.particle_q_prev = wp.zeros_like(
@@ -832,6 +916,65 @@ class SolverVBD(SolverBase, CouplingInterface):
         self.pos_prev_collision_detection = wp.zeros_like(model.particle_q, device=self.device)
         self.particle_displacements = wp.zeros(self.model.particle_count, dtype=wp.vec3, device=self.device)
         self.truncation_ts = wp.zeros(self.model.particle_count, dtype=float, device=self.device)
+        if self.particle_chebyshev_enabled:
+            self.particle_chebyshev_older = wp.zeros_like(model.particle_q, device=self.device)
+            self.particle_chebyshev_previous = wp.zeros_like(model.particle_q, device=self.device)
+            self.particle_chebyshev_collided = wp.zeros(model.particle_count, dtype=wp.int32, device=self.device)
+            if self.particle_chebyshev_contact_rings:
+                self.particle_chebyshev_guard_masks = (
+                    wp.zeros(model.particle_count, dtype=wp.int32, device=self.device),
+                    wp.zeros(model.particle_count, dtype=wp.int32, device=self.device),
+                )
+                topology_edges = _particle_topology_edges(model)
+                neighbor_lists: list[list[int]] = [[] for _ in range(model.particle_count)]
+                for particle_a, particle_b in topology_edges:
+                    neighbor_lists[int(particle_a)].append(int(particle_b))
+                    neighbor_lists[int(particle_b)].append(int(particle_a))
+                neighbor_offsets = np.zeros(model.particle_count + 1, dtype=np.int32)
+                neighbor_offsets[1:] = np.cumsum([len(neighbors) for neighbors in neighbor_lists], dtype=np.int32)
+                neighbors = np.asarray(
+                    [neighbor for particle_neighbors in neighbor_lists for neighbor in particle_neighbors],
+                    dtype=np.int32,
+                )
+                self.particle_chebyshev_neighbor_offsets = wp.array(
+                    neighbor_offsets, dtype=wp.int32, device=self.device
+                )
+                self.particle_chebyshev_neighbors = wp.array(neighbors, dtype=wp.int32, device=self.device)
+            else:
+                self.particle_chebyshev_guard_masks = ()
+                self.particle_chebyshev_neighbor_offsets = None
+                self.particle_chebyshev_neighbors = None
+        else:
+            self.particle_chebyshev_older = None
+            self.particle_chebyshev_previous = None
+            self.particle_chebyshev_collided = None
+            self.particle_chebyshev_guard_masks = ()
+            self.particle_chebyshev_neighbor_offsets = None
+            self.particle_chebyshev_neighbors = None
+        if (
+            self.particle_chebyshev_enabled
+            and self.particle_multilevel is not None
+            and particle_chebyshev_cleanup_max_radius_fraction is not None
+        ):
+            self.particle_chebyshev_cleanup_status = wp.zeros(1, dtype=wp.int32, device=self.device)
+            self.particle_chebyshev_cleanup_metrics = wp.zeros(1, dtype=float, device=self.device)
+        else:
+            self.particle_chebyshev_cleanup_status = None
+            self.particle_chebyshev_cleanup_metrics = None
+
+    def _build_particle_chebyshev_weights(
+        self, spectral_radius: float | None, accelerated_iterations: int
+    ) -> tuple[float, ...]:
+        """Return the VBD Chebyshev weights for the configured fixed sweep count."""
+        if spectral_radius is None:
+            return ()
+        rho_sq = spectral_radius * spectral_radius
+        weights = [1.0]
+        if accelerated_iterations > 1:
+            weights.append(2.0 / (2.0 - rho_sq))
+        while len(weights) < accelerated_iterations:
+            weights.append(4.0 / (4.0 - rho_sq * weights[-1]))
+        return tuple(weights)
 
     def _build_particle_elasticity_color_groups(self) -> tuple[list[wp.array], list[wp.array]]:
         """Split every graph-color group into surface-only and tetrahedral vertices."""
@@ -2177,6 +2320,11 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         correction = self.particle_multilevel
         if correction is not None and self.particle_multilevel_fallback_iterations > self.iterations:
+            fallback_status = (
+                self.particle_chebyshev_cleanup_status
+                if self.particle_chebyshev_cleanup_status is not None
+                else correction.runtime_status
+            )
 
             def run_fallback_iterations():
                 for iter_num in range(self.iterations, self.particle_multilevel_fallback_iterations):
@@ -2184,8 +2332,8 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self._solve_particle_iteration(state_in, state_out, contacts, dt, iter_num)
 
             if self.device.is_capturing:
-                wp.capture_if(correction.runtime_status, on_true=run_fallback_iterations)
-            elif int(correction.runtime_status.numpy()[0]) != 0:
+                wp.capture_if(fallback_status, on_true=run_fallback_iterations)
+            elif int(fallback_status.numpy()[0]) != 0:
                 run_fallback_iterations()
 
         if self.model.particle_count:
@@ -2442,6 +2590,8 @@ class SolverVBD(SolverBase, CouplingInterface):
                 outputs=[
                     self.particle_displacements,  # displacement_out: wp.array[wp.vec3],
                     particle_q_out,  # pos_out: wp.array[wp.vec3],
+                    self.particle_chebyshev_collided if self.particle_chebyshev_guarded else None,
+                    self.particle_chebyshev_cleanup_status,
                 ],
                 device=self.device,
             )
@@ -2483,6 +2633,8 @@ class SolverVBD(SolverBase, CouplingInterface):
                 outputs=[
                     self.particle_displacements,
                     particle_q_out,
+                    self.particle_chebyshev_collided if self.particle_chebyshev_guarded else None,
+                    self.particle_chebyshev_cleanup_status,
                 ],
                 device=self.device,
             )
@@ -2500,7 +2652,12 @@ class SolverVBD(SolverBase, CouplingInterface):
                 max_displacement,
                 self.has_active_self_contact,
             ],
-            outputs=[self.particle_displacements, particle_q_out],
+            outputs=[
+                self.particle_displacements,
+                particle_q_out,
+                self.particle_chebyshev_collided if self.particle_chebyshev_guarded else None,
+                self.particle_chebyshev_cleanup_status,
+            ],
             device=self.device,
         )
 
@@ -2540,6 +2697,9 @@ class SolverVBD(SolverBase, CouplingInterface):
         )
 
         self._penetration_free_truncation(state_in.particle_q)
+        if self.particle_chebyshev_enabled:
+            self.particle_chebyshev_older.assign(state_in.particle_q)
+            self.particle_chebyshev_collided.zero_()
 
         if self.surface_anchor_angles is not None:
             wp.launch(
@@ -3016,6 +3176,11 @@ class SolverVBD(SolverBase, CouplingInterface):
         # Early exit if no particles
         if model.particle_count == 0:
             return
+        chebyshev_history_active = (
+            self.particle_chebyshev_enabled and iter_num < self.iterations - self.particle_chebyshev_polish_iterations
+        )
+        if chebyshev_history_active:
+            self.particle_chebyshev_previous.assign(state_in.particle_q)
 
         # Update collision detection if needed (penetration-free mode only)
         if self.particle_enable_self_contact:
@@ -3276,7 +3441,73 @@ class SolverVBD(SolverBase, CouplingInterface):
                 )
             self._penetration_free_truncation(state_in.particle_q, self.model.particle_color_groups[color])
 
+        chebyshev_iteration = iter_num - self.particle_chebyshev_warmup_iterations
+        if self.particle_chebyshev_guarded and chebyshev_history_active:
+            wp.launch(
+                kernel=mark_particle_iteration_chebyshev_exclusions,
+                dim=model.particle_count,
+                inputs=[self.particle_hessians],
+                outputs=[self.particle_chebyshev_collided],
+                device=self.device,
+            )
+        if 0 <= chebyshev_iteration < len(self.particle_chebyshev_weights):
+            if self.particle_chebyshev_guarded:
+                excluded = self.particle_chebyshev_collided
+                for ring in range(self.particle_chebyshev_contact_rings):
+                    expanded = self.particle_chebyshev_guard_masks[ring % 2]
+                    expanded.zero_()
+                    wp.launch(
+                        kernel=expand_particle_iteration_chebyshev_exclusions,
+                        dim=model.particle_count,
+                        inputs=[
+                            excluded,
+                            self.particle_chebyshev_neighbor_offsets,
+                            self.particle_chebyshev_neighbors,
+                        ],
+                        outputs=[expanded],
+                        device=self.device,
+                    )
+                    excluded = expanded
+                wp.launch(
+                    kernel=accelerate_particle_iteration_chebyshev_guarded,
+                    dim=model.particle_count,
+                    inputs=[
+                        state_in.particle_q,
+                        self.particle_chebyshev_older,
+                        model.particle_radius,
+                        model.particle_flags,
+                        excluded,
+                        self.particle_chebyshev_weights[chebyshev_iteration],
+                        self.particle_chebyshev_max_radius_fraction,
+                    ],
+                    outputs=[self.particle_displacements],
+                    device=self.device,
+                )
+            else:
+                wp.launch(
+                    kernel=accelerate_particle_iteration_chebyshev,
+                    dim=model.particle_count,
+                    inputs=[
+                        state_in.particle_q,
+                        self.particle_chebyshev_older,
+                        model.particle_radius,
+                        model.particle_flags,
+                        self.particle_hessians,
+                        self.particle_chebyshev_weights[chebyshev_iteration],
+                        self.particle_chebyshev_max_radius_fraction,
+                    ],
+                    outputs=[self.particle_chebyshev_collided, self.particle_displacements],
+                    device=self.device,
+                )
+            if chebyshev_iteration > 0:
+                self._penetration_free_truncation(state_in.particle_q)
+        if chebyshev_history_active:
+            self.particle_chebyshev_older.assign(self.particle_chebyshev_previous)
+
         if self.particle_multilevel is not None and iter_num + 1 == self.iterations:
+            if self.particle_chebyshev_cleanup_status is not None:
+                self.particle_chebyshev_cleanup_status.zero_()
+                self.particle_chebyshev_cleanup_metrics.zero_()
             self._apply_particle_multilevel_correction(
                 state_in,
                 contacts,
@@ -3285,6 +3516,22 @@ class SolverVBD(SolverBase, CouplingInterface):
                 body_qd_for_particles,
                 dt,
             )
+            if self.particle_chebyshev_cleanup_status is not None:
+                wp.launch(
+                    kernel=_assess_particle_cleanup,
+                    dim=max(1, self.particle_multilevel.active_particle_count),
+                    inputs=[
+                        self.particle_multilevel.active_particles,
+                        self.particle_multilevel.active_particle_count,
+                        self.particle_multilevel.local_correction,
+                        self.particle_multilevel.fine_correction,
+                        model.particle_radius,
+                        self.particle_chebyshev_cleanup_max_radius_fraction,
+                        self.particle_multilevel.runtime_status,
+                    ],
+                    outputs=[self.particle_chebyshev_cleanup_status, self.particle_chebyshev_cleanup_metrics],
+                    device=self.device,
+                )
 
     def _apply_particle_multilevel_correction(
         self,

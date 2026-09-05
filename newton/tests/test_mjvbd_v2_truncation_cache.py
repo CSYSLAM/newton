@@ -68,6 +68,9 @@ def _fixture(kernels, device):
         particle_conservative_bound_relaxation=0.8,
         particle_self_contact_margin=0.1,
         truncation_ts=wp.ones(count * 4, dtype=float, device=device),
+        particle_chebyshev_guarded=True,
+        particle_chebyshev_collided=wp.zeros(count * 4, dtype=wp.int32, device=device),
+        particle_chebyshev_cleanup_status=wp.zeros(1, dtype=wp.int32, device=device),
     )
     if kernels is soft:
         solver.has_active_self_contact = wp.ones(1, dtype=wp.int32, device=device)
@@ -115,6 +118,11 @@ class TestMJVBDV2TruncationCache(unittest.TestCase):
                     delta = initial_delta * (0.5 + repetition)
                     solver.particle_displacements.assign(delta)
                     expected_t = _reference_factors(solver, kernels, solver.particle_displacements)
+                    expected_factors = expected_t.numpy()
+                    preclamp_delta = delta * expected_factors[:, None]
+                    expected_guard = bool(
+                        np.any(expected_factors < 1.0 - 1.0e-6) or np.any(np.linalg.norm(preclamp_delta, axis=1) > 0.04)
+                    )
                     inputs = [
                         solver.pos_prev_collision_detection,
                         solver.particle_displacements,
@@ -142,16 +150,26 @@ class TestMJVBDV2TruncationCache(unittest.TestCase):
                         kernels.apply_truncation_ts,
                         dim=solver.model.particle_count,
                         inputs=[solver.pos_prev_collision_detection, solver.particle_displacements, expected_t, 0.04],
-                        outputs=[reference_delta, reference_out],
+                        outputs=[reference_delta, reference_out, None, None],
                         device=device,
                     )
                     # Re-running the factor min is idempotent; apply must reset every consumed slot.
+                    solver.particle_chebyshev_collided.zero_()
+                    solver.particle_chebyshev_cleanup_status.zero_()
                     cache.apply(solver, out, None)
                     np.testing.assert_allclose(out.numpy(), reference_out.numpy(), rtol=2.0e-5, atol=1.0e-7)
                     np.testing.assert_allclose(
                         solver.particle_displacements.numpy(), reference_delta.numpy(), rtol=2.0e-5, atol=1.0e-7
                     )
                     np.testing.assert_array_equal(solver.truncation_ts.numpy(), 1.0)
+                    self.assertEqual(
+                        np.count_nonzero(solver.particle_chebyshev_collided.numpy()) > 0,
+                        expected_guard,
+                    )
+                    self.assertEqual(
+                        int(solver.particle_chebyshev_cleanup_status.numpy()[0]),
+                        int(expected_guard),
+                    )
 
             if kernels is soft:
                 # Exercise active -> inactive selected-color updates -> active.

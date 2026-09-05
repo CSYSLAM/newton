@@ -1380,6 +1380,119 @@ def forward_step(
         displacements_out[particle] = vel_new * dt
 
 
+@wp.kernel(enable_backward=False)
+def accelerate_particle_iteration_chebyshev(
+    particle_q: wp.array[wp.vec3],
+    particle_q_older: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    particle_flags: wp.array[wp.int32],
+    force_hessian: wp.array[wp.mat33],
+    spectral_weight: float,
+    max_radius_fraction: float,
+    collided: wp.array[wp.int32],
+    particle_displacements: wp.array[wp.vec3],
+):
+    """Apply one contact-aware Chebyshev extrapolation after a VBD sweep."""
+    particle = wp.tid()
+    # Contact force accumulation writes this Hessian before the local solve.
+    # Spring Hessians share the buffer and conservatively disable acceleration.
+    hessian = force_hessian[particle]
+    if (
+        wp.abs(hessian[0, 0])
+        + wp.abs(hessian[1, 1])
+        + wp.abs(hessian[2, 2])
+        + wp.abs(hessian[0, 1])
+        + wp.abs(hessian[0, 2])
+        + wp.abs(hessian[1, 2])
+        > 0.0
+    ):
+        collided[particle] = 1
+
+    if collided[particle] != 0 or (particle_flags[particle] & ParticleFlags.ACTIVE) == 0:
+        return
+    if spectral_weight <= 1.0:
+        return
+
+    current = particle_q[particle]
+    accelerated = particle_q_older[particle] + spectral_weight * (current - particle_q_older[particle])
+    correction = accelerated - current
+    correction_length = wp.length(correction)
+    max_length = max_radius_fraction * particle_radius[particle]
+    if correction_length > max_length:
+        if max_length > 0.0:
+            correction *= max_length / correction_length
+        else:
+            correction = wp.vec3(0.0)
+    particle_displacements[particle] += correction
+
+
+@wp.kernel(enable_backward=False)
+def mark_particle_iteration_chebyshev_exclusions(
+    force_hessian: wp.array[wp.mat33],
+    excluded: wp.array[wp.int32],
+):
+    """Persist particles touched by contact or spring Hessians."""
+    particle = wp.tid()
+    hessian = force_hessian[particle]
+    hessian_magnitude = (
+        wp.abs(hessian[0, 0])
+        + wp.abs(hessian[1, 1])
+        + wp.abs(hessian[2, 2])
+        + wp.abs(hessian[0, 1])
+        + wp.abs(hessian[0, 2])
+        + wp.abs(hessian[1, 2])
+    )
+    if not wp.isfinite(hessian_magnitude) or hessian_magnitude > 0.0:
+        excluded[particle] = 1
+
+
+@wp.kernel(enable_backward=False)
+def expand_particle_iteration_chebyshev_exclusions(
+    source: wp.array[wp.int32],
+    neighbor_offsets: wp.array[wp.int32],
+    neighbors: wp.array[wp.int32],
+    target: wp.array[wp.int32],
+):
+    """Expand an exclusion mask by one elasticity-topology ring."""
+    particle = wp.tid()
+    if source[particle] == 0:
+        return
+    wp.atomic_max(target, particle, 1)
+    for slot in range(neighbor_offsets[particle], neighbor_offsets[particle + 1]):
+        wp.atomic_max(target, neighbors[slot], 1)
+
+
+@wp.kernel(enable_backward=False)
+def accelerate_particle_iteration_chebyshev_guarded(
+    particle_q: wp.array[wp.vec3],
+    particle_q_older: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    particle_flags: wp.array[wp.int32],
+    excluded: wp.array[wp.int32],
+    spectral_weight: float,
+    max_radius_fraction: float,
+    particle_displacements: wp.array[wp.vec3],
+):
+    """Apply Chebyshev only outside the dilated contact/DAT region."""
+    particle = wp.tid()
+    if excluded[particle] != 0 or (particle_flags[particle] & ParticleFlags.ACTIVE) == 0:
+        return
+    if spectral_weight <= 1.0:
+        return
+
+    current = particle_q[particle]
+    accelerated = particle_q_older[particle] + spectral_weight * (current - particle_q_older[particle])
+    correction = accelerated - current
+    correction_length = wp.length(correction)
+    max_length = max_radius_fraction * particle_radius[particle]
+    if correction_length > max_length:
+        if max_length > 0.0:
+            correction *= max_length / correction_length
+        else:
+            correction = wp.vec3(0.0)
+    particle_displacements[particle] += correction
+
+
 @wp.kernel
 def compute_particle_conservative_bound(
     # inputs
@@ -2320,6 +2433,8 @@ def apply_truncation_ts(
     max_displacement: float,
     displacement_out: wp.array[wp.vec3],
     pos_out: wp.array[wp.vec3],
+    chebyshev_excluded: wp.array[wp.int32],
+    chebyshev_cleanup_status: wp.array[wp.int32],
 ):
     i = wp.tid()
     t = truncation_ts[i]
@@ -2329,6 +2444,11 @@ def apply_truncation_ts(
     len_displacement = wp.length(particle_displacement)
     if len_displacement > max_displacement:
         particle_displacement = particle_displacement * max_displacement / len_displacement
+    if t < 1.0 - 1.0e-6 or len_displacement > max_displacement:
+        if chebyshev_excluded:
+            chebyshev_excluded[i] = 1
+        if chebyshev_cleanup_status:
+            wp.atomic_max(chebyshev_cleanup_status, 0, 1)
 
     displacement_out[i] = particle_displacement
     if pos_out:
@@ -2366,6 +2486,8 @@ def apply_truncation_active_all_or_inactive_selected(
     has_active_self_contact: wp.array[wp.int32],
     displacement_out: wp.array[wp.vec3],
     pos_out: wp.array[wp.vec3],
+    chebyshev_excluded: wp.array[wp.int32],
+    chebyshev_cleanup_status: wp.array[wp.int32],
 ):
     tid = wp.tid()
     active = has_active_self_contact[0] != 0
@@ -2382,6 +2504,11 @@ def apply_truncation_active_all_or_inactive_selected(
     length = wp.length(displacement)
     if length > max_displacement:
         displacement = displacement * max_displacement / length
+    if t < 1.0 - 1.0e-6 or length > max_displacement:
+        if chebyshev_excluded:
+            chebyshev_excluded[particle] = 1
+        if chebyshev_cleanup_status:
+            wp.atomic_max(chebyshev_cleanup_status, 0, 1)
     displacement_out[particle] = displacement
     if pos_out:
         pos_out[particle] = pos[particle] + displacement

@@ -38,8 +38,11 @@ Status values are:
 
 | Date | Change | Affected path | Status | Evidence |
 | --- | --- | --- | --- | --- |
+| 2026-09-05 | Promote guarded cached Chebyshev to the W1 T-shirt default | T-shirt final00 example | **Retained** | The final DAT-safe policy passed 92 focused regressions and a complete 900-frame task, improved common-state accuracy over `cached13`, and reduced the same-run 900-frame mean by 7.59% |
+| 2026-09-05 | Promote the validated `cached13` policy to the W1 T-shirt default | T-shirt final00 example | **Superseded** | After merging `20d5d8fb` with the collision-aware Chebyshev work, an exact configuration assertion and the complete 900-frame null-viewer test passed; the later guarded policy keeps `cached13` selectable |
 | 2026-09-05 | Cache fixed bending anchors and DAT geometry; use 13 contact-free relaxed sweeps | CUDA `vbd/` and `vbd_soft/`; T-shirt `cached13` mode | **Retained, opt-in** | Two 900-frame runs reduced frame time 5.01% / 6.34% versus 12 + graph, with lower position/edge errors at all nine checkpoints; the native common-state mean position error fell 38.04%; defaults unchanged |
 | 2026-09-04 | Project the current particle Hessian into a block-sparse aggregate Galerkin operator | CUDA `vbd/` and `vbd_soft/` cloth/shell paths | **Retained, opt-in** | On the 6,436-particle T-shirt, 12 sweeps plus Galerkin reduced the 300-frame position/edge error versus 30 sweeps by 43.7%/36.3% relative to the existing graph operator, with 5.1% overhead over that operator and 48.9% lower frame time than 30 ordinary sweeps |
+| 2026-09-05 | Add collision-aware Chebyshev acceleration to particle VBD sweeps | CUDA `vbd/` and `vbd_soft/` particle paths | **Retained, opt-in** | The 6,436-particle W1 T-shirt fold reduced its validated policy from 12 to 8 sweeps and improved paired 300-frame GPU and wall time by 23.3% while keeping repeated-run RMS error ranges comparable; reducing the timestep count or using only 7 sweeps was rejected |
 | 2026-09-05 | Extend tetrahedral coarse clusters from six rigid modes to twelve affine modes | CUDA `vbd/` mixed and tet multilevel paths | **Rejected, reverted** | Armadillo position error improved but frame time regressed 49.0%; the mixed soft-tet-cube plus cloth-bag scene regressed 32.2% with no accuracy improvement, and cold module compilation grew from about 3 to 10 seconds |
 | 2026-09-04 | Extend the particle coarse space with six-DOF rigid modes and a Galerkin tet operator | CUDA `vbd/` mixed surface/tetrahedral paths | **Retained, opt-in** | The 240-frame Armadillo run was 3.93% faster than 10 sweeps while reducing the plain-6 position error from 6.83 to 3.53 mm; the complete 1,900-frame soft-cube-plus-cloth final was 9.29% faster than 12 sweeps and passed its placement test |
 | 2026-09-04 | Add conservative eligibility and device-side rejection to the particle multilevel correction | CUDA `vbd/` and `vbd_soft/` cloth/shell paths | **Retained, opt-in** | A graph scale scan bounded the current one-block PCG policy to 128--1,500 clusters; all 120 sampled T-shirt frames passed the residual/finite/clamp guards, while unsafe plastic-bag settings were detected and left on their explicitly validated policy |
@@ -2058,6 +2061,100 @@ this result. A future affine attempt must isolate compilation and demonstrate
 a benefit on both a large tet model and the mixed tet/cloth acceptance scene;
 an Armadillo-only accuracy result is insufficient.
 
+### 2026-09-05: retain contact-aware Chebyshev particle sweeps
+
+**Motivation.** The W1 T-shirt fold originally used 20 ordinary VBD sweeps per
+substep. The guarded multilevel correction reduced that to 12 fine sweeps plus
+one coarse correction, but fine-level convergence remained the dominant
+solver cost. Reducing substeps directly is numerically different from reducing
+nonlinear iterations: [Small Steps in Physics Simulation][small-steps]
+predicts that fewer, larger timesteps generally lose contact and
+time-integration accuracy even when each step receives more solver iterations.
+The newer [Augmented VBD][avbd] method is a stronger candidate for hard
+constraints and extreme stiffness ratios, but migrating the cloth contact
+objective to augmented-Lagrangian state would be a substantially larger
+algorithmic change. Collision-aware acceleration from the [original VBD
+method][vbd-paper] is the controlled first step because it preserves the
+existing local objective and contact model.
+
+**Implementation.** Both private particle VBD implementations now expose an
+opt-in `particle_chebyshev_spectral_radius`. The recurrence matches the
+Chebyshev semi-iterative acceleration described in the original VBD paper:
+
+```text
+omega_1 = 1
+omega_2 = 2 / (2 - rho^2)
+omega_n = 4 / (4 - rho^2 omega_(n-1))
+x_n = x_(n-2) + omega_n (x_bar_n - x_(n-2)).
+```
+
+The accelerator stores two fine iterates and adds the extrapolation through
+the existing displacement/DAT path, so self-contact truncation and CUDA Graph
+topology remain intact. Any particle with a nonzero contact-force Hessian in
+any sweep of the current timestep is permanently excluded from acceleration,
+including contacts detected in the first unit-weight sweep. This implements
+the VBD paper's collision-aware safety rule instead of applying a global SOR
+factor to contacting particles. Spring Hessians use the same accumulation
+buffer and therefore conservatively disable acceleration for their endpoints.
+A per-sweep particle-radius clamp bounds the candidate before DAT. The feature
+is disabled by default and for `requires_grad` models; therefore existing
+solver and demo paths do not change unless they opt in.
+
+**Benchmark.** Measurements used an RTX 5060 Ti, CUDA Graph replay, 6,436
+particles, 60 displayed frames/s, ten substeps, and the scripted W1 bimanual
+fold. Wall time excludes construction and graph capture. Accuracy compares the
+final particle state to a 20-ordinary-sweep run at the same substep count. The
+300-frame window covers grasp, lift, transport, placement, release, and most
+of the second fold.
+
+| Policy | Wall time | GPU stream time | Position RMS | Position p95 | Position maximum | Velocity RMS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 20 ordinary sweeps, reference | 111.115 ms/frame | not recorded | 0 | 0 | 0 | 0 |
+| 12 sweeps + multilevel | 85.210 ms/frame | 85.212 ms/frame | 10.566 mm | 21.231 mm | 47.176 mm | 0.05781 m/s |
+| 8 sweeps + multilevel + Chebyshev `rho=0.90` | 65.325 ms/frame | 65.327 ms/frame | 11.695 mm | 23.316 mm | 53.756 mm | 0.07219 m/s |
+| 7 sweeps + multilevel + Chebyshev `rho=0.90` | 61.130 ms/frame | not recorded | 19.232 mm | 43.626 mm | 74.044 mm | 0.08045 m/s |
+| 9 substeps, 8 sweeps + multilevel + Chebyshev `rho=0.90` | 61.197 ms/frame | not recorded | 17.995 mm | 37.552 mm | 78.988 mm | 0.07567 m/s |
+
+The retained policy is 23.3% faster than the paired existing 12-sweep policy
+in both GPU and wall time and 41.2% faster than the earlier 20-sweep reference.
+Atomic contact order makes the trajectory nondeterministic: across repeated
+300-frame runs, the retained policy produced 10.180--11.695 mm position RMS,
+while the 12-sweep path produced 10.566--11.732 mm. Thus the small paired-run
+error increase is within the observed trajectory spread and is not reported
+as an accuracy improvement. A separate 100-frame spectral-radius scan rejected
+`rho=0.95` and selected `rho=0.90`. The default 900-frame run completed at
+73.582 ms/frame with finite positions and velocities and a final maximum
+particle speed of 0.0282 m/s.
+
+**Substep decision.** No-Go for reducing the T-shirt default below ten
+substeps. Nine substeps was only 6.3% faster in the 300-frame window while its
+RMS error rose 53.9% versus the paired retained run. Eight substeps with 20
+ordinary sweeps had already produced 21.169 mm RMS error, so adding more
+nonlinear work cannot recover the lost temporal resolution efficiently. Seven
+fine sweeps is also rejected because its 6.4% extra speed over the retained
+policy increased RMS error by 64.4%.
+
+**Validation and scope.** Unit tests cover option validation, exact recurrence,
+default-off allocation, and CUDA Graph execution in both private VBD solvers.
+The W1 example explicitly selects eight sweeps and `rho=0.90`; its guarded
+multilevel fallback still captures up to 20 ordinary sweeps. Other examples
+retain their prior iteration behavior. Treat `rho` as a scene-policy parameter,
+not a universal default, until additional cloth, tet, pneumatic, and
+self-contact scenes establish their own safe values.
+
+Post-change regression ran 68 focused tests covering both particle solvers,
+multilevel, contact optimizations, pneumatic state, kinematic passthrough,
+pure MuJoCo, and coupled dispatch. The unchanged W1 plastic-bag-and-rod example
+passed its complete 240-frame test. Three-frame CUDA Graph smoke runs passed
+for that scene, the pneumatic inflatable bag, and the mixed soft-tet-cube plus
+cloth-bag scene; the 15,228-particle Armadillo tet scene passed a two-frame
+Graph smoke run. These examples leave Chebyshev disabled and therefore
+allocate no Chebyshev state or accelerator Graph nodes.
+
+[small-steps]: https://matthias-research.github.io/pages/publications/smallsteps.pdf
+[vbd-paper]: https://www.cemyuksel.com/research/papers/vbd-siggraph2024.pdf
+[avbd]: https://www.cemyuksel.com/research/papers/Augmented_VBD-SIGGRAPH25.pdf
+
 ## Reconstructed retained history
 
 The following changes predate standardized performance logging. They remain
@@ -2709,3 +2806,173 @@ physical lift/release/contact phases. The CUDA guard remains active during
 and after the tests; no VR stop/reload scripts or GPU power changes are used.
 The Towncrier draft also succeeds. Commit and push this integrated revision
 at the user's request, retaining the pre-integration stash as local recovery.
+
+### 2026-09-05: promote cached13 to the T-shirt default
+
+At the user's request, the validated `cached13` policy is now the default for
+`example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00`.
+The historical entries above correctly describe the earlier opt-in decision;
+this entry records the later promotion rather than rewriting that history.
+
+Mode construction is explicit and keeps the two retained experiments
+separate. Default `cached13` selects 13 sweeps, contact-free surface relaxation
+of 1.3, the fixed bending-anchor cache, and the DAT geometry cache, with both
+multilevel and Chebyshev disabled. `chebyshev8` preserves the separately
+validated eight-sweep collision-aware Chebyshev plus multilevel policy.
+`baseline`, `reference20`, and `contact-free` retain their original meanings.
+Low-level CLI overrides remain available without changing a mode's defaults.
+
+After fast-forwarding to `20d5d8fb` and restoring the local Chebyshev work, an
+exact live-solver assertion confirmed the default configuration. The complete
+900-frame CUDA Graph run with `--viewer null --test` passed. Ten surface cache
+and relaxation tests, four truncation-cache tests, and three Chebyshev tests
+also passed. The source formatter, focused Ruff check, and `git diff --check`
+reported no errors.
+
+### 2026-09-05: combine Chebyshev with the surface and DAT caches
+
+Add an explicit `cached-chebyshev8` T-shirt mode to test whether the two
+independent optimizations compose. It uses eight collision-aware Chebyshev
+sweeps, the guarded graph multilevel correction, and both exact geometry
+caches. Surface relaxation remains 1.0: combining Chebyshev with the existing
+1.3 surface SOR is a separate over-relaxation and is not part of the retained
+mode. The validated `cached13` policy remains the example default.
+
+A 100-frame CUDA Graph comparison on the RTX 5060 Ti measured the retained
+combined mode at 51.43--52.05 ms/frame, versus 57.47--57.81 ms/frame for
+uncached `chebyshev8` and 58.58--59.33 ms/frame for `cached13`. Thus the caches
+reduce the eight-sweep Chebyshev path by about 10.5%, and the combined path is
+about 11.8--12.3% faster than `cached13` in this short run.
+
+The speedup is real, but this run does not justify an equal-accuracy claim.
+At frame 100 the combined trajectory differed from ordinary 20 sweeps by
+5.86--6.21 mm position RMS and 0.101--0.122 mm edge-length MAE; `cached13`
+measured 1.70--1.91 mm and 0.060--0.067 mm. Independent ordinary-20 repeats
+already differed by 0.68--1.15 mm, so these are nonlinear trajectory metrics,
+not direct solver residuals, but the combined deviation is still materially
+larger. Nine and ten combined sweeps did not improve it, which is consistent
+with contact-driven trajectory divergence rather than simple under-solving.
+
+An exploratory eight-sweep SOR scan was rejected. Relaxation 1.1, 1.2, and
+1.3 reduced time to 50.88, 49.92, and 48.78 ms/frame, respectively, while the
+frame-100 position RMS increased to 5.76, 6.94, and 7.49 mm. Those variants
+are not exposed. Keep `cached-chebyshev8` opt-in for throughput-oriented
+experiments; use default `cached13` when matching the accepted 20-sweep
+trajectory more closely is the priority. A complete 900-frame CUDA Graph run
+of the retained combined mode passed the example's finite-state and scene
+invariant checks.
+
+### 2026-09-05: guard cached Chebyshev with contact-local ordinary sweeps
+
+The raw `cached-chebyshev8` mode is fast, but its independent trajectory
+diverges from ordinary 20-sweep VBD more than `cached13`. Add an opt-in
+`guarded-cached-chebyshev8` policy instead of changing the accepted default:
+
+1. run two ordinary warm-up sweeps;
+2. run four Chebyshev sweeps only outside a persistent contact/DAT exclusion;
+3. run two ordinary polish sweeps;
+4. apply the existing graph multilevel correction; and
+5. conditionally run five more ordinary sweeps, reaching 13 total, when the
+   device-side post-coarse convergence estimate exceeds 3% of particle radius.
+
+The exact exclusion records particles touched by contact, springs, pneumatic
+Hessians, or a DAT truncation at any point in the substep. A compact, immutable
+particle-neighbor CSR expands that mask by two elasticity-topology rings before
+each accelerated update. The mask remains local to the current substep and the
+two private VBD backends use the same schedule. The ordinary and unguarded
+Chebyshev paths are unchanged when the new options are disabled.
+
+The cleanup estimate is
+
+```text
+max_i ||local_correction_i - accepted_coarse_correction_i|| / radius_i
+```
+
+over active particles. This is a cheap linearized estimate of the correction
+that remains after the coarse update. Nonfinite values, a rejected coarse
+solve, or any DAT/magnitude truncation of the final coarse update always
+requests cleanup. A first version tested the pre-coarse local
+correction directly; it needlessly requested fallback for error that the coarse
+solve subsequently removed. That version reduced the short-run advantage to
+about 0.4% and was rejected. The retained scalar status is consumed by
+`wp.capture_if`, so inactive cleanup sweeps do not launch their Graph nodes and
+there is no per-substep CPU readback. CUDA Graph topology remains fixed.
+
+An initial topology-ring implementation traversed the full mesh adjacency in
+each Graph replay and made the benchmark impractically slow. Replace it with a
+construction-time bidirectional CSR containing triangle, tet, and spring
+connectivity. The retained expansion is one thread per particle and one
+short CSR row per requested ring.
+
+**RTX 5060 Ti, Warp 1.17.0.dev20260807, CUDA Graphs, headless.** Timing includes
+physics and realtime IK, but excludes construction, compilation, Graph capture,
+and checkpoint readback. Each comparison is from one process and one reference
+trajectory; absolute times differed between the short and long runs, so only
+same-run ratios are used.
+
+| Run | `cached13` | guarded cached Chebyshev | Reduction |
+| --- | ---: | ---: | ---: |
+| 100 frames | 60.169 ms/frame | 57.284 ms/frame | 4.80% |
+| 900 frames | 77.165 ms/frame | 71.308 ms/frame | 7.59% |
+
+The 900-frame number is not a regression from the roughly 60 ms short result:
+the first 100 frames contain much less folded-cloth self-contact than the later
+trajectory. A standalone 900-frame `cached13` replay measured 76.432 ms/frame,
+with consecutive 100-frame blocks at 59.961, 69.861, 77.219, 80.836, 80.431,
+79.866, 80.745, 79.617, and 79.353 ms/frame. The earlier roughly 55 ms figure
+was the guarded candidate in a short run, not `cached13`; after the final DAT
+safety condition that short candidate is 57.284 ms/frame. Compare modes within
+the same trajectory length and process rather than mixing these two workloads.
+
+Both 900-frame modes passed `test_final()`. At frame 900 their independent
+position RMS differences from that run's ordinary-20 trajectory were 19.702 mm
+and 18.179 mm, respectively; edge-length MAE was 0.1437 mm and 0.2088 mm.
+These nonlinear, atomic contact trajectories are not reproducible ground truth:
+the guarded mode is closer in position but farther in edge length, so neither
+trajectory metric alone establishes a strict accuracy ordering.
+
+Use a common-state diagnostic for that distinction. For every frame it forks
+all candidates from the same final-substep state of an ordinary-20 history,
+then restores all particle state before continuing the reference. The complete
+900-frame result was:
+
+| Mode | Mean position RMS | P95 position RMS | Mean edge-length MAE |
+| --- | ---: | ---: | ---: |
+| 12 + graph baseline | 0.009101 mm | 0.015985 mm | 0.000826 mm |
+| `cached13` | 0.031274 mm | 0.112559 mm | 0.001821 mm |
+| guarded cached Chebyshev | 0.012310 mm | 0.020483 mm | 0.001180 mm |
+
+No sampled baseline coarse correction was rejected. The guarded policy is
+slightly less accurate than the 12 + graph baseline on this local diagnostic,
+but it is materially closer to ordinary-20 than `cached13` in all three
+reported metrics and remains at hundredth-millimetre position error. Retain it
+as an explicit performance/accuracy mode; keep `cached13` as the demo default
+until broader scenario validation justifies promotion.
+
+Parameter validation covers invalid spectral windows, topology rings, and
+cleanup configurations. CUDA Graph tests execute both private VBD backends with
+the guarded schedule and conditional fallback. The compact masks and CSR are
+allocated only when guarded Chebyshev is enabled; CPU, differentiable,
+deterministic, and ordinary defaults are unaffected because every new option is
+disabled by default. Differentiable models remain on ordinary particle VBD, and
+the existing unguarded modes retain their prior behavior.
+
+All 92 tests in the seven focused MJVBDV2 modules passed after the final DAT
+safety path was added. A final focused re-run also passed the five Chebyshev and
+four DAT-cache tests after adding explicit invalid-configuration and truncation
+status assertions. Ruff format/check and `git diff --check` pass on every
+changed Python file. The required full-tree pre-commit run passes all hooks
+except repository-wide Ruff, which reports the same 737 unrelated historical
+errors already documented above; none points to a file changed by this work.
+
+### 2026-09-05: promote guarded cached Chebyshev to the T-shirt default
+
+At the user's request, promote `guarded-cached-chebyshev8` after the retained
+implementation passed its numerical and performance gates. This supersedes the
+earlier `cached13` default decision without removing that mode. The example's
+implicit Python fallback and command-line parser now select the guarded policy;
+explicit `--particle-solver-mode cached13` reproduces the previous default.
+
+This promotion is local to the W1 T-shirt example. All low-level MJVBDV2
+Chebyshev, topology guard, multilevel, cache, and cleanup options remain disabled
+by default, so no other example or solver construction changes behavior.

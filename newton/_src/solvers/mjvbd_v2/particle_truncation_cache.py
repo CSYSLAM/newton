@@ -255,6 +255,8 @@ def _finish_truncation(
     active: wp.array[wp.int32],
     all_particles: int,
     out: wp.array[wp.vec3],
+    chebyshev_excluded: wp.array[wp.int32],
+    chebyshev_cleanup_status: wp.array[wp.int32],
 ):
     tid = wp.tid()
     p = tid
@@ -269,6 +271,11 @@ def _finish_truncation(
     length = wp.length(d)
     if length > limit:
         d = d * limit / length
+    if t < 1.0 - 1.0e-6 or length > limit:
+        if chebyshev_excluded:
+            chebyshev_excluded[p] = 1
+        if chebyshev_cleanup_status:
+            wp.atomic_max(chebyshev_cleanup_status, 0, 1)
     delta[p] = d
     if out:
         out[p] = pos[p] + d
@@ -366,6 +373,10 @@ class ParticleTruncationCache:
                 self._active,
                 int(selected_particles is None),
             ],
-            outputs=[particle_q_out],
+            outputs=[
+                particle_q_out,
+                solver.particle_chebyshev_collided if getattr(solver, "particle_chebyshev_guarded", False) else None,
+                getattr(solver, "particle_chebyshev_cleanup_status", None),
+            ],
             device=solver.device,
         )

@@ -56,6 +56,8 @@ SOFT_MARGIN = 0.008
 SELF_RADIUS = 0.002
 SELF_MARGIN = 0.002
 VBD_ITERATIONS = 12
+VBD_CHEBYSHEV_ITERATIONS = 8
+VBD_CHEBYSHEV_SPECTRAL_RADIUS = 0.9
 IK_ITERATIONS = 24
 ROBOT_CONTACT_KE = 9.0e5
 LEGACY_SOFT_CONTACT_KD = 5.0e-2
@@ -184,7 +186,44 @@ class Example:
         self.viewer, self.args = viewer, args
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
-        self.sim_substeps = 10
+        if args.sim_substeps < 1:
+            raise ValueError("--sim-substeps must be at least 1")
+        self.particle_solver_mode = getattr(args, "particle_solver_mode", "guarded-cached-chebyshev8")
+        mode_iterations = {
+            "baseline": VBD_ITERATIONS,
+            "reference20": 20,
+            "contact-free": VBD_ITERATIONS,
+            "cached13": 13,
+            "chebyshev8": VBD_CHEBYSHEV_ITERATIONS,
+            "cached-chebyshev8": VBD_CHEBYSHEV_ITERATIONS,
+            "guarded-cached-chebyshev8": VBD_CHEBYSHEV_ITERATIONS,
+        }
+        if self.particle_solver_mode not in mode_iterations:
+            raise ValueError(f"Unknown particle solver mode: {self.particle_solver_mode}")
+        requested_iterations = getattr(args, "vbd_iterations", None)
+        self.vbd_iterations = (
+            mode_iterations[self.particle_solver_mode] if requested_iterations is None else int(requested_iterations)
+        )
+        if self.vbd_iterations < 1:
+            raise ValueError("--vbd-iterations must be at least 1")
+        mode_chebyshev_radius = (
+            VBD_CHEBYSHEV_SPECTRAL_RADIUS
+            if self.particle_solver_mode in ("chebyshev8", "cached-chebyshev8", "guarded-cached-chebyshev8")
+            else None
+        )
+        self.particle_chebyshev_spectral_radius = getattr(
+            args,
+            "particle_chebyshev_spectral_radius",
+            mode_chebyshev_radius,
+        )
+        requested_multilevel = getattr(args, "particle_multilevel", None)
+        self.particle_multilevel = (
+            self.particle_solver_mode in ("baseline", "chebyshev8", "cached-chebyshev8", "guarded-cached-chebyshev8")
+            if requested_multilevel is None
+            else bool(requested_multilevel)
+        )
+        self.particle_surface_relaxation = 1.3 if self.particle_solver_mode in ("contact-free", "cached13") else 1.0
+        self.sim_substeps = int(args.sim_substeps)
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.sim_time = 0.0
         self.frame_index = 0
@@ -193,7 +232,6 @@ class Example:
             wp.quat(args.waic_robot_base_qx, args.waic_robot_base_qy, args.waic_robot_base_qz, args.waic_robot_base_qw)
         )
         self.house_visual_usd = args.house_visual_usd
-        self.particle_solver_mode = getattr(args, "particle_solver_mode", "baseline")
 
         self._build_scene()
         self.device = self.model.device
@@ -209,22 +247,35 @@ class Example:
             contact_mode="soft",
             collision_options={"soft_contact_margin": SOFT_MARGIN},
             vbd_options={
-                "iterations": (
-                    13
-                    if self.particle_solver_mode == "cached13"
-                    else 20
-                    if self.particle_solver_mode == "reference20"
-                    else VBD_ITERATIONS
+                "iterations": self.vbd_iterations,
+                "particle_chebyshev_spectral_radius": self.particle_chebyshev_spectral_radius,
+                "particle_chebyshev_warmup_iterations": (
+                    2 if self.particle_solver_mode == "guarded-cached-chebyshev8" else 0
                 ),
-                "particle_enable_multilevel_correction": self.particle_solver_mode == "baseline",
-                "particle_surface_relaxation": (
-                    1.3 if self.particle_solver_mode in ("contact-free", "cached13") else 1.0
+                "particle_chebyshev_polish_iterations": (
+                    2 if self.particle_solver_mode == "guarded-cached-chebyshev8" else 0
                 ),
-                "particle_enable_surface_cache": self.particle_solver_mode == "cached13",
-                "particle_enable_truncation_cache": self.particle_solver_mode == "cached13",
+                "particle_chebyshev_contact_rings": (
+                    2 if self.particle_solver_mode == "guarded-cached-chebyshev8" else 0
+                ),
+                "particle_chebyshev_cleanup_max_radius_fraction": (
+                    0.03 if self.particle_solver_mode == "guarded-cached-chebyshev8" else None
+                ),
+                "particle_enable_multilevel_correction": self.particle_multilevel,
+                "particle_surface_relaxation": self.particle_surface_relaxation,
+                "particle_enable_surface_cache": self.particle_solver_mode
+                in ("cached13", "cached-chebyshev8", "guarded-cached-chebyshev8"),
+                "particle_enable_truncation_cache": self.particle_solver_mode
+                in ("cached13", "cached-chebyshev8", "guarded-cached-chebyshev8"),
                 "particle_multilevel_min_residual_reduction": 1.0e-4,
                 "particle_multilevel_max_clamp_fraction": 0.5,
-                "particle_multilevel_fallback_iterations": 20 if self.particle_solver_mode == "baseline" else None,
+                "particle_multilevel_fallback_iterations": (
+                    13
+                    if self.particle_solver_mode == "guarded-cached-chebyshev8"
+                    else 20
+                    if self.particle_multilevel
+                    else None
+                ),
                 "particle_enable_self_contact": True,
                 "particle_self_contact_radius": SELF_RADIUS,
                 "particle_self_contact_margin": SELF_MARGIN,
@@ -833,11 +884,22 @@ class Example:
         parser.set_defaults(num_frames=900)
         parser.add_argument(
             "--particle-solver-mode",
-            choices=("baseline", "reference20", "contact-free", "cached13"),
-            default="baseline",
+            choices=(
+                "baseline",
+                "reference20",
+                "contact-free",
+                "cached13",
+                "chebyshev8",
+                "cached-chebyshev8",
+                "guarded-cached-chebyshev8",
+            ),
+            default="guarded-cached-chebyshev8",
             help="Baseline: 12 sweeps + multilevel; reference20: ordinary 20 sweeps; "
             "contact-free: experimental 12 sweeps with contact-free surface relaxation; "
-            "cached13: experimental 13 relaxed sweeps with surface/DAT geometry caches.",
+            "cached13: experimental 13 relaxed sweeps with surface/DAT geometry caches; "
+            "chebyshev8: 8 collision-aware Chebyshev sweeps + multilevel; "
+            "cached-chebyshev8: chebyshev8 with surface/DAT geometry caches; "
+            "guarded-cached-chebyshev8 (default): cached 2 ordinary + 4 topology-guarded Chebyshev + 2 polish sweeps.",
         )
         parser.add_argument(
             "--robot-urdf", default=None, help="Optional Dexforce W1 URDF; defaults to the ignored tablecloth asset."
@@ -848,6 +910,30 @@ class Example:
         parser.add_argument("--show-physics-table", action="store_true")
         parser.add_argument("--enable-self-collisions", action="store_true")
         parser.add_argument("--trajectory-time-scale", type=float, default=4.0)
+        parser.add_argument("--sim-substeps", type=int, default=10)
+        parser.add_argument(
+            "--vbd-iterations", type=int, default=None, help="Override the selected mode's sweep count."
+        )
+        parser.add_argument(
+            "--particle-chebyshev-spectral-radius",
+            type=float,
+            default=argparse.SUPPRESS,
+            help="Override the selected mode's contact-aware Chebyshev spectral radius.",
+        )
+        parser.add_argument(
+            "--no-particle-chebyshev",
+            action="store_const",
+            const=None,
+            default=argparse.SUPPRESS,
+            dest="particle_chebyshev_spectral_radius",
+            help="Disable particle Chebyshev acceleration.",
+        )
+        parser.add_argument(
+            "--particle-multilevel",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help="Override the selected mode's guarded particle multilevel correction.",
+        )
         parser.add_argument(
             "--ik-iterations",
             type=int,

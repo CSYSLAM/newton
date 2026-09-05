@@ -1,0 +1,1 @@
+Add collision-aware Chebyshev acceleration to the private MJVBDV2 particle solvers, including ordinary warm-up and polish sweeps, topology-dilated contact guards, and device-side conditional cleanup. The W1 T-shirt fold uses the validated guarded cached eight-sweep policy by default while retaining `cached13` and the unguarded policies as selectable modes.

@@ -1460,6 +1460,39 @@ def _commit_prolonged_corrections(
         particle_displacements[particle] += fine_correction[particle]
 
 
+@wp.kernel(enable_backward=False)
+def _assess_particle_cleanup(
+    active_particles: wp.array[wp.int32],
+    active_particle_count: int,
+    local_correction: wp.array[wp.vec3],
+    coarse_correction: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    maximum_radius_fraction: float,
+    coarse_status: wp.array[wp.int32],
+    cleanup_status: wp.array[wp.int32],
+    cleanup_metrics: wp.array[float],
+):
+    """Request cleanup when the linearized post-coarse correction remains large."""
+    active_index = wp.tid()
+    if active_index == 0 and coarse_status[0] != 0:
+        wp.atomic_max(cleanup_status, 0, 1)
+    if active_index >= active_particle_count:
+        return
+    particle = active_particles[active_index]
+    radius = wp.max(particle_radius[particle], 1.0e-12)
+    # The coarse update is committed immediately before this check.  Subtracting
+    # it from the local Newton correction gives a cheap linearized estimate of
+    # what an ordinary post-coarse sweep would still need to resolve.
+    remaining_correction = local_correction[particle] - coarse_correction[particle]
+    correction_fraction = wp.length(remaining_correction) / radius
+    if not wp.isfinite(correction_fraction):
+        wp.atomic_max(cleanup_status, 0, 1)
+        correction_fraction = wp.inf
+    elif correction_fraction > maximum_radius_fraction:
+        wp.atomic_max(cleanup_status, 0, 1)
+    wp.atomic_max(cleanup_metrics, 0, correction_fraction)
+
+
 def _particle_topology_edges(model) -> np.ndarray:
     """Return unique undirected particle edges without crossing worlds."""
     edge_chunks: list[np.ndarray] = []

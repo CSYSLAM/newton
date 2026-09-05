@@ -85,7 +85,10 @@ def _run_case(label, sweeps, operator, args, *, demo_mode=None):
     edges = _mesh_edges(example.model)
     checkpoints = []
     elapsed = 0.0
+    checkpoint_frame_ms = []
     checkpoint_status = []
+    cleanup_checkpoint_status = []
+    cleanup_checkpoint_max_fraction = []
     for start in range(0, args.frames, args.checkpoint_interval):
         stop = min(args.frames, start + args.checkpoint_interval)
         wp.synchronize_device(example.device)
@@ -93,13 +96,20 @@ def _run_case(label, sweeps, operator, args, *, demo_mode=None):
         for _frame in range(start, stop):
             example.step()
         wp.synchronize_device(example.device)
-        elapsed += time.perf_counter() - begin
+        checkpoint_elapsed = time.perf_counter() - begin
+        elapsed += checkpoint_elapsed
+        checkpoint_frame_ms.append(1000.0 * checkpoint_elapsed / (stop - start))
         positions = example.state_0.particle_q.numpy().copy()
         if not np.all(np.isfinite(positions)):
             raise ValueError(f"{label}: nonfinite particles at frame {stop}")
         checkpoints.append((stop, positions))
         if correction is not None:
             checkpoint_status.append(int(correction.runtime_status.numpy()[0]))
+        cleanup_status = example.solver.vbd_solver.particle_chebyshev_cleanup_status
+        cleanup_metrics = example.solver.vbd_solver.particle_chebyshev_cleanup_metrics
+        if cleanup_status is not None:
+            cleanup_checkpoint_status.append(int(cleanup_status.numpy()[0]))
+            cleanup_checkpoint_max_fraction.append(float(cleanup_metrics.numpy()[0]))
     example.test_final()
     metrics = {
         "label": label,
@@ -110,8 +120,11 @@ def _run_case(label, sweeps, operator, args, *, demo_mode=None):
         "mean_frame_ms": 1000.0 * elapsed / args.frames,
         "particle_count": example.model.particle_count,
         "cluster_count": correction.cluster_count if correction is not None else 0,
+        "checkpoint_frame_ms": checkpoint_frame_ms,
         # These are only the last substep at each checkpoint, not fallback rates.
         "checkpoint_runtime_status": checkpoint_status,
+        "cleanup_checkpoint_status": cleanup_checkpoint_status,
+        "cleanup_checkpoint_max_fraction": cleanup_checkpoint_max_fraction,
         "test_final_passed": True,
     }
     del correction, example
@@ -242,6 +255,10 @@ def _probe_demo_same_substep(args):
         # but only apply that correction inside the isolated baseline trial.
         options.update(
             iterations=20,
+            particle_chebyshev_spectral_radius=0.9,
+            particle_chebyshev_warmup_iterations=2,
+            particle_chebyshev_polish_iterations=2,
+            particle_chebyshev_contact_rings=2,
             particle_enable_multilevel_correction=True,
             particle_multilevel_fallback_iterations=None,
             particle_enable_surface_cache=True,
@@ -261,7 +278,8 @@ def _probe_demo_same_substep(args):
         for name in ("surface_anchor_angles", "_surface_cached_kernel", "_particle_truncation_cache"):
             buffers[name] = getattr(solver, name)
             setattr(solver, name, None)
-        for name in ("positions", "displacements", "baseline", "candidate", "cached13"):
+        solver.particle_chebyshev_enabled = False
+        for name in ("positions", "displacements", "baseline", "candidate", "cached13", "guarded"):
             buffers[name] = wp.empty_like(model.particle_q)
 
     def save(self, state_in):
@@ -299,6 +317,33 @@ def _probe_demo_same_substep(args):
                 self.iterations = 20
                 self.particle_surface_relaxation = 1.0
                 restore(self, state_in)
+            self.iterations = 8
+            self.particle_chebyshev_weights = self._build_particle_chebyshev_weights(0.9, 4)
+            self.particle_chebyshev_enabled = True
+            self.particle_chebyshev_older.assign(state_in.particle_q)
+            self.particle_chebyshev_collided.zero_()
+            self.particle_multilevel = buffers["correction"]
+            for name in ("surface_anchor_angles", "_surface_cached_kernel", "_particle_truncation_cache"):
+                setattr(self, name, buffers[name])
+            try:
+                self._particle_truncation_cache.rebuild(self)
+                wp.launch(
+                    particle_surface_cache._prepare_anchor_angles,
+                    dim=self.model.edge_count,
+                    inputs=[self.particle_q_prev, self.model.edge_indices],
+                    outputs=[self.surface_anchor_angles],
+                    device=self.device,
+                )
+                for candidate_iteration in range(8):
+                    original_iteration(self, state_in, state_out, contacts, dt, candidate_iteration)
+                wp.copy(buffers["guarded"], state_in.particle_q)
+            finally:
+                self.particle_multilevel = None
+                self.particle_chebyshev_enabled = False
+                for name in ("surface_anchor_angles", "_surface_cached_kernel", "_particle_truncation_cache"):
+                    setattr(self, name, None)
+                self.iterations = 20
+                restore(self, state_in)
         original_iteration(self, state_in, state_out, contacts, dt, iter_num)
         if iter_num == 0:
             save(self, state_in)
@@ -326,7 +371,7 @@ def _probe_demo_same_substep(args):
 
     module, example_args = _example_args(args)
     example_args.particle_solver_mode = "baseline"
-    records = {"baseline": [], "contact-free": [], "cached13": []}
+    records = {"baseline": [], "contact-free": [], "cached13": [], "guarded": []}
     rejected_samples = 0
     with (
         mock.patch.object(SolverMJVBDV2, "__init__", configured_init),
@@ -339,7 +384,12 @@ def _probe_demo_same_substep(args):
             reference = example.state_0.particle_q.numpy()
             rejected = int(buffers["correction"].runtime_status.numpy()[0]) != 0
             rejected_samples += int(rejected)
-            for label, name in (("baseline", "baseline"), ("contact-free", "candidate"), ("cached13", "cached13")):
+            for label, name in (
+                ("baseline", "baseline"),
+                ("contact-free", "candidate"),
+                ("cached13", "cached13"),
+                ("guarded", "guarded"),
+            ):
                 positions = reference if label == "baseline" and rejected else buffers[name].numpy()
                 if not np.all(np.isfinite(positions)) or not np.all(np.isfinite(reference)):
                     raise ValueError(f"Nonfinite {label} state at frame {frame + 1}")
@@ -381,6 +431,12 @@ def main():
         help="Compare the exact 12-sweep multilevel demo and contact-free candidate against ordinary 20 sweeps",
     )
     parser.add_argument(
+        "--demo-modes",
+        nargs="+",
+        default=None,
+        help="With --compare-demo, run only the named candidate labels in addition to reference20.",
+    )
+    parser.add_argument(
         "--same-substep",
         action="store_true",
         help="Compare candidates from identical substep states; do not measure speed",
@@ -416,12 +472,18 @@ def main():
     if args.compare_demo:
         metrics, reference, edges = _run_case("reference20", 20, None, args, demo_mode="reference20")
         print("RESULT " + json.dumps(metrics), flush=True)
-        for label, sweeps, operator, mode in (
+        configurations = (
             ("reference20_repeat", 20, None, "reference20"),
             ("demo_baseline", 12, "graph", "baseline"),
             ("contact_free", 12, None, "contact-free"),
             ("cached13", 13, None, "cached13"),
-        ):
+            ("chebyshev8", 8, "graph", "chebyshev8"),
+            ("cached_chebyshev8", 8, "graph", "cached-chebyshev8"),
+            ("guarded_cached_chebyshev8", 8, "graph", "guarded-cached-chebyshev8"),
+        )
+        for label, sweeps, operator, mode in configurations:
+            if args.demo_modes is not None and label not in args.demo_modes:
+                continue
             metrics, checkpoints, candidate_edges = _run_case(label, sweeps, operator, args, demo_mode=mode)
             if not np.array_equal(edges, candidate_edges):
                 raise ValueError(f"{label}: candidate topology differs from reference")
