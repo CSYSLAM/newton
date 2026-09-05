@@ -24,8 +24,10 @@ _RUNTIME_STATUS_NONFINITE_RHS = 1
 _RUNTIME_STATUS_NONFINITE_SOLUTION = 2
 _RUNTIME_STATUS_RESIDUAL_NOT_REDUCED = 4
 _RUNTIME_STATUS_EXCESSIVE_RADIUS_CLAMP = 8
+_RUNTIME_STATUS_NONPOSITIVE_CURVATURE = 16
 
 ParticleMultilevelMode = Literal["off", "on", "auto"]
+ParticleMultilevelOperator = Literal["graph", "galerkin"]
 
 
 def _normalize_multilevel_mode(enabled: bool | Literal["auto"]) -> ParticleMultilevelMode:
@@ -37,6 +39,13 @@ def _normalize_multilevel_mode(enabled: bool | Literal["auto"]) -> ParticleMulti
     if enabled == "auto":
         return "auto"
     raise ValueError(f"particle_enable_multilevel_correction must be False, True, or 'auto', got {enabled!r}")
+
+
+def _normalize_multilevel_operator(operator: str) -> ParticleMultilevelOperator:
+    """Validate the coarse operator independently of the device eligibility gate."""
+    if operator in ("graph", "galerkin"):
+        return operator
+    raise ValueError(f"particle_multilevel_operator must be 'graph' or 'galerkin', got {operator!r}")
 
 
 def _automatic_rejection_reason(model, correction: ParticleMultilevelCorrection) -> str | None:
@@ -258,6 +267,237 @@ def _solve_cholesky6(factor: _mat66f, rhs: _vec6f):
     return solution
 
 
+@wp.func
+def _membrane_hessian_block(
+    face: int,
+    row_order: int,
+    column_order: int,
+    pos: wp.array[wp.vec3],
+    tri_indices: wp.array2d[wp.int32],
+    tri_pose: wp.mat22,
+    area: float,
+    mu: float,
+    lmbd: float,
+    damping: float,
+    dt: float,
+):
+    """Evaluate one 3-by-3 block of the projected membrane Hessian."""
+    v0 = tri_indices[face, 0]
+    v1 = tri_indices[face, 1]
+    v2 = tri_indices[face, 2]
+    x0 = pos[v0]
+    x01 = pos[v1] - x0
+    x02 = pos[v2] - x0
+
+    dm_inv_00 = tri_pose[0, 0]
+    dm_inv_01 = tri_pose[0, 1]
+    dm_inv_10 = tri_pose[1, 0]
+    dm_inv_11 = tri_pose[1, 1]
+    f0 = x01 * dm_inv_00 + x02 * dm_inv_10
+    f1 = x01 * dm_inv_01 + x02 * dm_inv_11
+    f0_dot_f0 = wp.dot(f0, f0)
+    f1_dot_f1 = wp.dot(f1, f1)
+    f0_dot_f1 = wp.dot(f0, f1)
+    surface_jacobian_sq = wp.max(f0_dot_f0 * f1_dot_f1 - f0_dot_f1 * f0_dot_f1, 1.0e-20)
+    surface_jacobian = wp.sqrt(surface_jacobian_sq)
+    inverse_jacobian = 1.0 / surface_jacobian
+
+    lambda_nh = lmbd + mu
+    lambda_safe = wp.sign(lambda_nh) * wp.max(wp.abs(lambda_nh), 1.0e-6)
+    alpha = 1.0 + mu / lambda_safe
+    g0 = inverse_jacobian * (f1_dot_f1 * f0 - f0_dot_f1 * f1)
+    g1 = inverse_jacobian * (f0_dot_f0 * f1 - f0_dot_f1 * f0)
+    stress_scale = lambda_nh * (surface_jacobian - alpha)
+    clamped_scale = wp.max(0.0, stress_scale)
+    ratio = clamped_scale * inverse_jacobian
+    projected_scale = lambda_nh - ratio
+
+    row_mask_0 = float(row_order == 0)
+    row_mask_1 = float(row_order == 1)
+    row_mask_2 = float(row_order == 2)
+    column_mask_0 = float(column_order == 0)
+    column_mask_1 = float(column_order == 1)
+    column_mask_2 = float(column_order == 2)
+    row_df0 = dm_inv_00 * (row_mask_1 - row_mask_0) + dm_inv_10 * (row_mask_2 - row_mask_0)
+    row_df1 = dm_inv_01 * (row_mask_1 - row_mask_0) + dm_inv_11 * (row_mask_2 - row_mask_0)
+    column_df0 = dm_inv_00 * (column_mask_1 - column_mask_0) + dm_inv_10 * (column_mask_2 - column_mask_0)
+    column_df1 = dm_inv_01 * (column_mask_1 - column_mask_0) + dm_inv_11 * (column_mask_2 - column_mask_0)
+
+    row_dj = g0 * row_df0 + g1 * row_df1
+    column_dj = g0 * column_df0 + g1 * column_df1
+    row_cross = f1 * row_df0 - f0 * row_df1
+    column_cross = f1 * column_df0 - f0 * column_df1
+    identity_scale = mu * (row_df0 * column_df0 + row_df1 * column_df1)
+    identity_scale += ratio * (
+        row_df0 * column_df0 * f1_dot_f1
+        + row_df1 * column_df1 * f0_dot_f0
+        - (row_df0 * column_df1 + row_df1 * column_df0) * f0_dot_f1
+    )
+    hessian = (
+        identity_scale * wp.identity(n=3, dtype=float)
+        + projected_scale * wp.outer(row_dj, column_dj)
+        # D_i.T @ D_j has outer(w_j, w_i); reversing these preserves the
+        # diagonal but can make the assembled element matrix indefinite.
+        - ratio * wp.outer(column_cross, row_cross)
+    )
+
+    if damping > 0.0:
+        row_dc00 = 2.0 * row_df0 * f0
+        row_dc01 = row_df0 * f1 + row_df1 * f0
+        row_dc11 = 2.0 * row_df1 * f1
+        column_dc00 = 2.0 * column_df0 * f0
+        column_dc01 = column_df0 * f1 + column_df1 * f0
+        column_dc11 = 2.0 * column_df1 * f1
+        hessian += (damping / dt) * (
+            wp.outer(row_dc00, column_dc00) + 2.0 * wp.outer(row_dc01, column_dc01) + wp.outer(row_dc11, column_dc11)
+        )
+    return area * hessian
+
+
+@wp.func
+def _normalized_vector_derivative(
+    vector_length: float,
+    normalized_vector: wp.vec3,
+    vector_derivative: wp.mat33,
+):
+    projection = wp.identity(n=3, dtype=float) - wp.outer(normalized_vector, normalized_vector)
+    return (1.0 / vector_length) * projection * vector_derivative
+
+
+@wp.func
+def _angle_derivative(
+    normal_0: wp.vec3,
+    normal_1: wp.vec3,
+    edge_direction: wp.vec3,
+    normal_0_derivative: wp.mat33,
+    normal_1_derivative: wp.mat33,
+    sine: float,
+    cosine: float,
+    skew_normal_0: wp.mat33,
+    skew_normal_1: wp.mat33,
+):
+    sine_derivative = (
+        wp.transpose(skew_normal_0 * normal_1_derivative - skew_normal_1 * normal_0_derivative) * edge_direction
+    )
+    cosine_derivative = wp.transpose(normal_0_derivative) * normal_1 + wp.transpose(normal_1_derivative) * normal_0
+    return sine_derivative * cosine - cosine_derivative * sine
+
+
+@wp.func
+def _bending_hessian_block(
+    edge: int,
+    row_order: int,
+    column_order: int,
+    pos: wp.array[wp.vec3],
+    edge_indices: wp.array2d[wp.int32],
+    edge_rest_length: wp.array[float],
+    stiffness: float,
+    damping: float,
+    dt: float,
+):
+    """Evaluate one 3-by-3 block of the projected bending Hessian."""
+    if edge_indices[edge, 0] < 0 or edge_indices[edge, 1] < 0:
+        return wp.mat33(0.0)
+
+    x0 = pos[edge_indices[edge, 0]]
+    x1 = pos[edge_indices[edge, 1]]
+    x2 = pos[edge_indices[edge, 2]]
+    x3 = pos[edge_indices[edge, 3]]
+    x02 = x2 - x0
+    x03 = x3 - x0
+    x13 = x3 - x1
+    x12 = x2 - x1
+    edge_vector = x3 - x2
+    normal_0_raw = wp.cross(x02, x03)
+    normal_1_raw = wp.cross(x13, x12)
+    normal_0_length = wp.length(normal_0_raw)
+    normal_1_length = wp.length(normal_1_raw)
+    edge_length = wp.length(edge_vector)
+    if normal_0_length < 1.0e-6 or normal_1_length < 1.0e-6 or edge_length < 1.0e-6:
+        return wp.mat33(0.0)
+
+    normal_0 = normal_0_raw / normal_0_length
+    normal_1 = normal_1_raw / normal_1_length
+    edge_direction = edge_vector / edge_length
+    sine = wp.dot(wp.cross(normal_0, normal_1), edge_direction)
+    cosine = wp.dot(normal_0, normal_1)
+    skew_edge = wp.skew(edge_vector)
+    skew_x03 = wp.skew(x03)
+    skew_x02 = wp.skew(x02)
+    skew_x13 = wp.skew(x13)
+    skew_x12 = wp.skew(x12)
+    skew_normal_0 = wp.skew(normal_0)
+    skew_normal_1 = wp.skew(normal_1)
+
+    dnormal_0_dx0 = _normalized_vector_derivative(normal_0_length, normal_0, skew_edge)
+    dnormal_1_dx0 = wp.mat33(0.0)
+    dnormal_0_dx1 = wp.mat33(0.0)
+    dnormal_1_dx1 = _normalized_vector_derivative(normal_1_length, normal_1, -skew_edge)
+    dnormal_0_dx2 = _normalized_vector_derivative(normal_0_length, normal_0, -skew_x03)
+    dnormal_1_dx2 = _normalized_vector_derivative(normal_1_length, normal_1, skew_x13)
+    dnormal_0_dx3 = _normalized_vector_derivative(normal_0_length, normal_0, skew_x02)
+    dnormal_1_dx3 = _normalized_vector_derivative(normal_1_length, normal_1, -skew_x12)
+
+    gradient_0 = _angle_derivative(
+        normal_0,
+        normal_1,
+        edge_direction,
+        dnormal_0_dx0,
+        dnormal_1_dx0,
+        sine,
+        cosine,
+        skew_normal_0,
+        skew_normal_1,
+    )
+    gradient_1 = _angle_derivative(
+        normal_0,
+        normal_1,
+        edge_direction,
+        dnormal_0_dx1,
+        dnormal_1_dx1,
+        sine,
+        cosine,
+        skew_normal_0,
+        skew_normal_1,
+    )
+    gradient_2 = _angle_derivative(
+        normal_0,
+        normal_1,
+        edge_direction,
+        dnormal_0_dx2,
+        dnormal_1_dx2,
+        sine,
+        cosine,
+        skew_normal_0,
+        skew_normal_1,
+    )
+    gradient_3 = _angle_derivative(
+        normal_0,
+        normal_1,
+        edge_direction,
+        dnormal_0_dx3,
+        dnormal_1_dx3,
+        sine,
+        cosine,
+        skew_normal_0,
+        skew_normal_1,
+    )
+    row_gradient = (
+        float(row_order == 0) * gradient_0
+        + float(row_order == 1) * gradient_1
+        + float(row_order == 2) * gradient_2
+        + float(row_order == 3) * gradient_3
+    )
+    column_gradient = (
+        float(column_order == 0) * gradient_0
+        + float(column_order == 1) * gradient_1
+        + float(column_order == 2) * gradient_2
+        + float(column_order == 3) * gradient_3
+    )
+    coefficient = edge_rest_length[edge] * (stiffness + damping / dt)
+    return coefficient * wp.outer(row_gradient, column_gradient)
+
+
 @wp.kernel(enable_backward=False)
 def _restrict_particle_corrections(
     cluster_particle_offsets: wp.array[wp.int32],
@@ -295,6 +535,148 @@ def _restrict_particle_corrections(
     coarse_mass[cluster] = mass_sum
     coarse_stiffness[cluster] = stiffness_sum
     coarse_contact_stiffness[cluster] = contact_stiffness_sum
+
+
+@wp.kernel(enable_backward=False)
+def _restrict_energy_galerkin(
+    cluster_particle_offsets: wp.array[wp.int32],
+    cluster_particles: wp.array[wp.int32],
+    local_correction: wp.array[wp.vec3],
+    local_hessian: wp.array[wp.mat33],
+    diagonal_slots: wp.array[wp.int32],
+    coarse_rhs: wp.array[wp.vec3],
+    coarse_blocks: wp.array[wp.mat33],
+):
+    cluster = wp.tid()
+    force_sum = wp.vec3(0.0)
+    hessian_sum = wp.mat33(0.0)
+    for slot in range(cluster_particle_offsets[cluster], cluster_particle_offsets[cluster + 1]):
+        particle = cluster_particles[slot]
+        hessian = local_hessian[particle]
+        force_sum += hessian * local_correction[particle]
+        hessian_sum += hessian
+    coarse_rhs[cluster] = force_sum
+    coarse_blocks[diagonal_slots[cluster]] = hessian_sum
+
+
+@wp.kernel(enable_backward=False)
+def _assemble_triangle_energy_galerkin(
+    dt: float,
+    pos: wp.array[wp.vec3],
+    tri_indices: wp.array2d[wp.int32],
+    tri_poses: wp.array[wp.mat22],
+    tri_materials: wp.array2d[float],
+    tri_areas: wp.array[float],
+    triangle_slots: wp.array[wp.int32],
+    coarse_blocks: wp.array[wp.mat33],
+):
+    pair = wp.tid()
+    face = pair // 3
+    local_pair = pair - face * 3
+    row = wp.int32(0)
+    column = local_pair + 1
+    if local_pair == 2:
+        row = 1
+        column = 2
+    row_slot = triangle_slots[face * 9 + row * 3 + column]
+    column_slot = triangle_slots[face * 9 + column * 3 + row]
+    if row_slot < 0 or column_slot < 0 or (tri_materials[face, 0] <= 0.0 and tri_materials[face, 1] <= 0.0):
+        return
+    block = _membrane_hessian_block(
+        face,
+        row,
+        column,
+        pos,
+        tri_indices,
+        tri_poses[face],
+        tri_areas[face],
+        tri_materials[face, 0],
+        tri_materials[face, 1],
+        tri_materials[face, 2],
+        dt,
+    )
+    if row_slot == column_slot:
+        wp.atomic_add(coarse_blocks, row_slot, block + wp.transpose(block))
+    else:
+        wp.atomic_add(coarse_blocks, row_slot, block)
+        wp.atomic_add(coarse_blocks, column_slot, wp.transpose(block))
+
+
+@wp.kernel(enable_backward=False)
+def _assemble_bending_energy_galerkin(
+    dt: float,
+    pos: wp.array[wp.vec3],
+    edge_indices: wp.array2d[wp.int32],
+    edge_rest_length: wp.array[float],
+    edge_bending_properties: wp.array2d[float],
+    edge_slots: wp.array[wp.int32],
+    coarse_blocks: wp.array[wp.mat33],
+):
+    pair = wp.tid()
+    edge = pair // 6
+    local_pair = pair - edge * 6
+    row = wp.int32(0)
+    column = local_pair + 1
+    if local_pair >= 3 and local_pair < 5:
+        row = 1
+        column = local_pair - 1
+    elif local_pair == 5:
+        row = 2
+        column = 3
+    row_slot = edge_slots[edge * 16 + row * 4 + column]
+    column_slot = edge_slots[edge * 16 + column * 4 + row]
+    if row_slot < 0 or column_slot < 0 or edge_bending_properties[edge, 0] <= 0.0:
+        return
+    block = _bending_hessian_block(
+        edge,
+        row,
+        column,
+        pos,
+        edge_indices,
+        edge_rest_length,
+        edge_bending_properties[edge, 0],
+        edge_bending_properties[edge, 1],
+        dt,
+    )
+    if row_slot == column_slot:
+        wp.atomic_add(coarse_blocks, row_slot, block + wp.transpose(block))
+    else:
+        wp.atomic_add(coarse_blocks, row_slot, block)
+        wp.atomic_add(coarse_blocks, column_slot, wp.transpose(block))
+
+
+@wp.kernel(enable_backward=False)
+def _assemble_spring_energy_galerkin(
+    dt: float,
+    pos: wp.array[wp.vec3],
+    spring_indices: wp.array[wp.int32],
+    spring_rest_length: wp.array[float],
+    spring_stiffness: wp.array[float],
+    spring_damping: wp.array[float],
+    spring_slots: wp.array[wp.int32],
+    coarse_blocks: wp.array[wp.mat33],
+):
+    spring = wp.tid()
+    row_slot = spring_slots[spring * 4 + 1]
+    column_slot = spring_slots[spring * 4 + 2]
+    if row_slot < 0 or column_slot < 0:
+        return
+    particle_0 = spring_indices[spring * 2]
+    particle_1 = spring_indices[spring * 2 + 1]
+    difference = pos[particle_0] - pos[particle_1]
+    length = wp.max(wp.length(difference), 1.0e-8)
+    rest_length = spring_rest_length[spring]
+    identity = wp.identity(n=3, dtype=float)
+    structural = identity - (rest_length / length) * (identity - wp.outer(difference, difference) / (length * length))
+    direction = difference / length
+    diagonal_hessian = spring_stiffness[spring] * structural
+    diagonal_hessian += (spring_damping[spring] / dt) * wp.outer(direction, direction)
+    block = -diagonal_hessian
+    if row_slot == column_slot:
+        wp.atomic_add(coarse_blocks, row_slot, block + wp.transpose(block))
+    else:
+        wp.atomic_add(coarse_blocks, row_slot, block)
+        wp.atomic_add(coarse_blocks, column_slot, wp.transpose(block))
 
 
 @wp.func
@@ -879,6 +1261,148 @@ def _prolong_rigid_coarse_corrections(
 
 
 @wp.kernel(enable_backward=False)
+def _solve_energy_galerkin_pcg_persistent(
+    coarse_count: int,
+    matrix_offsets: wp.array[wp.int32],
+    matrix_columns: wp.array[wp.int32],
+    diagonal_slots: wp.array[wp.int32],
+    matrix_blocks: wp.array[wp.mat33],
+    rhs: wp.array[wp.vec3],
+    iterations: int,
+    validate_residual: bool,
+    minimum_residual_reduction: float,
+    solution: wp.array[wp.vec3],
+    residual: wp.array[wp.vec3],
+    preconditioned_residual: wp.array[wp.vec3],
+    direction: wp.array[wp.vec3],
+    product: wp.array[wp.vec3],
+    inverse_diagonal: wp.array[wp.mat33],
+    runtime_status: wp.array[wp.int32],
+    runtime_metrics: wp.array[float],
+    runtime_counters: wp.array[wp.int32],
+):
+    """Solve the energy-projected block system in one CUDA block."""
+    lane = wp.tid()
+    stride = wp.block_dim()
+    identity = wp.identity(n=3, dtype=float)
+    rz_local = float(0.0)
+    initial_residual_norm_sq_local = float(0.0)
+    nonfinite_rhs_local = float(0.0)
+    cluster = lane
+    while cluster < coarse_count:
+        diagonal = matrix_blocks[diagonal_slots[cluster]]
+        diagonal = 0.5 * (diagonal + wp.transpose(diagonal))
+        diagonal_inverse = wp.inverse(diagonal + 1.0e-9 * identity)
+        r = rhs[cluster]
+        z = diagonal_inverse * r
+        solution[cluster] = wp.vec3(0.0)
+        residual[cluster] = r
+        preconditioned_residual[cluster] = z
+        direction[cluster] = z
+        inverse_diagonal[cluster] = diagonal_inverse
+        rz_local += wp.dot(r, z)
+        initial_residual_norm_sq_local += wp.dot(r, r)
+        if not (wp.isfinite(r[0]) and wp.isfinite(r[1]) and wp.isfinite(r[2])):
+            nonfinite_rhs_local += 1.0
+        cluster += stride
+
+    rz = wp.tile_sum(wp.tile(rz_local))[0]
+    initial_residual_norm_sq = wp.tile_sum(wp.tile(initial_residual_norm_sq_local))[0]
+    nonfinite_rhs_count = wp.tile_sum(wp.tile(nonfinite_rhs_local))[0]
+    curvature_failed = initial_residual_norm_sq > 1.0e-30 and rz <= 0.0
+    if lane == 0:
+        runtime_metrics[4] = rz
+    for iteration in range(iterations):
+        direction_product_local = float(0.0)
+        cluster = lane
+        while cluster < coarse_count:
+            value = wp.vec3(0.0)
+            for slot in range(matrix_offsets[cluster], matrix_offsets[cluster + 1]):
+                value += matrix_blocks[slot] * direction[matrix_columns[slot]]
+            product[cluster] = value
+            direction_product_local += wp.dot(direction[cluster], value)
+            cluster += stride
+
+        direction_product = wp.tile_sum(wp.tile(direction_product_local))[0]
+        if rz > 1.0e-20 and direction_product <= 0.0:
+            curvature_failed = True
+        alpha = float(0.0)
+        if not curvature_failed and direction_product > 1.0e-20:
+            alpha = rz / direction_product
+
+        new_rz_local = float(0.0)
+        cluster = lane
+        while cluster < coarse_count:
+            solution[cluster] += alpha * direction[cluster]
+            r = residual[cluster] - alpha * product[cluster]
+            z = inverse_diagonal[cluster] * r
+            residual[cluster] = r
+            preconditioned_residual[cluster] = z
+            new_rz_local += wp.dot(r, z)
+            cluster += stride
+
+        new_rz = wp.tile_sum(wp.tile(new_rz_local))[0]
+        if new_rz < 0.0:
+            curvature_failed = True
+        if lane == 0:
+            runtime_metrics[5 + iteration] = new_rz
+        beta = float(0.0)
+        if rz > 1.0e-20:
+            beta = new_rz / rz
+        rz = new_rz
+
+        direction_norm_local = float(0.0)
+        cluster = lane
+        while cluster < coarse_count:
+            direction[cluster] = preconditioned_residual[cluster] + beta * direction[cluster]
+            direction_norm_local += wp.dot(direction[cluster], direction[cluster])
+            cluster += stride
+        direction_norm = wp.tile_sum(wp.tile(direction_norm_local))[0]
+        if direction_norm <= 1.0e-30:
+            rz = 0.0
+
+    final_residual_norm_sq_local = float(0.0)
+    nonfinite_solution_local = float(0.0)
+    cluster = lane
+    while cluster < coarse_count:
+        final_residual = residual[cluster]
+        coarse_solution = solution[cluster]
+        final_residual_norm_sq_local += wp.dot(final_residual, final_residual)
+        if not (
+            wp.isfinite(final_residual[0])
+            and wp.isfinite(final_residual[1])
+            and wp.isfinite(final_residual[2])
+            and wp.isfinite(coarse_solution[0])
+            and wp.isfinite(coarse_solution[1])
+            and wp.isfinite(coarse_solution[2])
+        ):
+            nonfinite_solution_local += 1.0
+        cluster += stride
+
+    final_residual_norm_sq = wp.tile_sum(wp.tile(final_residual_norm_sq_local))[0]
+    nonfinite_solution_count = wp.tile_sum(wp.tile(nonfinite_solution_local))[0]
+    if lane == 0:
+        status = wp.int32(0)
+        if curvature_failed:
+            status = status | wp.int32(_RUNTIME_STATUS_NONPOSITIVE_CURVATURE)
+        if nonfinite_rhs_count > 0.0 or not wp.isfinite(initial_residual_norm_sq):
+            status = status | wp.int32(_RUNTIME_STATUS_NONFINITE_RHS)
+        if nonfinite_solution_count > 0.0 or not wp.isfinite(final_residual_norm_sq):
+            status = status | wp.int32(_RUNTIME_STATUS_NONFINITE_SOLUTION)
+        if validate_residual and initial_residual_norm_sq > 1.0e-30 and wp.isfinite(final_residual_norm_sq):
+            residual_reduction = 1.0 - final_residual_norm_sq / initial_residual_norm_sq
+            if residual_reduction < minimum_residual_reduction:
+                status = status | wp.int32(_RUNTIME_STATUS_RESIDUAL_NOT_REDUCED)
+        runtime_status[0] = status
+        runtime_metrics[0] = initial_residual_norm_sq
+        runtime_metrics[1] = final_residual_norm_sq
+        runtime_metrics[2] = 0.0
+        runtime_metrics[3] = 0.0
+        runtime_counters[0] = 0
+        runtime_counters[1] = 0
+
+
+@wp.kernel(enable_backward=False)
 def _prepare_prolonged_corrections(
     active_particles: wp.array[wp.int32],
     fine_to_coarse: wp.array[wp.int32],
@@ -963,6 +1487,87 @@ def _particle_topology_edges(model) -> np.ndarray:
         particle_world = np.asarray(model.particle_world.numpy(), dtype=np.int32)
         edges = edges[particle_world[edges[:, 0]] == particle_world[edges[:, 1]]]
     return np.unique(edges, axis=0)
+
+
+def _build_energy_galerkin_structure(
+    model,
+    fine_to_coarse: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build the block-CSR pattern and element-to-block lookup tables."""
+    cluster_count = int(fine_to_coarse.max(initial=-1)) + 1
+    row_columns: list[set[int]] = [{cluster} for cluster in range(cluster_count)]
+
+    triangles = (
+        np.asarray(model.tri_indices.numpy(), dtype=np.int32).reshape((-1, 3))
+        if model.tri_count
+        else np.empty((0, 3), dtype=np.int32)
+    )
+    bending_edges = (
+        np.asarray(model.edge_indices.numpy(), dtype=np.int32).reshape((-1, 4))
+        if model.edge_count
+        else np.empty((0, 4), dtype=np.int32)
+    )
+    springs = (
+        np.asarray(model.spring_indices.numpy(), dtype=np.int32).reshape((-1, 2))
+        if model.spring_count
+        else np.empty((0, 2), dtype=np.int32)
+    )
+
+    def add_element_pattern(vertices: np.ndarray) -> None:
+        clusters = [int(fine_to_coarse[particle]) for particle in vertices if particle >= 0]
+        for row in clusters:
+            if row >= 0:
+                row_columns[row].update(column for column in clusters if column >= 0)
+
+    for element_vertices in triangles:
+        add_element_pattern(element_vertices)
+    for element_vertices in bending_edges:
+        if np.all(element_vertices >= 0):
+            add_element_pattern(element_vertices)
+    for element_vertices in springs:
+        add_element_pattern(element_vertices)
+
+    offsets = np.zeros(cluster_count + 1, dtype=np.int32)
+    columns: list[int] = []
+    entry_lookup: dict[tuple[int, int], int] = {}
+    for row, entries in enumerate(row_columns):
+        for column in sorted(entries):
+            entry_lookup[row, column] = len(columns)
+            columns.append(column)
+        offsets[row + 1] = len(columns)
+    columns_array = np.asarray(columns, dtype=np.int32)
+    diagonal_slots = np.asarray([entry_lookup[cluster, cluster] for cluster in range(cluster_count)], dtype=np.int32)
+
+    def element_slots(elements: np.ndarray, *, require_all_vertices: bool = False) -> np.ndarray:
+        width = elements.shape[1]
+        slots = np.full(elements.shape[0] * width * width, -1, dtype=np.int32)
+        for element, vertices in enumerate(elements):
+            if require_all_vertices and np.any(vertices < 0):
+                continue
+            for local_row, particle_row in enumerate(vertices):
+                if particle_row < 0:
+                    continue
+                coarse_row = int(fine_to_coarse[particle_row])
+                if coarse_row < 0:
+                    continue
+                for local_column, particle_column in enumerate(vertices):
+                    if particle_column < 0:
+                        continue
+                    coarse_column = int(fine_to_coarse[particle_column])
+                    if coarse_column >= 0:
+                        slots[element * width * width + local_row * width + local_column] = entry_lookup[
+                            coarse_row, coarse_column
+                        ]
+        return slots
+
+    return (
+        offsets,
+        columns_array,
+        diagonal_slots,
+        element_slots(triangles),
+        element_slots(bending_edges, require_all_vertices=True),
+        element_slots(springs),
+    )
 
 
 def _build_clusters(
@@ -1174,6 +1779,7 @@ class ParticleMultilevelCorrection:
         self,
         model,
         *,
+        operator: ParticleMultilevelOperator = "graph",
         cluster_size: int,
         coarse_iterations: int,
         coupling: float,
@@ -1182,6 +1788,7 @@ class ParticleMultilevelCorrection:
         minimum_residual_reduction: float | None,
         max_clamp_fraction: float,
     ):
+        operator = _normalize_multilevel_operator(operator)
         if cluster_size < 2:
             raise ValueError(f"particle multilevel cluster_size must be at least 2, got {cluster_size}")
         if coarse_iterations < 1:
@@ -1211,6 +1818,7 @@ class ParticleMultilevelCorrection:
         ) = _build_clusters(model, cluster_size)
         self.cluster_count = int(cluster_offsets.size - 1)
         self.active_particle_count = int(cluster_particles.size)
+        self.operator = operator
         self.coarse_iterations = coarse_iterations
         self.coupling = coupling
         self.relaxation = relaxation
@@ -1244,6 +1852,29 @@ class ParticleMultilevelCorrection:
         )
         self.coarse_incident_edges = wp.array(coarse_incident_edges, dtype=wp.int32, device=model.device)
         self.coarse_anchor_edges = wp.array(coarse_anchor_edges, dtype=wp.int32, device=model.device)
+        if self.operator == "galerkin" and not self.use_rigid_basis:
+            (
+                coarse_matrix_offsets,
+                coarse_matrix_columns,
+                coarse_diagonal_slots,
+                triangle_coarse_slots,
+                edge_coarse_slots,
+                spring_coarse_slots,
+            ) = _build_energy_galerkin_structure(model, fine_to_coarse)
+        else:
+            coarse_matrix_offsets = np.empty(0, dtype=np.int32)
+            coarse_matrix_columns = np.empty(0, dtype=np.int32)
+            coarse_diagonal_slots = np.empty(0, dtype=np.int32)
+            triangle_coarse_slots = np.empty(0, dtype=np.int32)
+            edge_coarse_slots = np.empty(0, dtype=np.int32)
+            spring_coarse_slots = np.empty(0, dtype=np.int32)
+        self.coarse_matrix_offsets = wp.array(coarse_matrix_offsets, dtype=wp.int32, device=model.device)
+        self.coarse_matrix_columns = wp.array(coarse_matrix_columns, dtype=wp.int32, device=model.device)
+        self.coarse_diagonal_slots = wp.array(coarse_diagonal_slots, dtype=wp.int32, device=model.device)
+        self.triangle_coarse_slots = wp.array(triangle_coarse_slots, dtype=wp.int32, device=model.device)
+        self.edge_coarse_slots = wp.array(edge_coarse_slots, dtype=wp.int32, device=model.device)
+        self.spring_coarse_slots = wp.array(spring_coarse_slots, dtype=wp.int32, device=model.device)
+        self.coarse_matrix_blocks = wp.zeros(coarse_matrix_columns.size, dtype=wp.mat33, device=model.device)
         self.local_correction = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
         self.local_hessians = wp.zeros(model.particle_count, dtype=wp.mat33, device=model.device)
         self.contact_forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
@@ -1258,6 +1889,7 @@ class ParticleMultilevelCorrection:
         self.coarse_direction = wp.zeros(self.cluster_count, dtype=wp.vec3, device=model.device)
         self.coarse_product = wp.zeros(self.cluster_count, dtype=wp.vec3, device=model.device)
         self.coarse_diagonal = wp.zeros(self.cluster_count, dtype=float, device=model.device)
+        self.coarse_inverse_diagonal = wp.zeros(self.cluster_count, dtype=wp.mat33, device=model.device)
         self.fine_correction = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
         self.runtime_status = wp.zeros(1, dtype=wp.int32, device=model.device)
         # Initial/final Euclidean residual squared, radius-clamp fraction,
@@ -1385,64 +2017,157 @@ class ParticleMultilevelCorrection:
         """Restrict the local system, solve its coarse approximation, and prolong."""
         if not self.enabled:
             return
+        # Keep the validated mixed/tet six-DOF path independent of the optional
+        # three-DOF surface operator; do not project tet updates as translations.
         if self.use_rigid_basis:
             self._restrict_and_prolong_rigid(model, particle_q, particle_displacements, dt)
             return
-        wp.launch(
-            _restrict_particle_corrections,
-            dim=self.cluster_count,
-            inputs=[
-                self.cluster_particle_offsets,
-                self.cluster_particles,
-                model.particle_mass,
-                model.particle_flags,
-                self.local_correction,
-                self.local_hessians,
-                self.contact_hessians,
-                dt,
-            ],
-            outputs=[
-                self.coarse_rhs,
-                self.coarse_mass,
-                self.coarse_stiffness,
-                self.coarse_contact_stiffness,
-            ],
-            device=model.device,
-        )
-        wp.launch(
-            _solve_coarse_pcg_persistent,
-            dim=_COARSE_PCG_BLOCK_DIM,
-            block_dim=_COARSE_PCG_BLOCK_DIM,
-            inputs=[
-                self.cluster_count,
-                self.coarse_neighbor_offsets,
-                self.coarse_neighbors,
-                self.coarse_neighbor_multiplicity,
-                self.coarse_incident_edges,
-                self.coarse_anchor_edges,
-                self.coarse_rhs,
-                self.coarse_mass,
-                self.coarse_stiffness,
-                self.coarse_contact_stiffness,
-                dt,
-                self.coupling,
-                self.coarse_iterations,
-                self.validate_residual,
-                self.minimum_residual_reduction,
-            ],
-            outputs=[
-                self.coarse_solution,
-                self.coarse_residual,
-                self.coarse_preconditioned_residual,
-                self.coarse_direction,
-                self.coarse_product,
-                self.coarse_diagonal,
-                self.runtime_status,
-                self.runtime_metrics,
-                self.runtime_counters,
-            ],
-            device=model.device,
-        )
+        if self.operator == "galerkin":
+            self.coarse_matrix_blocks.zero_()
+            wp.launch(
+                _restrict_energy_galerkin,
+                dim=self.cluster_count,
+                inputs=[
+                    self.cluster_particle_offsets,
+                    self.cluster_particles,
+                    self.local_correction,
+                    self.local_hessians,
+                    self.coarse_diagonal_slots,
+                ],
+                outputs=[self.coarse_rhs, self.coarse_matrix_blocks],
+                device=model.device,
+            )
+            if model.tri_count:
+                wp.launch(
+                    _assemble_triangle_energy_galerkin,
+                    dim=model.tri_count * 3,
+                    inputs=[
+                        dt,
+                        particle_q,
+                        model.tri_indices,
+                        model.tri_poses,
+                        model.tri_materials,
+                        model.tri_areas,
+                        self.triangle_coarse_slots,
+                    ],
+                    outputs=[self.coarse_matrix_blocks],
+                    device=model.device,
+                )
+            if model.edge_count:
+                wp.launch(
+                    _assemble_bending_energy_galerkin,
+                    dim=model.edge_count * 6,
+                    inputs=[
+                        dt,
+                        particle_q,
+                        model.edge_indices,
+                        model.edge_rest_length,
+                        model.edge_bending_properties,
+                        self.edge_coarse_slots,
+                    ],
+                    outputs=[self.coarse_matrix_blocks],
+                    device=model.device,
+                )
+            if model.spring_count:
+                wp.launch(
+                    _assemble_spring_energy_galerkin,
+                    dim=model.spring_count,
+                    inputs=[
+                        dt,
+                        particle_q,
+                        model.spring_indices,
+                        model.spring_rest_length,
+                        model.spring_stiffness,
+                        model.spring_damping,
+                        self.spring_coarse_slots,
+                    ],
+                    outputs=[self.coarse_matrix_blocks],
+                    device=model.device,
+                )
+            wp.launch(
+                _solve_energy_galerkin_pcg_persistent,
+                dim=_COARSE_PCG_BLOCK_DIM,
+                block_dim=_COARSE_PCG_BLOCK_DIM,
+                inputs=[
+                    self.cluster_count,
+                    self.coarse_matrix_offsets,
+                    self.coarse_matrix_columns,
+                    self.coarse_diagonal_slots,
+                    self.coarse_matrix_blocks,
+                    self.coarse_rhs,
+                    self.coarse_iterations,
+                    self.validate_residual,
+                    self.minimum_residual_reduction,
+                ],
+                outputs=[
+                    self.coarse_solution,
+                    self.coarse_residual,
+                    self.coarse_preconditioned_residual,
+                    self.coarse_direction,
+                    self.coarse_product,
+                    self.coarse_inverse_diagonal,
+                    self.runtime_status,
+                    self.runtime_metrics,
+                    self.runtime_counters,
+                ],
+                device=model.device,
+            )
+        else:
+            wp.launch(
+                _restrict_particle_corrections,
+                dim=self.cluster_count,
+                inputs=[
+                    self.cluster_particle_offsets,
+                    self.cluster_particles,
+                    model.particle_mass,
+                    model.particle_flags,
+                    self.local_correction,
+                    self.local_hessians,
+                    self.contact_hessians,
+                    dt,
+                ],
+                outputs=[
+                    self.coarse_rhs,
+                    self.coarse_mass,
+                    self.coarse_stiffness,
+                    self.coarse_contact_stiffness,
+                ],
+                device=model.device,
+            )
+            wp.launch(
+                _solve_coarse_pcg_persistent,
+                dim=_COARSE_PCG_BLOCK_DIM,
+                block_dim=_COARSE_PCG_BLOCK_DIM,
+                inputs=[
+                    self.cluster_count,
+                    self.coarse_neighbor_offsets,
+                    self.coarse_neighbors,
+                    self.coarse_neighbor_multiplicity,
+                    self.coarse_incident_edges,
+                    self.coarse_anchor_edges,
+                    self.coarse_rhs,
+                    self.coarse_mass,
+                    self.coarse_stiffness,
+                    self.coarse_contact_stiffness,
+                    dt,
+                    self.coupling,
+                    self.coarse_iterations,
+                    self.validate_residual,
+                    self.minimum_residual_reduction,
+                ],
+                outputs=[
+                    self.coarse_solution,
+                    self.coarse_residual,
+                    self.coarse_preconditioned_residual,
+                    self.coarse_direction,
+                    self.coarse_product,
+                    self.coarse_diagonal,
+                    self.runtime_status,
+                    self.runtime_metrics,
+                    self.runtime_counters,
+                ],
+                device=model.device,
+            )
         wp.launch(
             _prepare_prolonged_corrections,
             dim=self.active_particle_count,

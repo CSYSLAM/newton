@@ -2906,6 +2906,7 @@ def solve_surface_elasticity_tile(
     particle_hessians: wp.array[wp.mat33],
     skip_active_checks: int,
     skip_material_checks: int,
+    contact_free_relaxation: float,
     particle_displacements: wp.array[wp.vec3],
 ):
     """Cloth-only tiled solve: membrane + bending, deliberately no tet path."""
@@ -2972,7 +2973,13 @@ def solve_surface_elasticity_tile(
         h_total += mass[particle] * inv_dt_sq * wp.identity(n=3, dtype=float) + particle_hessians[particle]
         if abs(wp.determinant(h_total)) > 1.0e-8:
             f_total += mass[particle] * (inertia[particle] - pos[particle]) * inv_dt_sq + particle_forces[particle]
-            particle_displacements[particle] += wp.inverse(h_total) * f_total
+            delta = wp.inverse(h_total) * f_total
+            if contact_free_relaxation != 1.0:
+                contact_hessian = particle_hessians[particle]
+                # Do not extrapolate constrained rows, including off-diagonal contributions.
+                if wp.ddot(contact_hessian, contact_hessian) == 0.0:
+                    delta *= contact_free_relaxation
+            particle_displacements[particle] += delta
 
 
 @wp.kernel

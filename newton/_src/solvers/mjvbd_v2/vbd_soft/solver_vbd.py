@@ -27,11 +27,13 @@ from ...coupled.interface import CouplingInterface
 from ...solver import SolverBase
 from ...xpbd import kernels as xpbd_kernels
 from ...xpbd.kernels import apply_joint_forces
+from .. import particle_surface_cache, particle_truncation_cache
 from ..collision_pipeline import _count_world_compatible_particle_shape_pairs
 from ..particle_multilevel import (
     ParticleMultilevelCorrection,
     _automatic_rejection_reason,
     _normalize_multilevel_mode,
+    _normalize_multilevel_operator,
 )
 from . import particle_vbd_kernels, rigid_vbd_kernels, vbd_coupling_kernels
 from .particle_vbd_kernels import (
@@ -240,7 +242,11 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_collision_detection_interval: int = 0,
         particle_edge_parallel_epsilon: float = 1e-5,
         particle_enable_tile_solve: bool = True,
+        particle_surface_relaxation: float = 1.0,
+        particle_enable_surface_cache: bool = False,
+        particle_enable_truncation_cache: bool = False,
         particle_enable_multilevel_correction: bool | Literal["auto"] = False,
+        particle_multilevel_operator: Literal["graph", "galerkin"] = "graph",
         particle_multilevel_cluster_size: int = 8,
         particle_multilevel_coarse_iterations: int = 8,
         particle_multilevel_coupling: float = 0.5,
@@ -313,15 +319,33 @@ class SolverVBD(SolverBase, CouplingInterface):
                 iterations.
             particle_edge_parallel_epsilon: Threshold to detect near-parallel edges in edge-edge collision handling.
             particle_enable_tile_solve: Whether to accelerate the particle solver using tile API.
+            particle_surface_relaxation: Experimental contact-free surface SOR factor in ``[1, 2)``. ``1`` keeps
+                ordinary VBD. Non-differentiable, non-deterministic CUDA surface tiles may scale local Newton updates
+                only where the accumulated contact/spring Hessian is exactly zero. The first and final three sweeps
+                remain ordinary, and normal collision truncation still applies. Scalar and volumetric solves are
+                unchanged. Validate accuracy for each scene; this is not an iteration-equivalence guarantee.
+            particle_enable_surface_cache: Experimental CUDA surface solve that caches fixed substep bending
+                damping angles and evaluates the same angle gradient in closed form. Rebuilds anchors every
+                substep; does not cache the current elastic or contact forces. Scalar, volumetric,
+                differentiable, and deterministic paths remain unchanged. Defaults to disabled.
+            particle_enable_truncation_cache: Experimental CUDA self-contact geometry cache for ordinary DAT.
+                Refreshes after every collision detection and retains displacement-dependent plane offsets.
+                Uses up to 256 MiB; larger caches raise an error. Disabled for differentiable and deterministic
+                models. Defaults to disabled; scalar execution is unchanged.
             particle_enable_multilevel_correction: Enable the experimental two-level particle propagation correction.
                 Pass ``"auto"`` to apply a conservative surface-topology and hierarchy-size policy. The correction is
                 available only for non-differentiable, non-deterministic CUDA models and otherwise falls back to
                 ordinary VBD iterations. Automatic mode also leaves self-contact scenes unchanged until they are
                 validated explicitly. Surface clusters use translation modes; tetrahedral clusters use translation and
                 infinitesimal-rotation modes with a projected Neo-Hookean coarse operator.
+            particle_multilevel_operator: Coarse operator for surface-only corrections. ``"graph"`` uses the inexpensive
+                topology-Laplacian approximation. ``"galerkin"`` projects the current membrane, bending, spring,
+                inertia, and diagonal contact Hessians into the aggregate translation basis. The latter captures
+                elastic anisotropy but rebuilds a block-sparse operator for each correction. Models with movable
+                tetrahedral clusters retain the six-DOF mixed/tet operator regardless of this surface-only option.
             particle_multilevel_cluster_size: Target number of topologically adjacent particles per coarse cluster.
             particle_multilevel_coarse_iterations: Number of fixed PCG iterations on the coarse graph.
-            particle_multilevel_coupling: Neighbor coupling used by the coarse propagation filter.
+            particle_multilevel_coupling: Neighbor coupling used by the ``"graph"`` coarse operator.
             particle_multilevel_relaxation: Fraction of the prolonged coarse correction applied to fine particles.
             particle_multilevel_max_radius_fraction: Maximum correction length as a fraction of particle radius.
             particle_multilevel_min_residual_reduction: Minimum required coarse-PCG residual reduction. ``None``
@@ -330,7 +354,8 @@ class SolverVBD(SolverBase, CouplingInterface):
                 clamp. ``None`` selects ``0.5`` in automatic mode and ``1.0`` when explicitly enabled.
             particle_multilevel_fallback_iterations: Total ordinary VBD iteration count to execute when a candidate
                 correction is rejected. ``None`` disables the conditional fallback. CUDA Graphs keep both branches
-                captured while selecting the fallback entirely on the device.
+                captured while selecting the fallback entirely on the device; uncaptured execution synchronizes the
+                status to the host and uses an ordinary Python branch.
             particle_topological_contact_filter_threshold: Maximum topological distance (measured in rings) under which candidate
                 self-contacts are discarded. Set to a higher value to tolerate contacts between more closely connected mesh
                 elements. Only used when `particle_enable_self_contact` is `True`. Note that setting this to a value larger than 3 will
@@ -503,6 +528,15 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         # Common parameters
         self.iterations = iterations
+        if not 1.0 <= particle_surface_relaxation < 2.0:
+            raise ValueError("particle_surface_relaxation must be finite and in [1, 2)")
+        self.particle_surface_relaxation = (
+            float(particle_surface_relaxation)
+            if self.device.is_cuda
+            and not model.requires_grad
+            and effective_deterministic == wp.DeterministicMode.NOT_GUARANTEED
+            else 1.0
+        )
         if particle_multilevel_fallback_iterations is not None:
             if not isinstance(particle_multilevel_fallback_iterations, int) or isinstance(
                 particle_multilevel_fallback_iterations, bool
@@ -546,6 +580,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             particle_edge_parallel_epsilon,
             particle_enable_tile_solve,
             particle_enable_multilevel_correction,
+            particle_multilevel_operator,
             particle_multilevel_cluster_size,
             particle_multilevel_coarse_iterations,
             particle_multilevel_coupling,
@@ -558,6 +593,41 @@ class SolverVBD(SolverBase, CouplingInterface):
             particle_external_vertex_contact_filtering_map,
             particle_external_edge_contact_filtering_map,
         )
+
+        self._particle_truncation_cache = None
+        if (
+            particle_enable_truncation_cache
+            and model.particle_count > 0
+            and self.device.is_cuda
+            and particle_enable_self_contact
+            and not model.requires_grad
+            and effective_deterministic == wp.DeterministicMode.NOT_GUARANTEED
+        ):
+            self._particle_truncation_cache = particle_truncation_cache.ParticleTruncationCache(
+                self, particle_vbd_kernels
+            )
+            self._set_module_options(
+                {"deterministic": effective_deterministic, "deterministic_max_records": 0},
+                module=particle_truncation_cache,
+            )
+
+        self.surface_anchor_angles = None
+        self._surface_cached_kernel = None
+        if (
+            particle_enable_surface_cache
+            and model.particle_count > 0
+            and self.use_particle_tile_solve
+            and not model.requires_grad
+            and self._effective_deterministic == wp.DeterministicMode.NOT_GUARANTEED
+        ):
+            self.surface_anchor_angles = wp.zeros(model.edge_count, dtype=wp.vec2, device=self.device)
+            self._surface_cached_kernel = particle_surface_cache.make_surface_kernel(
+                particle_vbd_kernels.evaluate_neo_hookean_membrane_force_hessian
+            )
+            self._set_module_options(
+                {"deterministic": effective_deterministic, "deterministic_max_records": 0},
+                module=particle_surface_cache,
+            )
 
         # Initialize rigid body system and rigid-particle (body-particle) interaction state
         self._init_rigid_system(
@@ -604,6 +674,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_edge_parallel_epsilon: float,
         particle_enable_tile_solve: bool,
         particle_enable_multilevel_correction: bool | Literal["auto"],
+        particle_multilevel_operator: Literal["graph", "galerkin"],
         particle_multilevel_cluster_size: int,
         particle_multilevel_coarse_iterations: int,
         particle_multilevel_coupling: float,
@@ -618,6 +689,7 @@ class SolverVBD(SolverBase, CouplingInterface):
     ):
         """Initialize particle-specific data structures and settings."""
         multilevel_mode = _normalize_multilevel_mode(particle_enable_multilevel_correction)
+        multilevel_operator = _normalize_multilevel_operator(particle_multilevel_operator)
         self.particle_multilevel_mode = multilevel_mode
         self.particle_multilevel = None
         self.particle_multilevel_auto_rejection_reason = None
@@ -689,6 +761,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 max_clamp_fraction = 0.5 if multilevel_mode == "auto" else 1.0
             correction = ParticleMultilevelCorrection(
                 model,
+                operator=multilevel_operator,
                 cluster_size=particle_multilevel_cluster_size,
                 coarse_iterations=particle_multilevel_coarse_iterations,
                 coupling=particle_multilevel_coupling,
@@ -2110,7 +2183,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self._solve_rigid_body_iteration(state_in, state_out, control, contacts, dt)
                     self._solve_particle_iteration(state_in, state_out, contacts, dt, iter_num)
 
-            wp.capture_if(correction.runtime_status, on_true=run_fallback_iterations)
+            if self.device.is_capturing:
+                wp.capture_if(correction.runtime_status, on_true=run_fallback_iterations)
+            elif int(correction.runtime_status.numpy()[0]) != 0:
+                run_fallback_iterations()
 
         if self.model.particle_count:
             wp.copy(state_out.particle_q, state_in.particle_q)
@@ -2334,6 +2410,9 @@ class SolverVBD(SolverBase, CouplingInterface):
         Modify displacements_in in-place, also modify particle_q if its not None
 
         """
+        if self._particle_truncation_cache is not None:
+            self._particle_truncation_cache.apply(self, particle_q_out, selected_particles)
+            return
         if not self.particle_enable_self_contact:
             if selected_particles is not None:
                 wp.launch(
@@ -2461,6 +2540,15 @@ class SolverVBD(SolverBase, CouplingInterface):
         )
 
         self._penetration_free_truncation(state_in.particle_q)
+
+        if self.surface_anchor_angles is not None:
+            wp.launch(
+                particle_surface_cache._prepare_anchor_angles,
+                dim=model.edge_count,
+                inputs=[self.particle_q_prev, model.edge_indices],
+                outputs=[self.surface_anchor_angles],
+                device=self.device,
+            )
 
     def _initialize_rigid_bodies(
         self,
@@ -3088,7 +3176,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 surface_group = self.surface_particle_color_groups[color]
                 if surface_group.size:
                     wp.launch(
-                        kernel=solve_surface_elasticity_tile,
+                        kernel=self._surface_cached_kernel or solve_surface_elasticity_tile,
                         dim=surface_group.size * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
                         block_dim=TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
                         inputs=[
@@ -3112,6 +3200,8 @@ class SolverVBD(SolverBase, CouplingInterface):
                             self.particle_hessians,
                             self.surface_tile_skip_active_checks,
                             self.surface_tile_skip_material_checks,
+                            self.particle_surface_relaxation if 0 < iter_num < self.iterations - 3 else 1.0,
+                            *([self.surface_anchor_angles] if self.surface_anchor_angles is not None else []),
                         ],
                         outputs=[self.particle_displacements],
                         device=self.device,
@@ -3907,6 +3997,9 @@ class SolverVBD(SolverBase, CouplingInterface):
             outputs=[self.has_active_self_contact],
             device=self.device,
         )
+
+        if self._particle_truncation_cache is not None:
+            self._particle_truncation_cache.rebuild(self)
 
     def rebuild_bvh(self, state: State):
         """This function will rebuild the BVHs used for detecting self-contacts using the input `state`.

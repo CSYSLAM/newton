@@ -193,6 +193,7 @@ class Example:
             wp.quat(args.waic_robot_base_qx, args.waic_robot_base_qy, args.waic_robot_base_qz, args.waic_robot_base_qw)
         )
         self.house_visual_usd = args.house_visual_usd
+        self.particle_solver_mode = getattr(args, "particle_solver_mode", "baseline")
 
         self._build_scene()
         self.device = self.model.device
@@ -208,11 +209,22 @@ class Example:
             contact_mode="soft",
             collision_options={"soft_contact_margin": SOFT_MARGIN},
             vbd_options={
-                "iterations": VBD_ITERATIONS,
-                "particle_enable_multilevel_correction": True,
+                "iterations": (
+                    13
+                    if self.particle_solver_mode == "cached13"
+                    else 20
+                    if self.particle_solver_mode == "reference20"
+                    else VBD_ITERATIONS
+                ),
+                "particle_enable_multilevel_correction": self.particle_solver_mode == "baseline",
+                "particle_surface_relaxation": (
+                    1.3 if self.particle_solver_mode in ("contact-free", "cached13") else 1.0
+                ),
+                "particle_enable_surface_cache": self.particle_solver_mode == "cached13",
+                "particle_enable_truncation_cache": self.particle_solver_mode == "cached13",
                 "particle_multilevel_min_residual_reduction": 1.0e-4,
                 "particle_multilevel_max_clamp_fraction": 0.5,
-                "particle_multilevel_fallback_iterations": 20,
+                "particle_multilevel_fallback_iterations": 20 if self.particle_solver_mode == "baseline" else None,
                 "particle_enable_self_contact": True,
                 "particle_self_contact_radius": SELF_RADIUS,
                 "particle_self_contact_margin": SELF_MARGIN,
@@ -819,6 +831,14 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         parser.set_defaults(num_frames=900)
+        parser.add_argument(
+            "--particle-solver-mode",
+            choices=("baseline", "reference20", "contact-free", "cached13"),
+            default="baseline",
+            help="Baseline: 12 sweeps + multilevel; reference20: ordinary 20 sweeps; "
+            "contact-free: experimental 12 sweeps with contact-free surface relaxation; "
+            "cached13: experimental 13 relaxed sweeps with surface/DAT geometry caches.",
+        )
         parser.add_argument(
             "--robot-urdf", default=None, help="Optional Dexforce W1 URDF; defaults to the ignored tablecloth asset."
         )

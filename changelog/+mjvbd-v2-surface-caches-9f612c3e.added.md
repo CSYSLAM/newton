@@ -1,0 +1,1 @@
+Add opt-in experimental CUDA bending-anchor and planar-truncation geometry caches to MJVBDV2, with a `cached13` T-shirt comparison mode. CPU, differentiable, deterministic, and existing default configurations remain unchanged.

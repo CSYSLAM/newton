@@ -38,6 +38,8 @@ Status values are:
 
 | Date | Change | Affected path | Status | Evidence |
 | --- | --- | --- | --- | --- |
+| 2026-09-05 | Cache fixed bending anchors and DAT geometry; use 13 contact-free relaxed sweeps | CUDA `vbd/` and `vbd_soft/`; T-shirt `cached13` mode | **Retained, opt-in** | Two 900-frame runs reduced frame time 5.01% / 6.34% versus 12 + graph, with lower position/edge errors at all nine checkpoints; the native common-state mean position error fell 38.04%; defaults unchanged |
+| 2026-09-04 | Project the current particle Hessian into a block-sparse aggregate Galerkin operator | CUDA `vbd/` and `vbd_soft/` cloth/shell paths | **Retained, opt-in** | On the 6,436-particle T-shirt, 12 sweeps plus Galerkin reduced the 300-frame position/edge error versus 30 sweeps by 43.7%/36.3% relative to the existing graph operator, with 5.1% overhead over that operator and 48.9% lower frame time than 30 ordinary sweeps |
 | 2026-09-05 | Extend tetrahedral coarse clusters from six rigid modes to twelve affine modes | CUDA `vbd/` mixed and tet multilevel paths | **Rejected, reverted** | Armadillo position error improved but frame time regressed 49.0%; the mixed soft-tet-cube plus cloth-bag scene regressed 32.2% with no accuracy improvement, and cold module compilation grew from about 3 to 10 seconds |
 | 2026-09-04 | Extend the particle coarse space with six-DOF rigid modes and a Galerkin tet operator | CUDA `vbd/` mixed surface/tetrahedral paths | **Retained, opt-in** | The 240-frame Armadillo run was 3.93% faster than 10 sweeps while reducing the plain-6 position error from 6.83 to 3.53 mm; the complete 1,900-frame soft-cube-plus-cloth final was 9.29% faster than 12 sweeps and passed its placement test |
 | 2026-09-04 | Add conservative eligibility and device-side rejection to the particle multilevel correction | CUDA `vbd/` and `vbd_soft/` cloth/shell paths | **Retained, opt-in** | A graph scale scan bounded the current one-block PCG policy to 128--1,500 clusters; all 120 sampled T-shirt frames passed the residual/finite/clamp guards, while unsafe plastic-bag settings were detected and left on their explicitly validated policy |
@@ -2113,3 +2115,597 @@ remain entirely under `newton/_src/solvers/mjvbd_v2/`; shared collision and
 simulation modules are inputs, not optimization targets. Do not infer a gain
 for particle-only cloth or coupled articulation scenes from the rigid-ball bag
 measurement because those backends do not execute this dense rigid path.
+
+### 2026-09-04: retain an aggregate Galerkin coarse operator
+
+**Historical measurements:** this prototype still contained a membrane
+off-diagonal assembly error. The 2026-09-05 follow-up below corrects it and
+supersedes these numbers for the retained implementation.
+
+**Problem.** The original multilevel correction restricts a frozen local
+Newton residual into piecewise-constant translation aggregates, but solves it
+with a scalar mass-plus-topology Laplacian. Parameter scans over cluster size,
+coupling, relaxation, PCG count, and repeated corrections improved short runs
+but could not consistently approach a 30-sweep reference. The limitation was
+the coarse operator rather than its default parameters.
+
+**Implementation.** A new opt-in `particle_multilevel_operator="galerkin"`
+path assembles the block-sparse aggregate projection (P^T H P) at the final
+ordinary sweep. The diagonal starts with the exact local VBD blocks, including
+inertia and diagonal contact terms. Off-diagonal blocks use the same projected
+membrane, dihedral-bending, damping, and spring Hessians as the fine solve.
+Each unordered element pair writes a block and its transpose, halving element
+evaluation work and keeping the matrix symmetric to floating-point atomic
+ordering. Block-Jacobi PCG and the existing finite, residual, radius-clamp,
+DAT, and conditional-fallback guards remain in force. The inexpensive
+`"graph"` operator remains the default.
+
+Uncaptured fallback now reads the device status and takes an ordinary Python
+branch. `wp.capture_if()` is used only while a CUDA Graph is actually being
+captured, so eager execution does not depend on a conditional-capture API and
+CPU-disabled multilevel configurations retain the original VBD path.
+
+**Measurements.** The primary benchmark was the scripted 6,436-particle,
+12,736-triangle, 19,174-edge W1 T-shirt scene with self-contact, 10 substeps,
+CUDA Graph replay, Warp 1.17.0.dev20260807, CUDA Toolkit 12.9, Driver 13.2,
+and an NVIDIA GeForce RTX 5090 D v2. Runs were consecutive in one process and
+included all 300 displayed frames.
+
+| Configuration | Mean frame time | Position RMS vs. 30 sweeps | Edge-length MAE vs. 30 sweeps |
+| --- | ---: | ---: | ---: |
+| 30 ordinary sweeps | 88.866 ms | reference | reference |
+| Independent 30-sweep repeat | 89.470 ms | 2.004 mm | 0.082 mm |
+| 12 sweeps + graph operator | 43.192 ms | 17.096 mm | 0.313 mm |
+| 12 sweeps + Galerkin operator | 45.384 ms | 9.624 mm | 0.199 mm |
+
+The Galerkin path adds 5.1% over the previous correction, reduces its
+position error by 43.7% and edge error by 36.3%, and remains 48.9% faster than
+30 ordinary sweeps. A separate 100-frame run measured 40.867 ms versus
+79.815 ms for 30 sweeps; its Galerkin position/edge errors were 3.833/0.112 mm
+versus 8.225/0.175 mm for the graph operator. Contact atomics make independent
+long trajectories diverge, so the 30/30 repeat is reported as the noise floor
+and endpoint position RMS is not treated as an analytic error bound.
+
+The configured Galerkin T-shirt example completed its full 900-frame test.
+Focused tests cover both private VBD implementations, CUDA Graph capture and
+replay, block-pattern and runtime-matrix symmetry, fixed anchors, transactional
+fallback, and equality between the Galerkin element diagonal blocks and the
+fine VBD projected Hessians.
+
+**Rejected variants.** One- and two-step smoothed aggregation with a scalar
+topological operator was slower and less accurate. Replacing that operator
+with the physical Hessian improved it only marginally in an offline exact
+coarse solve. Applying corrections mid-sweep, using two or three coarse cycles,
+and adding post-smoothing helped a contact-free cantilever but regressed the
+real T-shirt contact trajectory. Bounded Anderson and Chebyshev fixed-point
+prototypes likewise failed to improve the low-sweep cantilever consistently.
+A 6-DOF aggregate subspace with three translation and three infinitesimal
+rotation coordinates was also implemented and tested, rather than inferred.
+On the 100-frame T-shirt comparison, its best tested 12-sweep result took
+48.479 ms/frame with 4.472 mm position RMS and 0.109 mm edge MAE; the retained
+translation Galerkin path took 39.492 ms/frame with 3.791 mm and 0.096 mm.
+The affine coarse residual was also substantially harder to reduce. None of
+these rejected prototypes remains in source.
+
+**Decision.** Retain the physical Galerkin operator as an explicit accuracy
+option and use it for the measured T-shirt example at 12 sweeps, with a
+30-sweep fallback on rejected corrections. Do not enable it globally or claim
+30-sweep equivalence: it materially closes the gap, but the remaining
+long-trajectory error is above the measured repeat floor. The next accuracy
+step should include contact-aware off-diagonal blocks or a guarded nonlinear
+reduced solve, not another sweep/relaxation parameter grid.
+
+### 2026-09-05: correct Galerkin cross blocks and compare against 30 sweeps
+
+**Correctness first.** Reviewing the full element matrix, rather than only its
+3-by-3 vertex diagonals, exposed a transposed outer product in the projected
+membrane cross blocks. In the cross-product Jacobian term, `D_i.T @ D_j`
+requires `outer(w_j, w_i)`, not `outer(w_i, w_j)`. Both expressions agree on
+the diagonal, which is why the previous diagonal-equality test missed this.
+At stretch factors 1.5, 2, and 4, the old assembled element matrix had negative
+eigenvalues despite its positive-semidefinite construction being intended.
+The new symmetry, translation-nullspace, and positive-semidefiniteness test
+failed at all three stretches before the fix and passed after it. Fine VBD
+forces, local Hessians, materials, and collision geometry are unchanged.
+
+The Galerkin PCG now rejects nonpositive preconditioned curvature or search
+curvature even when residual-reduction validation is disabled. A two-cluster
+indefinite-system regression failed before this guard and passed afterward.
+A separate positive-definite block test matches a dense NumPy solve and
+checks that a valid correction is not spuriously rejected. Nonzero status
+prevents prolongation from committing the candidate and selects the existing
+fallback when configured. Normal DAT still truncates committed displacements;
+this is not a new nonlinear contact, cavity-volume, or energy acceptance test.
+
+**Reproducible trajectory benchmark.** Run:
+
+```bash
+uv run scripts/benchmark_mjvbd_v2_multilevel.py --frames 300 --sweeps 8 12
+```
+
+The script runs independent 30-sweep reference/repeat trajectories, ordinary
+low-sweep trajectories, and graph/Galerkin candidates. It reports JSON records
+with whole-frame times, errors at frames 100/200/300, finite checks, and the
+example's `test_final()`. Construction, compilation/capture, and checkpoint
+readbacks are outside the timer; all simulation and realtime IK frames are
+included. Device and scene are the same RTX 5090 D v2 / 6,436-particle T-shirt
+configuration as above. The CUDA guard was left running throughout.
+
+| Configuration | Mean frame time | RMS at 100 | RMS at 200 | RMS at 300 | Edge MAE at 300 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 30 ordinary sweeps | 93.303 ms | reference | reference | reference | reference |
+| Independent 30-sweep repeat | 93.504 ms | 2.280 mm | 2.029 mm | 13.080 mm | 0.194 mm |
+| 8 ordinary sweeps | 32.124 ms | 16.634 mm | 23.185 mm | 32.508 mm | 0.561 mm |
+| 8 sweeps + graph | 34.256 ms | 9.936 mm | 13.334 mm | 26.988 mm | 0.453 mm |
+| 8 sweeps + Galerkin | 37.958 ms | 5.676 mm | 5.237 mm | 15.225 mm | 0.300 mm |
+| 12 ordinary sweeps | 43.869 ms | 11.360 mm | 13.035 mm | 16.546 mm | 0.393 mm |
+| 12 sweeps + graph | 45.553 ms | 7.692 mm | 8.173 mm | 16.586 mm | 0.325 mm |
+| 12 sweeps + Galerkin | 47.766 ms | 3.768 mm | 4.819 mm | 10.935 mm | 0.207 mm |
+
+The corrected 12-sweep Galerkin run uses 48.8% less frame time than 30 ordinary
+sweeps, at an 8.9% cost over ordinary 12 sweeps. Eight sweeps with Galerkin are
+faster, but are not promoted to the example default: earlier checkpoints are
+still appreciably farther from the reference. The 13.080 mm 30/30 difference
+also demonstrates why a favorable endpoint alone cannot establish equivalent
+accuracy. Checkpoint runtime statuses were zero for these candidates; these
+samples are not an all-substep rejection count or a guarantee about contacts.
+
+**Same-substep accuracy diagnostic.** At the end of sweep 12, save the
+reference particle positions and displacements, apply the candidate correction
+using that exact contact state, save its result, restore both arrays, then
+continue ordinary sweeps 13 through 30. This prevents candidate trajectories
+from influencing subsequent reference steps. The rigid bodies are externally
+driven; the candidate only modifies the two restored physical arrays and
+temporary coarse/DAT buffers. Sample the final substep of each of 300 frames.
+This comparison does not time the candidate or pretend to sample every
+substep. The candidate is measured before extra fallback sweeps.
+
+| Candidate from identical state | Mean position RMS | 95th percentile RMS | Mean edge MAE |
+| --- | ---: | ---: | ---: |
+| Ordinary 12 sweeps | 0.014872 mm | 0.025311 mm | 0.001359 mm |
+| 12 sweeps + Galerkin | 0.015477 mm | 0.042187 mm | 0.001944 mm |
+
+Two of 300 candidate samples were rejected; these samples stay at the
+12-sweep state in this diagnostic. Production fallback would instead run
+through sweep 30. Even without interpreting long-trajectory divergence, the
+candidate does not consistently improve the local approximation. In
+particular, the position tail and edge error regress. A reproducible version
+of this diagnostic is included in the benchmark:
+
+```bash
+uv run scripts/benchmark_mjvbd_v2_multilevel.py --same-substep --frames 300 --sweeps 12
+```
+
+Re-running the checked-in script independently reproduced the conclusion:
+ordinary 12 sweeps had mean/P95 position RMS 0.014807/0.024515 mm and edge
+MAE 0.001366 mm, versus 0.016327/0.053890 mm and 0.001986 mm for Galerkin.
+Again, two sampled candidates were rejected. This repeat does not support
+treating the favorable independent-trajectory endpoint as an accuracy upgrade.
+
+**Additional subspace/solver experiments, not retained.** The following were
+implemented as isolated prototypes without changing the fine forces:
+
+- A metric Gauss-Newton membrane tangent and an exact membrane tangent were
+  compared with the projected tangent. Neither improved the real contact
+  trajectory consistently. Those preliminary runs preceded the cross-block
+  fix and are not used to validate the retained implementation.
+- A nonlinear reduced correction re-evaluated the original fine residual,
+  accepted only a decrease in a frozen local inverse-Hessian norm, and tried
+  half/quarter steps before rollback. After the cross-block fix, a 150-frame
+  run measured 44.105 ms / 5.266 mm RMS for ordinary Galerkin, versus
+  47.299 ms / 6.901 mm for one guarded cycle and 53.058 ms / 5.881 mm for two.
+  The two-cycle edge MAE improved from 0.155 to 0.138 mm, but position error
+  and runtime did not improve together. This norm is a diagnostic, not the
+  frictional-contact objective or a complete nonlinear safety certificate.
+- A contact-compliance-weighted aggregate basis used
+  `B_i = I - 0.9 inverse(H_i) H_contact_i` and transformed restriction,
+  membrane/bending blocks, and prolongation consistently. A separate
+  150-frame comparison measured position RMS 8.831 mm / edge MAE 0.205 mm,
+  versus 7.394 mm / 0.217 mm for ordinary Galerkin. This is a tradeoff, not
+  evidence of better accuracy; it is not retained.
+
+The existing 6-DOF aggregate and scalar-smoothed subspace experiments are also
+not reintroduced. More coarse cycles, looser guards, or a changed constitutive
+force are not accepted as substitutes for improving the approximation.
+
+**Decision.** No-Go as a default T-shirt accuracy upgrade. Keep the corrected
+Galerkin operator as an explicit experiment, but restore the T-shirt's
+pre-experiment graph-operator configuration, including its original fallback
+budget. Do not claim equivalence to 30 sweeps or reduce the demo to eight
+sweeps. The benchmark and mathematical regressions are retained; the
+inconclusive nonlinear and contact-basis prototypes are not part of the solver
+API. Subsequent work needs a coarse model/subspace that improves same-state
+contact and deformation errors together, not merely a more favorable endpoint.
+
+**Verification.** All 15 focused multilevel tests pass, covering CPU-disabled
+operation, both private CUDA VBD backends, graph capture/replay, eager fallback
+with `wp.capture_if` patched to fail if called, and the new matrix regressions.
+The restored default T-shirt configuration passes its 900-frame `--test` run.
+The experimental Galerkin configuration also passes a separate 900-frame
+finite-state/`test_final()` run (49.058 ms/frame; all nine sampled final-substep
+statuses zero). This long run is not a 900-frame comparison to 30 sweeps.
+These are finite-state/material/API checks, not visual certification that every
+fold or grasp is identical. Changed-file pre-commit hooks pass. No remote
+commit or push was made for this experiment.
+
+### 2026-09-05: compare contact-free surface relaxation to the original 20 sweeps
+
+**Target.** Use ordinary 20 sweeps as the accuracy reference and the existing
+12-sweep-plus-one-graph-correction T-shirt as the speed/accuracy baseline.
+`889ae3d4^` confirms that this example originally used `VBD_ITERATIONS = 20`.
+Use current identical materials, geometry, realtime IK, substeps, and collision
+parameters for all variants; this is not a comparison between different
+historical physics implementations. The exact demo baseline has a **5%**
+particle-radius coarse cap, not the 20% cap used in earlier operator scans.
+
+**Rejected before retention.** Isolated 300-frame same-substep comparisons
+tested corrected translation Galerkin, post-smoothing, and a genuinely larger
+four-dimensional per-aggregate basis: three translations plus a normalized
+local-Newton-residual deviation from the aggregate mean. The latter assembled
+consistent 4-by-4 projected blocks, restriction, and prolongation and used a
+block-PCG solve. Neither the expanded basis nor fewer ordinary sweeps with
+translation Galerkin improved position and edge errors over the exact current
+baseline. Unconditional local SOR and alternating forward/reverse color order
+also regressed contact errors. None of those prototypes was added to the
+production solver.
+
+**Retained experimental candidate.** Perform 12 ordinary color sweeps without
+the terminal multilevel correction. In sweeps 2 through 9, multiply the local
+Newton displacement by 1.3 only if the particle's accumulated contact/spring
+Hessian is exactly zero. Sweep 1 and sweeps 10 through 12 remain ordinary.
+Nonzero off-diagonal contributions also exclude acceleration; the production
+predicate tests the complete matrix, not just its trace. Existing DAT and
+displacement bounds still apply after each color. This changes the numerical
+iteration, not the constitutive force, stiffness, damping, friction, collision
+geometry, or timestep. A constrained row is not extrapolated locally; this
+does not mean its later trajectory is independent of neighboring free rows.
+
+The extra work is fused into the existing surface solve, with no scratch
+position copies, extra per-color launches, host synchronization, or conditional
+graph API. Both private MJVBDV2 backends expose
+`particle_surface_relaxation=1.0` by default. Non-differentiable,
+non-deterministic CUDA surface tiles can opt in; scalar/CPU and volumetric
+paths remain ordinary. Scene-specific validation is required. The T-shirt
+default remains the existing 12-sweep graph configuration.
+
+**Prototype evidence (RTX 5090 D v2).** In a matched 300-frame full-trajectory
+run, ordinary 20 sweeps took 66.424 ms/frame, its repeat 65.906 ms/frame,
+the exact demo baseline 45.566 ms/frame, and the fused 12-sweep candidate
+43.169 ms/frame (5.3% less time than the baseline).
+
+| Frame | Baseline RMS vs. 20 | Candidate RMS vs. 20 | Baseline edge MAE | Candidate edge MAE |
+| --- | ---: | ---: | ---: | ---: |
+| 100 | 3.859 mm | 2.794 mm | 0.103 mm | 0.088 mm |
+| 200 | 5.075 mm | 3.482 mm | 0.056 mm | 0.047 mm |
+| 300 | 11.057 mm | 8.820 mm | 0.257 mm | 0.195 mm |
+
+The 20/20 repeat position RMS was 0.989/1.795/8.256 mm at these checkpoints;
+endpoint differences remain subject to nonlinear contact divergence. In a
+separate 900-frame diagnostic, both candidates were forked from identical
+substep states along an ordinary 20-sweep history. One final-substep sample
+was taken per frame, avoiding inter-trajectory divergence:
+
+| Candidate | Mean position RMS vs. 20 | P95 position RMS | Mean edge MAE |
+| --- | ---: | ---: | ---: |
+| Exact 12 + graph baseline | 0.008317 mm | 0.013298 mm | 0.000738 mm |
+| 12 contact-free, final 3 ordinary | 0.005798 mm | 0.009367 mm | 0.000660 mm |
+
+This is approximately 30% lower mean/P95 position error and 11% lower edge
+error. An 11-sweep candidate was faster (40.106 ms/frame in the 300-frame
+run), but its 900-sample edge error increased; it is not the retained demo
+candidate. The residual-basis and SOR probes above were isolated prototypes;
+the checked-in implementation and native demo modes are measured separately.
+
+**Checked-in 900-frame timing/trajectory validation.** Ordinary 20 sweeps
+took 67.992 ms/frame (repeat 67.806), the unchanged default mode took
+47.613 ms/frame, and `contact-free` took 46.113 ms/frame: **3.15% less time**
+than the existing 12 + multilevel baseline. This supersedes the short prototype
+timing as the retained implementation's throughput estimate. All four runs
+passed the finite-state and existing `test_final()` checks.
+
+| Frame | Baseline RMS vs. 20 | Candidate RMS vs. 20 | Baseline edge MAE | Candidate edge MAE |
+| --- | ---: | ---: | ---: | ---: |
+| 100 | 4.545 mm | 3.182 mm | 0.117 mm | 0.092 mm |
+| 200 | 4.423 mm | 6.170 mm | 0.055 mm | 0.054 mm |
+| 300 | 11.376 mm | 10.270 mm | 0.251 mm | 0.196 mm |
+| 400 | 14.424 mm | 17.392 mm | 0.157 mm | 0.153 mm |
+| 500 | 14.524 mm | 18.886 mm | 0.158 mm | 0.142 mm |
+| 600 | 14.730 mm | 19.163 mm | 0.149 mm | 0.136 mm |
+| 700 | 15.068 mm | 19.258 mm | 0.144 mm | 0.135 mm |
+| 800 | 15.460 mm | 19.340 mm | 0.141 mm | 0.132 mm |
+| 900 | 16.440 mm | 18.309 mm | 0.141 mm | 0.133 mm |
+
+Edge errors improve at all nine checkpoints, but long-trajectory position
+errors do not. The independent 20/20 repeat itself differed by 5.102 mm at
+frame 300, 13.259 mm at 500, and 9.419 mm at 900. This variability is a reason
+to report common-history substep errors separately, not a reason to dismiss
+the worse trajectory checkpoints or claim equivalent grasp/folding behavior.
+Retain the mode as an explicit experiment; do not replace the demo default.
+
+**Checked-in same-substep validation.** The native diagnostic completed 900
+frames, taking one final-substep sample per frame along a common ordinary
+20-sweep history. Neither trial feeds its positions into the reference's next
+substep. The baseline correction was accepted in all 900 sampled substeps
+(this is not a rejection-rate measurement over all substeps).
+
+| Candidate | Mean position RMS vs. 20 | P95 position RMS | Mean edge MAE |
+| --- | ---: | ---: | ---: |
+| Exact 12 + graph baseline | 0.008289 mm | 0.013445 mm | 0.000736 mm |
+| Checked-in contact-free mode | 0.005857 mm | 0.009165 mm | 0.000669 mm |
+
+Mean position error is 29.3% lower, P95 is 31.8% lower, and edge error is
+9.0% lower. These confirm a local convergence improvement, not uniformly
+better full-trajectory accuracy. The 20-sweep reference is a practical
+comparison target, not a proven exact solution.
+
+**Verification.** All 20 focused multilevel/surface-relaxation tests pass.
+The new invalid-factor regression failed before the option was implemented
+and passes afterward. Coverage includes both private backends, exact
+preservation of contact/anchor updates, nonzero off-diagonal contact Hessians,
+the warm-up/final-sweep schedule, CUDA capture versus eager execution,
+deterministic/differentiable opt-out, and unchanged CPU execution with
+`wp.capture_if` patched to raise. The four independent 900-frame runs and the
+900-frame same-substep diagnostic pass finite-state/`test_final()` checks.
+These are not visual certification of equivalent folding or grasp retention.
+No default was changed, and no commit or push was made for this experiment.
+
+**Commands.** The default is unchanged. For visual comparison, append exactly
+one mode to the existing T-shirt command:
+
+```bash
+uv run -m newton.examples.mjvbdv2.example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00 --particle-solver-mode baseline
+uv run -m newton.examples.mjvbdv2.example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00 --particle-solver-mode reference20
+uv run -m newton.examples.mjvbdv2.example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00 --particle-solver-mode contact-free
+```
+
+Reproduce the native 20/reference-repeat/baseline/candidate comparison and
+the independent same-substep diagnostic without a viewer:
+
+```bash
+uv run scripts/benchmark_mjvbd_v2_multilevel.py --compare-demo --frames 900
+uv run scripts/benchmark_mjvbd_v2_multilevel.py --compare-demo --same-substep --frames 900
+```
+
+The existing CUDA guard stays active throughout these measurements; the
+benchmark does not stop a demo, reset the GPU, or terminate the guard.
+
+### 2026-09-05: cached13 improves the T-shirt speed/accuracy tradeoff
+
+**Acceptance target.** Beat the existing 12 + graph mode in throughput and
+accuracy against ordinary 20 sweeps, including the independent grasp/folding
+trajectory, not only a same-state local norm. Keep defaults unchanged while
+testing candidates. Do not disable collision, change materials, or weaken
+the original displacement/DAT limits to obtain a speedup.
+
+**Whole-sweep accelerators rejected.** Implemented isolated Chebyshev and
+two-dimensional Anderson prototypes using the actual fine-sweep history;
+neither requires a coarse matrix or mesh hierarchy. Anderson uses a fused
+single-block Gram reduction, finite/conditioning/coefficient guards, and
+existing DAT after mixing. These are experiments inspired by the
+[VBD paper](https://arxiv.org/abs/2403.06321) and
+[periodic Anderson paper](https://graphics.cs.uh.edu/wp-content/papers/2026/2026-HPG-PAA-PhysicalSim.pdf),
+not a reproduction of the latter's 100-iteration tetrahedral test setup.
+That paper explicitly reports contact-dominated failure cases; its speed and
+energy claims do not establish a safe cloth-grasping acceleration here.
+
+In a 300-frame common-history diagnostic (one final-substep sample/frame),
+the exact baseline had mean position RMS **0.009461 mm**, edge MAE
+**0.001152 mm**. Chebyshev at 10/12 sweeps and spectral estimates 0.7/0.9
+increased both errors. Anderson with 11 sweeps / period 3 had
+0.012399 / 0.001395 mm; damping its mixing to 0.5 still gave
+0.012071 / 0.001359 mm. A 12-sweep period-2 trial and a contact-free
+period-3 trial also failed to improve both metrics. None is added to the
+production solver API.
+
+**Investigate per-sweep cost instead.** A kernel-event diagnostic after 300
+T-shirt frames (one subsequent eager frame, not a graph throughput estimate)
+attributed approximately 13.17 ms to self-contact accumulation, 10.17 ms to
+surface elasticity, 9.77 ms to planar truncation, 5.94 ms to body-particle
+contact, 3.87 ms to applying truncation, and 3.17 ms to builtin fills. Thus
+the earlier bending-only idea cannot account for the whole bottleneck.
+
+Isolated bending prototypes evaluate only the selected angle gradient in
+closed form and cache the fixed damping anchor angle once per substep.
+Against the original matrix-chain derivative on 1,000 random hinges,
+maximum relative force/Hessian differences were 2.35e-5 / 4.01e-5
+(mean 1.65e-7 / 2.78e-7); algebraic equivalence is not bitwise equivalence.
+An independent 300-frame run with cached bending and 14 contact-free SOR
+sweeps took **44.481 ms/frame**, versus **45.103** for the baseline.
+Position RMS at frames 100/200/300 was 1.821/2.895/5.211 mm versus
+4.055/4.261/10.874 mm; corresponding edge errors were lower at all three
+checkpoints. This modest short-run result is not sufficient for acceptance.
+
+Subsequent experiments cache only the frozen closest-point geometry used by DAT
+(division-plane offsets still respond to the current displacement), fuse
+the reset of truncation factors with applying them, and separate EE/VT
+self-contact kernels. The synthetic CPU cached-DAT comparison matched
+the original truncation factors bitwise, including a degenerate pair.
+The EE/VT split matched the original CPU result within tolerance but made
+the full frame slower; it is not retained. Fourteen cached relaxed sweeps
+had too small a long-run speed advantage. Thirteen was the best tested
+compromise; this is not a claim of a globally optimal iteration count.
+
+**Retained as opt-in, not a new default.** `--particle-solver-mode cached13`
+uses 13 fine sweeps, no multilevel correction, contact-free relaxation 1.3,
+and both caches. The first and last three sweeps are ordinary. Only rows
+with exactly zero accumulated contact/spring Hessian are relaxed; ordinary
+DAT and the original displacement bound still apply. Materials, contact
+generation, robot trajectory, time step, and substeps are unchanged.
+
+`particle_enable_surface_cache` caches only the fixed damping angle from
+`particle_q_prev`, refreshed every substep, and uses the same bending force
+law with a selected-vertex closed-form derivative. Current elastic angles
+are still recomputed for every color. `particle_enable_truncation_cache`
+refreshes closest-point/normal geometry after **every** self-collision
+detection, including detections inside an iteration. Its division plane
+still depends on the current displacement. Applying truncation also resets
+the consumed factors to 1, eliminating the next color's full-array fill.
+Neither feature is enabled for CPU, differentiable, or deterministic
+execution. Surface scalar/volumetric solves are unchanged. DAT cache
+allocation is capped at 256 MiB; capture-time growth raises instead of
+silently reallocating pointers used by a CUDA Graph.
+
+**Independent 900-frame trajectory measurements.** RTX 5090 D v2, Warp
+1.17.0.dev20260807, CUDA Graphs, headless, the same continuously running CUDA
+guard. Timing includes physics and realtime IK but excludes construction,
+compilation, graph capture, and checkpoint readback. No other GPU benchmark
+or regression suite ran concurrently with these timed measurements.
+
+| Run | Ordinary 20 | 12 + graph baseline | cached13 | Frame-time reduction |
+| --- | ---: | ---: | ---: | ---: |
+| Prototype | 68.511 ms | 47.243 ms | 44.877 ms | 5.01% |
+| Native repository implementation | 67.778 ms | 47.535 ms | 44.519 ms | 6.34% |
+
+The native baseline/candidate correspond to 21.04 / 22.46 frames/s.
+Native results against that run's ordinary-20 reference:
+
+| Frame | Baseline position RMS (mm) | cached13 position RMS (mm) | Baseline edge-length MAE (mm) | cached13 edge-length MAE (mm) |
+| --- | ---: | ---: | ---: | ---: |
+| 100 | 4.2172 | 1.7806 | 0.09860 | 0.06487 |
+| 200 | 5.7364 | 5.6575 | 0.06425 | 0.03789 |
+| 300 | 11.0322 | 4.7453 | 0.24224 | 0.13948 |
+| 400 | 12.3164 | 6.1921 | 0.17008 | 0.09648 |
+| 500 | 13.5504 | 8.4636 | 0.16953 | 0.10051 |
+| 600 | 16.6881 | 12.6804 | 0.17144 | 0.11101 |
+| 700 | 16.0192 | 10.3073 | 0.16660 | 0.10122 |
+| 800 | 15.9779 | 9.9892 | 0.16439 | 0.09475 |
+| 900 | 15.8116 | 10.4810 | 0.16246 | 0.09711 |
+| Checkpoint mean | 12.3722 | 7.8108 | 0.15662 | 0.09370 |
+
+Position and edge errors improve at all nine checkpoints in both runs.
+For the native run, checkpoint means fall 36.87% / 40.17%. However, an
+ordinary-20 repeat itself differed by 0.617--15.495 mm at these checkpoints
+(68.376 ms/frame): nonlinear contact trajectories are not reproducible
+ground truth. The numbers support a measured improvement, not bitwise
+equivalence, a guarantee for every frame, or visual certification of an
+identical fold. The old 12-sweep contact-free candidate also improved in
+this native run (45.057 ms/frame), despite its late-trajectory regression
+in the preceding experiment; this variability is why a common-state test
+is also required.
+
+The prototype common-state test used an ordinary-20 history and one final
+substep sample per frame for 900 frames. Baseline / cached13 mean position
+RMS was 0.008022 / 0.004938 mm; P95 was 0.012990 / 0.010200 mm, and mean
+edge-length MAE was 0.0007194 / 0.0006339 mm. No baseline coarse rejection
+occurred in the sampled substeps. A native reproduction is included in
+`scripts/benchmark_mjvbd_v2_multilevel.py`; neither candidate feeds its state
+into the next reference substep.
+
+The **native 900-frame common-state reproduction** also passed:
+
+| Metric | 12 + graph baseline | cached13 |
+| --- | ---: | ---: |
+| Mean local position RMS (mm) | 0.00855777 | 0.00530261 |
+| P95 local position RMS (mm) | 0.01429923 | 0.01130051 |
+| Mean local edge-length MAE (mm) | 0.00074771 | 0.00068813 |
+
+These reduce the baseline errors by 38.04%, 20.97%, and 7.97%, respectively;
+all 900 sampled baseline coarse corrections were accepted. The older
+contact-free12 candidate has a lower local P95/edge MAE than cached13 in
+this run (0.00984599 / 0.00068074 mm), although its mean local position error
+is higher (0.00590760 mm). Do not describe cached13 as strictly dominating
+every candidate or metric. It improves the requested 12 + graph baseline
+on measured throughput, both independent trajectory metrics, and all three
+reported same-state metrics.
+
+**Regression coverage.** All **81 tests** in the six MJVBDV2 modules below
+passed on CPU/CUDA. The new cache tests compare the bending force/Hessian
+against the original law and the gradient against double-precision finite
+differences, exercise the +/-pi damping wrap and degenerate/boundary hinges,
+and compare DAT against both original backends on synthetic VT/EE pairs.
+They cover repeated factor consumption/reset, active/inactive transitions,
+selected-color updates, changing collision snapshots, native per-iteration
+collision refresh, eager/Graph replay, allocation limits, and CPU/gradient/
+deterministic opt-out. The CPU option regression was checked to fail before
+the cache options were introduced. The first synthetic DAT fixture exposed
+a test-owned buffer lifetime bug (device structs contain pointers, not
+ownership); keeping its host struct alive fixed the test, without changing
+solver code. Changed-file pre-commit hooks and `git diff --check` pass.
+
+```bash
+uv run --extra dev -m unittest \
+  newton.tests.test_mjvbd_v2_surface_cache \
+  newton.tests.test_mjvbd_v2_truncation_cache \
+  newton.tests.test_mjvbd_v2_surface_relaxation \
+  newton.tests.test_mjvbd_v2_particle_multilevel \
+  newton.tests.test_mjvbd_v2_contact_optimizations \
+  newton.tests.test_mjvbd_v2
+```
+
+**Reproduce.** Defaults remain unchanged. To try the candidate visually:
+
+```bash
+uv run -m newton.examples.mjvbdv2.example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00 --particle-solver-mode cached13
+```
+
+For the complete native comparison and common-substep accuracy diagnostic:
+
+```bash
+uv run scripts/benchmark_mjvbd_v2_multilevel.py --compare-demo --frames 900
+uv run scripts/benchmark_mjvbd_v2_multilevel.py --compare-demo --same-substep --frames 900
+```
+
+No default, VR process, GPU power configuration, or CUDA guard lifetime was
+changed. These measurements validate this T-shirt scenario only, not all
+`final00` examples. No commit or push is part of this tuning request.
+
+### 2026-09-05: integrate the surface experiments with remote tet correction
+
+**Integration base.** The remote `FAST_MJVBDV2` advanced to `ff29013f0`
+while the surface experiments were local. Integrate both implementations
+instead of replacing either side. The original staged surface work is
+retained in a local recovery stash while the integrated revision is tested.
+
+**Dispatch contract.** Keep the remote six-DOF path whenever a correction
+contains movable tetrahedral clusters, including mixed cloth/tet models.
+`particle_multilevel_operator` selects graph versus block-Galerkin only for
+surface-only corrections; it does not replace the mixed/tet basis. Skip
+unused three-DOF matrix allocation in the six-DOF case. Preserve the default
+`operator="graph"` on the internal correction constructor for the remote
+callers. CPU, differentiable, and deterministic solver eligibility remains
+unchanged. Automatic mode retains its existing conservative tet exclusion;
+explicit tet enablement remains available.
+
+AST comparisons confirm all 32 remote top-level multilevel functions and
+its `_restrict_and_prolong_rigid` method are unchanged. All 19 local
+top-level functions other than `_build_clusters` are unchanged; clustering
+now retains the remote surface/tet partition and tetrahedral assignment.
+The two remote final00 examples and their measured defaults are unchanged
+relative to `ff29013f0`. The T-shirt still defaults to 12 sweeps plus graph
+correction, with `cached13` opt-in.
+
+**Integration regression.** Add a test that rejects unnecessary three-DOF
+matrix storage for mixed/tet corrections: without the dispatch-specific
+allocation gate it failed with 133 blocks instead of zero, and with the gate
+it passed. A second test exercises actual surface caches together with the
+six-DOF correction, both surface operator values, and eager/CUDA Graph
+execution in both private backends. Its fixture includes enough tets to
+meet the pre-existing per-color tile threshold; tiny mixed fixtures correctly
+stay scalar and therefore do not exercise the cache. All **87 tests** in the
+six MJVBDV2 modules pass after integration.
+
+**Repository checks.** Run `uvx pre-commit run -a` on an isolated exact index
+snapshot so its autofixes cannot touch unrelated workspace files. Full-tree
+Ruff reports 737 errors in unrelated historical files; the unmodified
+`ff29013f0` tree reproduces the same 737 errors. Format the changed test file
+and run all hooks on this change's files separately. Do not sweep unrelated
+formatting changes into the integration commit.
+
+**Full-length scenario checks after integration.** Run each command below
+with `--viewer null --test`. All four runs exit successfully and execute
+their existing final-state assertions; these are functional regressions,
+not new speed measurements or a claim of bitwise trajectory equivalence.
+
+| `newton.examples.mjvbdv2` module | Configuration | Frames | Result |
+| --- | --- | ---: | --- |
+| `example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00` | Default `baseline` (12 + graph) | 900 | Pass |
+| `example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00` | Opt-in `cached13` | 900 | Pass |
+| `example_vbd_mjvbd_v2_dexforce_recorded_soft_then_rigid_cube_into_bag_final00` | Remote default (8 sweeps + six-DOF correction) | 1900 | Pass |
+| `example_vbd_mjvbd_v2_right_hand_armadillo_into_gear_crusher_final00` | Remote default | 1500 | Pass |
+
+The T-shirt checks finite cloth/IK state and collision-only robot geometry.
+The cube/bag and Armadillo checks additionally cover completed placement or
+physical lift/release/contact phases. The CUDA guard remains active during
+and after the tests; no VR stop/reload scripts or GPU power changes are used.
+The Towncrier draft also succeeds. Commit and push this integrated revision
+at the user's request, retaining the pre-integration stash as local recovery.
