@@ -9,7 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.mjvbd_v2.particle_multilevel import _build_clusters
+from newton._src.solvers.mjvbd_v2.particle_multilevel import ParticleMultilevelCorrection, _build_clusters
 from newton._src.solvers.mjvbd_v2.vbd.solver_vbd import SolverVBD as SolverVBDComplete
 from newton._src.solvers.mjvbd_v2.vbd_soft.solver_vbd import SolverVBD as SolverVBDSoft
 
@@ -35,13 +35,45 @@ def _build_cloth(device, *, dim_x=16, dim_y=4, fix_left=True, requires_grad=Fals
     return builder.finalize(device=device, requires_grad=requires_grad)
 
 
+def _build_two_tets(device):
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    for x_offset in (0.0, 0.3):
+        first_particle = builder.particle_count
+        for position in (
+            (x_offset, 0.0, 0.0),
+            (x_offset + 0.1, 0.0, 0.0),
+            (x_offset, 0.1, 0.0),
+            (x_offset, 0.0, 0.1),
+        ):
+            builder.add_particle(wp.vec3(*position), wp.vec3(), 0.01, radius=0.01)
+        builder.add_tetrahedron(
+            first_particle,
+            first_particle + 1,
+            first_particle + 2,
+            first_particle + 3,
+        )
+    builder.color()
+    return builder.finalize(device=device)
+
+
 class TestMJVBDV2ParticleMultilevel(unittest.TestCase):
     def test_invalid_automatic_mode_is_rejected(self):
+        """Reject unknown automatic-mode strings."""
+
         model = _build_cloth("cpu")
         for solver_type in (SolverVBDComplete, SolverVBDSoft):
             with self.subTest(solver=solver_type.__module__):
                 with self.assertRaisesRegex(ValueError, "particle_enable_multilevel_correction"):
                     solver_type(model, iterations=2, particle_enable_multilevel_correction="sometimes")
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Particle multilevel correction requires CUDA")
+    def test_multilevel_correction_is_opt_in(self):
+        """Keep the existing CUDA solver path unchanged unless explicitly enabled."""
+        model = _build_cloth(wp.get_device("cuda:0"))
+        for solver_type in (SolverVBDComplete, SolverVBDSoft):
+            with self.subTest(solver=solver_type.__module__):
+                solver = solver_type(model, iterations=2)
+                self.assertIsNone(solver.particle_multilevel)
 
     def test_cpu_uses_original_vbd_path(self):
         model = _build_cloth("cpu")
@@ -71,7 +103,8 @@ class TestMJVBDV2ParticleMultilevel(unittest.TestCase):
         self.assertEqual(cluster_offsets[-1], cluster_particles.size)
         self.assertGreater(int(coarse_anchor_edges.sum()), 0)
 
-    def test_tetrahedral_particles_stay_on_original_vbd_path(self):
+    def test_mixed_surface_and_tet_particles_use_separate_clusters(self):
+        """Assign tet particles without mixing their rigid basis into surface clusters."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         for position in (
             (0.0, 0.0, 0.0),
@@ -85,12 +118,55 @@ class TestMJVBDV2ParticleMultilevel(unittest.TestCase):
             builder.add_particle(wp.vec3(*position), wp.vec3(), 0.01, radius=0.01)
         builder.add_tetrahedron(0, 1, 2, 3)
         builder.add_triangle(4, 5, 6)
+        # Deliberately connect both domains: basis type, rather than graph
+        # connectivity alone, must form a cluster boundary.
+        builder.add_spring(3, 4, ke=1.0, kd=0.0, control=0.0)
         builder.color()
         model = builder.finalize(device="cpu")
 
-        fine_to_coarse = _build_clusters(model, 2)[0]
-        self.assertTrue(np.all(fine_to_coarse[:4] == -1))
+        fine_to_coarse, offsets, particles, *_ = _build_clusters(model, 16)
+        self.assertTrue(np.all(fine_to_coarse[:4] >= 0))
         self.assertTrue(np.all(fine_to_coarse[4:] >= 0))
+        tet_particle = np.zeros(model.particle_count, dtype=bool)
+        tet_particle[:4] = True
+        for cluster in range(offsets.size - 1):
+            members = particles[offsets[cluster] : offsets[cluster + 1]]
+            self.assertTrue(np.all(tet_particle[members] == tet_particle[members[0]]))
+
+    def test_fixed_tets_do_not_select_rigid_coarse_path(self):
+        """Do not penalize a surface solve for inactive tetrahedral topology."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        for position in ((0.0, 0.0, 0.0), (0.1, 0.0, 0.0), (0.0, 0.1, 0.0), (0.0, 0.0, 0.1)):
+            builder.add_particle(wp.vec3(*position), wp.vec3(), 0.0, radius=0.01)
+        builder.add_tetrahedron(0, 1, 2, 3)
+        builder.add_cloth_grid(
+            pos=wp.vec3(1.0, 0.0, 0.0),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(),
+            dim_x=4,
+            dim_y=2,
+            cell_x=0.02,
+            cell_y=0.02,
+            mass=0.001,
+            tri_ke=1.0e5,
+            tri_ka=1.0e5,
+            tri_kd=0.0,
+            edge_ke=0.0,
+        )
+        builder.color()
+        model = builder.finalize(device="cpu")
+        correction = ParticleMultilevelCorrection(
+            model,
+            cluster_size=4,
+            coarse_iterations=2,
+            coupling=0.5,
+            relaxation=0.1,
+            max_radius_fraction=0.05,
+            minimum_residual_reduction=None,
+            max_clamp_fraction=1.0,
+        )
+
+        self.assertFalse(correction.use_rigid_basis)
 
     @unittest.skipUnless(wp.is_cuda_available(), "Particle multilevel correction requires CUDA")
     def test_automatic_mode_uses_conservative_topology_and_scale_gate(self):
@@ -148,6 +224,62 @@ class TestMJVBDV2ParticleMultilevel(unittest.TestCase):
 
                 self.assertIsNotNone(solver.particle_multilevel)
                 self.assertTrue(np.isfinite(state_0.particle_q.numpy()).all())
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Particle multilevel correction requires CUDA")
+    def test_rigid_cluster_basis_executes_for_tetrahedra(self):
+        """Execute the six-DOF cluster solve for a tetrahedral model."""
+        device = wp.get_device("cuda:0")
+        model = _build_two_tets(device)
+        solver = SolverVBDComplete(
+            model,
+            iterations=2,
+            particle_enable_multilevel_correction=True,
+            particle_multilevel_cluster_size=4,
+        )
+        state_in = model.state()
+        state_out = model.state()
+        solver.step(state_in, state_out, model.control(), None, 1.0 / 60.0)
+
+        self.assertIsNotNone(solver.particle_multilevel)
+        self.assertTrue(solver.particle_multilevel.use_rigid_basis)
+        self.assertTrue(np.isfinite(state_out.particle_q.numpy()).all())
+        self.assertTrue(np.isfinite(solver.particle_multilevel.coarse_residual_ratio.numpy()).all())
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Particle multilevel correction requires CUDA")
+    def test_rigid_cluster_basis_responds_to_cluster_rotation(self):
+        """Respond to a representable infinitesimal rotation on each tet cluster."""
+        device = wp.get_device("cuda:0")
+        model = _build_two_tets(device)
+        correction = ParticleMultilevelCorrection(
+            model,
+            cluster_size=4,
+            coarse_iterations=8,
+            coupling=0.5,
+            relaxation=0.1,
+            max_radius_fraction=10.0,
+            minimum_residual_reduction=None,
+            max_clamp_fraction=1.0,
+        )
+        positions = model.particle_q.numpy()
+        masses = model.particle_mass.numpy()
+        local_updates = np.zeros_like(positions)
+        for cluster in range(2):
+            particles = np.arange(cluster * 4, cluster * 4 + 4)
+            centroid = np.average(positions[particles], axis=0, weights=masses[particles])
+            omega = np.asarray((0.12, -0.08, 0.05), dtype=np.float32)
+            local_updates[particles] = np.cross(omega, positions[particles] - centroid)
+        dt = 1.0 / 60.0
+        hessians = masses[:, None, None] / (dt * dt) * np.eye(3, dtype=np.float32)[None, :, :]
+        correction.local_correction.assign(local_updates)
+        correction.local_hessians.assign(hessians)
+        particle_displacements = wp.zeros(model.particle_count, dtype=wp.vec3, device=device)
+
+        correction.restrict_and_prolong(model, model.particle_q, particle_displacements, dt)
+        result = particle_displacements.numpy()
+
+        self.assertGreater(float(np.linalg.norm(result)), 1.0e-4)
+        self.assertLess(float(np.linalg.norm(result - 0.1 * local_updates)), 1.1e-3)
+        self.assertLess(float(correction.coarse_residual_ratio.numpy()[0]), 1.0e-3)
 
     @unittest.skipUnless(wp.is_cuda_available(), "Particle multilevel correction requires CUDA")
     def test_deterministic_mode_uses_original_vbd_path(self):

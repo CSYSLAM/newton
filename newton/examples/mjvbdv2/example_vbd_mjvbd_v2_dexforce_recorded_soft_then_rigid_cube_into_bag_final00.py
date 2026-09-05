@@ -150,7 +150,11 @@ class Example(recorded_soft.Example):
 
         options = super()._solver_vbd_options()
         options.update(
-            iterations=soft0.VBD_ITERATIONS,
+            iterations=self.args.vbd_iterations,
+            particle_enable_multilevel_correction=self.args.particle_multilevel_correction,
+            particle_multilevel_cluster_size=self.args.particle_multilevel_cluster_size,
+            particle_multilevel_coarse_iterations=self.args.particle_multilevel_coarse_iterations,
+            particle_multilevel_relaxation=self.args.particle_multilevel_relaxation,
             rigid_avbd_contact_alpha=0.0,
             rigid_contact_history=True,
             rigid_contact_stick_motion_eps=5.0e-4,
@@ -526,6 +530,36 @@ class Example(recorded_soft.Example):
             action=argparse.BooleanOptionalAction,
             default=True,
             help="Capture the warmed physics frame as one CUDA graph.",
+        )
+        parser.add_argument(
+            "--vbd-iterations",
+            type=int,
+            default=8,
+            help="VBD iterations per physics substep.",
+        )
+        parser.add_argument(
+            "--particle-multilevel-correction",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Enable the mixed surface/tetrahedral multilevel correction.",
+        )
+        parser.add_argument(
+            "--particle-multilevel-cluster-size",
+            type=int,
+            default=32,
+            help="Target particles per multilevel cluster.",
+        )
+        parser.add_argument(
+            "--particle-multilevel-coarse-iterations",
+            type=int,
+            default=4,
+            help="PCG iterations for the coarse solve.",
+        )
+        parser.add_argument(
+            "--particle-multilevel-relaxation",
+            type=float,
+            default=0.025,
+            help="Relaxation applied to the coarse correction.",
         )
         parser.add_argument(
             "--rigid-grasp-keyframe",

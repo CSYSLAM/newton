@@ -31,7 +31,7 @@ from newton.solvers import SolverMJVBDV2
 
 FPS = 60
 SIM_SUBSTEPS = 10
-VBD_ITERATIONS = 10
+VBD_ITERATIONS = 6
 DEFAULT_NUM_FRAMES = 1500
 
 RIGHT_HAND_URDF = Path(__file__).resolve().parents[3] / "assets" / "W1_right_hand" / "DexforceW1_right_hand.urdf"
@@ -441,6 +441,10 @@ class Example:
             contact_mode="full",
             vbd_options={
                 "iterations": self.vbd_iterations,
+                "particle_enable_multilevel_correction": args.particle_multilevel_correction,
+                "particle_multilevel_cluster_size": args.particle_multilevel_cluster_size,
+                "particle_multilevel_coarse_iterations": args.particle_multilevel_coarse_iterations,
+                "particle_multilevel_relaxation": args.particle_multilevel_relaxation,
                 "rigid_body_contact_buffer_size": RIGID_BODY_CONTACT_BUFFER_SIZE,
                 "rigid_body_particle_contact_buffer_size": RIGID_BODY_PARTICLE_CONTACT_BUFFER_SIZE,
                 "particle_enable_self_contact": True,
@@ -1059,6 +1063,30 @@ class Example:
             type=int,
             default=VBD_ITERATIONS,
             help="VBD iterations per physics substep.",
+        )
+        parser.add_argument(
+            "--particle-multilevel-correction",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Enable the six-DOF particle multilevel correction.",
+        )
+        parser.add_argument(
+            "--particle-multilevel-cluster-size",
+            type=int,
+            default=32,
+            help="Target particles per six-DOF multilevel cluster.",
+        )
+        parser.add_argument(
+            "--particle-multilevel-coarse-iterations",
+            type=int,
+            default=4,
+            help="PCG iterations for the six-DOF coarse solve.",
+        )
+        parser.add_argument(
+            "--particle-multilevel-relaxation",
+            type=float,
+            default=0.025,
+            help="Relaxation applied to the six-DOF coarse correction.",
         )
         parser.add_argument(
             "--graph-capture",

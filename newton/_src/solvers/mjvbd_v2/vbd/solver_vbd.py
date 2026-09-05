@@ -327,8 +327,8 @@ class SolverVBD(SolverBase, CouplingInterface):
                 final ordinary VBD iteration. Pass ``"auto"`` to apply a conservative surface-topology and
                 hierarchy-size policy. The correction is available only for non-differentiable, non-deterministic
                 CUDA models. Automatic mode leaves self-contact and pneumatic scenes unchanged until they are
-                validated explicitly. Tetrahedral vertices remain on the ordinary VBD path because the current coarse
-                basis contains translational surface modes only.
+                validated explicitly. Surface clusters use translation modes; tetrahedral clusters use translation and
+                infinitesimal-rotation modes with a projected Neo-Hookean coarse operator.
             particle_multilevel_cluster_size: Target number of topologically adjacent particles per coarse cluster.
             particle_multilevel_coarse_iterations: Number of fixed PCG iterations on the coarse graph.
             particle_multilevel_coupling: Neighbor coupling used by the coarse graph operator.
@@ -3785,7 +3785,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             outputs=[correction.local_correction],
             device=self.device,
         )
-        correction.restrict_and_prolong(self.model, self.particle_displacements, dt)
+        correction.restrict_and_prolong(self.model, state_in.particle_q, self.particle_displacements, dt)
         self._penetration_free_truncation(state_in.particle_q)
 
     def _solve_rigid_body_iteration(

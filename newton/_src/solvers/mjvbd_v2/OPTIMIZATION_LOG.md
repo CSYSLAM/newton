@@ -38,6 +38,8 @@ Status values are:
 
 | Date | Change | Affected path | Status | Evidence |
 | --- | --- | --- | --- | --- |
+| 2026-09-05 | Extend tetrahedral coarse clusters from six rigid modes to twelve affine modes | CUDA `vbd/` mixed and tet multilevel paths | **Rejected, reverted** | Armadillo position error improved but frame time regressed 49.0%; the mixed soft-tet-cube plus cloth-bag scene regressed 32.2% with no accuracy improvement, and cold module compilation grew from about 3 to 10 seconds |
+| 2026-09-04 | Extend the particle coarse space with six-DOF rigid modes and a Galerkin tet operator | CUDA `vbd/` mixed surface/tetrahedral paths | **Retained, opt-in** | The 240-frame Armadillo run was 3.93% faster than 10 sweeps while reducing the plain-6 position error from 6.83 to 3.53 mm; the complete 1,900-frame soft-cube-plus-cloth final was 9.29% faster than 12 sweeps and passed its placement test |
 | 2026-09-04 | Add conservative eligibility and device-side rejection to the particle multilevel correction | CUDA `vbd/` and `vbd_soft/` cloth/shell paths | **Retained, opt-in** | A graph scale scan bounded the current one-block PCG policy to 128--1,500 clusters; all 120 sampled T-shirt frames passed the residual/finite/clamp guards, while unsafe plastic-bag settings were detected and left on their explicitly validated policy |
 | 2026-09-04 | Incrementally update pneumatic volume by unique color-cavity faces | CUDA `vbd/` pneumatic surfaces | **Retained, gated** | Two alternating 50-frame plastic inflatable-bag runs reduced mean summed GPU kernel time from 28.169 to 25.785 ms/frame (8.46%) and pneumatic kernels from 7.366 to 5.254 ms/frame (28.67%); two 300-frame CUDA Graph runs reduced mean wall time from 25.142 to 22.595 ms/frame (10.13%) |
 | 2026-09-04 | Cache rigid-soft contact color masks in the optimized soft backend | CUDA `vbd_soft/` contact-major particle contact scatter | **Rejected, reverted** | An isolated mixed-contact graph improved 8.60%–10.96%, but real fixed-frame examples measured -1.0% for gear crusher, +1.0% for nonwoven bag, and -0.5% for kinematic T-shirt; the added mask build did not produce a reliable end-to-end gain |
@@ -346,6 +348,71 @@ two measured final00 examples. Do not claim a volumetric multigrid method: a
 tet-capable coarse basis needs at least rotational/affine modes and a matching
 Galerkin operator. Keep ordinary VBD as the default until more cloth and shell
 scenes establish a broadly safe automatic iteration policy.
+
+### 2026-09-04: extend the coarse space to tetrahedral meshes
+
+**Problem.** The translation-only cluster basis used by the first retained
+surface prototype cannot represent a tetrahedral object's large-scale
+rotation. On the Armadillo scene, an early translation-only tet experiment
+reduced the 10-sweep frame cost slightly but increased the particle RMS error
+to 25.25 mm. The surface implementation therefore gated out tet particles.
+
+The retained extension assigns every movable tet particle to a fixed
+topological cluster and uses six coarse coordinates per tet cluster:
+
+```text
+delta_x_i = translation_c + rotation_c cross (x_i - centroid_c)
+```
+
+The centroid and rotational basis are evaluated at the current particle
+positions. Restriction applies the transpose of this basis to the local VBD
+residual. The coarse diagonal contains the Galerkin projection of particle
+mass and contact Hessians. For every tetrahedron and directed cluster block,
+the implementation projects the same positive-semidefinite Neo-Hookean
+deformation-gradient Hessian used by fine VBD. Objective metric damping is
+projected as well; terms whose spectral scale is below one part per million of
+the elastic block use the elastic-only fast path. Surface clusters retain only
+their three translation modes, and construction prevents a cluster from
+mixing surface-only and tet particles.
+
+The six-DOF system uses a Cholesky block-Jacobi preconditioner and a fixed-step
+persistent PCG kernel. Its reported diagnostic is the true Euclidean residual
+ratio `||r_k|| / ||r_0||`. Fixed particles remain coarse boundary conditions,
+the final correction retains the existing relaxation and particle-radius cap,
+and DAT still truncates the combined fine-plus-coarse displacement. All
+buffers and block topology are fixed at construction, preserving CUDA Graph
+topology. CPU, `requires_grad`, and deterministic modes still use ordinary
+VBD. The solver-wide option remains disabled by default.
+
+**Measurements.** Tests used an NVIDIA GeForce RTX 5060 Ti, Warp
+1.17.0.dev20260807, CUDA Toolkit 12.9, Driver 13.3, viewer-null CUDA Graphs,
+and discarded the first three frame timings. Each comparison used the same
+scripted input and substep count.
+
+| Scene | Reference | Six-DOF configuration | Performance | Accuracy and function |
+| --- | --- | --- | --- | --- |
+| Armadillo gear-crusher final00, 15,228 particles and 62,770 tets, 240 frames | 10 fine sweeps, 201.678 ms mean | 6 fine sweeps, 32-particle clusters, 4 coarse PCG steps, 0.025 relaxation | 193.746 ms mean, 3.93% faster; p95 224.953 to 208.883 ms | Against 10 sweeps, particle RMS 3.535 mm, max 15.668 mm, tet-edge MAE 0.0519 mm. Plain 6 sweeps had 6.826 mm RMS, 32.914 mm max, and 0.0646 mm edge MAE. The complete 1,500-frame test passed physical grasp, lift, carry, release, and gear-contact assertions. |
+| Dexforce soft-then-rigid cube into cloth bag final00, 1,900 frames | 12 fine sweeps, 40.338 ms mean | 8 fine sweeps, 32-particle clusters, 4 coarse PCG steps, 0.025 relaxation | 36.590 ms mean, 9.29% faster | Before soft-cube release, bag RMS against 12 sweeps was 0.75--2.40 mm versus 3.27--4.48 mm for plain 8; tet-cube differences remained at or below 1.74 mm. The complete placement test passed. |
+
+The mixed scene is not run-to-run deterministic. Two identical accelerated
+480-frame runs differed by at most 1.1 mm before soft release but diverged by
+28--37 mm after later rigid-contact phases. Consequently, post-release pointwise
+RMS is not used as accuracy evidence; phase-local pre-release error and the
+scene's physical completion assertions are the meaningful checks.
+
+**Correctness evidence.** Unit tests cover tet cluster assignment, explicit
+separation of connected surface and tet cluster types, six-DOF rotation
+response, finite coarse residuals, CUDA Graph replay in both private VBD
+implementations, deterministic and differentiable fallbacks, and the existing
+surface long-range propagation result. The mixed and Armadillo final00 demos
+enable their measured configurations. Unmeasured scenes retain the original
+solver because the global default remains off.
+
+**Decision.** Retain the six-DOF extension. It resolves the tet accuracy
+failure that forced the original gate and provides a measurable benefit in a
+mixed cloth/tet workload. It is not an affine coarse space: cluster-scale
+shear and stretch still require fine sweeps, so larger relaxation or radius
+caps remain unsupported without separate validation.
 
 ### 2026-09-04: retain bounded temporal mesh-SDF face warm starts
 
@@ -1942,6 +2009,52 @@ loosening contact or local thresholds.  A future tiered-graph attempt first
 needs evidence that a cheap prior-substep signal predicts sustained 4/8/12/20
 sweep regimes; otherwise graph selection only moves the same overhead outside
 the loop.
+
+### 2026-09-05: reject twelve-DOF affine tet clusters
+
+A complete twelve-DOF tetrahedral coarse basis was prototyped to address the
+six-DOF basis limitation. Each volumetric cluster represented
+
+```text
+u_i = t_c + omega_c x (x_i - x_bar_c) + S_c (x_i - x_bar_c),
+```
+
+where the symmetric `S_c` contributed six strain modes in addition to three
+translations and three infinitesimal rotations. Surface clusters in mixed
+models remained three-DOF translation clusters. Restriction included mass and
+contact Hessians; tet groups used the projected Neo-Hookean Galerkin operator
+and objective damping metric; a persistent block-Cholesky PCG solve preserved
+fixed CUDA Graph topology. A synthetic symmetric-strain test confirmed that
+the affine basis represented a correction that the rigid basis could not.
+
+The representative measurements did not establish a general production
+benefit:
+
+| Scene and window | Six-DOF rigid | Twelve-DOF affine | Accuracy observation |
+| --- | ---: | ---: | --- |
+| 62,770-tet Armadillo, 240 frames | 201.829 ms/frame | 300.759 ms/frame | Position RMS versus ten sweeps: 4.727 -> 3.319 mm; maximum: 20.583 -> 11.533 mm; edge MAE: 0.0530 -> 0.0559 mm |
+| Soft tet cube plus cloth bag, 480 frames | 43.274 ms/frame | 57.224 ms/frame | Bag RMS versus twelve sweeps: 0.758 -> 0.862 mm; soft-cube RMS: 0.465 -> 0.557 mm |
+
+The Armadillo position result was consistent with the larger coarse space, but
+the trajectory uses nondeterministic contact and therefore the single-run
+percentage is only a convergence proxy. The mixed scene showed no quality
+improvement and was 32.2% slower. Exact 12-by-12 tet-group assembly has four
+times as many scalar entries as 6-by-6 assembly. Increasing cluster size from
+32 to 64 and reducing PCG from four iterations to two made Armadillo slower
+still at 349.901 ms/frame because it reduced assembly parallelism. A
+16-particle cluster variant reached 325.720 ms/frame and ended with a poor
+coarse residual ratio of 2.598.
+
+The extra kernels also increased the cold `particle_multilevel` CUDA compile
+from roughly three seconds to roughly ten seconds on the test machine, even
+when the six-DOF path was selected, because both paths occupied one Warp
+module.
+
+**Decision.** No-Go; the affine kernels, storage, solver option, demo switches,
+and affine-specific tests were removed. Retain the six-DOF production path and
+this result. A future affine attempt must isolate compilation and demonstrate
+a benefit on both a large tet model and the mixed tet/cloth acceptance scene;
+an Armadillo-only accuracy result is insufficient.
 
 ## Reconstructed retained history
 

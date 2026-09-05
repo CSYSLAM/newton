@@ -1,1 +1,1 @@
-Add an opt-in contact-aware multilevel correction for MJVBDV2 cloth and shell particles to improve long-range VBD propagation with fewer local sweeps.
+Add an opt-in contact-aware multilevel correction for MJVBDV2 cloth, shell, and tetrahedral particles to improve long-range VBD propagation with fewer local sweeps. Tetrahedral clusters use translation and rotation modes with a projected Neo-Hookean coarse operator.

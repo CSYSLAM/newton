@@ -54,6 +54,210 @@ def _automatic_rejection_reason(model, correction: ParticleMultilevelCorrection)
     return None
 
 
+_vec6f = wp.types.vector(length=6, dtype=wp.float32)
+_mat66f = wp.types.matrix(shape=(6, 6), dtype=wp.float32)
+_vec9f = wp.types.vector(length=9, dtype=wp.float32)
+_mat96f = wp.types.matrix(shape=(9, 6), dtype=wp.float32)
+
+
+@wp.func
+def _rigid_basis_displacement(value: _vec6f, offset: wp.vec3):
+    translation = wp.vec3(value[0], value[1], value[2])
+    rotation = wp.vec3(value[3], value[4], value[5])
+    return translation + wp.cross(rotation, offset)
+
+
+@wp.func
+def _cluster_basis_displacement(value: _vec6f, offset: wp.vec3, rigid: bool):
+    if rigid:
+        return _rigid_basis_displacement(value, offset)
+    return wp.vec3(value[0], value[1], value[2])
+
+
+@wp.func
+def _rigid_basis_force(force: wp.vec3, offset: wp.vec3):
+    torque = wp.cross(offset, force)
+    return _vec6f(force[0], force[1], force[2], torque[0], torque[1], torque[2])
+
+
+@wp.func
+def _cluster_basis_force(force: wp.vec3, offset: wp.vec3, rigid: bool):
+    if rigid:
+        return _rigid_basis_force(force, offset)
+    return _vec6f(force[0], force[1], force[2], 0.0, 0.0, 0.0)
+
+
+@wp.func
+def _rigid_basis_column(column: int, offset: wp.vec3):
+    if column == 0:
+        return wp.vec3(1.0, 0.0, 0.0)
+    if column == 1:
+        return wp.vec3(0.0, 1.0, 0.0)
+    if column == 2:
+        return wp.vec3(0.0, 0.0, 1.0)
+    if column == 3:
+        return wp.vec3(0.0, -offset[2], offset[1])
+    if column == 4:
+        return wp.vec3(offset[2], 0.0, -offset[0])
+    return wp.vec3(-offset[1], offset[0], 0.0)
+
+
+@wp.func
+def _cluster_basis_column(column: int, offset: wp.vec3, rigid: bool):
+    if rigid or column < 3:
+        return _rigid_basis_column(column, offset)
+    return wp.vec3(0.0)
+
+
+@wp.func
+def _dot6(left: _vec6f, right: _vec6f):
+    result = float(0.0)
+    for component in range(6):
+        result += left[component] * right[component]
+    return result
+
+
+@wp.func
+def _dot9(left: _vec9f, right: _vec9f):
+    result = float(0.0)
+    for component in range(9):
+        result += left[component] * right[component]
+    return result
+
+
+@wp.func
+def _flatten_mat33_columns(value: wp.mat33):
+    return _vec9f(
+        value[0, 0],
+        value[1, 0],
+        value[2, 0],
+        value[0, 1],
+        value[1, 1],
+        value[2, 1],
+        value[0, 2],
+        value[1, 2],
+        value[2, 2],
+    )
+
+
+@wp.func
+def _tet_cluster_deformation_basis(
+    tet: int,
+    cluster: int,
+    component: int,
+    tet_indices: wp.array2d[wp.int32],
+    fine_to_coarse: wp.array[wp.int32],
+    cluster_centroids: wp.array[wp.vec3],
+    particle_q: wp.array[wp.vec3],
+    rest_pose_inverse: wp.mat33,
+):
+    if cluster < 0:
+        return _vec9f(0.0)
+    delta_0 = wp.vec3(0.0)
+    delta_1 = wp.vec3(0.0)
+    delta_2 = wp.vec3(0.0)
+    delta_3 = wp.vec3(0.0)
+    particle_0 = tet_indices[tet, 0]
+    particle_1 = tet_indices[tet, 1]
+    particle_2 = tet_indices[tet, 2]
+    particle_3 = tet_indices[tet, 3]
+    centroid = cluster_centroids[cluster]
+    if fine_to_coarse[particle_0] == cluster:
+        delta_0 = _rigid_basis_column(component, particle_q[particle_0] - centroid)
+    if fine_to_coarse[particle_1] == cluster:
+        delta_1 = _rigid_basis_column(component, particle_q[particle_1] - centroid)
+    if fine_to_coarse[particle_2] == cluster:
+        delta_2 = _rigid_basis_column(component, particle_q[particle_2] - centroid)
+    if fine_to_coarse[particle_3] == cluster:
+        delta_3 = _rigid_basis_column(component, particle_q[particle_3] - centroid)
+    delta_ds = wp.matrix_from_cols(delta_1 - delta_0, delta_2 - delta_0, delta_3 - delta_0)
+    return _flatten_mat33_columns(delta_ds * rest_pose_inverse)
+
+
+@wp.func
+def _tet_cluster_deformation_basis_matrix(
+    tet: int,
+    cluster: int,
+    tet_indices: wp.array2d[wp.int32],
+    fine_to_coarse: wp.array[wp.int32],
+    cluster_centroids: wp.array[wp.vec3],
+    particle_q: wp.array[wp.vec3],
+    rest_pose_inverse: wp.mat33,
+):
+    basis = _mat96f(0.0)
+    for column in range(6):
+        column_value = _tet_cluster_deformation_basis(
+            tet,
+            cluster,
+            column,
+            tet_indices,
+            fine_to_coarse,
+            cluster_centroids,
+            particle_q,
+            rest_pose_inverse,
+        )
+        for row in range(9):
+            basis[row, column] = column_value[row]
+    return basis
+
+
+@wp.func
+def _tet_metric_basis_matrix(deformation_gradient: wp.mat33, deformation_basis: _mat96f):
+    """Return d(F^T F)/dq in symmetric-Voigt order for one cluster."""
+    metric_basis = _mat66f(0.0)
+    f0 = wp.vec3(deformation_gradient[0, 0], deformation_gradient[1, 0], deformation_gradient[2, 0])
+    f1 = wp.vec3(deformation_gradient[0, 1], deformation_gradient[1, 1], deformation_gradient[2, 1])
+    f2 = wp.vec3(deformation_gradient[0, 2], deformation_gradient[1, 2], deformation_gradient[2, 2])
+    for column in range(6):
+        df0 = wp.vec3(deformation_basis[0, column], deformation_basis[1, column], deformation_basis[2, column])
+        df1 = wp.vec3(deformation_basis[3, column], deformation_basis[4, column], deformation_basis[5, column])
+        df2 = wp.vec3(deformation_basis[6, column], deformation_basis[7, column], deformation_basis[8, column])
+        metric_basis[0, column] = 2.0 * wp.dot(f0, df0)
+        metric_basis[1, column] = wp.dot(df0, f1) + wp.dot(f0, df1)
+        metric_basis[2, column] = wp.dot(df0, f2) + wp.dot(f0, df2)
+        metric_basis[3, column] = 2.0 * wp.dot(f1, df1)
+        metric_basis[4, column] = wp.dot(df1, f2) + wp.dot(f1, df2)
+        metric_basis[5, column] = 2.0 * wp.dot(f2, df2)
+    return metric_basis
+
+
+@wp.func
+def _factor_cholesky6(matrix: _mat66f):
+    factor = _mat66f(0.0)
+    scale = float(1.0)
+    for component in range(6):
+        scale = wp.max(scale, wp.abs(matrix[component, component]))
+    regularization = 1.0e-9 * scale
+    for row in range(6):
+        for column in range(row + 1):
+            value = matrix[row, column]
+            for inner in range(column):
+                value -= factor[row, inner] * factor[column, inner]
+            if row == column:
+                factor[row, column] = wp.sqrt(wp.max(value, regularization))
+            else:
+                factor[row, column] = value / factor[column, column]
+    return factor
+
+
+@wp.func
+def _solve_cholesky6(factor: _mat66f, rhs: _vec6f):
+    forward = _vec6f(0.0)
+    for row in range(6):
+        value = rhs[row]
+        for column in range(row):
+            value -= factor[row, column] * forward[column]
+        forward[row] = value / factor[row, row]
+    solution = _vec6f(0.0)
+    for reverse_row in range(6):
+        row = 5 - reverse_row
+        value = forward[row]
+        for column in range(row + 1, 6):
+            value -= factor[column, row] * solution[column]
+        solution[row] = value / factor[row, row]
+    return solution
+
+
 @wp.kernel(enable_backward=False)
 def _restrict_particle_corrections(
     cluster_particle_offsets: wp.array[wp.int32],
@@ -279,6 +483,402 @@ def _solve_coarse_pcg_persistent(
 
 
 @wp.kernel(enable_backward=False)
+def _compute_cluster_centroids(
+    cluster_particle_offsets: wp.array[wp.int32],
+    cluster_particles: wp.array[wp.int32],
+    particle_q: wp.array[wp.vec3],
+    particle_mass: wp.array[float],
+    cluster_centroids: wp.array[wp.vec3],
+):
+    cluster = wp.tid()
+    weighted_position = wp.vec3(0.0)
+    mass_sum = float(0.0)
+    for slot in range(cluster_particle_offsets[cluster], cluster_particle_offsets[cluster + 1]):
+        particle = cluster_particles[slot]
+        mass = particle_mass[particle]
+        weighted_position += mass * particle_q[particle]
+        mass_sum += mass
+    if mass_sum > 0.0:
+        cluster_centroids[cluster] = weighted_position / mass_sum
+    else:
+        cluster_centroids[cluster] = wp.vec3(0.0)
+
+
+@wp.kernel(enable_backward=False)
+def _restrict_rigid_particle_corrections(
+    cluster_particle_offsets: wp.array[wp.int32],
+    cluster_particles: wp.array[wp.int32],
+    cluster_centroids: wp.array[wp.vec3],
+    cluster_is_rigid: wp.array[wp.int32],
+    particle_q: wp.array[wp.vec3],
+    particle_mass: wp.array[float],
+    particle_flags: wp.array[wp.int32],
+    local_correction: wp.array[wp.vec3],
+    local_hessian: wp.array[wp.mat33],
+    contact_hessian: wp.array[wp.mat33],
+    dt: float,
+    coarse_rhs: wp.array[_vec6f],
+    coarse_local_block: wp.array[_mat66f],
+    coarse_stiffness: wp.array[float],
+):
+    cluster = wp.tid()
+    centroid = cluster_centroids[cluster]
+    rigid = cluster_is_rigid[cluster] != 0
+    rhs = _vec6f(0.0)
+    local_block = _mat66f(0.0)
+    stiffness_sum = float(0.0)
+    inv_dt_sq = 1.0 / (dt * dt)
+    for slot in range(cluster_particle_offsets[cluster], cluster_particle_offsets[cluster + 1]):
+        particle = cluster_particles[slot]
+        mass = particle_mass[particle]
+        if mass > 0.0 and (particle_flags[particle] & ParticleFlags.ACTIVE) != 0:
+            hessian = local_hessian[particle]
+            contact = contact_hessian[particle]
+            force = hessian * local_correction[particle]
+            offset = particle_q[particle] - centroid
+            rhs += _cluster_basis_force(force, offset, rigid)
+
+            base_hessian = contact + mass * inv_dt_sq * wp.identity(n=3, dtype=float)
+            for row in range(6):
+                row_basis = _cluster_basis_column(row, offset, rigid)
+                for column in range(6):
+                    column_basis = _cluster_basis_column(column, offset, rigid)
+                    local_block[row, column] += wp.dot(row_basis, base_hessian * column_basis)
+
+            mean_diagonal = (hessian[0, 0] + hessian[1, 1] + hessian[2, 2]) / 3.0
+            contact_mean_diagonal = (contact[0, 0] + contact[1, 1] + contact[2, 2]) / 3.0
+            stiffness_sum += wp.max(mean_diagonal - mass * inv_dt_sq - contact_mean_diagonal, 0.0)
+    coarse_rhs[cluster] = rhs
+    coarse_local_block[cluster] = local_block
+    coarse_stiffness[cluster] = stiffness_sum
+
+
+@wp.func
+def _rigid_edge_weight(
+    cluster: int,
+    neighbor: int,
+    coarse_incident_edges: wp.array[wp.int32],
+    coarse_stiffness: wp.array[float],
+    coupling: float,
+):
+    cluster_edges = wp.max(float(coarse_incident_edges[cluster]), 1.0)
+    cluster_weight = coarse_stiffness[cluster] / cluster_edges
+    if neighbor >= 0:
+        neighbor_edges = wp.max(float(coarse_incident_edges[neighbor]), 1.0)
+        neighbor_weight = coarse_stiffness[neighbor] / neighbor_edges
+        return 0.5 * coupling * (cluster_weight + neighbor_weight)
+    return coupling * cluster_weight
+
+
+@wp.kernel(enable_backward=False)
+def _assemble_rigid_coarse_edge_blocks(
+    coarse_group_source_clusters: wp.array[wp.int32],
+    coarse_group_target_clusters: wp.array[wp.int32],
+    coarse_group_edge_offsets: wp.array[wp.int32],
+    coarse_edge_source_particles: wp.array[wp.int32],
+    coarse_edge_target_particles: wp.array[wp.int32],
+    cluster_centroids: wp.array[wp.vec3],
+    cluster_is_rigid: wp.array[wp.int32],
+    coarse_incident_edges: wp.array[wp.int32],
+    particle_q: wp.array[wp.vec3],
+    coarse_stiffness: wp.array[float],
+    coupling: float,
+    coarse_edge_self_blocks: wp.array[_mat66f],
+    coarse_edge_cross_blocks: wp.array[_mat66f],
+):
+    group = wp.tid()
+    source_cluster = coarse_group_source_clusters[group]
+    target_cluster = coarse_group_target_clusters[group]
+    weight = _rigid_edge_weight(
+        source_cluster,
+        target_cluster,
+        coarse_incident_edges,
+        coarse_stiffness,
+        coupling,
+    )
+    self_block = _mat66f(0.0)
+    cross_block = _mat66f(0.0)
+    source_centroid = cluster_centroids[source_cluster]
+    source_rigid = cluster_is_rigid[source_cluster] != 0
+    for slot in range(coarse_group_edge_offsets[group], coarse_group_edge_offsets[group + 1]):
+        source_particle = coarse_edge_source_particles[slot]
+        target_particle = coarse_edge_target_particles[slot]
+        source_offset = particle_q[source_particle] - source_centroid
+        target_offset = wp.vec3(0.0)
+        target_rigid = False
+        if target_cluster >= 0:
+            target_offset = particle_q[target_particle] - cluster_centroids[target_cluster]
+            target_rigid = cluster_is_rigid[target_cluster] != 0
+        for row in range(6):
+            source_row = _cluster_basis_column(row, source_offset, source_rigid)
+            for column in range(6):
+                source_column = _cluster_basis_column(column, source_offset, source_rigid)
+                self_block[row, column] += weight * wp.dot(source_row, source_column)
+                if target_cluster >= 0:
+                    target_column = _cluster_basis_column(column, target_offset, target_rigid)
+                    cross_block[row, column] -= weight * wp.dot(source_row, target_column)
+    coarse_edge_self_blocks[group] = self_block
+    coarse_edge_cross_blocks[group] = cross_block
+
+
+@wp.kernel(enable_backward=False)
+def _assemble_rigid_coarse_tet_blocks(
+    coarse_group_source_clusters: wp.array[wp.int32],
+    coarse_group_target_clusters: wp.array[wp.int32],
+    coarse_group_tet_offsets: wp.array[wp.int32],
+    coarse_group_tets: wp.array[wp.int32],
+    fine_to_coarse: wp.array[wp.int32],
+    cluster_centroids: wp.array[wp.vec3],
+    particle_q: wp.array[wp.vec3],
+    tet_indices: wp.array2d[wp.int32],
+    tet_poses: wp.array[wp.mat33],
+    tet_materials: wp.array2d[float],
+    dt: float,
+    coarse_tet_blocks: wp.array[_mat66f],
+):
+    group = wp.tid()
+    source_cluster = coarse_group_source_clusters[group]
+    target_cluster = coarse_group_target_clusters[group]
+    block = _mat66f(0.0)
+    for slot in range(coarse_group_tet_offsets[group], coarse_group_tet_offsets[group + 1]):
+        tet = coarse_group_tets[slot]
+        rest_pose_inverse = tet_poses[tet]
+        particle_0 = tet_indices[tet, 0]
+        particle_1 = tet_indices[tet, 1]
+        particle_2 = tet_indices[tet, 2]
+        particle_3 = tet_indices[tet, 3]
+        deformation_gradient = (
+            wp.matrix_from_cols(
+                particle_q[particle_1] - particle_q[particle_0],
+                particle_q[particle_2] - particle_q[particle_0],
+                particle_q[particle_3] - particle_q[particle_0],
+            )
+            * rest_pose_inverse
+        )
+        column_0 = wp.vec3(
+            deformation_gradient[0, 0],
+            deformation_gradient[1, 0],
+            deformation_gradient[2, 0],
+        )
+        column_1 = wp.vec3(
+            deformation_gradient[0, 1],
+            deformation_gradient[1, 1],
+            deformation_gradient[2, 1],
+        )
+        column_2 = wp.vec3(
+            deformation_gradient[0, 2],
+            deformation_gradient[1, 2],
+            deformation_gradient[2, 2],
+        )
+        cofactor = wp.matrix_from_cols(
+            wp.cross(column_1, column_2),
+            wp.cross(column_2, column_0),
+            wp.cross(column_0, column_1),
+        )
+        cofactor_vector = _flatten_mat33_columns(cofactor)
+        rest_volume = 1.0 / (wp.determinant(rest_pose_inverse) * 6.0)
+        mu = tet_materials[tet, 0]
+        lmbd = tet_materials[tet, 1] + mu
+        source_basis = _tet_cluster_deformation_basis_matrix(
+            tet,
+            source_cluster,
+            tet_indices,
+            fine_to_coarse,
+            cluster_centroids,
+            particle_q,
+            rest_pose_inverse,
+        )
+        target_basis = source_basis
+        if target_cluster != source_cluster:
+            target_basis = _tet_cluster_deformation_basis_matrix(
+                tet,
+                target_cluster,
+                tet_indices,
+                fine_to_coarse,
+                cluster_centroids,
+                particle_q,
+                rest_pose_inverse,
+            )
+        source_basis_transpose = wp.transpose(source_basis)
+        source_cofactor_projection = source_basis_transpose * cofactor_vector
+        target_basis_transpose = wp.transpose(target_basis)
+        target_cofactor_projection = target_basis_transpose * cofactor_vector
+        block += rest_volume * (
+            mu * (source_basis_transpose * target_basis)
+            + lmbd * wp.outer(source_cofactor_projection, target_cofactor_projection)
+        )
+        damping = tet_materials[tet, 2]
+        # Avoid paying for the metric projection when its spectral scale is
+        # below one part per million of the elastic block.  This bounds the
+        # omitted coarse Hessian term while keeping effectively-undamped tet
+        # models (which commonly use tiny nonzero sentinels) on the fast path.
+        if damping / dt > 1.0e-6 * wp.max(mu, lmbd):
+            source_metric_basis = _tet_metric_basis_matrix(deformation_gradient, source_basis)
+            target_metric_basis = source_metric_basis
+            if target_cluster != source_cluster:
+                target_metric_basis = _tet_metric_basis_matrix(deformation_gradient, target_basis)
+            weighted_target_metric_basis = _mat66f(0.0)
+            # The off-diagonal metric components occur twice in C:C.
+            for row in range(6):
+                weight = 1.0
+                if row == 1 or row == 2 or row == 4:
+                    weight = 2.0
+                for column in range(6):
+                    weighted_target_metric_basis[row, column] = weight * target_metric_basis[row, column]
+            block += rest_volume * damping / dt * (wp.transpose(source_metric_basis) * weighted_target_metric_basis)
+    coarse_tet_blocks[group] = block
+
+
+@wp.kernel(enable_backward=False)
+def _solve_rigid_coarse_pcg_persistent(
+    coarse_count: int,
+    coarse_row_offsets: wp.array[wp.int32],
+    coarse_group_target_clusters: wp.array[wp.int32],
+    coarse_edge_self_blocks: wp.array[_mat66f],
+    coarse_edge_cross_blocks: wp.array[_mat66f],
+    coarse_tet_row_offsets: wp.array[wp.int32],
+    coarse_tet_group_target_clusters: wp.array[wp.int32],
+    coarse_tet_blocks: wp.array[_mat66f],
+    rhs: wp.array[_vec6f],
+    local_block: wp.array[_mat66f],
+    iterations: int,
+    solution: wp.array[_vec6f],
+    residual: wp.array[_vec6f],
+    preconditioned_residual: wp.array[_vec6f],
+    direction: wp.array[_vec6f],
+    product: wp.array[_vec6f],
+    diagonal: wp.array[_mat66f],
+    residual_ratio: wp.array[float],
+):
+    """Solve the six-DOF cluster system in one persistent CUDA block."""
+    lane = wp.tid()
+    stride = wp.block_dim()
+    rz_local = float(0.0)
+    initial_residual_norm_sq_local = float(0.0)
+    cluster = lane
+    while cluster < coarse_count:
+        diagonal_block = local_block[cluster]
+        for group in range(coarse_row_offsets[cluster], coarse_row_offsets[cluster + 1]):
+            diagonal_block += coarse_edge_self_blocks[group]
+        for group in range(coarse_tet_row_offsets[cluster], coarse_tet_row_offsets[cluster + 1]):
+            if coarse_tet_group_target_clusters[group] == cluster:
+                diagonal_block += coarse_tet_blocks[group]
+        factor = _factor_cholesky6(diagonal_block)
+
+        r = rhs[cluster]
+        z = _solve_cholesky6(factor, r)
+        solution[cluster] = _vec6f(0.0)
+        residual[cluster] = r
+        preconditioned_residual[cluster] = z
+        direction[cluster] = z
+        diagonal[cluster] = factor
+        rz_local += _dot6(r, z)
+        initial_residual_norm_sq_local += _dot6(r, r)
+        cluster += stride
+
+    rz = wp.tile_sum(wp.tile(rz_local))[0]
+    initial_residual_norm_sq = wp.tile_sum(wp.tile(initial_residual_norm_sq_local))[0]
+    for _iteration in range(iterations):
+        direction_product_local = float(0.0)
+        cluster = lane
+        while cluster < coarse_count:
+            cluster_direction = direction[cluster]
+            value = local_block[cluster] * cluster_direction
+            for group in range(coarse_row_offsets[cluster], coarse_row_offsets[cluster + 1]):
+                value += coarse_edge_self_blocks[group] * cluster_direction
+                neighbor = coarse_group_target_clusters[group]
+                if neighbor >= 0:
+                    value += coarse_edge_cross_blocks[group] * direction[neighbor]
+            for group in range(coarse_tet_row_offsets[cluster], coarse_tet_row_offsets[cluster + 1]):
+                neighbor = coarse_tet_group_target_clusters[group]
+                if neighbor >= 0:
+                    value += coarse_tet_blocks[group] * direction[neighbor]
+            product[cluster] = value
+            direction_product_local += _dot6(cluster_direction, value)
+            cluster += stride
+
+        direction_product = wp.tile_sum(wp.tile(direction_product_local))[0]
+        alpha = float(0.0)
+        if direction_product > 1.0e-20:
+            alpha = rz / direction_product
+
+        new_rz_local = float(0.0)
+        cluster = lane
+        while cluster < coarse_count:
+            x = solution[cluster] + alpha * direction[cluster]
+            r = residual[cluster] - alpha * product[cluster]
+            z = _solve_cholesky6(diagonal[cluster], r)
+            solution[cluster] = x
+            residual[cluster] = r
+            preconditioned_residual[cluster] = z
+            new_rz_local += _dot6(r, z)
+            cluster += stride
+
+        new_rz = wp.tile_sum(wp.tile(new_rz_local))[0]
+        beta = float(0.0)
+        if rz > 1.0e-20:
+            beta = new_rz / rz
+        rz = new_rz
+
+        direction_norm_local = float(0.0)
+        cluster = lane
+        while cluster < coarse_count:
+            next_direction = preconditioned_residual[cluster] + beta * direction[cluster]
+            direction[cluster] = next_direction
+            direction_norm_local += _dot6(next_direction, next_direction)
+            cluster += stride
+        direction_norm = wp.tile_sum(wp.tile(direction_norm_local))[0]
+        if direction_norm <= 1.0e-30:
+            rz = 0.0
+
+    final_residual_norm_sq_local = float(0.0)
+    cluster = lane
+    while cluster < coarse_count:
+        final_residual_norm_sq_local += _dot6(residual[cluster], residual[cluster])
+        cluster += stride
+    final_residual_norm_sq = wp.tile_sum(wp.tile(final_residual_norm_sq_local))[0]
+
+    if lane == 0:
+        if initial_residual_norm_sq > 1.0e-20 and final_residual_norm_sq >= 0.0:
+            residual_ratio[0] = wp.sqrt(final_residual_norm_sq / initial_residual_norm_sq)
+        elif initial_residual_norm_sq <= 1.0e-20:
+            residual_ratio[0] = 0.0
+        else:
+            residual_ratio[0] = 1.0e30
+
+
+@wp.kernel(enable_backward=False)
+def _prolong_rigid_coarse_corrections(
+    active_particles: wp.array[wp.int32],
+    fine_to_coarse: wp.array[wp.int32],
+    cluster_centroids: wp.array[wp.vec3],
+    cluster_is_rigid: wp.array[wp.int32],
+    particle_q: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    coarse_correction: wp.array[_vec6f],
+    relaxation: float,
+    max_radius_fraction: float,
+    particle_displacements: wp.array[wp.vec3],
+):
+    particle = active_particles[wp.tid()]
+    cluster = fine_to_coarse[particle]
+    offset = particle_q[particle] - cluster_centroids[cluster]
+    correction = relaxation * _cluster_basis_displacement(
+        coarse_correction[cluster],
+        offset,
+        cluster_is_rigid[cluster] != 0,
+    )
+    correction_length = wp.length(correction)
+    max_length = max_radius_fraction * particle_radius[particle]
+    if correction_length > max_length:
+        if max_length > 0.0:
+            correction *= max_length / correction_length
+        else:
+            correction = wp.vec3(0.0)
+    particle_displacements[particle] += correction
+
+
+@wp.kernel(enable_backward=False)
 def _prepare_prolonged_corrections(
     active_particles: wp.array[wp.int32],
     fine_to_coarse: wp.array[wp.int32],
@@ -379,12 +979,10 @@ def _build_clusters(
     flags = np.asarray(model.particle_flags.numpy(), dtype=np.int32)
     movable = (masses > 0.0) & ((flags & int(ParticleFlags.ACTIVE)) != 0)
     movable &= np.fromiter((bool(particle_neighbors) for particle_neighbors in neighbors), dtype=bool)
-    # Piecewise-constant cluster translations improve long-wave propagation
-    # for cloth and shells, but cannot represent the affine modes required by
-    # tetrahedral solids. Leave tet vertices on the original VBD path.
+    tet_particle = np.zeros(particle_count, dtype=bool)
     if model.tet_count:
         tetrahedra = np.asarray(model.tet_indices.numpy(), dtype=np.int32).reshape((-1, 4))
-        movable[np.unique(tetrahedra)] = False
+        tet_particle[np.unique(tetrahedra)] = True
     fine_to_coarse = np.full(particle_count, -1, dtype=np.int32)
     clusters: list[list[int]] = []
 
@@ -399,7 +997,7 @@ def _build_clusters(
             particle = frontier.popleft()
             cluster.append(particle)
             for neighbor in neighbors[particle]:
-                if movable[neighbor] and fine_to_coarse[neighbor] < 0:
+                if movable[neighbor] and tet_particle[neighbor] == tet_particle[seed] and fine_to_coarse[neighbor] < 0:
                     fine_to_coarse[neighbor] = cluster_index
                     frontier.append(neighbor)
         # Return overflowed frontier vertices to the unassigned pool. They
@@ -479,6 +1077,96 @@ def _build_clusters(
     )
 
 
+def _build_rigid_cluster_edges(
+    model,
+    fine_to_coarse: np.ndarray,
+    cluster_count: int,
+    cluster_is_rigid: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Group directed fine edges by source and target coarse clusters."""
+    grouped_edges: list[dict[int, list[tuple[int, int]]]] = [{} for _ in range(cluster_count)]
+    for particle_a_value, particle_b_value in _particle_topology_edges(model):
+        particle_a = int(particle_a_value)
+        particle_b = int(particle_b_value)
+        cluster_a = int(fine_to_coarse[particle_a])
+        cluster_b = int(fine_to_coarse[particle_b])
+        if cluster_a < 0 and cluster_b < 0:
+            continue
+        if cluster_a == cluster_b:
+            continue
+        if cluster_a >= 0 and not cluster_is_rigid[cluster_a] and (cluster_b < 0 or not cluster_is_rigid[cluster_b]):
+            grouped_edges[cluster_a].setdefault(cluster_b, []).append((particle_a, particle_b))
+        if cluster_b >= 0 and not cluster_is_rigid[cluster_b] and (cluster_a < 0 or not cluster_is_rigid[cluster_a]):
+            grouped_edges[cluster_b].setdefault(cluster_a, []).append((particle_b, particle_a))
+
+    row_offsets = np.zeros(cluster_count + 1, dtype=np.int32)
+    if cluster_count:
+        row_offsets[1:] = np.cumsum([len(entries) for entries in grouped_edges], dtype=np.int32)
+    source_clusters: list[int] = []
+    target_clusters: list[int] = []
+    edge_offsets = [0]
+    flat_edges: list[tuple[int, int]] = []
+    for source_cluster, entries in enumerate(grouped_edges):
+        for target_cluster in sorted(entries):
+            edges = entries[target_cluster]
+            source_clusters.append(source_cluster)
+            target_clusters.append(target_cluster)
+            flat_edges.extend(edges)
+            edge_offsets.append(len(flat_edges))
+    if flat_edges:
+        source_particles, target_particles = np.asarray(flat_edges, dtype=np.int32).T
+    else:
+        source_particles = np.empty(0, dtype=np.int32)
+        target_particles = np.empty(0, dtype=np.int32)
+    return (
+        row_offsets,
+        np.asarray(source_clusters, dtype=np.int32),
+        np.asarray(target_clusters, dtype=np.int32),
+        np.asarray(edge_offsets, dtype=np.int32),
+        source_particles,
+        target_particles,
+    )
+
+
+def _build_rigid_cluster_tets(
+    model,
+    fine_to_coarse: np.ndarray,
+    cluster_count: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Group tetrahedra by directed coarse block row and column."""
+    grouped_tets: list[dict[int, list[int]]] = [{} for _ in range(cluster_count)]
+    tetrahedra = np.asarray(model.tet_indices.numpy(), dtype=np.int32).reshape((-1, 4))
+    for tet, particles in enumerate(tetrahedra):
+        clusters = np.unique(fine_to_coarse[particles])
+        for source_cluster_value in clusters:
+            source_cluster = int(source_cluster_value)
+            if source_cluster < 0:
+                continue
+            for target_cluster in clusters:
+                grouped_tets[source_cluster].setdefault(int(target_cluster), []).append(tet)
+
+    row_offsets = np.zeros(cluster_count + 1, dtype=np.int32)
+    if cluster_count:
+        row_offsets[1:] = np.cumsum([len(entries) for entries in grouped_tets], dtype=np.int32)
+    source_clusters: list[int] = []
+    target_clusters: list[int] = []
+    tet_offsets = [0]
+    flat_tets: list[int] = []
+    for source_cluster, entries in enumerate(grouped_tets):
+        for target_cluster in sorted(entries):
+            source_clusters.append(source_cluster)
+            target_clusters.append(target_cluster)
+            flat_tets.extend(entries[target_cluster])
+            tet_offsets.append(len(flat_tets))
+    return (
+        row_offsets,
+        np.asarray(source_clusters, dtype=np.int32),
+        np.asarray(target_clusters, dtype=np.int32),
+        np.asarray(tet_offsets, dtype=np.int32),
+        np.asarray(flat_tets, dtype=np.int32),
+    )
+
+
 class ParticleMultilevelCorrection:
     """Fixed-topology two-level propagation correction for particle VBD."""
 
@@ -530,6 +1218,19 @@ class ParticleMultilevelCorrection:
         self.validate_residual = minimum_residual_reduction is not None
         self.minimum_residual_reduction = 0.0 if minimum_residual_reduction is None else minimum_residual_reduction
         self.max_clamp_fraction = max_clamp_fraction
+        tet_particle = np.zeros(model.particle_count, dtype=bool)
+        if model.tet_count:
+            tetrahedra = np.asarray(model.tet_indices.numpy(), dtype=np.int32).reshape((-1, 4))
+            tet_particle[np.unique(tetrahedra)] = True
+        cluster_is_rigid = np.zeros(self.cluster_count, dtype=np.int32)
+        for cluster in range(self.cluster_count):
+            particles = cluster_particles[cluster_offsets[cluster] : cluster_offsets[cluster + 1]]
+            if particles.size:
+                cluster_is_rigid[cluster] = int(tet_particle[particles[0]])
+                if np.any(tet_particle[particles] != bool(cluster_is_rigid[cluster])):
+                    raise RuntimeError("particle multilevel cluster mixes surface and tetrahedral particles")
+        self.use_rigid_basis = bool(np.any(cluster_is_rigid))
+        self.cluster_is_rigid = wp.array(cluster_is_rigid, dtype=wp.int32, device=model.device)
         self.fine_to_coarse = wp.array(fine_to_coarse, dtype=wp.int32, device=model.device)
         self.active_particles = wp.array(cluster_particles, dtype=wp.int32, device=model.device)
         self.cluster_particle_offsets = wp.array(cluster_offsets, dtype=wp.int32, device=model.device)
@@ -564,14 +1265,128 @@ class ParticleMultilevelCorrection:
         self.runtime_metrics = wp.zeros(5 + coarse_iterations, dtype=float, device=model.device)
         # Radius-clamp count and non-finite fine-correction count.
         self.runtime_counters = wp.zeros(2, dtype=wp.int32, device=model.device)
+        self.coarse_residual_ratio = wp.zeros(1, dtype=float, device=model.device)
+
+        if self.use_rigid_basis:
+            (
+                coarse_row_offsets,
+                coarse_group_source_clusters,
+                coarse_group_target_clusters,
+                coarse_group_edge_offsets,
+                coarse_edge_source_particles,
+                coarse_edge_target_particles,
+            ) = _build_rigid_cluster_edges(model, fine_to_coarse, self.cluster_count, cluster_is_rigid)
+            (
+                coarse_tet_row_offsets,
+                coarse_tet_group_source_clusters,
+                coarse_tet_group_target_clusters,
+                coarse_tet_group_offsets,
+                coarse_group_tets,
+            ) = _build_rigid_cluster_tets(model, fine_to_coarse, self.cluster_count)
+            self.coarse_group_count = int(coarse_group_source_clusters.size)
+            self.coarse_tet_group_count = int(coarse_tet_group_source_clusters.size)
+            self.cluster_centroids = wp.zeros(self.cluster_count, dtype=wp.vec3, device=model.device)
+            self.coarse_row_offsets = wp.array(coarse_row_offsets, dtype=wp.int32, device=model.device)
+            self.coarse_group_source_clusters = wp.array(
+                coarse_group_source_clusters,
+                dtype=wp.int32,
+                device=model.device,
+            )
+            self.coarse_group_target_clusters = wp.array(
+                coarse_group_target_clusters,
+                dtype=wp.int32,
+                device=model.device,
+            )
+            self.coarse_group_edge_offsets = wp.array(
+                coarse_group_edge_offsets,
+                dtype=wp.int32,
+                device=model.device,
+            )
+            self.coarse_edge_source_particles = wp.array(
+                coarse_edge_source_particles,
+                dtype=wp.int32,
+                device=model.device,
+            )
+            self.coarse_edge_target_particles = wp.array(
+                coarse_edge_target_particles,
+                dtype=wp.int32,
+                device=model.device,
+            )
+            self.coarse_edge_self_blocks = wp.zeros(self.coarse_group_count, dtype=_mat66f, device=model.device)
+            self.coarse_edge_cross_blocks = wp.zeros(self.coarse_group_count, dtype=_mat66f, device=model.device)
+            self.coarse_tet_row_offsets = wp.array(coarse_tet_row_offsets, dtype=wp.int32, device=model.device)
+            self.coarse_tet_group_source_clusters = wp.array(
+                coarse_tet_group_source_clusters,
+                dtype=wp.int32,
+                device=model.device,
+            )
+            self.coarse_tet_group_target_clusters = wp.array(
+                coarse_tet_group_target_clusters,
+                dtype=wp.int32,
+                device=model.device,
+            )
+            self.coarse_tet_group_offsets = wp.array(
+                coarse_tet_group_offsets,
+                dtype=wp.int32,
+                device=model.device,
+            )
+            self.coarse_group_tets = wp.array(coarse_group_tets, dtype=wp.int32, device=model.device)
+            self.coarse_tet_blocks = wp.zeros(self.coarse_tet_group_count, dtype=_mat66f, device=model.device)
+            self.rigid_coarse_rhs = wp.zeros(self.cluster_count, dtype=_vec6f, device=model.device)
+            self.rigid_coarse_local_block = wp.zeros(self.cluster_count, dtype=_mat66f, device=model.device)
+            self.rigid_coarse_solution = wp.zeros(self.cluster_count, dtype=_vec6f, device=model.device)
+            self.rigid_coarse_residual = wp.zeros(self.cluster_count, dtype=_vec6f, device=model.device)
+            self.rigid_coarse_preconditioned_residual = wp.zeros(
+                self.cluster_count,
+                dtype=_vec6f,
+                device=model.device,
+            )
+            self.rigid_coarse_direction = wp.zeros(self.cluster_count, dtype=_vec6f, device=model.device)
+            self.rigid_coarse_product = wp.zeros(self.cluster_count, dtype=_vec6f, device=model.device)
+            self.rigid_coarse_diagonal = wp.zeros(self.cluster_count, dtype=_mat66f, device=model.device)
+        else:
+            self.coarse_group_count = 0
+            self.coarse_tet_group_count = 0
+            self.cluster_centroids = None
+            self.coarse_row_offsets = None
+            self.coarse_group_source_clusters = None
+            self.coarse_group_target_clusters = None
+            self.coarse_group_edge_offsets = None
+            self.coarse_edge_source_particles = None
+            self.coarse_edge_target_particles = None
+            self.coarse_edge_self_blocks = None
+            self.coarse_edge_cross_blocks = None
+            self.coarse_tet_row_offsets = None
+            self.coarse_tet_group_source_clusters = None
+            self.coarse_tet_group_target_clusters = None
+            self.coarse_tet_group_offsets = None
+            self.coarse_group_tets = None
+            self.coarse_tet_blocks = None
+            self.rigid_coarse_rhs = None
+            self.rigid_coarse_local_block = None
+            self.rigid_coarse_solution = None
+            self.rigid_coarse_residual = None
+            self.rigid_coarse_preconditioned_residual = None
+            self.rigid_coarse_direction = None
+            self.rigid_coarse_product = None
+            self.rigid_coarse_diagonal = None
 
     @property
     def enabled(self) -> bool:
         return self.cluster_count > 1 and self.active_particle_count > 0
 
-    def restrict_and_prolong(self, model, particle_displacements: wp.array[wp.vec3], dt: float) -> None:
+    def restrict_and_prolong(
+        self,
+        model,
+        particle_q: wp.array[wp.vec3],
+        particle_displacements: wp.array[wp.vec3],
+        dt: float,
+    ) -> None:
         """Restrict the local system, solve its coarse approximation, and prolong."""
         if not self.enabled:
+            return
+        if self.use_rigid_basis:
+            self._restrict_and_prolong_rigid(model, particle_q, particle_displacements, dt)
             return
         wp.launch(
             _restrict_particle_corrections,
@@ -654,6 +1469,133 @@ class ParticleMultilevelCorrection:
                 self.runtime_counters,
                 self.runtime_status,
                 self.runtime_metrics,
+            ],
+            outputs=[particle_displacements],
+            device=model.device,
+        )
+
+    def _restrict_and_prolong_rigid(
+        self,
+        model,
+        particle_q: wp.array[wp.vec3],
+        particle_displacements: wp.array[wp.vec3],
+        dt: float,
+    ) -> None:
+        """Apply the six-DOF rigid-cluster correction used by volumetric meshes."""
+        wp.launch(
+            _compute_cluster_centroids,
+            dim=self.cluster_count,
+            inputs=[
+                self.cluster_particle_offsets,
+                self.cluster_particles,
+                particle_q,
+                model.particle_mass,
+            ],
+            outputs=[self.cluster_centroids],
+            device=model.device,
+        )
+        wp.launch(
+            _restrict_rigid_particle_corrections,
+            dim=self.cluster_count,
+            inputs=[
+                self.cluster_particle_offsets,
+                self.cluster_particles,
+                self.cluster_centroids,
+                self.cluster_is_rigid,
+                particle_q,
+                model.particle_mass,
+                model.particle_flags,
+                self.local_correction,
+                self.local_hessians,
+                self.contact_hessians,
+                dt,
+            ],
+            outputs=[
+                self.rigid_coarse_rhs,
+                self.rigid_coarse_local_block,
+                self.coarse_stiffness,
+            ],
+            device=model.device,
+        )
+        wp.launch(
+            _assemble_rigid_coarse_edge_blocks,
+            dim=self.coarse_group_count,
+            inputs=[
+                self.coarse_group_source_clusters,
+                self.coarse_group_target_clusters,
+                self.coarse_group_edge_offsets,
+                self.coarse_edge_source_particles,
+                self.coarse_edge_target_particles,
+                self.cluster_centroids,
+                self.cluster_is_rigid,
+                self.coarse_incident_edges,
+                particle_q,
+                self.coarse_stiffness,
+                self.coupling,
+            ],
+            outputs=[self.coarse_edge_self_blocks, self.coarse_edge_cross_blocks],
+            device=model.device,
+        )
+        wp.launch(
+            _assemble_rigid_coarse_tet_blocks,
+            dim=self.coarse_tet_group_count,
+            inputs=[
+                self.coarse_tet_group_source_clusters,
+                self.coarse_tet_group_target_clusters,
+                self.coarse_tet_group_offsets,
+                self.coarse_group_tets,
+                self.fine_to_coarse,
+                self.cluster_centroids,
+                particle_q,
+                model.tet_indices,
+                model.tet_poses,
+                model.tet_materials,
+                dt,
+            ],
+            outputs=[self.coarse_tet_blocks],
+            device=model.device,
+        )
+        wp.launch(
+            _solve_rigid_coarse_pcg_persistent,
+            dim=_COARSE_PCG_BLOCK_DIM,
+            block_dim=_COARSE_PCG_BLOCK_DIM,
+            inputs=[
+                self.cluster_count,
+                self.coarse_row_offsets,
+                self.coarse_group_target_clusters,
+                self.coarse_edge_self_blocks,
+                self.coarse_edge_cross_blocks,
+                self.coarse_tet_row_offsets,
+                self.coarse_tet_group_target_clusters,
+                self.coarse_tet_blocks,
+                self.rigid_coarse_rhs,
+                self.rigid_coarse_local_block,
+                self.coarse_iterations,
+            ],
+            outputs=[
+                self.rigid_coarse_solution,
+                self.rigid_coarse_residual,
+                self.rigid_coarse_preconditioned_residual,
+                self.rigid_coarse_direction,
+                self.rigid_coarse_product,
+                self.rigid_coarse_diagonal,
+                self.coarse_residual_ratio,
+            ],
+            device=model.device,
+        )
+        wp.launch(
+            _prolong_rigid_coarse_corrections,
+            dim=self.active_particle_count,
+            inputs=[
+                self.active_particles,
+                self.fine_to_coarse,
+                self.cluster_centroids,
+                self.cluster_is_rigid,
+                particle_q,
+                model.particle_radius,
+                self.rigid_coarse_solution,
+                self.relaxation,
+                self.max_radius_fraction,
             ],
             outputs=[particle_displacements],
             device=model.device,
