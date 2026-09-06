@@ -140,6 +140,18 @@ def _coarse_options(sweeps, operator, reference_sweeps):
     }
 
 
+def _parse_tuning_options(raw_options):
+    """Overlay one experimental schedule on the retained surface-fast policy."""
+    options = dict(_SURFACE_FAST_BENCHMARK_OPTIONS)
+    if raw_options is None:
+        return options
+    overrides = json.loads(raw_options)
+    if not isinstance(overrides, dict):
+        raise ValueError("--tuning-options must decode to a JSON object")
+    options.update(overrides)
+    return options
+
+
 def _example_args(args):
     module = importlib.import_module(_EXAMPLE_MODULE)
     example_args = newton.examples.default_args(module.Example.create_parser())
@@ -159,7 +171,7 @@ def _mesh_edges(model):
     return np.unique(edges, axis=0)
 
 
-def _run_case(label, sweeps, operator, args, *, demo_mode=None):
+def _run_case(label, sweeps, operator, args, *, demo_mode=None, tuning_options=None):
     original_init = SolverMJVBDV2.__init__
 
     def configured_init(self, model, *solver_args, **kwargs):
@@ -170,6 +182,8 @@ def _run_case(label, sweeps, operator, args, *, demo_mode=None):
             options.update(_demo_mode_options(demo_mode))
         else:
             options.update(_coarse_options(sweeps, operator, args.reference_sweeps))
+        if tuning_options is not None:
+            options.update(tuning_options)
         kwargs["vbd_options"] = options
         return original_init(self, model, *solver_args, **kwargs)
 
@@ -523,32 +537,51 @@ def _probe_demo_same_substep(args):
     }
 
 
-def _probe_residual_schwarz_same_substep(args):
+def _probe_residual_schwarz_same_substep(args, tuning_options=None):
     """Compare residual-Schwarz and ordinary 30 sweeps against a common 60-sweep state."""
     original_init = SolverMJVBDV2.__init__
     original_iteration = SolverVBDSoft._solve_particle_iteration
     buffers = {}
+    candidate_options = dict(_SURFACE_FAST_BENCHMARK_OPTIONS)
+    candidate_options.update(tuning_options or {})
+    candidate_iterations = int(candidate_options["iterations"])
+    candidate_checkpoints = tuple(candidate_options["particle_multilevel_checkpoints"])
+    candidate_polish_iterations = int(candidate_options["particle_multilevel_selective_polish_iterations"])
+    candidate_spectral_radius = candidate_options.get("particle_chebyshev_spectral_radius")
+    candidate_fallback_iterations = int(candidate_options.get("particle_multilevel_fallback_iterations") or 20)
 
     def configured_init(self, model, *solver_args, **kwargs):
         options = dict(kwargs.get("vbd_options") or {})
         options.setdefault("particle_collision_detection_interval", -1)
         options.update(
             iterations=60,
-            particle_chebyshev_spectral_radius=0.9,
+            particle_chebyshev_spectral_radius=candidate_spectral_radius,
             particle_chebyshev_warmup_iterations=0,
             particle_chebyshev_polish_iterations=0,
             particle_chebyshev_contact_rings=0,
             particle_chebyshev_cleanup_max_radius_fraction=None,
             particle_enable_multilevel_correction=True,
-            particle_multilevel_checkpoints=(3,),
+            particle_multilevel_operator=candidate_options.get("particle_multilevel_operator", "graph"),
+            particle_multilevel_cluster_size=candidate_options.get("particle_multilevel_cluster_size", 8),
+            particle_multilevel_checkpoints=candidate_checkpoints,
             particle_multilevel_fallback_iterations=None,
-            particle_multilevel_selective_polish_iterations=2,
-            particle_multilevel_selective_polish_threshold_fraction=0.001,
-            particle_multilevel_selective_polish_rings=0,
-            particle_multilevel_selective_polish_max_radius_fraction=0.001,
+            particle_multilevel_selective_polish_iterations=candidate_polish_iterations,
+            particle_multilevel_selective_polish_threshold_fraction=candidate_options[
+                "particle_multilevel_selective_polish_threshold_fraction"
+            ],
+            particle_multilevel_selective_polish_rings=candidate_options["particle_multilevel_selective_polish_rings"],
+            particle_multilevel_selective_polish_max_radius_fraction=candidate_options[
+                "particle_multilevel_selective_polish_max_radius_fraction"
+            ],
+            particle_multilevel_coarse_iterations=candidate_options.get("particle_multilevel_coarse_iterations", 8),
+            particle_multilevel_coupling=candidate_options.get("particle_multilevel_coupling", 0.5),
+            particle_multilevel_relaxation=candidate_options.get("particle_multilevel_relaxation", 0.1),
+            particle_multilevel_max_radius_fraction=candidate_options.get(
+                "particle_multilevel_max_radius_fraction", 0.05
+            ),
             particle_enable_surface_cache=True,
             particle_enable_truncation_cache=True,
-            particle_surface_relaxation=1.0,
+            particle_surface_relaxation=candidate_options.get("particle_surface_relaxation", 1.0),
         )
         kwargs["vbd_preset"] = None
         kwargs["vbd_options"] = options
@@ -579,12 +612,15 @@ def _probe_residual_schwarz_same_substep(args):
         self.particle_multilevel = buffers["correction"]
         for name in ("surface_anchor_angles", "_surface_cached_kernel", "_particle_truncation_cache"):
             setattr(self, name, buffers[name])
-        self.iterations = 5
-        self.particle_multilevel_checkpoints = (3,)
-        self.particle_chebyshev_weights = self._build_particle_chebyshev_weights(0.9, 5)
-        self.particle_chebyshev_enabled = True
-        self.particle_chebyshev_older.assign(buffers["initial"])
-        self.particle_chebyshev_collided.zero_()
+        self.iterations = candidate_iterations
+        self.particle_multilevel_checkpoints = candidate_checkpoints
+        self.particle_chebyshev_weights = self._build_particle_chebyshev_weights(
+            candidate_spectral_radius, candidate_iterations
+        )
+        self.particle_chebyshev_enabled = bool(self.particle_chebyshev_weights)
+        if self.particle_chebyshev_enabled:
+            self.particle_chebyshev_older.assign(buffers["initial"])
+            self.particle_chebyshev_collided.zero_()
         self._particle_truncation_cache.rebuild(self)
         wp.launch(
             particle_surface_cache._prepare_anchor_angles,
@@ -605,16 +641,16 @@ def _probe_residual_schwarz_same_substep(args):
         if iter_num == 0:
             save(self, state_in)
             attach_candidate(self)
-            for candidate_iteration in range(5):
+            for candidate_iteration in range(candidate_iterations):
                 original_iteration(self, state_in, state_out, contacts, dt, candidate_iteration)
 
             def run_polish():
-                for _iteration in range(2):
+                for _iteration in range(candidate_polish_iterations):
                     self._solve_particle_selective_polish(state_in, dt)
                 self._penetration_free_truncation(state_in.particle_q)
 
             def run_fallback():
-                for fallback_iteration in range(5, 20):
+                for fallback_iteration in range(candidate_iterations, candidate_fallback_iterations):
                     original_iteration(self, state_in, state_out, contacts, dt, fallback_iteration)
 
             if self.device.is_capturing:
@@ -641,7 +677,8 @@ def _probe_residual_schwarz_same_substep(args):
         original_iteration(self, state_in, state_out, contacts, dt, iter_num)
 
     module, example_args = _example_args(args)
-    records = {"ordinary30": [], "residual_schwarz5": []}
+    candidate_label = args.tuning_label if tuning_options is not None else "residual_schwarz5"
+    records = {"ordinary30": [], candidate_label: []}
     rejected_samples = 0
     active_samples = []
     with (
@@ -655,7 +692,7 @@ def _probe_residual_schwarz_same_substep(args):
             gold = example.state_0.particle_q.numpy()
             rejected_samples += int(buffers["correction"].runtime_status.numpy()[0] != 0)
             active_samples.append(int(buffers["correction"].selective_active_count.numpy()[0]))
-            for label, name in (("ordinary30", "ordinary30"), ("residual_schwarz5", "candidate")):
+            for label, name in (("ordinary30", "ordinary30"), (candidate_label, "candidate")):
                 positions = buffers[name].numpy()
                 if not np.all(np.isfinite(positions)) or not np.all(np.isfinite(gold)):
                     raise ValueError(f"Nonfinite {label} state at frame {frame + 1}")
@@ -671,15 +708,19 @@ def _probe_residual_schwarz_same_substep(args):
             "mean_edge_length_mae_mm": float(np.mean(error_array[:, 1])),
         }
     ordinary = summaries["ordinary30"]
-    candidate = summaries["residual_schwarz5"]
+    candidate = summaries[candidate_label]
     ratios = {name: candidate[name] / max(ordinary[name], np.finfo(np.float64).eps) for name in ordinary}
     result = {
         "mode": "residual_schwarz_same_substep",
+        "candidate": candidate_label,
+        "candidate_options": candidate_options,
         "gold_sweeps": 60,
         "ordinary_sweeps": 30,
         "frame_samples": args.frames,
         "candidate_rejected_last_substep_samples": rejected_samples,
         "candidate_active_particles_mean": float(np.mean(active_samples)),
+        "candidate_cluster_count": buffers["correction"].cluster_count,
+        "candidate_runtime_metrics": buffers["correction"].runtime_metrics.numpy().tolist(),
         "errors": summaries,
         "candidate_to_ordinary30_error_ratio": ratios,
         "test_final_passed": True,
@@ -719,9 +760,16 @@ def main():
         action="store_true",
         help="Compare residual-Schwarz and ordinary 30 sweeps against an ordinary 60-sweep common-state gold solve",
     )
+    parser.add_argument(
+        "--tuning-options",
+        default=None,
+        help="JSON object overriding the retained residual-Schwarz schedule for an experimental run.",
+    )
+    parser.add_argument("--tuning-label", default="tuning_candidate")
     args = parser.parse_args()
     if args.strict_residual_schwarz and not args.same_substep:
         parser.error("--strict-residual-schwarz requires --same-substep")
+    tuning_options = _parse_tuning_options(args.tuning_options) if args.tuning_options is not None else None
     if args.compare_demo:
         args.reference_sweeps = 20
     if min(args.frames, args.checkpoint_interval, args.reference_sweeps, *args.sweeps) < 1:
@@ -744,13 +792,36 @@ def main():
     )
     if args.same_substep:
         if args.strict_residual_schwarz:
-            print("RESULT " + json.dumps(_probe_residual_schwarz_same_substep(args)), flush=True)
+            print(
+                "RESULT " + json.dumps(_probe_residual_schwarz_same_substep(args, tuning_options)),
+                flush=True,
+            )
             return
         if args.compare_demo:
             print("RESULT " + json.dumps(_probe_demo_same_substep(args)), flush=True)
             return
         for sweeps in args.sweeps:
             print("RESULT " + json.dumps(_probe_same_substep(sweeps, args)), flush=True)
+        return
+    if tuning_options is not None:
+        baseline, _, _ = _run_case(
+            "current_fastest",
+            5,
+            "graph",
+            args,
+            demo_mode="residual-schwarz5",
+        )
+        print("RESULT " + json.dumps(baseline), flush=True)
+        candidate_sweeps = int(tuning_options["iterations"])
+        candidate, _, _ = _run_case(
+            args.tuning_label,
+            candidate_sweeps,
+            "graph",
+            args,
+            demo_mode="residual-schwarz5",
+            tuning_options=tuning_options,
+        )
+        print("RESULT " + json.dumps(candidate), flush=True)
         return
     if args.compare_demo:
         metrics, reference, edges = _run_case("reference20", 20, None, args, demo_mode="reference20")
