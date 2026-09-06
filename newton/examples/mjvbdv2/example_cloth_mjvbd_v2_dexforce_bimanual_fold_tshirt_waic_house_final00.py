@@ -188,7 +188,7 @@ class Example:
         self.frame_dt = 1.0 / self.fps
         if args.sim_substeps < 1:
             raise ValueError("--sim-substeps must be at least 1")
-        self.particle_solver_mode = getattr(args, "particle_solver_mode", "guarded-cached-chebyshev6")
+        self.particle_solver_mode = getattr(args, "particle_solver_mode", "residual-schwarz5")
         mode_iterations = {
             "baseline": VBD_ITERATIONS,
             "reference20": 20,
@@ -198,6 +198,7 @@ class Example:
             "cached-chebyshev8": VBD_CHEBYSHEV_ITERATIONS,
             "guarded-cached-chebyshev8": VBD_CHEBYSHEV_ITERATIONS,
             "guarded-cached-chebyshev6": 6,
+            "residual-schwarz5": 5,
         }
         if self.particle_solver_mode not in mode_iterations:
             raise ValueError(f"Unknown particle solver mode: {self.particle_solver_mode}")
@@ -210,7 +211,13 @@ class Example:
         mode_chebyshev_radius = (
             VBD_CHEBYSHEV_SPECTRAL_RADIUS
             if self.particle_solver_mode
-            in ("chebyshev8", "cached-chebyshev8", "guarded-cached-chebyshev8", "guarded-cached-chebyshev6")
+            in (
+                "chebyshev8",
+                "cached-chebyshev8",
+                "guarded-cached-chebyshev8",
+                "guarded-cached-chebyshev6",
+                "residual-schwarz5",
+            )
             else None
         )
         self.particle_chebyshev_spectral_radius = getattr(
@@ -221,11 +228,34 @@ class Example:
         requested_multilevel = getattr(args, "particle_multilevel", None)
         self.particle_multilevel = (
             self.particle_solver_mode
-            in ("baseline", "chebyshev8", "cached-chebyshev8", "guarded-cached-chebyshev8", "guarded-cached-chebyshev6")
+            in (
+                "baseline",
+                "chebyshev8",
+                "cached-chebyshev8",
+                "guarded-cached-chebyshev8",
+                "guarded-cached-chebyshev6",
+                "residual-schwarz5",
+            )
             if requested_multilevel is None
             else bool(requested_multilevel)
         )
         self.particle_multilevel_coarse_iterations = int(getattr(args, "particle_multilevel_coarse_iterations", 8))
+        self.particle_multilevel_selective_polish_iterations = int(
+            getattr(
+                args,
+                "particle_multilevel_selective_polish_iterations",
+                2 if self.particle_solver_mode == "residual-schwarz5" else 0,
+            )
+        )
+        self.particle_multilevel_selective_polish_threshold_fraction = float(
+            getattr(args, "particle_multilevel_selective_polish_threshold_fraction", 0.001)
+        )
+        self.particle_multilevel_selective_polish_rings = int(
+            getattr(args, "particle_multilevel_selective_polish_rings", 0)
+        )
+        self.particle_multilevel_selective_polish_max_radius_fraction = float(
+            getattr(args, "particle_multilevel_selective_polish_max_radius_fraction", 0.001)
+        )
         self.particle_multilevel_checkpoint_iteration = int(
             getattr(args, "particle_multilevel_checkpoint_iteration", 3)
         )
@@ -270,18 +300,40 @@ class Example:
                 ),
                 "particle_multilevel_checkpoints": (
                     (self.particle_multilevel_checkpoint_iteration,)
-                    if self.particle_solver_mode == "guarded-cached-chebyshev6"
+                    if self.particle_solver_mode in ("guarded-cached-chebyshev6", "residual-schwarz5")
                     else None
                 ),
                 "particle_enable_multilevel_correction": self.particle_multilevel,
                 "particle_surface_relaxation": self.particle_surface_relaxation,
                 "particle_enable_surface_cache": self.particle_solver_mode
-                in ("cached13", "cached-chebyshev8", "guarded-cached-chebyshev8", "guarded-cached-chebyshev6"),
+                in (
+                    "cached13",
+                    "cached-chebyshev8",
+                    "guarded-cached-chebyshev8",
+                    "guarded-cached-chebyshev6",
+                    "residual-schwarz5",
+                ),
                 "particle_enable_truncation_cache": self.particle_solver_mode
-                in ("cached13", "cached-chebyshev8", "guarded-cached-chebyshev8", "guarded-cached-chebyshev6"),
+                in (
+                    "cached13",
+                    "cached-chebyshev8",
+                    "guarded-cached-chebyshev8",
+                    "guarded-cached-chebyshev6",
+                    "residual-schwarz5",
+                ),
                 "particle_multilevel_min_residual_reduction": 1.0e-4,
                 "particle_multilevel_max_clamp_fraction": 0.5,
                 "particle_multilevel_coarse_iterations": self.particle_multilevel_coarse_iterations,
+                "particle_multilevel_selective_polish_iterations": (
+                    self.particle_multilevel_selective_polish_iterations
+                ),
+                "particle_multilevel_selective_polish_threshold_fraction": (
+                    self.particle_multilevel_selective_polish_threshold_fraction
+                ),
+                "particle_multilevel_selective_polish_rings": self.particle_multilevel_selective_polish_rings,
+                "particle_multilevel_selective_polish_max_radius_fraction": (
+                    self.particle_multilevel_selective_polish_max_radius_fraction
+                ),
                 "particle_multilevel_fallback_iterations": (
                     13
                     if self.particle_solver_mode == "guarded-cached-chebyshev8"
@@ -906,14 +958,16 @@ class Example:
                 "cached-chebyshev8",
                 "guarded-cached-chebyshev8",
                 "guarded-cached-chebyshev6",
+                "residual-schwarz5",
             ),
-            default="guarded-cached-chebyshev6",
+            default="residual-schwarz5",
             help="Baseline: 12 sweeps + multilevel; reference20: ordinary 20 sweeps; "
             "contact-free: experimental 12 sweeps with contact-free surface relaxation; "
             "cached13: experimental 13 relaxed sweeps with surface/DAT geometry caches; "
             "chebyshev8: 8 collision-aware Chebyshev sweeps + multilevel; "
             "cached-chebyshev8: chebyshev8 with surface/DAT geometry caches; "
-            "guarded-cached-chebyshev6 (default): 6 total sweeps with one mid-step multilevel checkpoint; "
+            "guarded-cached-chebyshev6: 6 total sweeps with one mid-step multilevel checkpoint; "
+            "residual-schwarz5 (default): 5 sweeps plus two residual-selected frozen-contact Schwarz passes; "
             "guarded-cached-chebyshev8: cached 2 ordinary + 4 topology-guarded Chebyshev + 2 polish sweeps.",
         )
         parser.add_argument(
@@ -954,6 +1008,30 @@ class Example:
             type=int,
             default=8,
             help="Coarse iterations used by the selected mode's multilevel correction.",
+        )
+        parser.add_argument(
+            "--particle-multilevel-selective-polish-iterations",
+            type=int,
+            default=argparse.SUPPRESS,
+            help="Additional surface sweeps restricted to residual-selected particles.",
+        )
+        parser.add_argument(
+            "--particle-multilevel-selective-polish-threshold-fraction",
+            type=float,
+            default=argparse.SUPPRESS,
+            help="Local-correction threshold relative to particle radius for selective polishing.",
+        )
+        parser.add_argument(
+            "--particle-multilevel-selective-polish-rings",
+            type=int,
+            default=argparse.SUPPRESS,
+            help="Fine-topology dilation rings around residual-selected particles.",
+        )
+        parser.add_argument(
+            "--particle-multilevel-selective-polish-max-radius-fraction",
+            type=float,
+            default=argparse.SUPPRESS,
+            help="Per-polish trust-region radius relative to particle radius.",
         )
         parser.add_argument(
             "--particle-multilevel-checkpoint-iteration",

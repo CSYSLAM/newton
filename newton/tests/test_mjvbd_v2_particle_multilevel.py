@@ -255,6 +255,57 @@ class TestMJVBDV2ParticleMultilevel(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "particle_multilevel_operator"):
                     solver_type(model, iterations=2, particle_multilevel_operator="dense")
 
+    def test_invalid_selective_polish_options_are_rejected(self):
+        """Validate residual-selected polish controls when constructing a hierarchy."""
+        model = _build_cloth("cpu")
+        base_options = {
+            "cluster_size": 4,
+            "coarse_iterations": 2,
+            "coupling": 0.5,
+            "relaxation": 0.1,
+            "max_radius_fraction": 0.05,
+            "minimum_residual_reduction": None,
+            "max_clamp_fraction": 1.0,
+        }
+        invalid_options = (
+            ("selective_polish_iterations", -1, "iterations"),
+            ("selective_polish_threshold_fraction", 0.0, "threshold"),
+            ("selective_polish_rings", -1, "rings"),
+            ("selective_polish_max_radius_fraction", 0.0, "radius"),
+        )
+        for name, value, message in invalid_options:
+            with self.subTest(option=name):
+                with self.assertRaisesRegex(ValueError, message):
+                    ParticleMultilevelCorrection(model, **base_options, **{name: value})
+
+    def test_selective_polish_mask_uses_local_correction_threshold(self):
+        """Select only unresolved particles, then optionally expand over topology."""
+        model = _build_cloth("cpu", dim_x=2, dim_y=1, fix_left=False)
+        options = {
+            "cluster_size": 4,
+            "coarse_iterations": 2,
+            "selective_polish_iterations": 1,
+            "selective_polish_threshold_fraction": 0.01,
+            "coupling": 0.5,
+            "relaxation": 0.1,
+            "max_radius_fraction": 0.05,
+            "minimum_residual_reduction": None,
+            "max_clamp_fraction": 1.0,
+        }
+        correction = ParticleMultilevelCorrection(model, selective_polish_rings=0, **options)
+        local_correction = np.zeros_like(model.particle_q.numpy())
+        local_correction[2, 0] = 0.02 * model.particle_radius.numpy()[2]
+        correction.local_correction.assign(local_correction)
+        mask = correction.build_selective_polish_mask(model)
+        self.assertEqual(int(correction.selective_active_count.numpy()[0]), 1)
+        self.assertEqual(int(mask.numpy().sum()), 1)
+
+        expanded = ParticleMultilevelCorrection(model, selective_polish_rings=1, **options)
+        expanded.local_correction.assign(local_correction)
+        expanded_mask = expanded.build_selective_polish_mask(model)
+        self.assertGreater(int(expanded.selective_active_count.numpy()[0]), 1)
+        self.assertEqual(int(expanded_mask.numpy()[2]), 1)
+
     def test_surface_operator_does_not_allocate_tet_translation_matrix(self):
         """Keep mixed/tet corrections on the six-DOF path for either surface option."""
         model = _build_tets("cpu", include_surface=True)
@@ -314,8 +365,15 @@ class TestMJVBDV2ParticleMultilevel(unittest.TestCase):
         model = _build_cloth("cpu")
         for solver_type in (SolverVBDComplete, SolverVBDSoft):
             with self.subTest(solver=solver_type.__module__):
-                solver = solver_type(model, iterations=2, particle_enable_multilevel_correction=True)
+                solver = solver_type(
+                    model,
+                    iterations=2,
+                    particle_enable_multilevel_correction=True,
+                    particle_enable_surface_cache=True,
+                    particle_multilevel_selective_polish_iterations=1,
+                )
                 self.assertIsNone(solver.particle_multilevel)
+                self.assertIsNone(solver._surface_cached_kernel)
 
     def test_clusters_keep_fixed_particles_as_anchors(self):
         model = _build_cloth("cpu", dim_x=8, dim_y=2)
@@ -631,6 +689,60 @@ class TestMJVBDV2ParticleMultilevel(unittest.TestCase):
                         )
                         self.assertLessEqual(asymmetry, 1.0e-5 * matrix_scale)
 
+    @unittest.skipUnless(wp.is_cuda_available(), "Selective particle polishing requires CUDA")
+    def test_selective_polish_executes_under_cuda_graph(self):
+        """Keep the residual-selected false branch graph-safe in both private solvers."""
+        device = wp.get_device("cuda:0")
+        for solver_type in (SolverVBDComplete, SolverVBDSoft):
+            for fallback_iterations in (None, 3):
+                with self.subTest(solver=solver_type.__module__, fallback_iterations=fallback_iterations):
+                    self._check_selective_polish_graph(device, solver_type, fallback_iterations)
+
+    def _check_selective_polish_graph(self, device, solver_type, fallback_iterations):
+        """Build and replay one selective-polish graph configuration."""
+        model = _build_cloth(device)
+        solver = solver_type(
+            model,
+            iterations=2,
+            particle_enable_multilevel_correction=True,
+            particle_multilevel_checkpoints=(1,),
+            particle_multilevel_fallback_iterations=fallback_iterations,
+            particle_multilevel_selective_polish_iterations=1,
+            particle_multilevel_selective_polish_threshold_fraction=1.0e-3,
+            particle_multilevel_selective_polish_rings=0,
+            particle_multilevel_selective_polish_max_radius_fraction=1.0e-3,
+            particle_enable_surface_cache=True,
+            particle_enable_truncation_cache=True,
+        )
+        correction = solver.particle_multilevel
+        self.assertIsNotNone(correction)
+        self.assertIsNotNone(correction.selective_active_count)
+        state_0, state_1 = model.state(), model.state()
+        control = model.control()
+        solver.step(state_0, state_1, control, None, 1.0 / 60.0)
+        with wp.ScopedCapture(device=device) as capture:
+            solver.step(state_1, state_0, control, None, 1.0 / 60.0)
+        wp.capture_launch(capture.graph)
+        wp.synchronize_device(device)
+        self.assertEqual(int(correction.runtime_status.numpy()[0]), 0)
+        self.assertGreaterEqual(int(correction.selective_active_count.numpy()[0]), 0)
+        self.assertTrue(np.isfinite(state_0.particle_q.numpy()).all())
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Selective particle polishing requires CUDA")
+    def test_selective_polish_rejects_mixed_volumetric_models(self):
+        """Fail explicitly instead of applying the surface-only polish to tetrahedra."""
+        model = _build_tets("cuda:0", include_surface=True, tet_count=32)
+        for solver_type in (SolverVBDComplete, SolverVBDSoft):
+            with self.subTest(solver=solver_type.__module__):
+                with self.assertRaisesRegex(ValueError, "cached surface tile path"):
+                    solver_type(
+                        model,
+                        iterations=2,
+                        particle_enable_multilevel_correction=True,
+                        particle_enable_surface_cache=True,
+                        particle_multilevel_selective_polish_iterations=1,
+                    )
+
     @unittest.skipUnless(wp.is_cuda_available(), "Particle multilevel correction requires CUDA")
     def test_rigid_cluster_basis_executes_for_tetrahedra(self):
         """Execute the six-DOF cluster solve for a tetrahedral model."""
@@ -697,15 +809,25 @@ class TestMJVBDV2ParticleMultilevel(unittest.TestCase):
                     model,
                     iterations=2,
                     particle_enable_multilevel_correction=True,
+                    particle_enable_surface_cache=True,
+                    particle_multilevel_selective_polish_iterations=1,
                     deterministic=wp.DeterministicMode.RUN_TO_RUN,
                 )
                 self.assertIsNone(solver.particle_multilevel)
+                self.assertIsNone(solver._surface_cached_kernel)
 
         grad_model = _build_cloth(device, requires_grad=True)
         for solver_type in (SolverVBDComplete, SolverVBDSoft):
             with self.subTest(solver=solver_type.__module__, requires_grad=True):
-                solver = solver_type(grad_model, iterations=2, particle_enable_multilevel_correction=True)
+                solver = solver_type(
+                    grad_model,
+                    iterations=2,
+                    particle_enable_multilevel_correction=True,
+                    particle_enable_surface_cache=True,
+                    particle_multilevel_selective_polish_iterations=1,
+                )
                 self.assertIsNone(solver.particle_multilevel)
+                self.assertIsNone(solver._surface_cached_kernel)
 
     @unittest.skipUnless(wp.is_cuda_available(), "Particle multilevel correction requires CUDA")
     def test_coarse_correction_improves_long_range_propagation(self):

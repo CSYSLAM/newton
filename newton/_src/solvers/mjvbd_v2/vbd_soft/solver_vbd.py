@@ -262,6 +262,10 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_multilevel_operator: Literal["graph", "galerkin"] = "graph",
         particle_multilevel_cluster_size: int = 8,
         particle_multilevel_coarse_iterations: int = 8,
+        particle_multilevel_selective_polish_iterations: int = 0,
+        particle_multilevel_selective_polish_threshold_fraction: float = 0.02,
+        particle_multilevel_selective_polish_rings: int = 2,
+        particle_multilevel_selective_polish_max_radius_fraction: float = 0.01,
         particle_multilevel_coupling: float = 0.5,
         particle_multilevel_relaxation: float = 0.1,
         particle_multilevel_max_radius_fraction: float = 0.05,
@@ -370,6 +374,13 @@ class SolverVBD(SolverBase, CouplingInterface):
                 tetrahedral clusters retain the six-DOF mixed/tet operator regardless of this surface-only option.
             particle_multilevel_cluster_size: Target number of topologically adjacent particles per coarse cluster.
             particle_multilevel_coarse_iterations: Number of fixed PCG iterations on the coarse graph.
+            particle_multilevel_selective_polish_iterations: Additional fine sweeps restricted to unresolved surface
+                particles selected by the coarse residual probe. Zero disables selective polishing.
+            particle_multilevel_selective_polish_threshold_fraction: Select particles whose local correction exceeds
+                this fraction of particle radius.
+            particle_multilevel_selective_polish_rings: Fine-topology rings added around selected particles.
+            particle_multilevel_selective_polish_max_radius_fraction: Trust-region radius for each frozen-contact
+                polish update, expressed as a fraction of particle radius.
             particle_multilevel_coupling: Neighbor coupling used by the ``"graph"`` coarse operator.
             particle_multilevel_relaxation: Fraction of the prolonged coarse correction applied to fine particles.
             particle_multilevel_max_radius_fraction: Maximum correction length as a fraction of particle radius.
@@ -626,6 +637,10 @@ class SolverVBD(SolverBase, CouplingInterface):
             particle_multilevel_operator,
             particle_multilevel_cluster_size,
             particle_multilevel_coarse_iterations,
+            particle_multilevel_selective_polish_iterations,
+            particle_multilevel_selective_polish_threshold_fraction,
+            particle_multilevel_selective_polish_rings,
+            particle_multilevel_selective_polish_max_radius_fraction,
             particle_multilevel_coupling,
             particle_multilevel_relaxation,
             particle_multilevel_max_radius_fraction,
@@ -671,6 +686,11 @@ class SolverVBD(SolverBase, CouplingInterface):
                 {"deterministic": effective_deterministic, "deterministic_max_records": 0},
                 module=particle_surface_cache,
             )
+        if self.particle_multilevel is not None and self.particle_multilevel.selective_polish_iterations:
+            if self._surface_cached_kernel is None or any(
+                group.size for group in self.volumetric_particle_color_groups
+            ):
+                raise ValueError("Selective multilevel polishing currently requires the cached surface tile path")
 
         # Initialize rigid body system and rigid-particle (body-particle) interaction state
         self._init_rigid_system(
@@ -726,6 +746,10 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_multilevel_operator: Literal["graph", "galerkin"],
         particle_multilevel_cluster_size: int,
         particle_multilevel_coarse_iterations: int,
+        particle_multilevel_selective_polish_iterations: int,
+        particle_multilevel_selective_polish_threshold_fraction: float,
+        particle_multilevel_selective_polish_rings: int,
+        particle_multilevel_selective_polish_max_radius_fraction: float,
         particle_multilevel_coupling: float,
         particle_multilevel_relaxation: float,
         particle_multilevel_max_radius_fraction: float,
@@ -857,6 +881,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                 operator=multilevel_operator,
                 cluster_size=particle_multilevel_cluster_size,
                 coarse_iterations=particle_multilevel_coarse_iterations,
+                selective_polish_iterations=particle_multilevel_selective_polish_iterations,
+                selective_polish_threshold_fraction=particle_multilevel_selective_polish_threshold_fraction,
+                selective_polish_rings=particle_multilevel_selective_polish_rings,
+                selective_polish_max_radius_fraction=particle_multilevel_selective_polish_max_radius_fraction,
                 coupling=particle_multilevel_coupling,
                 relaxation=particle_multilevel_relaxation,
                 max_radius_fraction=particle_multilevel_max_radius_fraction,
@@ -2328,22 +2356,43 @@ class SolverVBD(SolverBase, CouplingInterface):
             self._solve_particle_iteration(state_in, state_out, contacts, dt, iter_num)
 
         correction = self.particle_multilevel
-        if correction is not None and self.particle_multilevel_fallback_iterations > self.iterations:
+        if correction is not None:
             fallback_status = (
                 self.particle_chebyshev_cleanup_status
                 if self.particle_chebyshev_cleanup_status is not None
                 else correction.runtime_status
             )
 
+            def run_selective_polish():
+                for _iteration in range(correction.selective_polish_iterations):
+                    self._solve_particle_selective_polish(state_in, dt)
+                if correction.selective_polish_iterations:
+                    self._penetration_free_truncation(state_in.particle_q)
+
             def run_fallback_iterations():
                 for iter_num in range(self.iterations, self.particle_multilevel_fallback_iterations):
                     self._solve_rigid_body_iteration(state_in, state_out, control, contacts, dt)
                     self._solve_particle_iteration(state_in, state_out, contacts, dt, iter_num)
 
-            if self.device.is_capturing:
-                wp.capture_if(fallback_status, on_true=run_fallback_iterations)
-            elif int(fallback_status.numpy()[0]) != 0:
-                run_fallback_iterations()
+            has_fallback = self.particle_multilevel_fallback_iterations > self.iterations
+            has_selective_polish = correction.selective_polish_iterations > 0
+            if has_fallback or has_selective_polish:
+                if self.device.is_capturing:
+                    if has_fallback and has_selective_polish:
+                        wp.capture_if(
+                            fallback_status,
+                            on_true=run_fallback_iterations,
+                            on_false=run_selective_polish,
+                        )
+                    elif has_fallback:
+                        wp.capture_if(fallback_status, on_true=run_fallback_iterations)
+                    else:
+                        wp.capture_if(fallback_status, on_false=run_selective_polish)
+                elif int(fallback_status.numpy()[0]) != 0:
+                    if has_fallback:
+                        run_fallback_iterations()
+                elif has_selective_polish:
+                    run_selective_polish()
 
         if self.model.particle_count:
             wp.copy(state_out.particle_q, state_in.particle_q)
@@ -3161,8 +3210,62 @@ class SolverVBD(SolverBase, CouplingInterface):
                     device=self.device,
                 )
 
+    def _solve_particle_selective_polish(self, state_in: State, dt: float) -> None:
+        """Apply one frozen-contact multiplicative Schwarz sweep to the active surface set."""
+        correction = self.particle_multilevel
+        if correction is None or self._surface_cached_kernel is None:
+            return
+        correction.selective_displacements.zero_()
+        model = self.model
+        for surface_group in self.surface_particle_color_groups:
+            if not surface_group.size:
+                continue
+            wp.launch(
+                kernel=self._surface_cached_kernel,
+                dim=surface_group.size * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                block_dim=TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                inputs=[
+                    dt,
+                    surface_group,
+                    self.particle_q_prev,
+                    state_in.particle_q,
+                    model.particle_mass,
+                    self.inertia,
+                    model.particle_flags,
+                    model.tri_indices,
+                    model.tri_poses,
+                    model.tri_materials,
+                    model.tri_areas,
+                    model.edge_indices,
+                    model.edge_rest_angle,
+                    model.edge_rest_length,
+                    model.edge_bending_properties,
+                    self.particle_adjacency,
+                    self.particle_forces,
+                    self.particle_hessians,
+                    self.surface_tile_skip_active_checks,
+                    self.surface_tile_skip_material_checks,
+                    1.0,
+                    self.surface_anchor_angles,
+                    correction.selective_active_mask,
+                ],
+                outputs=[correction.selective_displacements],
+                device=self.device,
+            )
+            correction.commit_selective_polish_color(
+                model,
+                surface_group,
+                state_in.particle_q,
+                self.particle_displacements,
+            )
+
     def _solve_particle_iteration(
-        self, state_in: State, state_out: State, contacts: Contacts | None, dt: float, iter_num: int
+        self,
+        state_in: State,
+        state_out: State,
+        contacts: Contacts | None,
+        dt: float,
+        iter_num: int,
     ):
         """Solve one VBD iteration for particles."""
         model = self.model
@@ -3375,7 +3478,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                             self.surface_tile_skip_active_checks,
                             self.surface_tile_skip_material_checks,
                             self.particle_surface_relaxation if 0 < iter_num < self.iterations - 3 else 1.0,
-                            *([self.surface_anchor_angles] if self.surface_anchor_angles is not None else []),
+                            *([self.surface_anchor_angles, None] if self.surface_anchor_angles is not None else []),
                         ],
                         outputs=[self.particle_displacements],
                         device=self.device,
@@ -3548,6 +3651,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             body_qd_for_particles,
             dt,
         )
+        correction.build_selective_polish_mask(self.model)
         if self.particle_chebyshev_cleanup_status is not None:
             wp.launch(
                 kernel=_assess_particle_cleanup,

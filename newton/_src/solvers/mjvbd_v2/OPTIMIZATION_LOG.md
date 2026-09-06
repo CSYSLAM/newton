@@ -3026,3 +3026,81 @@ CUDA Graph headless test on an RTX 5060 Ti in 59.043 ms/frame. Consecutive
 finite, the final graph-correction status was zero, and the example's existing
 `test_final()` passed. This establishes stability and throughput for that run;
 the test does not certify visual identity or 30-sweep convergence.
+
+### 2026-09-06: residual-selected frozen-contact Schwarz polish
+
+**Goal.** Improve on the six-sweep staged mode while meeting a stricter
+criterion than independent trajectory similarity: from an identical substep
+state, the candidate should be no farther from an ordinary 60-sweep proxy
+solution than ordinary 30 sweeps. The position mean/P95 and edge-length mean
+error ratios must each remain at or below 1.10, while end-to-end time must be
+lower than the retained six-sweep mode.
+
+Two broader prototypes were rejected first. Reusing the previous coarse PCG
+solution through a one-vector residual-minimizing projection did not reduce
+end-to-end time at three or four new PCG iterations and worsened edge error.
+Restricting complete fine sweeps to a residual mask also lost performance:
+even with only 15--47% of particles active, it still rebuilt contact forces,
+self-contact forces, and DAT state for the whole candidate set. Neither
+prototype remains in the implementation.
+
+The retained `residual-schwarz5` T-shirt mode uses the following schedule:
+
+1. run five cached collision-aware Chebyshev fine sweeps;
+2. after sweep three, run the existing guarded graph coarse correction and
+   mark particles whose local Newton correction exceeds 0.001 particle radii;
+3. after sweep five, run two multiplicative colored surface passes only for
+   the marked particles;
+4. reuse the last complete fine sweep's contact force/Hessian during those
+   passes and clamp every accepted local update to 0.001 particle radii; and
+5. run one final DAT truncation over the accumulated displacement.
+
+The last two passes are deliberately not incomplete full VBD iterations. They
+are a frozen-contact nonlinear Schwarz smoother: updated elastic positions are
+visible to later colors, but expensive body-contact/self-contact force and
+Hessian assembly is not repeated. The tight trust region bounds the error of
+that frozen contact linearization. A rejected/nonfinite coarse solve takes the
+existing device-side fallback branch to 20 iterations and skips the polish.
+CUDA Graphs express polish as the false branch of `wp.capture_if`, so fallback
+and polish have fixed captured topology without a per-substep CPU readback.
+
+The low-level feature is opt-in and defaults to zero polish iterations in both
+private VBD backends. Its initial implementation is intentionally limited to
+the cached pure-surface tile path; a requested mixed/tetrahedral configuration
+fails explicitly. CPU, differentiable, deterministic, volumetric, and every
+example that omits the new options retain their previous paths and allocation
+behavior.
+
+**Strict common-state accuracy.** A new benchmark diagnostic runs an ordinary
+60-sweep history and, at the same last-substep initial state of each of 100
+frames, forks both ordinary 30 sweeps and the retained candidate. Ordinary 60
+is only a numerical proxy for the converged state, but this comparison removes
+independent atomic-contact trajectory divergence.
+
+| Trial versus ordinary 60 | Mean position RMS | P95 position RMS | Mean edge-length MAE |
+| --- | ---: | ---: | ---: |
+| Ordinary 30 | 0.037830 mm | 0.105278 mm | 0.002550 mm |
+| `residual-schwarz5` | 0.027789 mm | 0.104203 mm | 0.002768 mm |
+| Candidate / ordinary 30 | 0.735 | 0.990 | 1.085 |
+
+All three error ratios pass the 1.10 gate. The last-substep coarse status was
+accepted in all 100 samples and the mean active set was 314 of 6,436 particles.
+This validates 30-sweep-level convergence for the sampled W1 T-shirt states;
+it is not a claim that five sweeps are universally equivalent to 30 for other
+materials, topologies, or contact histories.
+
+**Performance and long-run validation.** On the RTX 5060 Ti with Warp
+1.17.0.dev20260807, ten substeps, CUDA Graphs, and headless realtime IK, a
+matched 300-frame process measured the old six-sweep mode at 52.468 ms/frame
+and the candidate at 47.564 ms/frame, a 9.35% reduction. The candidate's
+complete 900-frame run took 54.961 ms/frame; a fresh old-mode run under the
+same source tree took 59.493 ms/frame, a 7.62% reduction. Candidate 100-frame
+blocks were 41.475, 47.541, 53.186, 58.175, 59.496, 59.120, 58.666, 58.164,
+and 58.824 ms/frame. All nine checkpoint statuses were zero, active sets were
+433, 304, 721, 206, 197, 169, 151, 183, and 209 particles, finite-state checks
+passed, and the example's `test_final()` passed.
+
+The benchmark now exposes both retained six-sweep and residual-Schwarz modes
+and a strict `--same-substep --strict-residual-schwarz` diagnostic. Unit tests
+cover option validation, threshold/ring mask construction, explicit volumetric
+rejection, and eager plus CUDA Graph execution in both private VBD backends.

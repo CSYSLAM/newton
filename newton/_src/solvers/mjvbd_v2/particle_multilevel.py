@@ -31,6 +31,77 @@ ParticleMultilevelMode = Literal["off", "on", "auto"]
 ParticleMultilevelOperator = Literal["graph", "galerkin"]
 
 
+@wp.kernel(enable_backward=False)
+def _mark_selective_polish_particles(
+    local_correction: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    particle_flags: wp.array[wp.int32],
+    threshold_fraction: float,
+    active: wp.array[wp.int32],
+):
+    particle = wp.tid()
+    if (particle_flags[particle] & ParticleFlags.ACTIVE) == 0:
+        active[particle] = 0
+        return
+    threshold = threshold_fraction * wp.max(particle_radius[particle], 1.0e-8)
+    correction_length = wp.length(local_correction[particle])
+    # Contact rows are selected by their unresolved local correction, not by
+    # mere contact presence: large resting contact patches may already be in
+    # equilibrium and should not turn a sparse polish into a global sweep.
+    active[particle] = int(not wp.isfinite(correction_length) or correction_length > threshold)
+
+
+@wp.kernel(enable_backward=False)
+def _commit_selective_polish_corrections(
+    particle_ids: wp.array[wp.int32],
+    active: wp.array[wp.int32],
+    particle_radius: wp.array[float],
+    max_radius_fraction: float,
+    correction: wp.array[wp.vec3],
+    particle_q: wp.array[wp.vec3],
+    cumulative_displacement: wp.array[wp.vec3],
+):
+    particle = particle_ids[wp.tid()]
+    if active[particle] == 0:
+        return
+    delta = correction[particle]
+    length = wp.length(delta)
+    if not wp.isfinite(length):
+        correction[particle] = wp.vec3(0.0)
+        return
+    limit = max_radius_fraction * particle_radius[particle]
+    if length > limit:
+        if limit > 0.0:
+            delta *= limit / length
+        else:
+            delta = wp.vec3(0.0)
+    particle_q[particle] += delta
+    cumulative_displacement[particle] += delta
+    correction[particle] = wp.vec3(0.0)
+
+
+@wp.kernel(enable_backward=False)
+def _expand_selective_polish_particles(
+    source: wp.array[wp.int32],
+    neighbor_offsets: wp.array[wp.int32],
+    neighbors: wp.array[wp.int32],
+    target: wp.array[wp.int32],
+):
+    particle = wp.tid()
+    if source[particle] == 0:
+        return
+    target[particle] = 1
+    for slot in range(neighbor_offsets[particle], neighbor_offsets[particle + 1]):
+        wp.atomic_max(target, neighbors[slot], 1)
+
+
+@wp.kernel(enable_backward=False)
+def _count_selective_polish_particles(active: wp.array[wp.int32], count: wp.array[wp.int32]):
+    particle = wp.tid()
+    if active[particle] != 0:
+        wp.atomic_add(count, 0, 1)
+
+
 def _normalize_multilevel_mode(enabled: bool | Literal["auto"]) -> ParticleMultilevelMode:
     """Normalize the backward-compatible multilevel option."""
     if enabled is False:
@@ -1841,6 +1912,10 @@ class ParticleMultilevelCorrection:
         operator: ParticleMultilevelOperator = "graph",
         cluster_size: int,
         coarse_iterations: int,
+        selective_polish_iterations: int = 0,
+        selective_polish_threshold_fraction: float = 0.02,
+        selective_polish_rings: int = 2,
+        selective_polish_max_radius_fraction: float = 0.01,
         coupling: float,
         relaxation: float,
         max_radius_fraction: float,
@@ -1852,6 +1927,14 @@ class ParticleMultilevelCorrection:
             raise ValueError(f"particle multilevel cluster_size must be at least 2, got {cluster_size}")
         if coarse_iterations < 1:
             raise ValueError(f"particle multilevel coarse_iterations must be at least 1, got {coarse_iterations}")
+        if selective_polish_iterations < 0:
+            raise ValueError("particle multilevel selective_polish_iterations must be nonnegative")
+        if selective_polish_threshold_fraction <= 0.0:
+            raise ValueError("particle multilevel selective_polish_threshold_fraction must be positive")
+        if selective_polish_rings < 0:
+            raise ValueError("particle multilevel selective_polish_rings must be nonnegative")
+        if selective_polish_max_radius_fraction <= 0.0:
+            raise ValueError("particle multilevel selective_polish_max_radius_fraction must be positive")
         if coupling < 0.0:
             raise ValueError(f"particle multilevel coupling must be nonnegative, got {coupling}")
         if not 0.0 < relaxation <= 1.0:
@@ -1879,6 +1962,10 @@ class ParticleMultilevelCorrection:
         self.active_particle_count = int(cluster_particles.size)
         self.operator = operator
         self.coarse_iterations = coarse_iterations
+        self.selective_polish_iterations = selective_polish_iterations
+        self.selective_polish_threshold_fraction = selective_polish_threshold_fraction
+        self.selective_polish_rings = selective_polish_rings
+        self.selective_polish_max_radius_fraction = selective_polish_max_radius_fraction
         self.coupling = coupling
         self.relaxation = relaxation
         self.max_radius_fraction = max_radius_fraction
@@ -1902,6 +1989,44 @@ class ParticleMultilevelCorrection:
         self.active_particles = wp.array(cluster_particles, dtype=wp.int32, device=model.device)
         self.cluster_particle_offsets = wp.array(cluster_offsets, dtype=wp.int32, device=model.device)
         self.cluster_particles = wp.array(cluster_particles, dtype=wp.int32, device=model.device)
+        if selective_polish_iterations:
+            if selective_polish_rings:
+                topology_edges = _particle_topology_edges(model)
+                neighbor_lists: list[set[int]] = [set() for _ in range(model.particle_count)]
+                for particle_a_value, particle_b_value in topology_edges:
+                    particle_a = int(particle_a_value)
+                    particle_b = int(particle_b_value)
+                    neighbor_lists[particle_a].add(particle_b)
+                    neighbor_lists[particle_b].add(particle_a)
+                selective_neighbor_offsets = np.zeros(model.particle_count + 1, dtype=np.int32)
+                selective_neighbor_offsets[1:] = np.cumsum(
+                    [len(neighbors) for neighbors in neighbor_lists], dtype=np.int32
+                )
+                selective_neighbors = np.asarray(
+                    [neighbor for particle_neighbors in neighbor_lists for neighbor in sorted(particle_neighbors)],
+                    dtype=np.int32,
+                )
+                self.selective_neighbor_offsets = wp.array(
+                    selective_neighbor_offsets, dtype=wp.int32, device=model.device
+                )
+                self.selective_neighbors = wp.array(selective_neighbors, dtype=wp.int32, device=model.device)
+            else:
+                self.selective_neighbor_offsets = None
+                self.selective_neighbors = None
+            self.selective_masks = (
+                wp.zeros(model.particle_count, dtype=wp.int32, device=model.device),
+                wp.zeros(model.particle_count, dtype=wp.int32, device=model.device),
+            )
+            self.selective_active_count = wp.zeros(1, dtype=wp.int32, device=model.device)
+            self.selective_active_mask = self.selective_masks[0]
+            self.selective_displacements = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        else:
+            self.selective_neighbor_offsets = None
+            self.selective_neighbors = None
+            self.selective_masks = ()
+            self.selective_active_count = None
+            self.selective_active_mask = None
+            self.selective_displacements = None
         self.coarse_neighbor_offsets = wp.array(coarse_neighbor_offsets, dtype=wp.int32, device=model.device)
         self.coarse_neighbors = wp.array(coarse_neighbors, dtype=wp.int32, device=model.device)
         self.coarse_neighbor_multiplicity = wp.array(
@@ -2255,6 +2380,66 @@ class ParticleMultilevelCorrection:
                 self.runtime_metrics,
             ],
             outputs=[particle_displacements],
+            device=model.device,
+        )
+
+    def build_selective_polish_mask(self, model) -> wp.array | None:
+        """Select unresolved particles and expand them over the fine constraint graph."""
+        if not self.selective_masks:
+            return None
+        source = self.selective_masks[0]
+        wp.launch(
+            _mark_selective_polish_particles,
+            dim=model.particle_count,
+            inputs=[
+                self.local_correction,
+                model.particle_radius,
+                model.particle_flags,
+                self.selective_polish_threshold_fraction,
+            ],
+            outputs=[source],
+            device=model.device,
+        )
+        for ring in range(self.selective_polish_rings):
+            target = self.selective_masks[(ring + 1) % 2]
+            target.zero_()
+            wp.launch(
+                _expand_selective_polish_particles,
+                dim=model.particle_count,
+                inputs=[source, self.selective_neighbor_offsets, self.selective_neighbors],
+                outputs=[target],
+                device=model.device,
+            )
+            source = target
+        self.selective_active_count.zero_()
+        wp.launch(
+            _count_selective_polish_particles,
+            dim=model.particle_count,
+            inputs=[source],
+            outputs=[self.selective_active_count],
+            device=model.device,
+        )
+        self.selective_active_mask = source
+        return source
+
+    def commit_selective_polish_color(
+        self,
+        model,
+        particle_ids: wp.array,
+        particle_q: wp.array,
+        cumulative_displacement: wp.array,
+    ) -> None:
+        """Commit one colored Schwarz update inside the configured trust region."""
+        wp.launch(
+            _commit_selective_polish_corrections,
+            dim=particle_ids.size,
+            inputs=[
+                particle_ids,
+                self.selective_active_mask,
+                model.particle_radius,
+                self.selective_polish_max_radius_fraction,
+            ],
+            outputs=[self.selective_displacements, particle_q, cumulative_displacement],
             device=model.device,
         )
 

@@ -89,6 +89,7 @@ def _run_case(label, sweeps, operator, args, *, demo_mode=None):
     checkpoint_status = []
     cleanup_checkpoint_status = []
     cleanup_checkpoint_max_fraction = []
+    selective_checkpoint_active_particles = []
     for start in range(0, args.frames, args.checkpoint_interval):
         stop = min(args.frames, start + args.checkpoint_interval)
         wp.synchronize_device(example.device)
@@ -105,6 +106,8 @@ def _run_case(label, sweeps, operator, args, *, demo_mode=None):
         checkpoints.append((stop, positions))
         if correction is not None:
             checkpoint_status.append(int(correction.runtime_status.numpy()[0]))
+            if correction.selective_active_count is not None:
+                selective_checkpoint_active_particles.append(int(correction.selective_active_count.numpy()[0]))
         cleanup_status = example.solver.vbd_solver.particle_chebyshev_cleanup_status
         cleanup_metrics = example.solver.vbd_solver.particle_chebyshev_cleanup_metrics
         if cleanup_status is not None:
@@ -125,6 +128,7 @@ def _run_case(label, sweeps, operator, args, *, demo_mode=None):
         "checkpoint_runtime_status": checkpoint_status,
         "cleanup_checkpoint_status": cleanup_checkpoint_status,
         "cleanup_checkpoint_max_fraction": cleanup_checkpoint_max_fraction,
+        "selective_checkpoint_active_particles": selective_checkpoint_active_particles,
         "test_final_passed": True,
     }
     del correction, example
@@ -417,6 +421,172 @@ def _probe_demo_same_substep(args):
     }
 
 
+def _probe_residual_schwarz_same_substep(args):
+    """Compare residual-Schwarz and ordinary 30 sweeps against a common 60-sweep state."""
+    original_init = SolverMJVBDV2.__init__
+    original_iteration = SolverVBDSoft._solve_particle_iteration
+    buffers = {}
+
+    def configured_init(self, model, *solver_args, **kwargs):
+        options = dict(kwargs.get("vbd_options") or {})
+        options.update(
+            iterations=60,
+            particle_chebyshev_spectral_radius=0.9,
+            particle_chebyshev_warmup_iterations=0,
+            particle_chebyshev_polish_iterations=0,
+            particle_chebyshev_contact_rings=0,
+            particle_chebyshev_cleanup_max_radius_fraction=None,
+            particle_enable_multilevel_correction=True,
+            particle_multilevel_checkpoints=(3,),
+            particle_multilevel_fallback_iterations=None,
+            particle_multilevel_selective_polish_iterations=2,
+            particle_multilevel_selective_polish_threshold_fraction=0.001,
+            particle_multilevel_selective_polish_rings=0,
+            particle_multilevel_selective_polish_max_radius_fraction=0.001,
+            particle_enable_surface_cache=True,
+            particle_enable_truncation_cache=True,
+            particle_surface_relaxation=1.0,
+        )
+        kwargs["vbd_options"] = options
+        original_init(self, model, *solver_args, **kwargs)
+        solver = self.vbd_solver
+        if not isinstance(solver, SolverVBDSoft) or not solver.integrate_with_external_rigid_solver:
+            raise RuntimeError("The strict residual-Schwarz probe requires the externally driven soft backend")
+        if solver.particle_multilevel is None or solver._surface_cached_kernel is None:
+            raise RuntimeError("The strict residual-Schwarz probe requires multilevel and cached surface kernels")
+        buffers["correction"] = solver.particle_multilevel
+        for name in ("surface_anchor_angles", "_surface_cached_kernel", "_particle_truncation_cache"):
+            buffers[name] = getattr(solver, name)
+            setattr(solver, name, None)
+        solver.particle_multilevel = None
+        solver.particle_chebyshev_enabled = False
+        for name in ("initial", "displacements", "ordinary30", "candidate"):
+            buffers[name] = wp.empty_like(model.particle_q)
+
+    def save(self, state_in):
+        wp.copy(buffers["initial"], state_in.particle_q)
+        wp.copy(buffers["displacements"], self.particle_displacements)
+
+    def restore(self, state_in):
+        wp.copy(state_in.particle_q, buffers["initial"])
+        wp.copy(self.particle_displacements, buffers["displacements"])
+
+    def attach_candidate(self):
+        self.particle_multilevel = buffers["correction"]
+        for name in ("surface_anchor_angles", "_surface_cached_kernel", "_particle_truncation_cache"):
+            setattr(self, name, buffers[name])
+        self.iterations = 5
+        self.particle_multilevel_checkpoints = (3,)
+        self.particle_chebyshev_weights = self._build_particle_chebyshev_weights(0.9, 5)
+        self.particle_chebyshev_enabled = True
+        self.particle_chebyshev_older.assign(buffers["initial"])
+        self.particle_chebyshev_collided.zero_()
+        self._particle_truncation_cache.rebuild(self)
+        wp.launch(
+            particle_surface_cache._prepare_anchor_angles,
+            dim=self.model.edge_count,
+            inputs=[self.particle_q_prev, self.model.edge_indices],
+            outputs=[self.surface_anchor_angles],
+            device=self.device,
+        )
+
+    def detach_candidate(self):
+        self.particle_multilevel = None
+        self.particle_chebyshev_enabled = False
+        for name in ("surface_anchor_angles", "_surface_cached_kernel", "_particle_truncation_cache"):
+            setattr(self, name, None)
+        self.iterations = 60
+
+    def solve_iteration(self, state_in, state_out, contacts, dt, iter_num):
+        if iter_num == 0:
+            save(self, state_in)
+            attach_candidate(self)
+            for candidate_iteration in range(5):
+                original_iteration(self, state_in, state_out, contacts, dt, candidate_iteration)
+
+            def run_polish():
+                for _iteration in range(2):
+                    self._solve_particle_selective_polish(state_in, dt)
+                self._penetration_free_truncation(state_in.particle_q)
+
+            def run_fallback():
+                for fallback_iteration in range(5, 20):
+                    original_iteration(self, state_in, state_out, contacts, dt, fallback_iteration)
+
+            if self.device.is_capturing:
+                wp.capture_if(
+                    buffers["correction"].runtime_status,
+                    on_true=run_fallback,
+                    on_false=run_polish,
+                )
+            elif int(buffers["correction"].runtime_status.numpy()[0]) != 0:
+                run_fallback()
+            else:
+                run_polish()
+            wp.copy(buffers["candidate"], state_in.particle_q)
+            detach_candidate(self)
+            restore(self, state_in)
+
+            self.iterations = 30
+            for ordinary_iteration in range(30):
+                original_iteration(self, state_in, state_out, contacts, dt, ordinary_iteration)
+            wp.copy(buffers["ordinary30"], state_in.particle_q)
+            self.iterations = 60
+            restore(self, state_in)
+
+        original_iteration(self, state_in, state_out, contacts, dt, iter_num)
+
+    module, example_args = _example_args(args)
+    example_args.particle_solver_mode = "reference20"
+    records = {"ordinary30": [], "residual_schwarz5": []}
+    rejected_samples = 0
+    active_samples = []
+    with (
+        mock.patch.object(SolverMJVBDV2, "__init__", configured_init),
+        mock.patch.object(SolverVBDSoft, "_solve_particle_iteration", solve_iteration),
+    ):
+        example = module.Example(newton.viewer.ViewerNull(num_frames=args.frames), example_args)
+        edges = _mesh_edges(example.model)
+        for frame in range(args.frames):
+            example.step()
+            gold = example.state_0.particle_q.numpy()
+            rejected_samples += int(buffers["correction"].runtime_status.numpy()[0] != 0)
+            active_samples.append(int(buffers["correction"].selective_active_count.numpy()[0]))
+            for label, name in (("ordinary30", "ordinary30"), ("residual_schwarz5", "candidate")):
+                positions = buffers[name].numpy()
+                if not np.all(np.isfinite(positions)) or not np.all(np.isfinite(gold)):
+                    raise ValueError(f"Nonfinite {label} state at frame {frame + 1}")
+                error = _compare([(frame, positions)], [(frame, gold)], edges)[0]
+                records[label].append((error["position_rms_mm"], error["edge_length_mae_mm"]))
+        example.test_final()
+    summaries = {}
+    for label, errors in records.items():
+        error_array = np.asarray(errors)
+        summaries[label] = {
+            "mean_position_rms_mm": float(np.mean(error_array[:, 0])),
+            "p95_position_rms_mm": float(np.percentile(error_array[:, 0], 95)),
+            "mean_edge_length_mae_mm": float(np.mean(error_array[:, 1])),
+        }
+    ordinary = summaries["ordinary30"]
+    candidate = summaries["residual_schwarz5"]
+    ratios = {name: candidate[name] / max(ordinary[name], np.finfo(np.float64).eps) for name in ordinary}
+    result = {
+        "mode": "residual_schwarz_same_substep",
+        "gold_sweeps": 60,
+        "ordinary_sweeps": 30,
+        "frame_samples": args.frames,
+        "candidate_rejected_last_substep_samples": rejected_samples,
+        "candidate_active_particles_mean": float(np.mean(active_samples)),
+        "errors": summaries,
+        "candidate_to_ordinary30_error_ratio": ratios,
+        "test_final_passed": True,
+    }
+    del example
+    buffers.clear()
+    gc.collect()
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--frames", type=int, default=300)
@@ -441,7 +611,14 @@ def main():
         action="store_true",
         help="Compare candidates from identical substep states; do not measure speed",
     )
+    parser.add_argument(
+        "--strict-residual-schwarz",
+        action="store_true",
+        help="Compare residual-Schwarz and ordinary 30 sweeps against an ordinary 60-sweep common-state gold solve",
+    )
     args = parser.parse_args()
+    if args.strict_residual_schwarz and not args.same_substep:
+        parser.error("--strict-residual-schwarz requires --same-substep")
     if args.compare_demo:
         args.reference_sweeps = 20
     if min(args.frames, args.checkpoint_interval, args.reference_sweeps, *args.sweeps) < 1:
@@ -463,6 +640,9 @@ def main():
         flush=True,
     )
     if args.same_substep:
+        if args.strict_residual_schwarz:
+            print("RESULT " + json.dumps(_probe_residual_schwarz_same_substep(args)), flush=True)
+            return
         if args.compare_demo:
             print("RESULT " + json.dumps(_probe_demo_same_substep(args)), flush=True)
             return
@@ -480,6 +660,8 @@ def main():
             ("chebyshev8", 8, "graph", "chebyshev8"),
             ("cached_chebyshev8", 8, "graph", "cached-chebyshev8"),
             ("guarded_cached_chebyshev8", 8, "graph", "guarded-cached-chebyshev8"),
+            ("guarded_cached_chebyshev6", 6, "graph", "guarded-cached-chebyshev6"),
+            ("residual_schwarz5", 5, "graph", "residual-schwarz5"),
         )
         for label, sweeps, operator, mode in configurations:
             if args.demo_modes is not None and label not in args.demo_modes:

@@ -129,11 +129,14 @@ def make_surface_kernel(evaluate_membrane):
         skip_material: int,
         relaxation: float,
         anchor_angles: wp.array[wp.vec2],
+        selective_active: wp.array[wp.int32],
         displacement: wp.array[wp.vec3],
     ):
         tid = wp.tid()
         lane = tid % 16
         particle = particle_ids[tid // 16]
+        if selective_active and selective_active[particle] == 0:
+            return
         if skip_active == 0 and (not flags[particle] & ParticleFlags.ACTIVE or mass[particle] == 0.0):
             if lane == 0:
                 displacement[particle] = wp.vec3(0.0)
