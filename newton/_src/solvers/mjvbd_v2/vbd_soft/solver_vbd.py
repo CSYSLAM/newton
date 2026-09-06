@@ -33,6 +33,7 @@ from ..particle_multilevel import (
     ParticleMultilevelCorrection,
     _assess_particle_cleanup,
     _automatic_rejection_reason,
+    _normalize_multilevel_checkpoints,
     _normalize_multilevel_mode,
     _normalize_multilevel_operator,
     _particle_topology_edges,
@@ -267,6 +268,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_multilevel_min_residual_reduction: float | None = None,
         particle_multilevel_max_clamp_fraction: float | None = None,
         particle_multilevel_fallback_iterations: int | None = None,
+        particle_multilevel_checkpoints: tuple[int, ...] | None = None,
         particle_topological_contact_filter_threshold: int = 2,
         particle_rest_shape_contact_exclusion_radius: float = 0.0,
         particle_external_vertex_contact_filtering_map: dict | None = None,
@@ -379,6 +381,8 @@ class SolverVBD(SolverBase, CouplingInterface):
                 correction is rejected. ``None`` disables the conditional fallback. CUDA Graphs keep both branches
                 captured while selecting the fallback entirely on the device; uncaptured execution synchronizes the
                 status to the host and uses an ordinary Python branch.
+            particle_multilevel_checkpoints: Optional exact iteration checkpoints at which to apply the coarse
+                correction. ``None`` keeps the legacy schedule of one correction after the final fine iteration.
             particle_topological_contact_filter_threshold: Maximum topological distance (measured in rings) under which candidate
                 self-contacts are discarded. Set to a higher value to tolerate contacts between more closely connected mesh
                 elements. Only used when `particle_enable_self_contact` is `True`. Note that setting this to a value larger than 3 will
@@ -570,9 +574,14 @@ class SolverVBD(SolverBase, CouplingInterface):
                     "particle_multilevel_fallback_iterations must be at least the ordinary iteration count, "
                     f"got {particle_multilevel_fallback_iterations} < {iterations}"
                 )
+        particle_multilevel_checkpoints = _normalize_multilevel_checkpoints(
+            particle_multilevel_checkpoints,
+            iterations,
+        )
         self.particle_multilevel_fallback_iterations = (
             iterations if particle_multilevel_fallback_iterations is None else particle_multilevel_fallback_iterations
         )
+        self.particle_multilevel_checkpoints = particle_multilevel_checkpoints
         if (
             particle_chebyshev_cleanup_max_radius_fraction is not None
             and self.particle_multilevel_fallback_iterations <= iterations
@@ -3504,34 +3513,57 @@ class SolverVBD(SolverBase, CouplingInterface):
         if chebyshev_history_active:
             self.particle_chebyshev_older.assign(self.particle_chebyshev_previous)
 
-        if self.particle_multilevel is not None and iter_num + 1 == self.iterations:
-            if self.particle_chebyshev_cleanup_status is not None:
-                self.particle_chebyshev_cleanup_status.zero_()
-                self.particle_chebyshev_cleanup_metrics.zero_()
-            self._apply_particle_multilevel_correction(
-                state_in,
-                contacts,
-                body_q_for_particles,
-                body_q_prev_for_particles,
-                body_qd_for_particles,
-                dt,
-            )
-            if self.particle_chebyshev_cleanup_status is not None:
-                wp.launch(
-                    kernel=_assess_particle_cleanup,
-                    dim=max(1, self.particle_multilevel.active_particle_count),
-                    inputs=[
-                        self.particle_multilevel.active_particles,
-                        self.particle_multilevel.active_particle_count,
-                        self.particle_multilevel.local_correction,
-                        self.particle_multilevel.fine_correction,
-                        model.particle_radius,
-                        self.particle_chebyshev_cleanup_max_radius_fraction,
-                        self.particle_multilevel.runtime_status,
-                    ],
-                    outputs=[self.particle_chebyshev_cleanup_status, self.particle_chebyshev_cleanup_metrics],
-                    device=self.device,
+        if self.particle_multilevel is not None:
+            if iter_num + 1 in self.particle_multilevel_checkpoints:
+                self._apply_particle_multilevel_correction_and_assess(
+                    state_in,
+                    contacts,
+                    body_q_for_particles,
+                    body_q_prev_for_particles,
+                    body_qd_for_particles,
+                    dt,
                 )
+
+    def _apply_particle_multilevel_correction_and_assess(
+        self,
+        state_in: State,
+        contacts: Contacts | None,
+        body_q_for_particles: wp.array,
+        body_q_prev_for_particles: wp.array | None,
+        body_qd_for_particles: wp.array,
+        dt: float,
+    ) -> None:
+        """Apply the coarse correction and run the existing cleanup metric check."""
+        correction = self.particle_multilevel
+        if correction is None:
+            return
+        if self.particle_chebyshev_cleanup_status is not None:
+            self.particle_chebyshev_cleanup_status.zero_()
+            self.particle_chebyshev_cleanup_metrics.zero_()
+        self._apply_particle_multilevel_correction(
+            state_in,
+            contacts,
+            body_q_for_particles,
+            body_q_prev_for_particles,
+            body_qd_for_particles,
+            dt,
+        )
+        if self.particle_chebyshev_cleanup_status is not None:
+            wp.launch(
+                kernel=_assess_particle_cleanup,
+                dim=max(1, correction.active_particle_count),
+                inputs=[
+                    correction.active_particles,
+                    correction.active_particle_count,
+                    correction.local_correction,
+                    correction.fine_correction,
+                    self.model.particle_radius,
+                    self.particle_chebyshev_cleanup_max_radius_fraction,
+                    correction.runtime_status,
+                ],
+                outputs=[self.particle_chebyshev_cleanup_status, self.particle_chebyshev_cleanup_metrics],
+                device=self.device,
+            )
 
     def _apply_particle_multilevel_correction(
         self,

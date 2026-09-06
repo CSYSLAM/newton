@@ -2976,3 +2976,53 @@ explicit `--particle-solver-mode cached13` reproduces the previous default.
 This promotion is local to the W1 T-shirt example. All low-level MJVBDV2
 Chebyshev, topology guard, multilevel, cache, and cleanup options remain disabled
 by default, so no other example or solver construction changes behavior.
+
+### 2026-09-06: stage one graph correction inside six cached sweeps
+
+**Goal.** Test whether a multilevel V-cycle can approach 30 ordinary particle
+sweeps while remaining faster than the retained eight-sweep guarded cached
+Chebyshev policy in the W1 T-shirt fold. The experiment keeps ten substeps,
+all contact and DAT settings, and the scripted realtime IK trajectory fixed.
+
+**Implementation.** Both private MJVBDV2 particle solvers accept an optional
+exact `particle_multilevel_checkpoints` sequence. `None` preserves the legacy
+single correction after the final fine iteration. An explicit sequence is the
+complete schedule; it does not implicitly append a terminal correction. The
+T-shirt performance mode runs six cached, collision-aware Chebyshev sweeps and
+applies the graph correction after sweep three, leaving three fine sweeps to
+smooth the prolonged update. CPU, differentiable, deterministic, disabled
+multilevel, and all examples that omit the option keep their previous path.
+
+The first prototype accidentally interpreted `(3,)` as corrections after both
+sweeps three and six. Correcting this to the intended `3 fine -> coarse -> 3
+fine` schedule reduced a matched 300-frame run from 53.612 to 51.001 ms/frame.
+Its independent position RMS versus ordinary 30 sweeps improved at frames
+50/100/150 from 9.091/11.645/13.024 mm to 6.658/10.048/10.601 mm. At frame 300
+the two schedules were effectively tied at 18.418/18.630 mm. These trajectory
+numbers are convergence proxies, not deterministic error bounds.
+
+**30-sweep accuracy decision: No-Go.** In the native 300-frame comparison,
+ordinary 30 sweeps took 152.626 ms/frame and its independent repeat differed
+by 0.015, 1.838, and 6.543 mm at frames 50, 100, and 300. The original staged
+candidate took 53.612 ms/frame but differed from the same reference by 9.091,
+11.645, and 18.418 mm. The corrected single-midpoint schedule improves the
+early trajectory and throughput but does not close the remaining gap. It must
+not be described as equivalent to 30 ordinary sweeps.
+
+Parameter probes over checkpoint placement, two or three coarse corrections,
+coarse relaxation, seven through twelve fine sweeps, guarded windows, and
+spectral radii did not consistently improve both position and edge error.
+More or stronger frozen coarse corrections usually amplified nonlinear contact
+error. A singleton/full-fine Galerkin defect-correction prototype was also not
+retained: aggressive parameters diverged, and an attempted in-solver fork did
+not transactionally restore all hidden solver/contact history, eventually
+corrupting its diagnostic reference. The temporary singleton allowance was
+removed; none of those exploratory results changes the production API.
+
+**Long run.** The corrected six-sweep schedule completed the full 900-frame
+CUDA Graph headless test on an RTX 5060 Ti in 59.043 ms/frame. Consecutive
+100-frame blocks were 44.957, 51.746, 57.987, 62.598, 62.129, 62.511,
+62.567, 63.859, and 63.031 ms/frame. Particle positions and velocities stayed
+finite, the final graph-correction status was zero, and the example's existing
+`test_final()` passed. This establishes stability and throughput for that run;
+the test does not certify visual identity or 30-sweep convergence.

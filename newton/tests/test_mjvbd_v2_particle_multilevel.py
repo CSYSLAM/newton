@@ -227,6 +227,26 @@ class TestMJVBDV2ParticleMultilevel(unittest.TestCase):
                 solver = solver_type(model, iterations=2)
                 self.assertIsNone(solver.particle_multilevel)
 
+    def test_multilevel_checkpoints_are_normalized(self):
+        """Normalize coarse-correction checkpoints for both private solvers."""
+
+        model = _build_cloth("cpu")
+        for solver_type in (SolverVBDComplete, SolverVBDSoft):
+            with self.subTest(solver=solver_type.__module__):
+                solver = solver_type(
+                    model,
+                    iterations=4,
+                    particle_enable_multilevel_correction=False,
+                    particle_multilevel_checkpoints=(3, 2, 3),
+                )
+                self.assertEqual(solver.particle_multilevel_checkpoints, (2, 3))
+                final_only = solver_type(
+                    model,
+                    iterations=4,
+                    particle_enable_multilevel_correction=False,
+                )
+                self.assertEqual(final_only.particle_multilevel_checkpoints, (4,))
+
     def test_invalid_coarse_operator_is_rejected(self):
         """Reject unknown surface operator names independently of device eligibility."""
         model = _build_cloth("cpu")
@@ -580,6 +600,7 @@ class TestMJVBDV2ParticleMultilevel(unittest.TestCase):
                         iterations=2,
                         particle_enable_multilevel_correction=True,
                         particle_multilevel_operator=operator,
+                        particle_multilevel_checkpoints=(1,),
                     )
                     state_0 = model.state()
                     state_1 = model.state()

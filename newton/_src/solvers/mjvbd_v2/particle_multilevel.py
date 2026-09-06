@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Sequence
 from typing import Literal
 
 import numpy as np
@@ -46,6 +47,31 @@ def _normalize_multilevel_operator(operator: str) -> ParticleMultilevelOperator:
     if operator in ("graph", "galerkin"):
         return operator
     raise ValueError(f"particle_multilevel_operator must be 'graph' or 'galerkin', got {operator!r}")
+
+
+def _normalize_multilevel_checkpoints(
+    checkpoints: Sequence[int] | None,
+    iterations: int,
+) -> tuple[int, ...]:
+    """Normalize the scheduled coarse-correction checkpoints."""
+    if checkpoints is None:
+        return (iterations,)
+    if not isinstance(checkpoints, Sequence) or isinstance(checkpoints, (str, bytes)):
+        raise TypeError("particle_multilevel_checkpoints must be a sequence of positive integers or None")
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for checkpoint in checkpoints:
+        if not isinstance(checkpoint, int) or isinstance(checkpoint, bool):
+            raise TypeError("particle_multilevel_checkpoints must contain only integers")
+        if checkpoint < 1 or checkpoint > iterations:
+            raise ValueError("particle_multilevel_checkpoints entries must be in [1, iterations]")
+        if checkpoint in seen:
+            continue
+        seen.add(checkpoint)
+        normalized.append(checkpoint)
+    if not normalized:
+        raise ValueError("particle_multilevel_checkpoints must not be empty")
+    return tuple(sorted(normalized))
 
 
 def _automatic_rejection_reason(model, correction: ParticleMultilevelCorrection) -> str | None:
