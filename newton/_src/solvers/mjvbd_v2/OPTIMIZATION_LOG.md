@@ -38,6 +38,8 @@ Status values are:
 
 | Date | Change | Affected path | Status | Evidence |
 | --- | --- | --- | --- | --- |
+| 2026-09-07 | Batch independent-set colors into rotating topology-aware Jacobi partitions | CUDA `vbd_soft/` cached triangle-surface solve | **Retained, gated** | On the 6,436-particle W1 T-shirt, the eight-sweep candidate stayed within 1.10x of ordinary 30-sweep error against an ordinary 60-sweep proxy and reduced the matched 900-frame mean from 28.244 to 18.672 ms/frame (33.89%) versus the previous fastest policy |
+| 2026-09-07 | Split edge-edge and vertex-triangle self-contact accumulation into dedicated kernels | CUDA `vbd_soft/` surface self-contact solve | **Rejected, reverted** | A matched 100-frame W1 T-shirt CUDA Graph run regressed from 22.220 to 23.493 ms/frame (5.73% slower); the extra launch and VT grid outweighed any register-pressure reduction |
 | 2026-09-05 | Promote guarded cached Chebyshev to the W1 T-shirt default | T-shirt final00 example | **Retained** | The final DAT-safe policy passed 92 focused regressions and a complete 900-frame task, improved common-state accuracy over `cached13`, and reduced the same-run 900-frame mean by 7.59% |
 | 2026-09-05 | Promote the validated `cached13` policy to the W1 T-shirt default | T-shirt final00 example | **Superseded** | After merging `20d5d8fb` with the collision-aware Chebyshev work, an exact configuration assertion and the complete 900-frame null-viewer test passed; the later guarded policy keeps `cached13` selectable |
 | 2026-09-05 | Cache fixed bending anchors and DAT geometry; use 13 contact-free relaxed sweeps | CUDA `vbd/` and `vbd_soft/`; T-shirt `cached13` mode | **Retained, opt-in** | Two 900-frame runs reduced frame time 5.01% / 6.34% versus 12 + graph, with lower position/edge errors at all nine checkpoints; the native common-state mean position error fell 38.04%; defaults unchanged |
@@ -3134,3 +3136,97 @@ noise rather than a material regression. All three multilevel statuses were
 zero and `test_final()` passed. The public dispatch suite passed 42 tests, the
 preset-specific CUDA/fallback tests passed, and a direct 10-frame invocation
 of the simplified demo completed successfully.
+
+### 2026-09-07: reject split EE and VT self-contact kernels
+
+**Hypothesis.** The combined self-contact force/Hessian kernel contains both
+edge-edge (EE) and vertex-triangle (VT) narrow phase code. Splitting those
+paths could lower register pressure enough to improve occupancy, despite
+adding one CUDA launch per color.
+
+**Prototype.** An opt-in `vbd_soft/` path copied the existing EE and VT
+branches into separate kernels. It retained the directed detector rows,
+material selection, color filtering, contact equations, atomic accumulation,
+block limits, and current-position reevaluation. The normal combined kernel
+remained available for a matched A/B run. No shared Newton collision code or
+production preset was changed.
+
+**Measurement.** The scripted 6,436-particle W1 T-shirt scene used 12,736
+triangles, 19,174 edges, nine particle colors, ten substeps, the retained
+five-sweep residual-Schwarz schedule, CUDA Graph capture, Warp 1.17.0, and an
+NVIDIA GeForce RTX 5090 D v2. Both cases ran consecutively in one process for
+100 evolving frames after construction and graph capture:
+
+| Self-contact accumulation | Mean frame time | Change |
+| --- | ---: | ---: |
+| Combined EE + VT kernel | 22.220485 ms | baseline |
+| Dedicated EE and VT kernels | 23.493046 ms | 5.73% slower |
+
+Both paths completed with finite state, zero multilevel rejection status, and
+the example's `test_final()` passed. The split path's extra VT launch and grid
+work cost more than any occupancy benefit. The prototype was fully reverted;
+do not repeat this split without a fused scheduling mechanism that removes at
+least one other synchronization boundary.
+
+### 2026-09-07: retain topology-aware color-batched Jacobi
+
+**Problem.** The previous fastest surface policy used five complete colored
+sweeps. Every sweep traversed all nine independent-set colors, so contact,
+self-contact, elasticity, and DAT work paid nine launch and synchronization
+boundaries. Simply reducing the sweep count no longer met the established
+ordinary-30 accuracy gate, while merging fixed pairs of colors made the
+edge-length error too sensitive to the selected partition.
+
+**Implementation.** The opt-in CUDA surface path now merges the original
+colors into two ordered batches. A batch evaluates every particle correction
+from the same frozen displacement and commits those corrections together;
+the second batch still sees the first batch's committed state. Construction
+scores balanced partitions by triangle and bending-edge coupling, then rotates
+among low-coupling partitions over eight sweeps. The rotation minimizes the
+maximum number of times any original color pair shares a batch, rather than
+leaving one strongly coupled pair in Jacobi form for the entire solve.
+
+The retained `surface-fast` policy uses eight of these two-batch sweeps,
+Chebyshev spectral radius 0.8, and one guarded graph multilevel correction
+after sweep four. A rejected multilevel correction takes the already captured
+20-sweep fallback, with both batched Jacobi and Chebyshev disabled so that the
+fallback remains ordinary colored Gauss--Seidel. The CUDA Graph topology is
+fixed and no per-frame host synchronization was added.
+
+The feature is disabled by default in the low-level solver. A direct opt-in
+requires a nondifferentiable, nondeterministic CUDA triangle surface using the
+cached tiled solve, with no tetrahedra or springs and no isolated particles.
+Unsupported direct configurations fail explicitly. The high-level preset
+continues to resolve CPU, differentiable, deterministic, pneumatic,
+tetrahedral, spring, and dynamic-rigid configurations to 20 ordinary sweeps.
+
+**Strict common-state accuracy.** On an NVIDIA GeForce RTX 5090 D v2, Warp
+1.17.0, CUDA Toolkit 12.9, and Driver 13.2, the diagnostic advanced an
+ordinary 60-sweep history and forked ordinary 30 sweeps and the candidate from
+the identical final-substep initial state of each of 300 frames. The scene had
+6,436 particles, 12,736 triangles, 19,174 bending edges, nine original colors,
+996 coarse clusters, and ten substeps per 60 Hz frame. Ordinary 60 is a
+numerical convergence proxy rather than an exact solution.
+
+| Trial versus ordinary 60 | Mean position RMS | P95 position RMS | Mean edge-length MAE |
+| --- | ---: | ---: | ---: |
+| Ordinary 30 | 0.026622 mm | 0.046863 mm | 0.001700 mm |
+| Two-batch eight-sweep candidate | 0.020966 mm | 0.040641 mm | 0.001849 mm |
+| Candidate / ordinary 30 | 0.788 | 0.867 | 1.088 |
+
+All three ratios pass the pre-established 1.10 accuracy gate. None of the 300
+sampled final-substep corrections was rejected, all values remained finite,
+and the example's final test passed. A fixed two-batch partition was faster
+but failed the edge gate at 1.207; a rotating affine partition also failed at
+1.147; and three batches passed accuracy but improved frame time by only
+23.5%. These alternatives were not retained.
+
+**Performance and long-run validation.** A matched process captured both
+policies as CUDA Graphs and advanced the full scene, including realtime IK.
+Over 900 frames, the previous five-sweep residual-Schwarz policy averaged
+28.244172 ms/frame and the candidate averaged 18.671711 ms/frame, a 33.89%
+reduction. Candidate 100-frame blocks were 15.012, 17.721, 19.490, 19.988,
+19.358, 19.104, 19.174, 19.078, and 19.121 ms/frame. All nine multilevel
+statuses were zero and `test_final()` passed. A separate direct 900-frame
+invocation through `vbd_preset="surface-fast"` also passed, confirming that the
+measured benchmark configuration and the production entry point agree.

@@ -420,13 +420,25 @@ class TestMJVBDV2(unittest.TestCase):
 
         options = _resolve_vbd_options(model, "surface-fast", None)
 
-        self.assertEqual(options["iterations"], 5)
-        self.assertEqual(options["particle_multilevel_checkpoints"], (3,))
+        self.assertEqual(options["iterations"], 8)
+        self.assertEqual(options["particle_multilevel_checkpoints"], (4,))
         self.assertEqual(options["particle_multilevel_fallback_iterations"], 20)
-        self.assertEqual(options["particle_multilevel_selective_polish_iterations"], 2)
+        self.assertEqual(options["particle_multilevel_selective_polish_iterations"], 0)
+        self.assertEqual(options["particle_chebyshev_spectral_radius"], 0.8)
+        self.assertTrue(options["particle_enable_batched_jacobi"])
+        self.assertEqual(options["particle_jacobi_batch_count"], 2)
+        self.assertEqual(options["particle_jacobi_relaxation"], 1.0)
         self.assertEqual(options["particle_collision_detection_interval"], -1)
         self.assertTrue(options["particle_enable_surface_cache"])
         self.assertTrue(options["particle_enable_truncation_cache"])
+
+        deterministic_options = _resolve_vbd_options(
+            model,
+            "surface-fast",
+            {"deterministic": wp.DeterministicMode.RUN_TO_RUN},
+        )
+        self.assertEqual(deterministic_options["iterations"], 20)
+        self.assertNotIn("particle_enable_batched_jacobi", deterministic_options)
 
     def test_backends_use_rod_joint_name(self):
         """Avoid the deprecated cable-joint alias in both VBD paths."""

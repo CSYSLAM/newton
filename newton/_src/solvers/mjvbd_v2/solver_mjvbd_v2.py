@@ -25,13 +25,16 @@ __all__ = ["SolverMJVBDV2"]
 _PNEUMATIC_STATE_FIELDS = ("volume", "absolute_pressure", "volume_rate", "clamp_flags")
 
 _SURFACE_FAST_VBD_OPTIONS: dict[str, object] = {
-    "iterations": 5,
-    "particle_chebyshev_spectral_radius": 0.9,
+    "iterations": 8,
+    "particle_chebyshev_spectral_radius": 0.8,
+    "particle_enable_batched_jacobi": True,
+    "particle_jacobi_batch_count": 2,
+    "particle_jacobi_relaxation": 1.0,
     "particle_enable_multilevel_correction": True,
-    "particle_multilevel_checkpoints": (3,),
+    "particle_multilevel_checkpoints": (4,),
     "particle_multilevel_min_residual_reduction": 1.0e-4,
     "particle_multilevel_max_clamp_fraction": 0.5,
-    "particle_multilevel_selective_polish_iterations": 2,
+    "particle_multilevel_selective_polish_iterations": 0,
     "particle_multilevel_selective_polish_threshold_fraction": 0.001,
     "particle_multilevel_selective_polish_rings": 0,
     "particle_multilevel_selective_polish_max_radius_fraction": 0.001,

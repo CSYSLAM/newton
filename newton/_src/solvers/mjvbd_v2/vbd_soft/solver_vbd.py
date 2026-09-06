@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import itertools
+import math
 import warnings
 from typing import Any, Literal
 
@@ -50,6 +52,7 @@ from .particle_vbd_kernels import (
     accumulate_particle_body_contact_force_and_hessian_active,
     accumulate_self_contact_force_and_hessian,
     accumulate_spring_force_and_hessian,
+    apply_particle_jacobi_correction,
     # Planar DAT (Divide and Truncate) kernels
     apply_planar_truncation_parallel_by_collision,
     apply_truncation_active_all_or_inactive_selected,
@@ -114,6 +117,77 @@ _SOFT_CONTACT_BLOCKS_PER_SM = 2
 _PARTICLE_CONTACT_GATHER_BLOCK_DIM = 128
 _PERSISTENT_PARTICLE_CONTACT_WORKERS = 4096
 _PERSISTENT_PARTICLE_CONTACT_MIN_CAPACITY_RATIO = 8
+
+
+def _build_particle_color_batch_schedules(
+    model: Model,
+    original_colors: np.ndarray,
+    color_count: int,
+    batch_count: int,
+    iteration_count: int,
+) -> tuple[np.ndarray, ...]:
+    """Build balanced partitions that do not repeatedly merge the same colors."""
+    if batch_count in (1, color_count):
+        return (np.remainder(original_colors, batch_count).astype(np.int32),)
+
+    color_coupling = np.zeros((color_count, color_count), dtype=np.float64)
+    topologies = [np.asarray(model.tri_indices.numpy(), dtype=np.int32).reshape((-1, 3))]
+    if model.edge_count:
+        topologies.append(np.asarray(model.edge_indices.numpy(), dtype=np.int32).reshape((-1, 4)))
+    for topology in topologies:
+        for first_column in range(topology.shape[1]):
+            for second_column in range(first_column + 1, topology.shape[1]):
+                first = topology[:, first_column]
+                second = topology[:, second_column]
+                valid = (first >= 0) & (second >= 0)
+                first_colors = original_colors[first[valid]]
+                second_colors = original_colors[second[valid]]
+                distinct = first_colors != second_colors
+                np.add.at(color_coupling, (first_colors[distinct], second_colors[distinct]), 1.0)
+                np.add.at(color_coupling, (second_colors[distinct], first_colors[distinct]), 1.0)
+
+    if batch_count == 2 and color_count <= 12:
+        minimum_size = color_count // 2
+        maximum_size = color_count - minimum_size
+        candidates = [
+            np.asarray(assignment, dtype=np.int32)
+            for assignment in itertools.product(range(2), repeat=color_count)
+            if minimum_size <= sum(assignment) <= maximum_size
+        ]
+    else:
+        candidates_by_key = {}
+        for stride in range(1, color_count):
+            if math.gcd(stride, color_count) != 1:
+                continue
+            for offset in range(color_count):
+                assignment = np.remainder(
+                    np.remainder(np.arange(color_count) * stride + offset, color_count),
+                    batch_count,
+                ).astype(np.int32)
+                candidates_by_key.setdefault(tuple(assignment), assignment)
+        candidates = list(candidates_by_key.values())
+
+    upper_triangle = np.triu_indices(color_count, 1)
+    co_batch_count = np.zeros((color_count, color_count), dtype=np.int32)
+    schedules = []
+    for phase in range(iteration_count):
+
+        def score(assignment, phase=phase, co_batch_count=co_batch_count):
+            same_batch = assignment[:, None] == assignment[None, :]
+            if phase == 0:
+                return (float(np.sum(color_coupling[upper_triangle] * same_batch[upper_triangle])),)
+            accumulated = co_batch_count + same_batch
+            pair_counts = accumulated[upper_triangle]
+            return (
+                int(np.max(pair_counts)),
+                int(np.dot(pair_counts, pair_counts)),
+                float(np.sum(color_coupling[upper_triangle] * pair_counts)),
+            )
+
+        selected = min(candidates, key=score)
+        co_batch_count += selected[:, None] == selected[None, :]
+        schedules.append(selected[original_colors].astype(np.int32))
+    return tuple(schedules)
 
 
 class SolverVBD(SolverBase, CouplingInterface):
@@ -252,6 +326,9 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_surface_relaxation: float = 1.0,
         particle_enable_surface_cache: bool = False,
         particle_enable_truncation_cache: bool = False,
+        particle_enable_batched_jacobi: bool = False,
+        particle_jacobi_relaxation: float = 0.5,
+        particle_jacobi_batch_count: int = 1,
         particle_chebyshev_spectral_radius: float | None = None,
         particle_chebyshev_max_radius_fraction: float = 1.0,
         particle_chebyshev_warmup_iterations: int = 0,
@@ -350,6 +427,11 @@ class SolverVBD(SolverBase, CouplingInterface):
                 Refreshes after every collision detection and retains displacement-dependent plane offsets.
                 Uses up to 256 MiB; larger caches raise an error. Disabled for differentiable and deterministic
                 models. Defaults to disabled; scalar execution is unchanged.
+            particle_enable_batched_jacobi: Merge the original independent-set colors into ordered batches. Particles
+                within one batch use a frozen iterate while batches retain Gauss-Seidel ordering. This experimental
+                CUDA surface path is disabled by default.
+            particle_jacobi_relaxation: Weight in `(0, 1]` applied to each experimental Jacobi correction.
+            particle_jacobi_batch_count: Number of ordered color batches per experimental Jacobi sweep.
             particle_chebyshev_spectral_radius: Estimated spectral radius for contact-aware Chebyshev acceleration.
                 ``None`` disables the experimental accelerator and preserves the ordinary VBD iteration path.
                 Differentiable models always use the ordinary path.
@@ -599,6 +681,13 @@ class SolverVBD(SolverBase, CouplingInterface):
         ):
             raise ValueError("Chebyshev cleanup requires fallback iterations beyond the primary iteration count")
         self.friction_epsilon = friction_epsilon
+        self.particle_enable_batched_jacobi = bool(particle_enable_batched_jacobi)
+        self.particle_jacobi_relaxation = float(particle_jacobi_relaxation)
+        if not 0.0 < self.particle_jacobi_relaxation <= 1.0:
+            raise ValueError("particle_jacobi_relaxation must be in (0, 1]")
+        if not isinstance(particle_jacobi_batch_count, int) or isinstance(particle_jacobi_batch_count, bool):
+            raise TypeError("particle_jacobi_batch_count must be an integer")
+        self.particle_jacobi_batch_count = particle_jacobi_batch_count
         self._soft_contact_materials = wp.empty(0, dtype=wp.vec3, device=self.device)
         self._soft_contact_material_index = wp.empty(0, dtype=wp.int32, device=self.device)
         self._use_soft_contact_material_source = False
@@ -668,6 +757,48 @@ class SolverVBD(SolverBase, CouplingInterface):
                 {"deterministic": effective_deterministic, "deterministic_max_records": 0},
                 module=particle_truncation_cache,
             )
+
+        self._particle_jacobi_color_schedules = ()
+        self._particle_jacobi_group_schedules = ()
+        self._particle_jacobi_corrections = None
+        if self.particle_enable_batched_jacobi:
+            if (
+                not self.device.is_cuda
+                or model.requires_grad
+                or effective_deterministic != wp.DeterministicMode.NOT_GUARANTEED
+                or model.tri_count == 0
+                or model.tet_count > 0
+                or model.spring_count > 0
+                or not particle_enable_tile_solve
+                or not particle_enable_surface_cache
+                or np.unique(np.asarray(model.tri_indices.numpy(), dtype=np.int32)).size != model.particle_count
+            ):
+                raise ValueError(
+                    "particle_enable_batched_jacobi requires a nondifferentiable, nondeterministic CUDA surface mesh "
+                    "with the surface cache enabled"
+                )
+            color_count = len(model.particle_color_groups)
+            if not 1 <= self.particle_jacobi_batch_count <= color_count:
+                raise ValueError(f"particle_jacobi_batch_count must be in [1, {color_count}]")
+            original_colors = np.asarray(model.particle_colors.numpy(), dtype=np.int32)
+            color_schedules = _build_particle_color_batch_schedules(
+                model,
+                original_colors,
+                color_count,
+                self.particle_jacobi_batch_count,
+                self.iterations,
+            )
+            self._particle_jacobi_color_schedules = tuple(
+                wp.array(colors.astype(np.int32), device=self.device) for colors in color_schedules
+            )
+            self._particle_jacobi_group_schedules = tuple(
+                tuple(
+                    wp.array(np.flatnonzero(colors == batch).astype(np.int32), device=self.device)
+                    for batch in range(self.particle_jacobi_batch_count)
+                )
+                for colors in color_schedules
+            )
+            self._particle_jacobi_corrections = wp.zeros(model.particle_count, dtype=wp.vec3, device=self.device)
 
         self.surface_anchor_angles = None
         self._surface_cached_kernel = None
@@ -2370,9 +2501,17 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self._penetration_free_truncation(state_in.particle_q)
 
             def run_fallback_iterations():
-                for iter_num in range(self.iterations, self.particle_multilevel_fallback_iterations):
-                    self._solve_rigid_body_iteration(state_in, state_out, control, contacts, dt)
-                    self._solve_particle_iteration(state_in, state_out, contacts, dt, iter_num)
+                batched_jacobi_enabled = self.particle_enable_batched_jacobi
+                chebyshev_enabled = self.particle_chebyshev_enabled
+                self.particle_enable_batched_jacobi = False
+                self.particle_chebyshev_enabled = False
+                try:
+                    for iter_num in range(self.iterations, self.particle_multilevel_fallback_iterations):
+                        self._solve_rigid_body_iteration(state_in, state_out, control, contacts, dt)
+                        self._solve_particle_iteration(state_in, state_out, contacts, dt, iter_num)
+                finally:
+                    self.particle_enable_batched_jacobi = batched_jacobi_enabled
+                    self.particle_chebyshev_enabled = chebyshev_enabled
 
             has_fallback = self.particle_multilevel_fallback_iterations > self.iterations
             has_selective_polish = correction.selective_polish_iterations > 0
@@ -3259,6 +3398,241 @@ class SolverVBD(SolverBase, CouplingInterface):
                 self.particle_displacements,
             )
 
+    def _solve_particle_jacobi_iteration(
+        self,
+        state_in: State,
+        state_out: State,
+        contacts: Contacts | None,
+        dt: float,
+        iter_num: int,
+    ) -> None:
+        """Solve one experimental frozen-iterate surface Jacobi sweep."""
+        model = self.model
+        if self.integrate_with_external_rigid_solver:
+            body_q = state_out.body_q
+            body_q_prev = self._external_body_q_prev if self._external_body_q_prev is not None else state_in.body_q
+            body_qd = state_out.body_qd
+        else:
+            body_q = state_in.body_q
+            body_q_prev = self.body_q_prev if model.body_count > 0 else None
+            body_qd = state_in.body_qd
+
+        chebyshev_history_active = (
+            self.particle_chebyshev_enabled and iter_num < self.iterations - self.particle_chebyshev_polish_iterations
+        )
+        if chebyshev_history_active:
+            self.particle_chebyshev_previous.assign(state_in.particle_q)
+
+        if self.particle_enable_self_contact:
+            if (self.particle_collision_detection_interval == 0 and iter_num == 0) or (
+                self.particle_collision_detection_interval >= 1
+                and iter_num % self.particle_collision_detection_interval == 0
+            ):
+                self._collision_detection_penetration_free(state_in)
+
+        self.particle_forces.zero_()
+        self.particle_hessians.zero_()
+        self._particle_jacobi_corrections.zero_()
+        schedule = iter_num % len(self._particle_jacobi_color_schedules)
+        batched_colors = self._particle_jacobi_color_schedules[schedule]
+        batched_groups = self._particle_jacobi_group_schedules[schedule]
+        for batch_color, particle_group in enumerate(batched_groups):
+            if contacts is not None and self._soft_contact_launch_dim > 0:
+                use_persistent = self._should_use_persistent_particle_contact_force(self._soft_contact_launch_dim)
+                contact_dim = (
+                    self._persistent_particle_contact_worker_dim(self._soft_contact_launch_dim)
+                    if use_persistent
+                    else self._soft_contact_launch_dim
+                )
+                inputs = [
+                    dt,
+                    batch_color,
+                    self.particle_q_prev,
+                    state_in.particle_q,
+                    batched_colors,
+                    self.friction_epsilon,
+                    model.particle_radius,
+                    contacts.soft_contact_indices,
+                    contacts.soft_contact_count,
+                    contacts.soft_contact_max,
+                ]
+                if use_persistent:
+                    inputs.append(contact_dim)
+                inputs.extend(
+                    [
+                        self.body_particle_contact_penalty_k,
+                        self.body_particle_contact_material_ke,
+                        self.body_particle_contact_material_kd,
+                        self.body_particle_contact_material_mu,
+                        model.shape_body,
+                        body_q,
+                        body_q_prev,
+                        body_qd,
+                        model.body_com,
+                        contacts.soft_contact_shape,
+                        contacts.soft_contact_body_pos,
+                        contacts.soft_contact_body_vel,
+                        contacts.soft_contact_normal,
+                        model.shape_margin,
+                        contacts.soft_contact_barycentric,
+                    ]
+                )
+                wp.launch(
+                    kernel=(
+                        accumulate_particle_body_contact_force_and_hessian_active
+                        if use_persistent
+                        else accumulate_particle_body_contact_force_and_hessian
+                    ),
+                    dim=contact_dim,
+                    block_dim=_SOFT_CONTACT_BLOCK_DIM,
+                    inputs=inputs,
+                    outputs=[self.particle_forces, self.particle_hessians],
+                    device=self.device,
+                )
+
+            if self.particle_enable_self_contact:
+                wp.launch(
+                    kernel=accumulate_self_contact_force_and_hessian,
+                    dim=self.particle_self_contact_evaluation_kernel_launch_size,
+                    inputs=[
+                        dt,
+                        batch_color,
+                        self.particle_q_prev,
+                        state_in.particle_q,
+                        batched_colors,
+                        model.tri_indices,
+                        model.edge_indices,
+                        self.trimesh_collision_info,
+                        self.particle_self_contact_radius,
+                        model.soft_contact_ke,
+                        model.soft_contact_kd,
+                        model.soft_contact_mu,
+                        self._soft_contact_materials,
+                        self._soft_contact_material_index,
+                        self._use_soft_contact_material_source,
+                        self.friction_epsilon,
+                        self.trimesh_collision_detector.edge_edge_parallel_epsilon,
+                        self.has_active_self_contact,
+                    ],
+                    outputs=[self.particle_forces, self.particle_hessians],
+                    device=self.device,
+                    max_blocks=model.device.sm_count,
+                )
+
+            wp.launch(
+                kernel=self._surface_cached_kernel,
+                dim=particle_group.size * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                block_dim=TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                inputs=[
+                    dt,
+                    particle_group,
+                    self.particle_q_prev,
+                    state_in.particle_q,
+                    model.particle_mass,
+                    self.inertia,
+                    model.particle_flags,
+                    model.tri_indices,
+                    model.tri_poses,
+                    model.tri_materials,
+                    model.tri_areas,
+                    model.edge_indices,
+                    model.edge_rest_angle,
+                    model.edge_rest_length,
+                    model.edge_bending_properties,
+                    self.particle_adjacency,
+                    self.particle_forces,
+                    self.particle_hessians,
+                    self.surface_tile_skip_active_checks,
+                    self.surface_tile_skip_material_checks,
+                    1.0,
+                    self.surface_anchor_angles,
+                    None,
+                ],
+                outputs=[self._particle_jacobi_corrections],
+                device=self.device,
+            )
+            wp.launch(
+                kernel=apply_particle_jacobi_correction,
+                dim=particle_group.size,
+                inputs=[particle_group, self._particle_jacobi_corrections, self.particle_jacobi_relaxation],
+                outputs=[self.particle_displacements],
+                device=self.device,
+            )
+            self._penetration_free_truncation(state_in.particle_q, particle_group)
+
+        chebyshev_iteration = iter_num - self.particle_chebyshev_warmup_iterations
+        if self.particle_chebyshev_guarded and chebyshev_history_active:
+            wp.launch(
+                kernel=mark_particle_iteration_chebyshev_exclusions,
+                dim=model.particle_count,
+                inputs=[self.particle_hessians],
+                outputs=[self.particle_chebyshev_collided],
+                device=self.device,
+            )
+        if 0 <= chebyshev_iteration < len(self.particle_chebyshev_weights):
+            if self.particle_chebyshev_guarded:
+                excluded = self.particle_chebyshev_collided
+                for ring in range(self.particle_chebyshev_contact_rings):
+                    expanded = self.particle_chebyshev_guard_masks[ring % 2]
+                    expanded.zero_()
+                    wp.launch(
+                        kernel=expand_particle_iteration_chebyshev_exclusions,
+                        dim=model.particle_count,
+                        inputs=[
+                            excluded,
+                            self.particle_chebyshev_neighbor_offsets,
+                            self.particle_chebyshev_neighbors,
+                        ],
+                        outputs=[expanded],
+                        device=self.device,
+                    )
+                    excluded = expanded
+                wp.launch(
+                    kernel=accelerate_particle_iteration_chebyshev_guarded,
+                    dim=model.particle_count,
+                    inputs=[
+                        state_in.particle_q,
+                        self.particle_chebyshev_older,
+                        model.particle_radius,
+                        model.particle_flags,
+                        excluded,
+                        self.particle_chebyshev_weights[chebyshev_iteration],
+                        self.particle_chebyshev_max_radius_fraction,
+                    ],
+                    outputs=[self.particle_displacements],
+                    device=self.device,
+                )
+            else:
+                wp.launch(
+                    kernel=accelerate_particle_iteration_chebyshev,
+                    dim=model.particle_count,
+                    inputs=[
+                        state_in.particle_q,
+                        self.particle_chebyshev_older,
+                        model.particle_radius,
+                        model.particle_flags,
+                        self.particle_hessians,
+                        self.particle_chebyshev_weights[chebyshev_iteration],
+                        self.particle_chebyshev_max_radius_fraction,
+                    ],
+                    outputs=[self.particle_chebyshev_collided, self.particle_displacements],
+                    device=self.device,
+                )
+            if chebyshev_iteration > 0:
+                self._penetration_free_truncation(state_in.particle_q)
+        if chebyshev_history_active:
+            self.particle_chebyshev_older.assign(self.particle_chebyshev_previous)
+
+        if self.particle_multilevel is not None and iter_num + 1 in self.particle_multilevel_checkpoints:
+            self._apply_particle_multilevel_correction_and_assess(
+                state_in,
+                contacts,
+                body_q,
+                body_q_prev,
+                body_qd,
+                dt,
+            )
+
     def _solve_particle_iteration(
         self,
         state_in: State,
@@ -3269,6 +3643,10 @@ class SolverVBD(SolverBase, CouplingInterface):
     ):
         """Solve one VBD iteration for particles."""
         model = self.model
+
+        if self.particle_enable_batched_jacobi:
+            self._solve_particle_jacobi_iteration(state_in, state_out, contacts, dt, iter_num)
+            return
 
         # Select rigid-body poses for particle-rigid contact evaluation
         if self.integrate_with_external_rigid_solver:
@@ -3551,7 +3929,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                     ],
                     device=self.device,
                 )
-            self._penetration_free_truncation(state_in.particle_q, self.model.particle_color_groups[color])
+            self._penetration_free_truncation(
+                state_in.particle_q,
+                self.model.particle_color_groups[color],
+            )
 
         chebyshev_iteration = iter_num - self.particle_chebyshev_warmup_iterations
         if self.particle_chebyshev_guarded and chebyshev_history_active:

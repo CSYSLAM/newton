@@ -1381,6 +1381,18 @@ def forward_step(
 
 
 @wp.kernel(enable_backward=False)
+def apply_particle_jacobi_correction(
+    particle_ids: wp.array[wp.int32],
+    correction: wp.array[wp.vec3],
+    relaxation: float,
+    displacement: wp.array[wp.vec3],
+):
+    """Apply one weighted frozen-iterate particle correction."""
+    particle = particle_ids[wp.tid()]
+    displacement[particle] += relaxation * correction[particle]
+
+
+@wp.kernel(enable_backward=False)
 def accelerate_particle_iteration_chebyshev(
     particle_q: wp.array[wp.vec3],
     particle_q_older: wp.array[wp.vec3],

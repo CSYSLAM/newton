@@ -101,7 +101,7 @@ def _demo_mode_options(mode):
             "particle_enable_surface_cache": True,
             "particle_enable_truncation_cache": True,
         },
-        "residual-schwarz5": dict(_SURFACE_FAST_BENCHMARK_OPTIONS),
+        "residual-schwarz5": dict(_PREVIOUS_SURFACE_FAST_BENCHMARK_OPTIONS),
     }
     try:
         options.update(mode_options[mode])
@@ -111,6 +111,24 @@ def _demo_mode_options(mode):
 
 
 _SURFACE_FAST_BENCHMARK_OPTIONS = {
+    "iterations": 8,
+    "particle_chebyshev_spectral_radius": 0.8,
+    "particle_enable_batched_jacobi": True,
+    "particle_jacobi_batch_count": 2,
+    "particle_jacobi_relaxation": 1.0,
+    "particle_enable_multilevel_correction": True,
+    "particle_multilevel_checkpoints": (4,),
+    "particle_multilevel_fallback_iterations": 20,
+    "particle_multilevel_selective_polish_iterations": 0,
+    "particle_multilevel_selective_polish_threshold_fraction": 0.001,
+    "particle_multilevel_selective_polish_rings": 0,
+    "particle_multilevel_selective_polish_max_radius_fraction": 0.001,
+    "particle_enable_surface_cache": True,
+    "particle_enable_truncation_cache": True,
+    "particle_collision_detection_interval": -1,
+}
+
+_PREVIOUS_SURFACE_FAST_BENCHMARK_OPTIONS = {
     "iterations": 5,
     "particle_chebyshev_spectral_radius": 0.9,
     "particle_enable_multilevel_correction": True,
@@ -192,7 +210,10 @@ def _run_case(label, sweeps, operator, args, *, demo_mode=None, tuning_options=N
         example = module.Example(newton.viewer.ViewerNull(num_frames=args.frames), example_args)
 
     correction = example.solver.vbd_solver.particle_multilevel
-    if operator is not None and correction is None:
+    requested_multilevel = operator is not None and not (
+        tuning_options is not None and tuning_options.get("particle_enable_multilevel_correction") is False
+    )
+    if requested_multilevel and correction is None:
         raise RuntimeError(f"{label}: requested multilevel correction was disabled on this model/device")
 
     edges = _mesh_edges(example.model)
@@ -545,10 +566,14 @@ def _probe_residual_schwarz_same_substep(args, tuning_options=None):
     candidate_options = dict(_SURFACE_FAST_BENCHMARK_OPTIONS)
     candidate_options.update(tuning_options or {})
     candidate_iterations = int(candidate_options["iterations"])
-    candidate_checkpoints = tuple(candidate_options["particle_multilevel_checkpoints"])
+    candidate_checkpoints = tuple(candidate_options.get("particle_multilevel_checkpoints") or ())
     candidate_polish_iterations = int(candidate_options["particle_multilevel_selective_polish_iterations"])
     candidate_spectral_radius = candidate_options.get("particle_chebyshev_spectral_radius")
     candidate_fallback_iterations = int(candidate_options.get("particle_multilevel_fallback_iterations") or 20)
+    candidate_enable_multilevel = candidate_options.get("particle_enable_multilevel_correction", True)
+    candidate_enable_jacobi = bool(candidate_options.get("particle_enable_batched_jacobi", False))
+    candidate_jacobi_relaxation = float(candidate_options.get("particle_jacobi_relaxation", 0.5))
+    candidate_jacobi_batch_count = int(candidate_options.get("particle_jacobi_batch_count", 1))
 
     def configured_init(self, model, *solver_args, **kwargs):
         options = dict(kwargs.get("vbd_options") or {})
@@ -560,10 +585,10 @@ def _probe_residual_schwarz_same_substep(args, tuning_options=None):
             particle_chebyshev_polish_iterations=0,
             particle_chebyshev_contact_rings=0,
             particle_chebyshev_cleanup_max_radius_fraction=None,
-            particle_enable_multilevel_correction=True,
+            particle_enable_multilevel_correction=candidate_enable_multilevel,
             particle_multilevel_operator=candidate_options.get("particle_multilevel_operator", "graph"),
             particle_multilevel_cluster_size=candidate_options.get("particle_multilevel_cluster_size", 8),
-            particle_multilevel_checkpoints=candidate_checkpoints,
+            particle_multilevel_checkpoints=candidate_checkpoints if candidate_enable_multilevel else None,
             particle_multilevel_fallback_iterations=None,
             particle_multilevel_selective_polish_iterations=candidate_polish_iterations,
             particle_multilevel_selective_polish_threshold_fraction=candidate_options[
@@ -581,6 +606,9 @@ def _probe_residual_schwarz_same_substep(args, tuning_options=None):
             ),
             particle_enable_surface_cache=True,
             particle_enable_truncation_cache=True,
+            particle_enable_batched_jacobi=candidate_enable_jacobi,
+            particle_jacobi_relaxation=candidate_jacobi_relaxation,
+            particle_jacobi_batch_count=candidate_jacobi_batch_count,
             particle_surface_relaxation=candidate_options.get("particle_surface_relaxation", 1.0),
         )
         kwargs["vbd_preset"] = None
@@ -589,14 +617,17 @@ def _probe_residual_schwarz_same_substep(args, tuning_options=None):
         solver = self.vbd_solver
         if not isinstance(solver, SolverVBDSoft) or not solver.integrate_with_external_rigid_solver:
             raise RuntimeError("The strict residual-Schwarz probe requires the externally driven soft backend")
-        if solver.particle_multilevel is None or solver._surface_cached_kernel is None:
-            raise RuntimeError("The strict residual-Schwarz probe requires multilevel and cached surface kernels")
+        if candidate_enable_multilevel and solver.particle_multilevel is None:
+            raise RuntimeError("The strict residual-Schwarz probe requires the requested multilevel correction")
+        if solver._surface_cached_kernel is None:
+            raise RuntimeError("The strict residual-Schwarz probe requires cached surface kernels")
         buffers["correction"] = solver.particle_multilevel
         for name in ("surface_anchor_angles", "_surface_cached_kernel", "_particle_truncation_cache"):
             buffers[name] = getattr(solver, name)
             setattr(solver, name, None)
         solver.particle_multilevel = None
         solver.particle_chebyshev_enabled = False
+        solver.particle_enable_batched_jacobi = False
         for name in ("initial", "displacements", "ordinary30", "candidate"):
             buffers[name] = wp.empty_like(model.particle_q)
 
@@ -610,6 +641,7 @@ def _probe_residual_schwarz_same_substep(args, tuning_options=None):
 
     def attach_candidate(self):
         self.particle_multilevel = buffers["correction"]
+        self.particle_enable_batched_jacobi = candidate_enable_jacobi
         for name in ("surface_anchor_angles", "_surface_cached_kernel", "_particle_truncation_cache"):
             setattr(self, name, buffers[name])
         self.iterations = candidate_iterations
@@ -633,6 +665,7 @@ def _probe_residual_schwarz_same_substep(args, tuning_options=None):
     def detach_candidate(self):
         self.particle_multilevel = None
         self.particle_chebyshev_enabled = False
+        self.particle_enable_batched_jacobi = False
         for name in ("surface_anchor_angles", "_surface_cached_kernel", "_particle_truncation_cache"):
             setattr(self, name, None)
         self.iterations = 60
@@ -650,19 +683,29 @@ def _probe_residual_schwarz_same_substep(args, tuning_options=None):
                 self._penetration_free_truncation(state_in.particle_q)
 
             def run_fallback():
-                for fallback_iteration in range(candidate_iterations, candidate_fallback_iterations):
-                    original_iteration(self, state_in, state_out, contacts, dt, fallback_iteration)
+                jacobi_enabled = self.particle_enable_batched_jacobi
+                chebyshev_enabled = self.particle_chebyshev_enabled
+                self.particle_enable_batched_jacobi = False
+                self.particle_chebyshev_enabled = False
+                try:
+                    for fallback_iteration in range(candidate_iterations, candidate_fallback_iterations):
+                        original_iteration(self, state_in, state_out, contacts, dt, fallback_iteration)
+                finally:
+                    self.particle_enable_batched_jacobi = jacobi_enabled
+                    self.particle_chebyshev_enabled = chebyshev_enabled
 
-            if self.device.is_capturing:
-                wp.capture_if(
-                    buffers["correction"].runtime_status,
-                    on_true=run_fallback,
-                    on_false=run_polish,
-                )
-            elif int(buffers["correction"].runtime_status.numpy()[0]) != 0:
-                run_fallback()
-            else:
-                run_polish()
+            correction = buffers["correction"]
+            if correction is not None:
+                if self.device.is_capturing:
+                    wp.capture_if(
+                        correction.runtime_status,
+                        on_true=run_fallback,
+                        on_false=run_polish,
+                    )
+                elif int(correction.runtime_status.numpy()[0]) != 0:
+                    run_fallback()
+                else:
+                    run_polish()
             wp.copy(buffers["candidate"], state_in.particle_q)
             detach_candidate(self)
             restore(self, state_in)
@@ -690,8 +733,13 @@ def _probe_residual_schwarz_same_substep(args, tuning_options=None):
         for frame in range(args.frames):
             example.step()
             gold = example.state_0.particle_q.numpy()
-            rejected_samples += int(buffers["correction"].runtime_status.numpy()[0] != 0)
-            active_samples.append(int(buffers["correction"].selective_active_count.numpy()[0]))
+            correction = buffers["correction"]
+            rejected_samples += int(correction is not None and correction.runtime_status.numpy()[0] != 0)
+            active_samples.append(
+                0
+                if correction is None or correction.selective_active_count is None
+                else int(correction.selective_active_count.numpy()[0])
+            )
             for label, name in (("ordinary30", "ordinary30"), (candidate_label, "candidate")):
                 positions = buffers[name].numpy()
                 if not np.all(np.isfinite(positions)) or not np.all(np.isfinite(gold)):
@@ -719,8 +767,10 @@ def _probe_residual_schwarz_same_substep(args, tuning_options=None):
         "frame_samples": args.frames,
         "candidate_rejected_last_substep_samples": rejected_samples,
         "candidate_active_particles_mean": float(np.mean(active_samples)),
-        "candidate_cluster_count": buffers["correction"].cluster_count,
-        "candidate_runtime_metrics": buffers["correction"].runtime_metrics.numpy().tolist(),
+        "candidate_cluster_count": 0 if buffers["correction"] is None else buffers["correction"].cluster_count,
+        "candidate_runtime_metrics": (
+            [] if buffers["correction"] is None else buffers["correction"].runtime_metrics.numpy().tolist()
+        ),
         "errors": summaries,
         "candidate_to_ordinary30_error_ratio": ratios,
         "test_final_passed": True,
@@ -805,7 +855,7 @@ def main():
         return
     if tuning_options is not None:
         baseline, _, _ = _run_case(
-            "current_fastest",
+            "previous_surface_fast",
             5,
             "graph",
             args,
