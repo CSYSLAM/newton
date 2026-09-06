@@ -29,6 +29,103 @@ from newton.solvers import SolverMJVBDV2
 _EXAMPLE_MODULE = "newton.examples.mjvbdv2.example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00"
 
 
+def _demo_mode_options(mode):
+    """Return complete historical policies without exposing them in the demo UI."""
+    options = {
+        "iterations": 20,
+        "particle_chebyshev_spectral_radius": None,
+        "particle_chebyshev_warmup_iterations": 0,
+        "particle_chebyshev_polish_iterations": 0,
+        "particle_chebyshev_contact_rings": 0,
+        "particle_chebyshev_cleanup_max_radius_fraction": None,
+        "particle_enable_multilevel_correction": False,
+        "particle_multilevel_checkpoints": None,
+        "particle_multilevel_min_residual_reduction": 1.0e-4,
+        "particle_multilevel_max_clamp_fraction": 0.5,
+        "particle_multilevel_coarse_iterations": 8,
+        "particle_multilevel_selective_polish_iterations": 0,
+        "particle_multilevel_selective_polish_threshold_fraction": 0.001,
+        "particle_multilevel_selective_polish_rings": 0,
+        "particle_multilevel_selective_polish_max_radius_fraction": 0.001,
+        "particle_multilevel_fallback_iterations": None,
+        "particle_surface_relaxation": 1.0,
+        "particle_enable_surface_cache": False,
+        "particle_enable_truncation_cache": False,
+    }
+    mode_options = {
+        "reference20": {},
+        "baseline": {
+            "iterations": 12,
+            "particle_enable_multilevel_correction": True,
+            "particle_multilevel_fallback_iterations": 20,
+        },
+        "contact-free": {"iterations": 12, "particle_surface_relaxation": 1.3},
+        "cached13": {
+            "iterations": 13,
+            "particle_surface_relaxation": 1.3,
+            "particle_enable_surface_cache": True,
+            "particle_enable_truncation_cache": True,
+        },
+        "chebyshev8": {
+            "iterations": 8,
+            "particle_chebyshev_spectral_radius": 0.9,
+            "particle_enable_multilevel_correction": True,
+            "particle_multilevel_fallback_iterations": 20,
+        },
+        "cached-chebyshev8": {
+            "iterations": 8,
+            "particle_chebyshev_spectral_radius": 0.9,
+            "particle_enable_multilevel_correction": True,
+            "particle_multilevel_fallback_iterations": 20,
+            "particle_enable_surface_cache": True,
+            "particle_enable_truncation_cache": True,
+        },
+        "guarded-cached-chebyshev8": {
+            "iterations": 8,
+            "particle_chebyshev_spectral_radius": 0.9,
+            "particle_chebyshev_warmup_iterations": 2,
+            "particle_chebyshev_polish_iterations": 2,
+            "particle_chebyshev_contact_rings": 2,
+            "particle_chebyshev_cleanup_max_radius_fraction": 0.03,
+            "particle_enable_multilevel_correction": True,
+            "particle_multilevel_fallback_iterations": 13,
+            "particle_enable_surface_cache": True,
+            "particle_enable_truncation_cache": True,
+        },
+        "guarded-cached-chebyshev6": {
+            "iterations": 6,
+            "particle_chebyshev_spectral_radius": 0.9,
+            "particle_enable_multilevel_correction": True,
+            "particle_multilevel_checkpoints": (3,),
+            "particle_multilevel_fallback_iterations": 20,
+            "particle_enable_surface_cache": True,
+            "particle_enable_truncation_cache": True,
+        },
+        "residual-schwarz5": dict(_SURFACE_FAST_BENCHMARK_OPTIONS),
+    }
+    try:
+        options.update(mode_options[mode])
+    except KeyError as error:
+        raise ValueError(f"Unknown benchmark demo mode: {mode}") from error
+    return options
+
+
+_SURFACE_FAST_BENCHMARK_OPTIONS = {
+    "iterations": 5,
+    "particle_chebyshev_spectral_radius": 0.9,
+    "particle_enable_multilevel_correction": True,
+    "particle_multilevel_checkpoints": (3,),
+    "particle_multilevel_fallback_iterations": 20,
+    "particle_multilevel_selective_polish_iterations": 2,
+    "particle_multilevel_selective_polish_threshold_fraction": 0.001,
+    "particle_multilevel_selective_polish_rings": 0,
+    "particle_multilevel_selective_polish_max_radius_fraction": 0.001,
+    "particle_enable_surface_cache": True,
+    "particle_enable_truncation_cache": True,
+    "particle_collision_detection_interval": -1,
+}
+
+
 def _coarse_options(sweeps, operator, reference_sweeps):
     return {
         "iterations": sweeps,
@@ -67,14 +164,16 @@ def _run_case(label, sweeps, operator, args, *, demo_mode=None):
 
     def configured_init(self, model, *solver_args, **kwargs):
         options = dict(kwargs.get("vbd_options") or {})
-        if demo_mode is None:
+        options.setdefault("particle_collision_detection_interval", -1)
+        kwargs["vbd_preset"] = None
+        if demo_mode is not None:
+            options.update(_demo_mode_options(demo_mode))
+        else:
             options.update(_coarse_options(sweeps, operator, args.reference_sweeps))
         kwargs["vbd_options"] = options
         return original_init(self, model, *solver_args, **kwargs)
 
     module, example_args = _example_args(args)
-    if demo_mode is not None:
-        example_args.particle_solver_mode = demo_mode
     with mock.patch.object(SolverMJVBDV2, "__init__", configured_init):
         example = module.Example(newton.viewer.ViewerNull(num_frames=args.frames), example_args)
 
@@ -171,7 +270,9 @@ def _probe_same_substep(sweeps, args):
 
     def configured_init(self, model, *solver_args, **kwargs):
         options = dict(kwargs.get("vbd_options") or {})
+        options.setdefault("particle_collision_detection_interval", -1)
         options.update(_coarse_options(args.reference_sweeps, "galerkin", None))
+        kwargs["vbd_preset"] = None
         kwargs["vbd_options"] = options
         original_init(self, model, *solver_args, **kwargs)
         solver = self.vbd_solver
@@ -255,6 +356,7 @@ def _probe_demo_same_substep(args):
 
     def configured_init(self, model, *solver_args, **kwargs):
         options = dict(kwargs.get("vbd_options") or {})
+        options.setdefault("particle_collision_detection_interval", -1)
         # Keep the demo's exact graph defaults (including the 5% radius cap),
         # but only apply that correction inside the isolated baseline trial.
         options.update(
@@ -268,6 +370,7 @@ def _probe_demo_same_substep(args):
             particle_enable_surface_cache=True,
             particle_enable_truncation_cache=True,
         )
+        kwargs["vbd_preset"] = None
         kwargs["vbd_options"] = options
         original_init(self, model, *solver_args, **kwargs)
         solver = self.vbd_solver
@@ -374,7 +477,6 @@ def _probe_demo_same_substep(args):
                 restore(self, state_in)
 
     module, example_args = _example_args(args)
-    example_args.particle_solver_mode = "baseline"
     records = {"baseline": [], "contact-free": [], "cached13": [], "guarded": []}
     rejected_samples = 0
     with (
@@ -429,6 +531,7 @@ def _probe_residual_schwarz_same_substep(args):
 
     def configured_init(self, model, *solver_args, **kwargs):
         options = dict(kwargs.get("vbd_options") or {})
+        options.setdefault("particle_collision_detection_interval", -1)
         options.update(
             iterations=60,
             particle_chebyshev_spectral_radius=0.9,
@@ -447,6 +550,7 @@ def _probe_residual_schwarz_same_substep(args):
             particle_enable_truncation_cache=True,
             particle_surface_relaxation=1.0,
         )
+        kwargs["vbd_preset"] = None
         kwargs["vbd_options"] = options
         original_init(self, model, *solver_args, **kwargs)
         solver = self.vbd_solver
@@ -537,7 +641,6 @@ def _probe_residual_schwarz_same_substep(args):
         original_iteration(self, state_in, state_out, contacts, dt, iter_num)
 
     module, example_args = _example_args(args)
-    example_args.particle_solver_mode = "reference20"
     records = {"ordinary30": [], "residual_schwarz5": []}
     rejected_samples = 0
     active_samples = []

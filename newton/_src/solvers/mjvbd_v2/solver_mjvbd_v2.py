@@ -24,6 +24,65 @@ __all__ = ["SolverMJVBDV2"]
 
 _PNEUMATIC_STATE_FIELDS = ("volume", "absolute_pressure", "volume_rate", "clamp_flags")
 
+_SURFACE_FAST_VBD_OPTIONS: dict[str, object] = {
+    "iterations": 5,
+    "particle_chebyshev_spectral_radius": 0.9,
+    "particle_enable_multilevel_correction": True,
+    "particle_multilevel_checkpoints": (3,),
+    "particle_multilevel_min_residual_reduction": 1.0e-4,
+    "particle_multilevel_max_clamp_fraction": 0.5,
+    "particle_multilevel_selective_polish_iterations": 2,
+    "particle_multilevel_selective_polish_threshold_fraction": 0.001,
+    "particle_multilevel_selective_polish_rings": 0,
+    "particle_multilevel_selective_polish_max_radius_fraction": 0.001,
+    "particle_multilevel_fallback_iterations": 20,
+    "particle_enable_surface_cache": True,
+    "particle_enable_truncation_cache": True,
+    "particle_collision_detection_interval": -1,
+}
+
+
+def _resolve_vbd_options(
+    model: Model,
+    preset: Literal["surface-fast"] | None,
+    overrides: Mapping[str, object] | None,
+    *,
+    use_external_rigid_surface_path: bool = True,
+) -> dict[str, object]:
+    """Resolve a high-level VBD policy before applying expert overrides."""
+    if preset not in (None, "surface-fast"):
+        raise ValueError("vbd_preset must be None or 'surface-fast'")
+
+    options: dict[str, object] = {}
+    if preset == "surface-fast":
+        requested_deterministic = (overrides or {}).get("deterministic")
+        effective_deterministic = (
+            wp.config.deterministic if requested_deterministic is None else requested_deterministic
+        )
+        surface_particle_count = (
+            np.unique(np.asarray(model.tri_indices.numpy(), dtype=np.int32)).size if model.tri_count else 0
+        )
+        supports_fast_surface_path = (
+            model.device.is_cuda
+            and not model.requires_grad
+            and use_external_rigid_surface_path
+            and surface_particle_count == model.particle_count
+            and model.tet_count == 0
+            and model.spring_count == 0
+            and _get_pneumatic_counts(model)[0] == 0
+            and effective_deterministic == wp.DeterministicMode.NOT_GUARANTEED
+        )
+        if supports_fast_surface_path:
+            options.update(_SURFACE_FAST_VBD_OPTIONS)
+        else:
+            # Keep the preset semantically safe on CPU, differentiable,
+            # deterministic, and volumetric models where its CUDA surface
+            # accelerators are unavailable or have not met the accuracy gate.
+            options["iterations"] = 20
+
+    options.update(overrides or {})
+    return options
+
 
 @wp.kernel
 def _copy_pneumatic_state_kernel(
@@ -92,6 +151,18 @@ class SolverMJVBDV2(_OneWayCoupledProxy):
         mujoco_options: Mapping[str, object] | None = None,
         collision_options: Mapping[str, object] | None = None,
     ) -> None:
+        """Create the specialized one-way MuJoCo/VBD solver.
+
+        Args:
+            model: Simulation model.
+            mujoco_articulations: Articulations owned by MuJoCo.
+            mujoco_joints: Joints owned by MuJoCo.
+            joint_mode: Whether MuJoCo joints are dynamic or kinematic.
+            contact_mode: Particle/rigid contact pipeline selection.
+            vbd_options: Options forwarded by the public MJVBDV2 dispatcher.
+            mujoco_options: Options forwarded to the private MuJoCo solver.
+            collision_options: Options forwarded to the contact pipeline.
+        """
         if joint_mode not in ("dynamic", "kinematic"):
             raise ValueError("joint_mode must be 'dynamic' or 'kinematic'")
         if contact_mode not in ("auto", "soft", "full"):

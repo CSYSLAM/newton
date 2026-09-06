@@ -55,9 +55,6 @@ RADIUS = 0.008
 SOFT_MARGIN = 0.008
 SELF_RADIUS = 0.002
 SELF_MARGIN = 0.002
-VBD_ITERATIONS = 12
-VBD_CHEBYSHEV_ITERATIONS = 8
-VBD_CHEBYSHEV_SPECTRAL_RADIUS = 0.9
 IK_ITERATIONS = 24
 ROBOT_CONTACT_KE = 9.0e5
 LEGACY_SOFT_CONTACT_KD = 5.0e-2
@@ -188,78 +185,6 @@ class Example:
         self.frame_dt = 1.0 / self.fps
         if args.sim_substeps < 1:
             raise ValueError("--sim-substeps must be at least 1")
-        self.particle_solver_mode = getattr(args, "particle_solver_mode", "residual-schwarz5")
-        mode_iterations = {
-            "baseline": VBD_ITERATIONS,
-            "reference20": 20,
-            "contact-free": VBD_ITERATIONS,
-            "cached13": 13,
-            "chebyshev8": VBD_CHEBYSHEV_ITERATIONS,
-            "cached-chebyshev8": VBD_CHEBYSHEV_ITERATIONS,
-            "guarded-cached-chebyshev8": VBD_CHEBYSHEV_ITERATIONS,
-            "guarded-cached-chebyshev6": 6,
-            "residual-schwarz5": 5,
-        }
-        if self.particle_solver_mode not in mode_iterations:
-            raise ValueError(f"Unknown particle solver mode: {self.particle_solver_mode}")
-        requested_iterations = getattr(args, "vbd_iterations", None)
-        self.vbd_iterations = (
-            mode_iterations[self.particle_solver_mode] if requested_iterations is None else int(requested_iterations)
-        )
-        if self.vbd_iterations < 1:
-            raise ValueError("--vbd-iterations must be at least 1")
-        mode_chebyshev_radius = (
-            VBD_CHEBYSHEV_SPECTRAL_RADIUS
-            if self.particle_solver_mode
-            in (
-                "chebyshev8",
-                "cached-chebyshev8",
-                "guarded-cached-chebyshev8",
-                "guarded-cached-chebyshev6",
-                "residual-schwarz5",
-            )
-            else None
-        )
-        self.particle_chebyshev_spectral_radius = getattr(
-            args,
-            "particle_chebyshev_spectral_radius",
-            mode_chebyshev_radius,
-        )
-        requested_multilevel = getattr(args, "particle_multilevel", None)
-        self.particle_multilevel = (
-            self.particle_solver_mode
-            in (
-                "baseline",
-                "chebyshev8",
-                "cached-chebyshev8",
-                "guarded-cached-chebyshev8",
-                "guarded-cached-chebyshev6",
-                "residual-schwarz5",
-            )
-            if requested_multilevel is None
-            else bool(requested_multilevel)
-        )
-        self.particle_multilevel_coarse_iterations = int(getattr(args, "particle_multilevel_coarse_iterations", 8))
-        self.particle_multilevel_selective_polish_iterations = int(
-            getattr(
-                args,
-                "particle_multilevel_selective_polish_iterations",
-                2 if self.particle_solver_mode == "residual-schwarz5" else 0,
-            )
-        )
-        self.particle_multilevel_selective_polish_threshold_fraction = float(
-            getattr(args, "particle_multilevel_selective_polish_threshold_fraction", 0.001)
-        )
-        self.particle_multilevel_selective_polish_rings = int(
-            getattr(args, "particle_multilevel_selective_polish_rings", 0)
-        )
-        self.particle_multilevel_selective_polish_max_radius_fraction = float(
-            getattr(args, "particle_multilevel_selective_polish_max_radius_fraction", 0.001)
-        )
-        self.particle_multilevel_checkpoint_iteration = int(
-            getattr(args, "particle_multilevel_checkpoint_iteration", 3)
-        )
-        self.particle_surface_relaxation = 1.3 if self.particle_solver_mode in ("contact-free", "cached13") else 1.0
         self.sim_substeps = int(args.sim_substeps)
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.sim_time = 0.0
@@ -282,74 +207,14 @@ class Example:
             mujoco_articulations=self.robot_articulations,
             joint_mode="kinematic",
             contact_mode="soft",
+            vbd_preset="surface-fast",
             collision_options={"soft_contact_margin": SOFT_MARGIN},
             vbd_options={
-                "iterations": self.vbd_iterations,
-                "particle_chebyshev_spectral_radius": self.particle_chebyshev_spectral_radius,
-                "particle_chebyshev_warmup_iterations": (
-                    2 if self.particle_solver_mode == "guarded-cached-chebyshev8" else 0
-                ),
-                "particle_chebyshev_polish_iterations": (
-                    2 if self.particle_solver_mode == "guarded-cached-chebyshev8" else 0
-                ),
-                "particle_chebyshev_contact_rings": (
-                    2 if self.particle_solver_mode == "guarded-cached-chebyshev8" else 0
-                ),
-                "particle_chebyshev_cleanup_max_radius_fraction": (
-                    0.03 if self.particle_solver_mode == "guarded-cached-chebyshev8" else None
-                ),
-                "particle_multilevel_checkpoints": (
-                    (self.particle_multilevel_checkpoint_iteration,)
-                    if self.particle_solver_mode in ("guarded-cached-chebyshev6", "residual-schwarz5")
-                    else None
-                ),
-                "particle_enable_multilevel_correction": self.particle_multilevel,
-                "particle_surface_relaxation": self.particle_surface_relaxation,
-                "particle_enable_surface_cache": self.particle_solver_mode
-                in (
-                    "cached13",
-                    "cached-chebyshev8",
-                    "guarded-cached-chebyshev8",
-                    "guarded-cached-chebyshev6",
-                    "residual-schwarz5",
-                ),
-                "particle_enable_truncation_cache": self.particle_solver_mode
-                in (
-                    "cached13",
-                    "cached-chebyshev8",
-                    "guarded-cached-chebyshev8",
-                    "guarded-cached-chebyshev6",
-                    "residual-schwarz5",
-                ),
-                "particle_multilevel_min_residual_reduction": 1.0e-4,
-                "particle_multilevel_max_clamp_fraction": 0.5,
-                "particle_multilevel_coarse_iterations": self.particle_multilevel_coarse_iterations,
-                "particle_multilevel_selective_polish_iterations": (
-                    self.particle_multilevel_selective_polish_iterations
-                ),
-                "particle_multilevel_selective_polish_threshold_fraction": (
-                    self.particle_multilevel_selective_polish_threshold_fraction
-                ),
-                "particle_multilevel_selective_polish_rings": self.particle_multilevel_selective_polish_rings,
-                "particle_multilevel_selective_polish_max_radius_fraction": (
-                    self.particle_multilevel_selective_polish_max_radius_fraction
-                ),
-                "particle_multilevel_fallback_iterations": (
-                    13
-                    if self.particle_solver_mode == "guarded-cached-chebyshev8"
-                    else 20
-                    if self.particle_multilevel
-                    else None
-                ),
                 "particle_enable_self_contact": True,
                 "particle_self_contact_radius": SELF_RADIUS,
                 "particle_self_contact_margin": SELF_MARGIN,
                 "particle_topological_contact_filter_threshold": 1,
                 "particle_rest_shape_contact_exclusion_radius": 0.03,
-                "particle_vertex_contact_buffer_size": 16,
-                "particle_edge_contact_buffer_size": 20,
-                "rigid_body_particle_contact_buffer_size": 256,
-                "particle_collision_detection_interval": -1,
             },
         )
         self.contacts = getattr(self.solver, "contacts", None)
@@ -948,29 +813,6 @@ class Example:
         parser = newton.examples.create_parser()
         parser.set_defaults(num_frames=900)
         parser.add_argument(
-            "--particle-solver-mode",
-            choices=(
-                "baseline",
-                "reference20",
-                "contact-free",
-                "cached13",
-                "chebyshev8",
-                "cached-chebyshev8",
-                "guarded-cached-chebyshev8",
-                "guarded-cached-chebyshev6",
-                "residual-schwarz5",
-            ),
-            default="residual-schwarz5",
-            help="Baseline: 12 sweeps + multilevel; reference20: ordinary 20 sweeps; "
-            "contact-free: experimental 12 sweeps with contact-free surface relaxation; "
-            "cached13: experimental 13 relaxed sweeps with surface/DAT geometry caches; "
-            "chebyshev8: 8 collision-aware Chebyshev sweeps + multilevel; "
-            "cached-chebyshev8: chebyshev8 with surface/DAT geometry caches; "
-            "guarded-cached-chebyshev6: 6 total sweeps with one mid-step multilevel checkpoint; "
-            "residual-schwarz5 (default): 5 sweeps plus two residual-selected frozen-contact Schwarz passes; "
-            "guarded-cached-chebyshev8: cached 2 ordinary + 4 topology-guarded Chebyshev + 2 polish sweeps.",
-        )
-        parser.add_argument(
             "--robot-urdf", default=None, help="Optional Dexforce W1 URDF; defaults to the ignored tablecloth asset."
         )
         parser.add_argument(
@@ -980,65 +822,6 @@ class Example:
         parser.add_argument("--enable-self-collisions", action="store_true")
         parser.add_argument("--trajectory-time-scale", type=float, default=4.0)
         parser.add_argument("--sim-substeps", type=int, default=10)
-        parser.add_argument(
-            "--vbd-iterations", type=int, default=None, help="Override the selected mode's sweep count."
-        )
-        parser.add_argument(
-            "--particle-chebyshev-spectral-radius",
-            type=float,
-            default=argparse.SUPPRESS,
-            help="Override the selected mode's contact-aware Chebyshev spectral radius.",
-        )
-        parser.add_argument(
-            "--no-particle-chebyshev",
-            action="store_const",
-            const=None,
-            default=argparse.SUPPRESS,
-            dest="particle_chebyshev_spectral_radius",
-            help="Disable particle Chebyshev acceleration.",
-        )
-        parser.add_argument(
-            "--particle-multilevel",
-            action=argparse.BooleanOptionalAction,
-            default=None,
-            help="Override the selected mode's guarded particle multilevel correction.",
-        )
-        parser.add_argument(
-            "--particle-multilevel-coarse-iterations",
-            type=int,
-            default=8,
-            help="Coarse iterations used by the selected mode's multilevel correction.",
-        )
-        parser.add_argument(
-            "--particle-multilevel-selective-polish-iterations",
-            type=int,
-            default=argparse.SUPPRESS,
-            help="Additional surface sweeps restricted to residual-selected particles.",
-        )
-        parser.add_argument(
-            "--particle-multilevel-selective-polish-threshold-fraction",
-            type=float,
-            default=argparse.SUPPRESS,
-            help="Local-correction threshold relative to particle radius for selective polishing.",
-        )
-        parser.add_argument(
-            "--particle-multilevel-selective-polish-rings",
-            type=int,
-            default=argparse.SUPPRESS,
-            help="Fine-topology dilation rings around residual-selected particles.",
-        )
-        parser.add_argument(
-            "--particle-multilevel-selective-polish-max-radius-fraction",
-            type=float,
-            default=argparse.SUPPRESS,
-            help="Per-polish trust-region radius relative to particle radius.",
-        )
-        parser.add_argument(
-            "--particle-multilevel-checkpoint-iteration",
-            type=int,
-            default=3,
-            help="Iteration number at which the guarded 6-sweep mode applies its coarse correction.",
-        )
         parser.add_argument(
             "--ik-iterations",
             type=int,

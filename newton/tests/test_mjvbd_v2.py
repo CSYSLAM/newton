@@ -12,6 +12,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.mjvbd_v2.ownership import resolve_ownership
+from newton._src.solvers.mjvbd_v2.solver_mjvbd_v2 import _resolve_vbd_options
 from newton._src.solvers.mjvbd_v2.vbd_soft.solver_vbd import SolverVBD as SolverVBDSoft
 from newton.solvers import SolverMJVBD, SolverMJVBDV2
 
@@ -364,6 +365,46 @@ def _build_falling_articulation_model(device):
 
 
 class TestMJVBDV2(unittest.TestCase):
+    def test_surface_fast_preset_falls_back_and_applies_overrides(self):
+        """Use ordinary sweeps off CUDA and keep expert overrides authoritative."""
+        model = _build_self_contact_cloth_model("cpu", 0.05)
+
+        options = _resolve_vbd_options(model, "surface-fast", None)
+        self.assertEqual(options, {"iterations": 20})
+
+        options = _resolve_vbd_options(model, "surface-fast", {"iterations": 7})
+        self.assertEqual(options, {"iterations": 7})
+
+        options = _resolve_vbd_options(
+            model,
+            "surface-fast",
+            None,
+            use_external_rigid_surface_path=False,
+        )
+        self.assertEqual(options, {"iterations": 20})
+
+        solver = SolverMJVBDV2(model, vbd_preset="surface-fast", contact_mode="soft")
+        self.assertEqual(solver.vbd_solver.iterations, 20)
+        self.assertEqual(solver.vbd_preset, "surface-fast")
+
+        with self.assertRaisesRegex(ValueError, "vbd_preset"):
+            _resolve_vbd_options(model, "unknown", None)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Surface-fast preset requires CUDA")
+    def test_surface_fast_preset_selects_validated_cuda_policy(self):
+        """Expand the compact surface preset to the validated CUDA schedule."""
+        model = _build_self_contact_cloth_model("cuda:0", 0.05)
+
+        options = _resolve_vbd_options(model, "surface-fast", None)
+
+        self.assertEqual(options["iterations"], 5)
+        self.assertEqual(options["particle_multilevel_checkpoints"], (3,))
+        self.assertEqual(options["particle_multilevel_fallback_iterations"], 20)
+        self.assertEqual(options["particle_multilevel_selective_polish_iterations"], 2)
+        self.assertEqual(options["particle_collision_detection_interval"], -1)
+        self.assertTrue(options["particle_enable_surface_cache"])
+        self.assertTrue(options["particle_enable_truncation_cache"])
+
     def test_backends_use_rod_joint_name(self):
         """Avoid the deprecated cable-joint alias in both VBD paths."""
         full_model, _, _, _, full_articulation = _build_partition_model("cpu")

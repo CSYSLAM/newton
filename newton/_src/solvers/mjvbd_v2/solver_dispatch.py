@@ -33,7 +33,7 @@ from .mujoco.solver_mujoco import SolverMuJoCo
 from .ownership import MJVBDV2Ownership, resolve_ownership
 from .soft_contact_pipeline import MJVBDSoftContactPipeline
 from .solver_mjvbd_v2 import SolverMJVBDV2 as _SolverMJVBDV2Coupled
-from .solver_mjvbd_v2 import _SolverMJVBDV2Pneumatic
+from .solver_mjvbd_v2 import _resolve_vbd_options, _SolverMJVBDV2Pneumatic
 from .vbd.solver_vbd import SolverVBD, _get_pneumatic_counts
 from .vbd_soft.solver_vbd import SolverVBD as SolverVBDSoft
 
@@ -413,8 +413,12 @@ class SolverMJVBDV2(SolverBase):
         contact_mode: Use ``"soft"`` for sparse particle-shape contacts,
             ``"full"`` for the complete collision pipeline, or ``"auto"`` to
             choose full contact only when VBD owns dynamic rigid bodies.
-        vbd_options: Keyword arguments forwarded to the selected private VBD
-            implementation.
+        vbd_preset: Optional high-level VBD policy. ``"surface-fast"`` selects
+            the validated CUDA surface schedule and falls back to 20 ordinary
+            sweeps outside externally driven, triangle-only surface solves,
+            including volumetric, pneumatic, spring, differentiable,
+            deterministic, and VBD-dynamic-rigid scenes.
+        vbd_options: Expert VBD overrides applied after ``vbd_preset``.
         mujoco_options: Keyword arguments forwarded to the private MuJoCo
             implementation when the selected backend uses MuJoCo.
         collision_options: Keyword arguments forwarded to the selected contact
@@ -476,6 +480,7 @@ class SolverMJVBDV2(SolverBase):
         mujoco_joints: Sequence[int] | None = None,
         joint_mode: Literal["dynamic", "kinematic"] = "dynamic",
         contact_mode: Literal["auto", "soft", "full"] = "auto",
+        vbd_preset: Literal["surface-fast"] | None = None,
         vbd_options: Mapping[str, object] | None = None,
         mujoco_options: Mapping[str, object] | None = None,
         collision_options: Mapping[str, object] | None = None,
@@ -500,6 +505,15 @@ class SolverMJVBDV2(SolverBase):
             for index in self.ownership.vbd_bodies
         )
         pneumatic_cavity_count, pneumatic_face_count = _get_pneumatic_counts(model)
+        resolved_vbd_options = _resolve_vbd_options(
+            model,
+            vbd_preset,
+            vbd_options,
+            use_external_rigid_surface_path=(
+                not self.ownership.has_vbd_dynamic_bodies and contact_mode in ("auto", "soft")
+            ),
+        )
+        self.vbd_preset = vbd_preset
 
         has_vbd_dynamics = self.ownership.has_vbd_dynamic_bodies or model.particle_count > 0
 
@@ -511,7 +525,7 @@ class SolverMJVBDV2(SolverBase):
                 model,
                 self.ownership,
                 contact_mode=contact_mode,
-                vbd_options=vbd_options,
+                vbd_options=resolved_vbd_options,
                 collision_options=collision_options,
             )
         elif not has_vbd_dynamics and joint_mode == "kinematic":
@@ -535,7 +549,7 @@ class SolverMJVBDV2(SolverBase):
             backend = _KinematicSoftBackend(
                 model,
                 use_full_vbd=pneumatic_cavity_count > 0,
-                vbd_options=vbd_options,
+                vbd_options=resolved_vbd_options,
                 collision_options=collision_options,
             )
         elif joint_mode == "kinematic":
@@ -545,7 +559,7 @@ class SolverMJVBDV2(SolverBase):
             backend = _KinematicFullVBDBackend(
                 model,
                 self.ownership,
-                vbd_options=vbd_options,
+                vbd_options=resolved_vbd_options,
                 collision_options=collision_options,
             )
         else:
@@ -557,7 +571,7 @@ class SolverMJVBDV2(SolverBase):
                 mujoco_joints=mujoco_joints,
                 joint_mode=joint_mode,
                 contact_mode=contact_mode,
-                vbd_options=vbd_options,
+                vbd_options=resolved_vbd_options,
                 mujoco_options=mujoco_options,
                 collision_options=collision_options,
             )

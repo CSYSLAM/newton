@@ -3104,3 +3104,33 @@ The benchmark now exposes both retained six-sweep and residual-Schwarz modes
 and a strict `--same-substep --strict-residual-schwarz` diagnostic. Unit tests
 cover option validation, threshold/ring mask construction, explicit volumetric
 rejection, and eager plus CUDA Graph execution in both private VBD backends.
+
+### 2026-09-06: consolidate the validated surface policy into one preset
+
+The T-shirt demo had accumulated more than twenty solver switches while
+comparing superseded acceleration experiments. That made the final example
+look as though users needed to understand and reproduce an implementation
+schedule involving Chebyshev warm-up, cleanup rings, multilevel checkpoints,
+selective polish, caches, and fallback iterations.
+
+`SolverMJVBDV2` now accepts `vbd_preset="surface-fast"`. The preset owns the
+validated five-sweep residual-Schwarz schedule and its 20-sweep transactional
+fallback. `vbd_options` remains an expert override layer and takes precedence
+over preset values. Outside externally driven CUDA triangle-only surface
+solves—including differentiable, deterministic, spring, tetrahedral,
+pneumatic, and VBD-dynamic-rigid models—the preset resolves to 20 ordinary
+sweeps instead of silently running five sweeps on an unvalidated path.
+
+The final T-shirt demo now selects that single preset and specifies only its
+scene-scale self-contact distances and topology filtering. It uses the safe
+default row capacities instead of exposing memory-tuning knobs. Historical
+and rejected policies remain available only in the dedicated benchmark
+script; they are no longer advertised as normal demo configuration choices.
+
+A 300-frame headless run after consolidation measured 47.672 ms/frame in
+100-frame blocks of 41.804, 47.916, and 53.297 ms/frame. The nearby
+pre-consolidation measurement was 47.564 ms/frame, so the difference is timing
+noise rather than a material regression. All three multilevel statuses were
+zero and `test_final()` passed. The public dispatch suite passed 42 tests, the
+preset-specific CUDA/fallback tests passed, and a direct 10-frame invocation
+of the simplified demo completed successfully.
