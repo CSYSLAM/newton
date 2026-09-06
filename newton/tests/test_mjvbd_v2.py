@@ -365,6 +365,29 @@ def _build_falling_articulation_model(device):
 
 
 class TestMJVBDV2(unittest.TestCase):
+    def test_private_mujoco_registration_uses_canonical_damping(self):
+        """Register only the canonical joint-damping attribute."""
+        builder = newton.ModelBuilder()
+
+        SolverMJVBDV2.register_custom_attributes(builder)
+
+        self.assertNotIn("mujoco:dof_passive_damping", builder.custom_attributes)
+
+    def test_full_contact_legacy_margin_maps_to_gap_without_warning(self):
+        """Translate the legacy MJVBDV2 collision option before the shared pipeline."""
+        model, _ = _build_pure_vbd_model("cpu")
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", category=DeprecationWarning)
+            solver = SolverMJVBDV2(
+                model,
+                contact_mode="full",
+                vbd_options={"iterations": 1},
+                collision_options={"soft_contact_margin": 0.012},
+            )
+
+        self.assertAlmostEqual(solver.backend.pipeline.soft_contact_gap, 0.012)
+
     def test_surface_fast_preset_falls_back_and_applies_overrides(self):
         """Use ordinary sweeps off CUDA and keep expert overrides authoritative."""
         model = _build_self_contact_cloth_model("cpu", 0.05)

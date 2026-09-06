@@ -1257,7 +1257,7 @@ def evaluate_joint_force_hessian(
     """
     jt = joint_type[joint_index]
     if (
-        jt != JointType.CABLE
+        jt != JointType.ROD
         and jt != JointType.BALL
         and jt != JointType.FIXED
         and jt != JointType.REVOLUTE
@@ -1336,7 +1336,7 @@ def evaluate_joint_force_hessian(
         ang_C0 = joint_C0_ang[joint_index]
         ang_alpha = avbd_alpha
 
-    if jt == JointType.CABLE:
+    if jt == JointType.ROD:
         k_stretch = joint_penalty_k[c_start]
         k_bend = joint_penalty_k[c_start + 1]
         kd_stretch = joint_penalty_kd[c_start]
@@ -2697,7 +2697,7 @@ def compute_cable_dahl_parameters(
     j = wp.tid()
 
     # Only cable joints own Dahl state.
-    if joint_type[j] != JointType.CABLE:
+    if joint_type[j] != JointType.ROD:
         joint_sigma_start[j] = wp.vec3(0.0)
         joint_C_fric[j] = wp.vec3(0.0)
         return
@@ -3625,7 +3625,7 @@ def update_duals_joint(
 
     jt = joint_type[j]
     if (
-        jt != JointType.CABLE
+        jt != JointType.ROD
         and jt != JointType.BALL
         and jt != JointType.FIXED
         and jt != JointType.REVOLUTE
@@ -3648,7 +3648,7 @@ def update_duals_joint(
     X_wc_rest = body_q_rest[child] * joint_X_c[j]
 
     # CABLE joint: isotropic stretch + isotropic bend penalties (2 scalars).
-    if jt == JointType.CABLE:
+    if jt == JointType.ROD:
         q_wp = wp.transform_get_rotation(X_wp)
         q_wc = wp.transform_get_rotation(X_wc)
         q_wp_rest = wp.transform_get_rotation(X_wp_rest)
@@ -4332,7 +4332,7 @@ def update_cable_dahl_state(
     j = wp.tid()
 
     # Only update cable joints
-    if joint_type[j] != JointType.CABLE:
+    if joint_type[j] != JointType.ROD:
         return
 
     # Get parent and child body indices

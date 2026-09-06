@@ -488,7 +488,7 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
         model = builder.finalize(device=device)
         options = {
             "broad_phase": "nxn",
-            "soft_contact_margin": 0.0,
+            "soft_contact_gap": 0.0,
             "enable_rigid_soft_full_surface_contact": True,
         }
         shared_pipeline = newton.CollisionPipeline(model, **options)
@@ -558,9 +558,13 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
         assert_records_equal()
 
         model.shape_margin.zero_()
-        shared_pipeline.collide(state, shared_contacts, soft_contact_margin=0.1)
-        private_pipeline.collide(state, private_contacts, soft_contact_margin=0.1)
+        shared_pipeline.set_collision_detection_range(soft_contact_gap=0.1)
+        private_pipeline.set_collision_detection_range(soft_contact_gap=0.1)
+        shared_pipeline.collide(state, shared_contacts)
+        private_pipeline.collide(state, private_contacts)
         assert_records_equal()
+        shared_pipeline.set_collision_detection_range(soft_contact_gap=0.0)
+        private_pipeline.set_collision_detection_range(soft_contact_gap=0.0)
 
         model.shape_margin.assign(np.array([0.1, 0.0], dtype=np.float32))
         private_pipeline.collide(state, private_contacts)
@@ -613,7 +617,7 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
         model = builder.finalize(device=device)
         options = {
             "broad_phase": "nxn",
-            "soft_contact_margin": 0.1,
+            "soft_contact_gap": 0.1,
             "enable_rigid_soft_full_surface_contact": True,
         }
         shared_pipeline = newton.CollisionPipeline(model, **options)

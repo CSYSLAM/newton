@@ -863,6 +863,12 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
     """Full collision pipeline with V2-local soft-surface broad rejection."""
 
     def __init__(self, model: Model, **kwargs: object):
+        kwargs = dict(kwargs)
+        soft_contact_margin = kwargs.pop("soft_contact_margin", None)
+        if soft_contact_margin is not None:
+            if "soft_contact_gap" in kwargs:
+                raise ValueError("soft_contact_margin is an alias of soft_contact_gap; pass only one")
+            kwargs["soft_contact_gap"] = soft_contact_margin
         super().__init__(model, **kwargs)
         self._use_soft_surface_aabb = bool(
             model.device.is_cuda
@@ -926,7 +932,7 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
         contacts._enable_rigid_soft_full_surface_contact = True
         if not state.particle_q:
             return
-        margin = self.soft_contact_margin if soft_contact_margin is None else soft_contact_margin
+        margin = self.soft_contact_gap if soft_contact_margin is None else soft_contact_margin
         model = self.model
         shape_aabb_lower = self.narrow_phase.shape_aabb_lower
         shape_aabb_upper = self.narrow_phase.shape_aabb_upper
@@ -997,7 +1003,7 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
             self._use_soft_surface_compaction,
             self._soft_edge_compact_worker_count,
             self._soft_face_compact_worker_count,
-            self.soft_rigid_contact_pair_count,
+            self.soft_contact_pair_count,
             self._use_soft_face_temporal_cache,
             self._soft_face_cached_barycentric,
             self._soft_face_cache_state,
