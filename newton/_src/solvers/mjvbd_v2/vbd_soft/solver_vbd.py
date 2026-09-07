@@ -3569,7 +3569,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 outputs=[self.particle_chebyshev_collided],
                 device=self.device,
             )
-        if 0 <= chebyshev_iteration < len(self.particle_chebyshev_weights):
+        if self.particle_chebyshev_enabled and 0 <= chebyshev_iteration < len(self.particle_chebyshev_weights):
             if self.particle_chebyshev_guarded:
                 excluded = self.particle_chebyshev_collided
                 for ring in range(self.particle_chebyshev_contact_rings):
@@ -3943,7 +3943,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 outputs=[self.particle_chebyshev_collided],
                 device=self.device,
             )
-        if 0 <= chebyshev_iteration < len(self.particle_chebyshev_weights):
+        if self.particle_chebyshev_enabled and 0 <= chebyshev_iteration < len(self.particle_chebyshev_weights):
             if self.particle_chebyshev_guarded:
                 excluded = self.particle_chebyshev_collided
                 for ring in range(self.particle_chebyshev_contact_rings):

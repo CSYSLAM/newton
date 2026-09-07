@@ -38,7 +38,9 @@ Status values are:
 
 | Date | Change | Affected path | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| 2026-09-07 | Batch independent-set colors into rotating topology-aware Jacobi partitions | CUDA `vbd_soft/` cached triangle-surface solve | **Retained, gated** | On the 6,436-particle W1 T-shirt, the eight-sweep candidate stayed within 1.10x of ordinary 30-sweep error against an ordinary 60-sweep proxy and reduced the matched 900-frame mean from 28.244 to 18.672 ms/frame (33.89%) versus the previous fastest policy |
+| 2026-09-07 | Keep multilevel correction off the rotating fixed-boundary cloth twist | `mjvbd_v2_cloth_twist` CUDA surface solve | **Retained, gated** | Disabling only multilevel removed the corner spike (transverse/inward ratio 1.760 to 0.858) while the remaining three-sweep schedule reduced a matched 300-frame mean from 17.791 to 9.830 ms/frame (44.74%) |
+| 2026-09-07 | Honor runtime Chebyshev disablement | Both private MJVBDV2 VBD backends | **Retained** | A CPU regression fails in both backends without the boolean gate and passes with it; this restores genuinely ordinary guarded fallbacks and benchmark references |
+| 2026-09-07 | Batch independent-set colors into rotating topology-aware Jacobi partitions | CUDA `vbd_soft/` cached triangle-surface solve | **Retained, opt-in** | The matched W1 T-shirt 900-frame mean fell from 28.244 to 18.672 ms/frame (33.89%); after fixing the disabled-Chebyshev reference, the former ordinary-30 accuracy claim is withdrawn because the corrected ratios are 1.643 / 1.632 / 2.132 |
 | 2026-09-07 | Split edge-edge and vertex-triangle self-contact accumulation into dedicated kernels | CUDA `vbd_soft/` surface self-contact solve | **Rejected, reverted** | A matched 100-frame W1 T-shirt CUDA Graph run regressed from 22.220 to 23.493 ms/frame (5.73% slower); the extra launch and VT grid outweighed any register-pressure reduction |
 | 2026-09-05 | Promote guarded cached Chebyshev to the W1 T-shirt default | T-shirt final00 example | **Retained** | The final DAT-safe policy passed 92 focused regressions and a complete 900-frame task, improved common-state accuracy over `cached13`, and reduced the same-run 900-frame mean by 7.59% |
 | 2026-09-05 | Promote the validated `cached13` policy to the W1 T-shirt default | T-shirt final00 example | **Superseded** | After merging `20d5d8fb` with the collision-aware Chebyshev work, an exact configuration assertion and the complete 900-frame null-viewer test passed; the later guarded policy keeps `cached13` selectable |
@@ -3230,3 +3232,80 @@ reduction. Candidate 100-frame blocks were 15.012, 17.721, 19.490, 19.988,
 statuses were zero and `test_final()` passed. A separate direct 900-frame
 invocation through `vbd_preset="surface-fast"` also passed, confirming that the
 measured benchmark configuration and the production entry point agree.
+
+### 2026-09-07: correct the disabled-Chebyshev reference
+
+The strict result immediately above used `particle_chebyshev_enabled=False`
+to form its ordinary 30- and 60-sweep references while leaving the previously
+built recurrence weights allocated. The iteration kernels checked only the
+weight-array length before applying acceleration, so those references still
+ran Chebyshev. The performance comparison between the enabled production
+policies remains valid, but the stated ordinary-30 accuracy gate did not.
+
+Both private VBD backends now require the runtime enable flag as well as a
+valid recurrence index. A focused CPU regression constructs a solver with
+weights, disables it at runtime, and compares one step with a solver that never
+allocated weights. Without the fix, 80% of particle-position components differ
+and the maximum error is 0.199 m in the small forced-cloth fixture; with the
+fix, both backends match within `rtol=2e-6`, `atol=2e-7`.
+
+The corrected 100-frame common-state T-shirt diagnostic gives:
+
+| Trial versus ordinary 60 | Mean position RMS | P95 position RMS | Mean edge-length MAE |
+| --- | ---: | ---: | ---: |
+| Ordinary 30 | 0.014054 mm | 0.027881 mm | 0.000958 mm |
+| Two-batch eight-sweep candidate | 0.023095 mm | 0.045508 mm | 0.002042 mm |
+| Candidate / ordinary 30 | 1.643 | 1.632 | 2.132 |
+
+The two-batch implementation remains an explicit performance option, but its
+former claim of ordinary-30-equivalent T-shirt accuracy is withdrawn. Future
+surface presets must use the corrected reference gate.
+
+### 2026-09-07: exclude multilevel from rotating anchored cloth twist
+
+Enabling the surface preset on the 2,500-particle, three-color cloth-twist
+scene exposed a narrow triangular spike beside a rotating fixed corner. A
+geometric diagnostic measured the transverse displacement of each fixed
+corner's first free neighbor divided by its inward displacement. Ordinary four
+sweeps stayed at 0.750 or below, while the three-sweep preset reached 1.760 at
+opposite corners. The existing finite, residual, global clamp-fraction, and
+velocity guards all passed, so none detected this local directional bias.
+
+Matched 300-frame option ablations isolated the coarse correction:
+
+| Three-sweep surface configuration | Maximum corner ratio | Result |
+| --- | ---: | --- |
+| Batched + Chebyshev + multilevel | 1.760 | Visible spike |
+| Disable only multilevel | 0.858 | Normal boundary |
+| Disable only Chebyshev | 1.954 | Visible spike |
+| Disable only batched Jacobi | 1.776 | Visible spike |
+| Batched only | 0.661 | Normal boundary |
+| Chebyshev only | 0.754 | Normal boundary |
+| Cached ordinary Gauss--Seidel | 0.717 | Normal boundary |
+
+Commit `889ae3d47` introduced the opt-in multilevel mechanism, but the cloth
+twist did not exercise it until the surface preset was selected. Its
+translation-only coarse clusters do not move fixed particles, yet clusters
+beside the rotating anchors can repeatedly prolong a small transverse update
+to their active particles. The global clamp-fraction check dilutes this local
+failure among all 2,400 active particles. Suppressing one or two coarse rings
+was insufficient; three rings removed the spike but excluded 174 of 308
+clusters, so that scene-specific solver modification was rejected.
+
+The example now disables only multilevel correction on its accelerated CUDA
+path. It retains three two-batch Chebyshev sweeps plus the surface and DAT
+caches; CPU, differentiable, and deterministic execution retain the former
+four ordinary sweeps. In an alternating ABBA run on an NVIDIA GeForce RTX
+5090 D v2 with Warp 1.17.0, CUDA Toolkit 12.9, Driver 13.2, CUDA Graphs, ten
+substeps, and three 100-frame synchronized blocks per case, ordinary four
+sweeps averaged 17.790773 ms/frame and the anchored-safe configuration averaged
+9.830389 ms/frame, a 44.744% reduction. Repeated accelerated runs had maximum
+corner ratios of 0.855 and 0.860. The example's five-second final test now
+rejects a ratio of 1.2 or greater so the visual regression cannot silently
+return.
+
+At frame 300, ordinary/accelerated mean edge strain was 8.129%/8.003%, P95
+edge strain was 21.698%/21.872%, mean area strain was 6.841%/6.855%, and P95
+area strain was 14.081%/14.372%. RMS particle speed was 0.1711/0.1713 m/s and
+maximum speed was 0.4952/0.4975 m/s. These constraint and velocity statistics
+remain comparable while the visible corner failure is removed.

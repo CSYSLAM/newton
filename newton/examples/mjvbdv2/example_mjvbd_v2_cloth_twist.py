@@ -68,8 +68,21 @@ class Example:
         self.model.soft_contact_ke = 1.0e3
         self.model.soft_contact_kd = 1.0e-1
         self.model.soft_contact_mu = 0.2
+        self.use_surface_fast = (
+            self.model.device.is_cuda
+            and not self.model.requires_grad
+            and wp.config.deterministic == wp.DeterministicMode.NOT_GUARANTEED
+        )
+        if self.use_surface_fast:
+            self.iterations = 3
 
         cloth_size = 50
+        self.corner_neighbor_pairs = (
+            (0, 1),
+            (cloth_size - 2, cloth_size - 1),
+            ((cloth_size - 1) * cloth_size, (cloth_size - 1) * cloth_size + 1),
+            (cloth_size * cloth_size - 2, cloth_size * cloth_size - 1),
+        )
         left_side = [cloth_size - 1 + index * cloth_size for index in range(cloth_size)]
         right_side = [index * cloth_size for index in range(cloth_size)]
         rot_point_indices = left_side + right_side
@@ -79,14 +92,23 @@ class Example:
             flags[fixed_vertex_id] &= ~ParticleFlags.ACTIVE
         self.model.particle_flags = wp.array(flags)
 
+        vbd_options: dict[str, object] = {
+            "iterations": self.iterations,
+            "particle_enable_self_contact": True,
+            "particle_self_contact_radius": 0.002,
+            "particle_self_contact_margin": 0.0035,
+        }
+        if self.use_surface_fast:
+            # This regular grid has only three original colors. Two batched
+            # sweeps plus one final batched sweep are sufficient. Keep the
+            # coarse correction disabled near this scene's rotating fixed
+            # boundaries, and retain four ordinary sweeps elsewhere.
+            vbd_options["particle_enable_multilevel_correction"] = False
+            vbd_options["particle_multilevel_checkpoints"] = None
         self.solver = newton.solvers.SolverMJVBDV2(
             self.model,
-            vbd_options={
-                "iterations": self.iterations,
-                "particle_enable_self_contact": True,
-                "particle_self_contact_radius": 0.002,
-                "particle_self_contact_margin": 0.0035,
-            },
+            vbd_preset="surface-fast" if self.use_surface_fast else None,
+            vbd_options=vbd_options,
         )
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -173,6 +195,10 @@ class Example:
         assert not self.solver.features.mujoco_solve_enabled
         assert not self.solver.features.rigid_solve_enabled
         assert not self.solver.features.tetrahedron_solve_enabled
+        if self.use_surface_fast:
+            assert self.solver.vbd_solver.particle_enable_batched_jacobi
+            assert self.solver.vbd_solver.particle_jacobi_batch_count == 2
+            assert self.solver.vbd_solver.particle_multilevel is None
 
         p_lower = wp.vec3(-0.6, -0.9, -0.6)
         p_upper = wp.vec3(0.6, 0.9, 0.6)
@@ -186,6 +212,16 @@ class Example:
             "particle velocities are within a reasonable range",
             lambda q, qd: max(abs(qd)) < 1.5,
         )
+        if math.isclose(self.sim_time, 5.0, abs_tol=0.5 * self.frame_dt):
+            positions = self.state_0.particle_q.numpy()
+            corner_transverse_ratios = []
+            for fixed, neighbor in self.corner_neighbor_pairs:
+                delta = positions[neighbor] - positions[fixed]
+                inward_distance = max(abs(float(delta[1])), 1.0e-12)
+                corner_transverse_ratios.append(float(np.hypot(delta[0], delta[2])) / inward_distance)
+            assert max(corner_transverse_ratios) < 1.2, (
+                f"fixed-boundary corner formed a transverse spike: ratios={corner_transverse_ratios}"
+            )
 
 
 if __name__ == "__main__":

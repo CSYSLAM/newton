@@ -111,6 +111,33 @@ class TestMJVBDV2ParticleChebyshev(unittest.TestCase):
                 self.assertFalse(solver.particle_chebyshev_enabled)
                 self.assertIsNone(solver.particle_chebyshev_older)
 
+    def test_runtime_disable_skips_acceleration(self):
+        """Honor fallback paths that temporarily disable Chebyshev."""
+        model = _build_cloth("cpu")
+        force = np.zeros_like(model.particle_q.numpy())
+        force[-1, 0] = 0.1
+
+        for solver_type in (SolverVBDComplete, SolverVBDSoft):
+            results = []
+            with self.subTest(solver=solver_type.__module__):
+                for spectral_radius in (None, 0.9):
+                    solver = solver_type(
+                        model,
+                        iterations=3,
+                        particle_enable_self_contact=False,
+                        particle_chebyshev_spectral_radius=spectral_radius,
+                    )
+                    if spectral_radius is not None:
+                        self.assertTrue(solver.particle_chebyshev_weights)
+                        solver.particle_chebyshev_enabled = False
+
+                    state_in, state_out = model.state(), model.state()
+                    state_in.particle_f.assign(force)
+                    solver.step(state_in, state_out, model.control(), None, 1.0 / 60.0)
+                    results.append(state_out.particle_q.numpy())
+
+                np.testing.assert_allclose(*results, rtol=2.0e-6, atol=2.0e-7)
+
     def test_guarded_schedule_builds_compact_topology_and_accelerated_window(self):
         model = _build_cloth("cpu")
         rho = 0.9

@@ -210,6 +210,7 @@ class Example:
             vbd_preset="surface-fast",
             collision_options={"soft_contact_margin": SOFT_MARGIN},
             vbd_options={
+                "particle_enable_multilevel_correction": False,
                 "particle_enable_self_contact": True,
                 "particle_self_contact_radius": SELF_RADIUS,
                 "particle_self_contact_margin": SELF_MARGIN,
