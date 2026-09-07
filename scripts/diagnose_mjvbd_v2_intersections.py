@@ -75,6 +75,7 @@ def main():
 
     def configure(self, model, **kwargs):
         options = dict(kwargs["vbd_options"])
+        options.pop("particle_jacobi_polish_iterations", None)
         options.update(particle_enable_multilevel_correction=False, particle_multilevel_checkpoints=None)
         if args.case in ("legacy20", "legacy30"):
             kwargs["vbd_preset"] = None

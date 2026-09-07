@@ -10,6 +10,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.mjvbd_v2.contact_projection import ContactProjectionData
 from newton._src.solvers.mjvbd_v2.particle_multilevel import (
     ParticleMultilevelCorrection,
     _bending_hessian_block,
@@ -570,7 +571,7 @@ class TestMJVBDV2ParticleMultilevel(unittest.TestCase):
             _solve_energy_galerkin_pcg_persistent,
             dim=256,
             block_dim=256,
-            inputs=[2, offsets, columns, diagonal, matrix, rhs, 4, False, 0.0],
+            inputs=[2, offsets, columns, diagonal, matrix, rhs, 4, False, 0.0, ContactProjectionData()],
             outputs=[*vectors, inverse, status, metrics, counters],
             device=device,
         )
@@ -600,7 +601,7 @@ class TestMJVBDV2ParticleMultilevel(unittest.TestCase):
             _solve_energy_galerkin_pcg_persistent,
             dim=256,
             block_dim=256,
-            inputs=[2, offsets, columns, diagonal, matrix, rhs, 12, True, 1.0e-4],
+            inputs=[2, offsets, columns, diagonal, matrix, rhs, 12, True, 1.0e-4, ContactProjectionData()],
             outputs=[*vectors, inverse, status, metrics, counters],
             device=device,
         )

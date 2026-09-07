@@ -13,6 +13,8 @@ import numpy as np
 import warp as wp
 
 from ...geometry import ParticleFlags
+from . import contact_projection
+from .coarse_pcg_split import SplitCoarsePCG
 
 __all__ = ["ParticleMultilevelCorrection"]
 
@@ -1368,6 +1370,7 @@ def _solve_energy_galerkin_pcg_persistent(
     iterations: int,
     validate_residual: bool,
     minimum_residual_reduction: float,
+    projected_contacts: contact_projection.ContactProjectionData,
     solution: wp.array[wp.vec3],
     residual: wp.array[wp.vec3],
     preconditioned_residual: wp.array[wp.vec3],
@@ -1381,6 +1384,18 @@ def _solve_energy_galerkin_pcg_persistent(
     """Solve the energy-projected block system in one CUDA block."""
     lane = wp.tid()
     stride = wp.block_dim()
+    if projected_contacts.overflow and projected_contacts.overflow[0] != 0:
+        # An incomplete or asymmetric contact stencil is not a valid PCG
+        # operator. Reject uniformly before attempting any matrix inversions.
+        for row in range(lane, coarse_count, stride):
+            solution[row] = wp.vec3(0.0)
+        for index in range(lane, runtime_metrics.shape[0], stride):
+            runtime_metrics[index] = 0.0
+        if lane == 0:
+            runtime_status[0] = 32
+            runtime_counters[0] = 0
+            runtime_counters[1] = 0
+        return
     identity = wp.identity(n=3, dtype=float)
     rz_local = float(0.0)
     initial_residual_norm_sq_local = float(0.0)
@@ -1416,6 +1431,7 @@ def _solve_energy_galerkin_pcg_persistent(
             value = wp.vec3(0.0)
             for slot in range(matrix_offsets[cluster], matrix_offsets[cluster + 1]):
                 value += matrix_blocks[slot] * direction[matrix_columns[slot]]
+            value += contact_projection.off_diagonal_product(cluster, direction, projected_contacts)
             product[cluster] = value
             direction_product_local += wp.dot(direction[cluster], value)
             cluster += stride
@@ -2059,6 +2075,19 @@ class ParticleMultilevelCorrection:
         self.edge_coarse_slots = wp.array(edge_coarse_slots, dtype=wp.int32, device=model.device)
         self.spring_coarse_slots = wp.array(spring_coarse_slots, dtype=wp.int32, device=model.device)
         self.coarse_matrix_blocks = wp.zeros(coarse_matrix_columns.size, dtype=wp.mat33, device=model.device)
+        # Small sparse systems favor the single-launch solver. Split only
+        # sufficiently large surface systems, without device-count readback.
+        self.coarse_use_split_pcg = (
+            model.device.is_cuda
+            and self.cluster_count >= 512
+            and coarse_matrix_columns.size >= 8192
+            and coarse_iterations >= 4
+        )
+        self._split_coarse_pcg = SplitCoarsePCG(model.device) if self.coarse_use_split_pcg else None
+        self.contact_projection = None
+        # Keep the corrected operator experimental until end-to-end quality
+        # and cost beat the existing fast path. Diagnostics opt in explicitly.
+        self.contact_projection_enabled = False
         self.local_correction = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
         self.local_hessians = wp.zeros(model.particle_count, dtype=wp.mat33, device=model.device)
         self.contact_forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
@@ -2268,34 +2297,52 @@ class ParticleMultilevelCorrection:
                     outputs=[self.coarse_matrix_blocks],
                     device=model.device,
                 )
-            wp.launch(
-                _solve_energy_galerkin_pcg_persistent,
-                dim=_COARSE_PCG_BLOCK_DIM,
-                block_dim=_COARSE_PCG_BLOCK_DIM,
-                inputs=[
-                    self.cluster_count,
-                    self.coarse_matrix_offsets,
-                    self.coarse_matrix_columns,
-                    self.coarse_diagonal_slots,
-                    self.coarse_matrix_blocks,
-                    self.coarse_rhs,
-                    self.coarse_iterations,
-                    self.validate_residual,
-                    self.minimum_residual_reduction,
-                ],
-                outputs=[
-                    self.coarse_solution,
-                    self.coarse_residual,
-                    self.coarse_preconditioned_residual,
-                    self.coarse_direction,
-                    self.coarse_product,
-                    self.coarse_inverse_diagonal,
-                    self.runtime_status,
-                    self.runtime_metrics,
-                    self.runtime_counters,
-                ],
-                device=model.device,
-            )
+            projected_contacts = contact_projection.ContactProjectionData()
+            if self.contact_projection is not None:
+                self.contact_projection.correct_diagonal(self.coarse_matrix_blocks, self.coarse_diagonal_slots)
+                projected_contacts = self.contact_projection.data
+            coarse_inputs = [
+                self.cluster_count,
+                self.coarse_matrix_offsets,
+                self.coarse_matrix_columns,
+                self.coarse_diagonal_slots,
+                self.coarse_matrix_blocks,
+                self.coarse_rhs,
+                self.coarse_iterations,
+                self.validate_residual,
+                self.minimum_residual_reduction,
+                projected_contacts,
+            ]
+            coarse_outputs = [
+                self.coarse_solution,
+                self.coarse_residual,
+                self.coarse_preconditioned_residual,
+                self.coarse_direction,
+                self.coarse_product,
+                self.coarse_inverse_diagonal,
+                self.runtime_status,
+                self.runtime_metrics,
+                self.runtime_counters,
+            ]
+            if self.coarse_use_split_pcg:
+                self._split_coarse_pcg.solve(coarse_inputs, coarse_outputs)
+            else:
+                wp.launch(
+                    _solve_energy_galerkin_pcg_persistent,
+                    dim=_COARSE_PCG_BLOCK_DIM,
+                    block_dim=_COARSE_PCG_BLOCK_DIM,
+                    inputs=coarse_inputs,
+                    outputs=coarse_outputs,
+                    device=model.device,
+                )
+            if self.contact_projection is not None:
+                wp.launch(
+                    contact_projection.reject_overflow,
+                    dim=1,
+                    inputs=[projected_contacts],
+                    outputs=[self.runtime_status],
+                    device=model.device,
+                )
         else:
             wp.launch(
                 _restrict_particle_corrections,

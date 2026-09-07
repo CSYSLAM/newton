@@ -151,3 +151,72 @@ uv run scripts/diagnose_mjvbd_v2_intersections.py --case legacy20 --frames 390
 uv run scripts/diagnose_mjvbd_v2_intersections.py --case legacy30 --frames 390
 uv run scripts/diagnose_mjvbd_v2_intersections.py --case gs20_uncached --frames 390
 ```
+
+## Convergence-only follow-up after user rollback to 8380c9ab
+
+The user restored the checkpoint and requested one convergence change at
+a time. The topology/rest-distance changes and quality-default proposal
+from the intervening experiments are **not** part of this change. The
+folding example retains its surface-fast preset, eight total sweeps,
+original contact filters/materials and disabled multilevel correction.
+
+`scripts/diagnose_mjvbd_v2_convergence.py` warms the original fast policy
+for 900 frames, then branches one frozen substep after initialization.
+The branches share positions, displacements, inertial targets, kinematic
+poses, material state and collision candidates. An extra ordinary GS
+sweep measures a fixed-point defect, **not a force residual or energy**.
+Probe positions, displacements, truncation factors and Chebyshev exclusion
+flags are restored after each measurement. Ordinary 30 and 60 are
+references, not assumed converged truth. Timing this synchronized probe
+would not be a valid speed benchmark.
+
+One same-state comparison (units: micrometers):
+
+| Policy | RMS distance to ordinary30 | Extra ordinary sweep defect |
+| --- | ---: | ---: |
+| Ordinary30 | 0 (by definition) | 2.51 |
+| Fast8 | 54.30 | 3.81 |
+| Seven batched + one ordinary sweep | 54.12 | 3.39 |
+
+The positional accuracy gap remains. This directly rejects the previous
+claim that fast8 has already achieved ordinary30 accuracy. About 4,967
+of 6,436 particles were excluded from Chebyshev in this sample; simply
+raising its spectral-radius estimate in another probe did not improve
+both positional error and fixed-point defect.
+
+The one retained candidate is `particle_jacobi_polish_iterations=1`.
+It replaces, rather than appends to, the last batched sweep. That sweep
+uses original ordered colors and no Chebyshev extrapolation. The option
+defaults to zero; only the T-shirt example opts in for this trial. Other
+examples and solver-wide presets are unchanged. This is a measured
+settling improvement, **not a completed convergence solution**.
+
+Full-history runs through frame 900; last 90 frames averaged:
+
+| Policy | RMS speed (m/s) | Mean max speed (m/s) | Second difference (micrometers) | End-frame time (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Original fast8 | 0.004294 | 0.091614 | 44.99 | 18.85 |
+| Manual seven-batched/one-ordinary prototype | 0.001853 | 0.041490 | 18.72 | 21.21 |
+| Implemented option, independent run | 0.002465 | 0.052847 | 26.86 | 22.02 |
+| Ordinary30, same scene/contact settings | 0.036397 | 0.249374 | 64.99 | 121.62 |
+
+Time measures 120 additional end-state frames with synchronization only
+at interval boundaries and no mesh readback in the timed loop. It is not
+a whole-trajectory performance profile. Independent contact histories
+differ, as the two candidate runs illustrate; the full-history ordinary30
+result also does not justify treating that trajectory as converged truth.
+The candidate lowers the observed jitter proxy by roughly 40–58% but
+costs roughly 13–17% more than fast8 in these runs. It does not establish
+equal final shapes, penetration behavior or convergence for other demos.
+
+Thirteen targeted tests passed, including iteration-budget accounting,
+manual-schedule equivalence, CUDA graph replay and CPU stepping with
+`wp.capture_if` disallowed. Further low-frequency convergence improvement
+is still required; neither more damping nor freezing the cloth was used.
+
+```bash
+uv run scripts/diagnose_mjvbd_v2_convergence.py
+uv run scripts/diagnose_mjvbd_v2_last_sweep.py --mode fast
+uv run scripts/diagnose_mjvbd_v2_last_sweep.py --mode option
+uv run scripts/diagnose_mjvbd_v2_last_sweep.py --mode ordinary30
+```

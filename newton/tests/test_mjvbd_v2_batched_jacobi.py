@@ -23,6 +23,79 @@ class TestMJVBDV2BatchedJacobi(unittest.TestCase):
             SolverVBD(cpu_model, particle_jacobi_relaxation=0.0)
         with self.assertRaisesRegex(TypeError, "particle_jacobi_batch_count"):
             SolverVBD(cpu_model, particle_jacobi_batch_count=1.0)
+        for value in (True, 1.0):
+            with self.assertRaisesRegex(TypeError, "particle_jacobi_polish_iterations"):
+                SolverVBD(cpu_model, particle_jacobi_polish_iterations=value)
+        for value in (-1, 9):
+            with self.assertRaisesRegex(ValueError, "particle_jacobi_polish_iterations"):
+                SolverVBD(cpu_model, iterations=8, particle_jacobi_polish_iterations=value)
+
+    def test_polish_option_keeps_cpu_ordinary_path(self):
+        """Run CPU ordinary sweeps without a graph-only conditional dependency."""
+        model = _cloth("cpu")
+        solver = SolverVBD(model, iterations=8, particle_jacobi_polish_iterations=1)
+        state_in, state_out = model.state(), model.state()
+        with mock.patch.object(wp, "capture_if", side_effect=AssertionError("Unexpected capture_if")):
+            solver.step(state_in, state_out, model.control(), None, 1.0 / 60.0)
+        self.assertEqual(solver.iterations, 8)
+        self.assertTrue(np.all(np.isfinite(state_out.particle_q.numpy())))
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Batched Jacobi requires CUDA")
+    def test_final_ordinary_sweep_preserves_budget_and_matches_manual(self):
+        """Replace the last batch sweep and suppress its Chebyshev extrapolation."""
+        model = _cloth("cuda:0")
+        options = {
+            "iterations": 8,
+            "particle_enable_self_contact": False,
+            "particle_enable_surface_cache": True,
+            "particle_enable_batched_jacobi": True,
+            "particle_jacobi_batch_count": 2,
+            "particle_jacobi_relaxation": 1.0,
+            "particle_chebyshev_spectral_radius": 0.8,
+        }
+        automatic = SolverVBD(model, **options, particle_jacobi_polish_iterations=1)
+        manual = SolverVBD(model, **options)
+        force = np.zeros_like(model.particle_q.numpy())
+        force[-1, 0] = 0.1
+
+        def states():
+            state_in, state_out = model.state(), model.state()
+            state_in.particle_f.assign(force)
+            return state_in, state_out
+
+        state_in, state_out = states()
+        with mock.patch.object(
+            automatic, "_solve_particle_jacobi_iteration", wraps=automatic._solve_particle_jacobi_iteration
+        ) as batches:
+            automatic.step(state_in, state_out, model.control(), None, 1.0 / 60.0)
+        self.assertEqual(batches.call_count, 7)
+        self.assertEqual(automatic.iterations, 8)
+        expected_q, expected_qd = state_out.particle_q.numpy(), state_out.particle_qd.numpy()
+        original = manual._solve_particle_iteration
+
+        def manual_iteration(state_in, state_out, contacts, dt, iteration):
+            if iteration != 7:
+                return original(state_in, state_out, contacts, dt, iteration)
+            manual.particle_enable_batched_jacobi = False
+            manual.particle_chebyshev_enabled = False
+            try:
+                return original(state_in, state_out, contacts, dt, iteration)
+            finally:
+                manual.particle_enable_batched_jacobi = True
+                manual.particle_chebyshev_enabled = True
+
+        state_in, state_out = states()
+        with mock.patch.object(manual, "_solve_particle_iteration", side_effect=manual_iteration):
+            manual.step(state_in, state_out, model.control(), None, 1.0 / 60.0)
+        np.testing.assert_allclose(state_out.particle_q.numpy(), expected_q, rtol=2e-6, atol=2e-7)
+        np.testing.assert_allclose(state_out.particle_qd.numpy(), expected_qd, rtol=2e-6, atol=2e-7)
+
+        state_in, state_out = states()
+        control = model.control()
+        with wp.ScopedCapture(device=model.device) as capture:
+            automatic.step(state_in, state_out, control, None, 1.0 / 60.0)
+        wp.capture_launch(capture.graph)
+        np.testing.assert_allclose(state_out.particle_q.numpy(), expected_q, rtol=2e-6, atol=2e-7)
 
     @unittest.skipUnless(wp.is_cuda_available(), "Batched Jacobi requires CUDA")
     def test_batches_cover_every_particle(self):

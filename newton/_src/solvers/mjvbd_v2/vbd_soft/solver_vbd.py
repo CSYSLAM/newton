@@ -40,7 +40,7 @@ from ..particle_multilevel import (
     _normalize_multilevel_operator,
     _particle_topology_edges,
 )
-from . import particle_vbd_kernels, rigid_vbd_kernels, vbd_coupling_kernels
+from . import multilevel_contacts, particle_vbd_kernels, rigid_vbd_kernels, vbd_coupling_kernels
 from .particle_vbd_kernels import (
     NUM_THREADS_PER_COLLISION_PRIMITIVE,
     TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
@@ -52,7 +52,6 @@ from .particle_vbd_kernels import (
     accumulate_particle_body_contact_force_and_hessian_active,
     accumulate_self_contact_force_and_hessian,
     accumulate_spring_force_and_hessian,
-    apply_particle_jacobi_correction,
     # Planar DAT (Divide and Truncate) kernels
     apply_planar_truncation_parallel_by_collision,
     apply_truncation_active_all_or_inactive_selected,
@@ -329,6 +328,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_enable_batched_jacobi: bool = False,
         particle_jacobi_relaxation: float = 0.5,
         particle_jacobi_batch_count: int = 1,
+        particle_jacobi_polish_iterations: int = 0,
         particle_chebyshev_spectral_radius: float | None = None,
         particle_chebyshev_max_radius_fraction: float = 1.0,
         particle_chebyshev_warmup_iterations: int = 0,
@@ -432,6 +432,9 @@ class SolverVBD(SolverBase, CouplingInterface):
                 CUDA surface path is disabled by default.
             particle_jacobi_relaxation: Weight in `(0, 1]` applied to each experimental Jacobi correction.
             particle_jacobi_batch_count: Number of ordered color batches per experimental Jacobi sweep.
+            particle_jacobi_polish_iterations: Replace this many final batched sweeps with ordinary colored sweeps,
+                without Chebyshev extrapolation. These sweeps are included in ``iterations``, not added to it.
+                Zero preserves the original batched policy. Ignored when batched Jacobi is disabled.
             particle_chebyshev_spectral_radius: Estimated spectral radius for contact-aware Chebyshev acceleration.
                 ``None`` disables the experimental accelerator and preserves the ordinary VBD iteration path.
                 Differentiable models always use the ordinary path.
@@ -688,6 +691,13 @@ class SolverVBD(SolverBase, CouplingInterface):
         if not isinstance(particle_jacobi_batch_count, int) or isinstance(particle_jacobi_batch_count, bool):
             raise TypeError("particle_jacobi_batch_count must be an integer")
         self.particle_jacobi_batch_count = particle_jacobi_batch_count
+        if not isinstance(particle_jacobi_polish_iterations, int) or isinstance(
+            particle_jacobi_polish_iterations, bool
+        ):
+            raise TypeError("particle_jacobi_polish_iterations must be an integer")
+        if not 0 <= particle_jacobi_polish_iterations <= iterations:
+            raise ValueError("particle_jacobi_polish_iterations must be between zero and iterations")
+        self.particle_jacobi_polish_iterations = particle_jacobi_polish_iterations
         self._soft_contact_materials = wp.empty(0, dtype=wp.vec3, device=self.device)
         self._soft_contact_material_index = wp.empty(0, dtype=wp.int32, device=self.device)
         self._use_soft_contact_material_source = False
@@ -760,7 +770,7 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         self._particle_jacobi_color_schedules = ()
         self._particle_jacobi_group_schedules = ()
-        self._particle_jacobi_corrections = None
+        self._surface_jacobi_kernel = None
         if self.particle_enable_batched_jacobi:
             if (
                 not self.device.is_cuda
@@ -798,7 +808,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                 )
                 for colors in color_schedules
             )
-            self._particle_jacobi_corrections = wp.zeros(model.particle_count, dtype=wp.vec3, device=self.device)
+            self._surface_jacobi_kernel = particle_surface_cache.make_surface_kernel(
+                particle_vbd_kernels.evaluate_neo_hookean_membrane_force_hessian,
+                jacobi_update=True,
+            )
 
         self.surface_anchor_angles = None
         self._surface_cached_kernel = None
@@ -3432,7 +3445,6 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         self.particle_forces.zero_()
         self.particle_hessians.zero_()
-        self._particle_jacobi_corrections.zero_()
         schedule = iter_num % len(self._particle_jacobi_color_schedules)
         batched_colors = self._particle_jacobi_color_schedules[schedule]
         batched_groups = self._particle_jacobi_group_schedules[schedule]
@@ -3520,7 +3532,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 )
 
             wp.launch(
-                kernel=self._surface_cached_kernel,
+                kernel=self._surface_jacobi_kernel,
                 dim=particle_group.size * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
                 block_dim=TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
                 inputs=[
@@ -3544,17 +3556,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self.particle_hessians,
                     self.surface_tile_skip_active_checks,
                     self.surface_tile_skip_material_checks,
-                    1.0,
+                    self.particle_jacobi_relaxation,
                     self.surface_anchor_angles,
                     None,
                 ],
-                outputs=[self._particle_jacobi_corrections],
-                device=self.device,
-            )
-            wp.launch(
-                kernel=apply_particle_jacobi_correction,
-                dim=particle_group.size,
-                inputs=[particle_group, self._particle_jacobi_corrections, self.particle_jacobi_relaxation],
                 outputs=[self.particle_displacements],
                 device=self.device,
             )
@@ -3644,7 +3649,12 @@ class SolverVBD(SolverBase, CouplingInterface):
         """Solve one VBD iteration for particles."""
         model = self.model
 
-        if self.particle_enable_batched_jacobi:
+        jacobi_polish = (
+            self.particle_enable_batched_jacobi
+            and self.particle_jacobi_polish_iterations > 0
+            and iter_num >= self.iterations - self.particle_jacobi_polish_iterations
+        )
+        if self.particle_enable_batched_jacobi and not jacobi_polish:
             self._solve_particle_jacobi_iteration(state_in, state_out, contacts, dt, iter_num)
             return
 
@@ -3667,7 +3677,9 @@ class SolverVBD(SolverBase, CouplingInterface):
         if model.particle_count == 0:
             return
         chebyshev_history_active = (
-            self.particle_chebyshev_enabled and iter_num < self.iterations - self.particle_chebyshev_polish_iterations
+            self.particle_chebyshev_enabled
+            and not jacobi_polish
+            and iter_num < self.iterations - self.particle_chebyshev_polish_iterations
         )
         if chebyshev_history_active:
             self.particle_chebyshev_previous.assign(state_in.particle_q)
@@ -3943,7 +3955,11 @@ class SolverVBD(SolverBase, CouplingInterface):
                 outputs=[self.particle_chebyshev_collided],
                 device=self.device,
             )
-        if self.particle_chebyshev_enabled and 0 <= chebyshev_iteration < len(self.particle_chebyshev_weights):
+        if (
+            self.particle_chebyshev_enabled
+            and not jacobi_polish
+            and 0 <= chebyshev_iteration < len(self.particle_chebyshev_weights)
+        ):
             if self.particle_chebyshev_guarded:
                 excluded = self.particle_chebyshev_collided
                 for ring in range(self.particle_chebyshev_contact_rings):
@@ -4198,6 +4214,9 @@ class SolverVBD(SolverBase, CouplingInterface):
             ],
             outputs=[correction.local_correction],
             device=self.device,
+        )
+        multilevel_contacts.prepare(
+            self, state_in, contacts, body_q_for_particles, body_q_prev_for_particles, body_qd_for_particles, dt
         )
         correction.restrict_and_prolong(self.model, state_in.particle_q, self.particle_displacements, dt)
         self._penetration_free_truncation(state_in.particle_q)

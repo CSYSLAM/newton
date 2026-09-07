@@ -101,9 +101,13 @@ def _evaluate_bending(
     return force, hessian
 
 
-@lru_cache(maxsize=2)
-def make_surface_kernel(evaluate_membrane):
-    """Specialize the cached surface path for either private backend's membrane function."""
+@lru_cache(maxsize=4)
+def make_surface_kernel(evaluate_membrane, *, jacobi_update: bool = False):
+    """Specialize surface solves, optionally fusing the weighted Jacobi increment.
+
+    Jacobi writes only cumulative displacement; positions remain frozen until
+    the subsequent DAT launch. Its relaxation applies to contact rows too.
+    """
 
     @wp.kernel(enable_backward=False)
     def solve_surface_cached(
@@ -138,8 +142,9 @@ def make_surface_kernel(evaluate_membrane):
         if selective_active and selective_active[particle] == 0:
             return
         if skip_active == 0 and (not flags[particle] & ParticleFlags.ACTIVE or mass[particle] == 0.0):
-            if lane == 0:
-                displacement[particle] = wp.vec3(0.0)
+            if wp.static(not jacobi_update):
+                if lane == 0:
+                    displacement[particle] = wp.vec3(0.0)
             return
         force = wp.vec3(0.0)
         hessian = wp.mat33(0.0)
@@ -192,8 +197,11 @@ def make_surface_kernel(evaluate_membrane):
             if wp.abs(wp.determinant(h_total)) > 1.0e-8:
                 f_total += mass[particle] * (inertia[particle] - pos[particle]) * inv_dt_sq + forces[particle]
                 delta = wp.inverse(h_total) * f_total
-                if relaxation != 1.0 and wp.ddot(hessians[particle], hessians[particle]) == 0.0:
+                if wp.static(jacobi_update):
                     delta *= relaxation
+                else:
+                    if relaxation != 1.0 and wp.ddot(hessians[particle], hessians[particle]) == 0.0:
+                        delta *= relaxation
                 displacement[particle] += delta
 
     return solve_surface_cached

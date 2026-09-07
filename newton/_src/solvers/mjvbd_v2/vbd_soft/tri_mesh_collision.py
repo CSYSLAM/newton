@@ -229,7 +229,12 @@ def build_edge_n_ring_edge_collision_filter(
         filter_set.difference_update(incident_to_v0)
         filter_set.difference_update(incident_to_v1)
 
-    return edge_sets
+    # Bending adjacency includes opposite vertices, so the legacy exclusion
+    # policy can produce directed pairs. Fine EE forces require both query
+    # directions. Keep only mutual exclusions: restore missing counterparts
+    # without dropping any previously allowed contact candidate. Do not apply
+    # this policy to caller-provided filtering maps, merged separately below.
+    return [{other for other in row if edge_id in edge_sets[other]} for edge_id, row in enumerate(edge_sets)]
 
 
 class TriMeshCollisionDetector:

@@ -1,0 +1,807 @@
+diff --git a/newton/_src/solvers/mjvbd_v2/vbd_soft/particle_vbd_kernels.py b/newton/_src/solvers/mjvbd_v2/vbd_soft/particle_vbd_kernels.py
+index 1bad1d90..44baf193 100644
+--- a/newton/_src/solvers/mjvbd_v2/vbd_soft/particle_vbd_kernels.py
++++ b/newton/_src/solvers/mjvbd_v2/vbd_soft/particle_vbd_kernels.py
+@@ -12,6 +12,8 @@ The high-level :class:`SolverVBD` interface should remain in
+ 
+ from __future__ import annotations
+ 
++from functools import lru_cache
++
+ import warp as wp
+ 
+ from newton._src.math import orthonormal_basis
+@@ -1625,173 +1627,213 @@ def convert_body_particle_contact_data_kernel(
+         body_particle_contact_buffer[offset + contact_counter] = contact_index
+ 
+ 
+-@wp.kernel
+-def accumulate_self_contact_force_and_hessian(
+-    # inputs
+-    dt: float,
+-    current_color: int,
+-    pos_prev: wp.array[wp.vec3],
+-    pos: wp.array[wp.vec3],
+-    particle_colors: wp.array[int],
+-    tri_indices: wp.array2d[wp.int32],
+-    edge_indices: wp.array2d[wp.int32],
+-    # self contact
+-    collision_info_array: wp.array[TriMeshCollisionInfo],
+-    collision_radius: float,
+-    soft_contact_ke: float,
+-    soft_contact_kd: float,
+-    friction_mu: float,
+-    soft_contact_materials: wp.array[wp.vec3],
+-    soft_contact_material_index: wp.array[int],
+-    use_soft_contact_material_source: bool,
+-    friction_epsilon: float,
+-    edge_edge_parallel_epsilon: float,
+-    has_active_self_contact: wp.array[wp.int32],
+-    # outputs: particle force and hessian
+-    particle_forces: wp.array[wp.vec3],
+-    particle_hessians: wp.array[wp.mat33],
+-):
+-    t_id = wp.tid()
+-    if has_active_self_contact[0] == 0:
+-        return
+-    collision_info = collision_info_array[0]
+-
+-    primitive_id = t_id // NUM_THREADS_PER_COLLISION_PRIMITIVE
+-    t_id_current_primitive = t_id % NUM_THREADS_PER_COLLISION_PRIMITIVE
+-
+-    # process edge-edge collisions
+-    if primitive_id < collision_info.edge_colliding_edges_buffer_sizes.shape[0]:
+-        e1_idx = primitive_id
++@lru_cache(maxsize=2)
++def make_self_contact_kernel(jacobi_majorization: bool = False):
++    """Specialize contact diagonal bounds for simultaneous color updates.
+ 
+-        collision_buffer_counter = t_id_current_primitive
+-        collision_buffer_offset = collision_info.edge_colliding_edges_offsets[primitive_id]
+-        collision_count = get_edge_colliding_edges_count(collision_info, primitive_id)
+-        while collision_buffer_counter < collision_count:
+-            e2_idx = collision_info.edge_colliding_edges[2 * (collision_buffer_offset + collision_buffer_counter) + 1]
++    For n same-color vertices, n * diag(b_i**2) - b*b.T is PSD by
++    Cauchy-Schwarz for a fixed linearized contact stencil. Scale only the
++    contact Hessian, never its physical force. Counting zero-weight or fixed
++    vertices gives a conservative upper bound. This is not a bound on the
++    full nonlinear objective when contact stencils change.
++    """
+ 
+-            if e1_idx != -1 and e2_idx != -1:
+-                e1_v1 = edge_indices[e1_idx, 2]
+-                e1_v2 = edge_indices[e1_idx, 3]
++    @wp.kernel
++    def accumulate_self_contact_force_and_hessian(
++        # inputs
++        dt: float,
++        current_color: int,
++        pos_prev: wp.array[wp.vec3],
++        pos: wp.array[wp.vec3],
++        particle_colors: wp.array[int],
++        tri_indices: wp.array2d[wp.int32],
++        edge_indices: wp.array2d[wp.int32],
++        # self contact
++        collision_info_array: wp.array[TriMeshCollisionInfo],
++        collision_radius: float,
++        soft_contact_ke: float,
++        soft_contact_kd: float,
++        friction_mu: float,
++        soft_contact_materials: wp.array[wp.vec3],
++        soft_contact_material_index: wp.array[int],
++        use_soft_contact_material_source: bool,
++        friction_epsilon: float,
++        edge_edge_parallel_epsilon: float,
++        has_active_self_contact: wp.array[wp.int32],
++        # outputs: particle force and hessian
++        particle_forces: wp.array[wp.vec3],
++        particle_hessians: wp.array[wp.mat33],
++    ):
++        t_id = wp.tid()
++        if has_active_self_contact[0] == 0:
++            return
++        collision_info = collision_info_array[0]
++
++        primitive_id = t_id // NUM_THREADS_PER_COLLISION_PRIMITIVE
++        t_id_current_primitive = t_id % NUM_THREADS_PER_COLLISION_PRIMITIVE
++
++        # process edge-edge collisions
++        if primitive_id < collision_info.edge_colliding_edges_buffer_sizes.shape[0]:
++            e1_idx = primitive_id
++
++            collision_buffer_counter = t_id_current_primitive
++            collision_buffer_offset = collision_info.edge_colliding_edges_offsets[primitive_id]
++            collision_count = get_edge_colliding_edges_count(collision_info, primitive_id)
++            while collision_buffer_counter < collision_count:
++                e2_idx = collision_info.edge_colliding_edges[
++                    2 * (collision_buffer_offset + collision_buffer_counter) + 1
++                ]
++
++                if e1_idx != -1 and e2_idx != -1:
++                    e1_v1 = edge_indices[e1_idx, 2]
++                    e1_v2 = edge_indices[e1_idx, 3]
++
++                    c_e1_v1 = particle_colors[e1_v1]
++                    c_e1_v2 = particle_colors[e1_v2]
++                    if current_color < 0 or c_e1_v1 == current_color or c_e1_v2 == current_color:
++                        soft_material = _select_soft_contact_material(
++                            soft_contact_ke,
++                            soft_contact_kd,
++                            friction_mu,
++                            soft_contact_materials,
++                            soft_contact_material_index,
++                            use_soft_contact_material_source,
++                        )
++                        has_contact, collision_force_0, collision_force_1, collision_hessian_0, collision_hessian_1 = (
++                            evaluate_edge_edge_contact_2_vertices(
++                                e1_idx,
++                                e2_idx,
++                                pos,
++                                pos_prev,
++                                edge_indices,
++                                collision_radius,
++                                soft_material[0],
++                                soft_material[1],
++                                soft_material[2],
++                                friction_epsilon,
++                                dt,
++                                edge_edge_parallel_epsilon,
++                            )
++                        )
+ 
+-                c_e1_v1 = particle_colors[e1_v1]
+-                c_e1_v2 = particle_colors[e1_v2]
+-                if current_color < 0 or c_e1_v1 == current_color or c_e1_v2 == current_color:
+-                    soft_material = _select_soft_contact_material(
+-                        soft_contact_ke,
+-                        soft_contact_kd,
+-                        friction_mu,
+-                        soft_contact_materials,
+-                        soft_contact_material_index,
+-                        use_soft_contact_material_source,
+-                    )
+-                    has_contact, collision_force_0, collision_force_1, collision_hessian_0, collision_hessian_1 = (
+-                        evaluate_edge_edge_contact_2_vertices(
+-                            e1_idx,
+-                            e2_idx,
++                        if has_contact:
++                            if wp.static(jacobi_majorization):
++                                e2_v1 = edge_indices[e2_idx, 2]
++                                e2_v2 = edge_indices[e2_idx, 3]
++                                multiplicity = float(
++                                    int(c_e1_v1 == current_color)
++                                    + int(c_e1_v2 == current_color)
++                                    + int(particle_colors[e2_v1] == current_color)
++                                    + int(particle_colors[e2_v2] == current_color)
++                                )
++                                collision_hessian_0 *= wp.max(1.0, multiplicity)
++                                collision_hessian_1 *= wp.max(1.0, multiplicity)
++                            # here we only handle the e1 side, because e2 will also detection this contact and add force and hessian on its own
++                            if current_color < 0 or c_e1_v1 == current_color:
++                                wp.atomic_add(particle_forces, e1_v1, collision_force_0)
++                                wp.atomic_add(particle_hessians, e1_v1, collision_hessian_0)
++                            if current_color < 0 or c_e1_v2 == current_color:
++                                wp.atomic_add(particle_forces, e1_v2, collision_force_1)
++                                wp.atomic_add(particle_hessians, e1_v2, collision_hessian_1)
++                collision_buffer_counter += NUM_THREADS_PER_COLLISION_PRIMITIVE
++
++        # process vertex-triangle collisions
++        if primitive_id < collision_info.vertex_colliding_triangles_buffer_sizes.shape[0]:
++            particle_idx = primitive_id
++            collision_buffer_counter = t_id_current_primitive
++            collision_buffer_offset = collision_info.vertex_colliding_triangles_offsets[primitive_id]
++            collision_count = get_vertex_colliding_triangles_count(collision_info, primitive_id)
++            while collision_buffer_counter < collision_count:
++                tri_idx = collision_info.vertex_colliding_triangles[
++                    (collision_buffer_offset + collision_buffer_counter) * 2 + 1
++                ]
++
++                if particle_idx != -1 and tri_idx != -1:
++                    tri_a = tri_indices[tri_idx, 0]
++                    tri_b = tri_indices[tri_idx, 1]
++                    tri_c = tri_indices[tri_idx, 2]
++
++                    c_v = particle_colors[particle_idx]
++                    c_tri_a = particle_colors[tri_a]
++                    c_tri_b = particle_colors[tri_b]
++                    c_tri_c = particle_colors[tri_c]
++
++                    if (
++                        current_color < 0
++                        or c_v == current_color
++                        or c_tri_a == current_color
++                        or c_tri_b == current_color
++                        or c_tri_c == current_color
++                    ):
++                        soft_material = _select_soft_contact_material(
++                            soft_contact_ke,
++                            soft_contact_kd,
++                            friction_mu,
++                            soft_contact_materials,
++                            soft_contact_material_index,
++                            use_soft_contact_material_source,
++                        )
++                        (
++                            has_contact,
++                            collision_force_0,
++                            collision_force_1,
++                            collision_force_2,
++                            collision_force_3,
++                            collision_hessian_0,
++                            collision_hessian_1,
++                            collision_hessian_2,
++                            collision_hessian_3,
++                        ) = evaluate_vertex_triangle_collision_force_hessian_4_vertices(
++                            particle_idx,
++                            tri_idx,
+                             pos,
+                             pos_prev,
+-                            edge_indices,
++                            tri_indices,
+                             collision_radius,
+                             soft_material[0],
+                             soft_material[1],
+                             soft_material[2],
+                             friction_epsilon,
+                             dt,
+-                            edge_edge_parallel_epsilon,
+                         )
+-                    )
+ 
+-                    if has_contact:
+-                        # here we only handle the e1 side, because e2 will also detection this contact and add force and hessian on its own
+-                        if current_color < 0 or c_e1_v1 == current_color:
+-                            wp.atomic_add(particle_forces, e1_v1, collision_force_0)
+-                            wp.atomic_add(particle_hessians, e1_v1, collision_hessian_0)
+-                        if current_color < 0 or c_e1_v2 == current_color:
+-                            wp.atomic_add(particle_forces, e1_v2, collision_force_1)
+-                            wp.atomic_add(particle_hessians, e1_v2, collision_hessian_1)
+-            collision_buffer_counter += NUM_THREADS_PER_COLLISION_PRIMITIVE
+-
+-    # process vertex-triangle collisions
+-    if primitive_id < collision_info.vertex_colliding_triangles_buffer_sizes.shape[0]:
+-        particle_idx = primitive_id
+-        collision_buffer_counter = t_id_current_primitive
+-        collision_buffer_offset = collision_info.vertex_colliding_triangles_offsets[primitive_id]
+-        collision_count = get_vertex_colliding_triangles_count(collision_info, primitive_id)
+-        while collision_buffer_counter < collision_count:
+-            tri_idx = collision_info.vertex_colliding_triangles[
+-                (collision_buffer_offset + collision_buffer_counter) * 2 + 1
+-            ]
+-
+-            if particle_idx != -1 and tri_idx != -1:
+-                tri_a = tri_indices[tri_idx, 0]
+-                tri_b = tri_indices[tri_idx, 1]
+-                tri_c = tri_indices[tri_idx, 2]
+-
+-                c_v = particle_colors[particle_idx]
+-                c_tri_a = particle_colors[tri_a]
+-                c_tri_b = particle_colors[tri_b]
+-                c_tri_c = particle_colors[tri_c]
+-
+-                if (
+-                    current_color < 0
+-                    or c_v == current_color
+-                    or c_tri_a == current_color
+-                    or c_tri_b == current_color
+-                    or c_tri_c == current_color
+-                ):
+-                    soft_material = _select_soft_contact_material(
+-                        soft_contact_ke,
+-                        soft_contact_kd,
+-                        friction_mu,
+-                        soft_contact_materials,
+-                        soft_contact_material_index,
+-                        use_soft_contact_material_source,
+-                    )
+-                    (
+-                        has_contact,
+-                        collision_force_0,
+-                        collision_force_1,
+-                        collision_force_2,
+-                        collision_force_3,
+-                        collision_hessian_0,
+-                        collision_hessian_1,
+-                        collision_hessian_2,
+-                        collision_hessian_3,
+-                    ) = evaluate_vertex_triangle_collision_force_hessian_4_vertices(
+-                        particle_idx,
+-                        tri_idx,
+-                        pos,
+-                        pos_prev,
+-                        tri_indices,
+-                        collision_radius,
+-                        soft_material[0],
+-                        soft_material[1],
+-                        soft_material[2],
+-                        friction_epsilon,
+-                        dt,
+-                    )
+-
+-                    if has_contact:
+-                        # particle
+-                        if current_color < 0 or c_v == current_color:
+-                            wp.atomic_add(particle_forces, particle_idx, collision_force_3)
+-                            wp.atomic_add(particle_hessians, particle_idx, collision_hessian_3)
+-
+-                        # tri_a
+-                        if current_color < 0 or c_tri_a == current_color:
+-                            wp.atomic_add(particle_forces, tri_a, collision_force_0)
+-                            wp.atomic_add(particle_hessians, tri_a, collision_hessian_0)
+-
+-                        # tri_b
+-                        if current_color < 0 or c_tri_b == current_color:
+-                            wp.atomic_add(particle_forces, tri_b, collision_force_1)
+-                            wp.atomic_add(particle_hessians, tri_b, collision_hessian_1)
+-
+-                        # tri_c
+-                        if current_color < 0 or c_tri_c == current_color:
+-                            wp.atomic_add(particle_forces, tri_c, collision_force_2)
+-                            wp.atomic_add(particle_hessians, tri_c, collision_hessian_2)
+-            collision_buffer_counter += NUM_THREADS_PER_COLLISION_PRIMITIVE
++                        if has_contact:
++                            if wp.static(jacobi_majorization):
++                                multiplicity = float(
++                                    int(c_v == current_color)
++                                    + int(c_tri_a == current_color)
++                                    + int(c_tri_b == current_color)
++                                    + int(c_tri_c == current_color)
++                                )
++                                collision_hessian_0 *= wp.max(1.0, multiplicity)
++                                collision_hessian_1 *= wp.max(1.0, multiplicity)
++                                collision_hessian_2 *= wp.max(1.0, multiplicity)
++                                collision_hessian_3 *= wp.max(1.0, multiplicity)
++                            # particle
++                            if current_color < 0 or c_v == current_color:
++                                wp.atomic_add(particle_forces, particle_idx, collision_force_3)
++                                wp.atomic_add(particle_hessians, particle_idx, collision_hessian_3)
++
++                            # tri_a
++                            if current_color < 0 or c_tri_a == current_color:
++                                wp.atomic_add(particle_forces, tri_a, collision_force_0)
++                                wp.atomic_add(particle_hessians, tri_a, collision_hessian_0)
++
++                            # tri_b
++                            if current_color < 0 or c_tri_b == current_color:
++                                wp.atomic_add(particle_forces, tri_b, collision_force_1)
++                                wp.atomic_add(particle_hessians, tri_b, collision_hessian_1)
++
++                            # tri_c
++                            if current_color < 0 or c_tri_c == current_color:
++                                wp.atomic_add(particle_forces, tri_c, collision_force_2)
++                                wp.atomic_add(particle_hessians, tri_c, collision_hessian_2)
++                collision_buffer_counter += NUM_THREADS_PER_COLLISION_PRIMITIVE
++
++    return accumulate_self_contact_force_and_hessian
++
++
++accumulate_self_contact_force_and_hessian = make_self_contact_kernel()
+ 
+ 
+ @wp.kernel
+diff --git a/newton/_src/solvers/mjvbd_v2/vbd_soft/solver_vbd.py b/newton/_src/solvers/mjvbd_v2/vbd_soft/solver_vbd.py
+index 253a6f99..8efeadba 100644
+--- a/newton/_src/solvers/mjvbd_v2/vbd_soft/solver_vbd.py
++++ b/newton/_src/solvers/mjvbd_v2/vbd_soft/solver_vbd.py
+@@ -771,6 +771,7 @@ class SolverVBD(SolverBase, CouplingInterface):
+         self._particle_jacobi_color_schedules = ()
+         self._particle_jacobi_group_schedules = ()
+         self._surface_jacobi_kernel = None
++        self._particle_jacobi_self_contact_kernel = particle_vbd_kernels.make_self_contact_kernel(False)
+         if self.particle_enable_batched_jacobi:
+             if (
+                 not self.device.is_cuda
+@@ -3504,7 +3505,7 @@ class SolverVBD(SolverBase, CouplingInterface):
+ 
+             if self.particle_enable_self_contact:
+                 wp.launch(
+-                    kernel=accumulate_self_contact_force_and_hessian,
++                    kernel=self._particle_jacobi_self_contact_kernel,
+                     dim=self.particle_self_contact_evaluation_kernel_launch_size,
+                     inputs=[
+                         dt,
+diff --git a/scripts/benchmark_mjvbd_v2_jacobi_fusion.py b/scripts/benchmark_mjvbd_v2_jacobi_fusion.py
+index 25b93c68..e9bab32d 100644
+--- a/scripts/benchmark_mjvbd_v2_jacobi_fusion.py
++++ b/scripts/benchmark_mjvbd_v2_jacobi_fusion.py
+@@ -17,11 +17,12 @@ import numpy as np
+ import warp as wp
+ 
+ import newton
++from newton._src.solvers.mjvbd_v2.vbd_soft import particle_vbd_kernels
+ from newton._src.solvers.mjvbd_v2.vbd_soft.solver_vbd import SolverVBD
+ from newton.tests.test_mjvbd_v2_jacobi_fusion import unfused_jacobi
+ 
+ 
+-def benchmark(size, layers, repeats):
++def benchmark(size, layers, repeats, contact_majorization=False):
+     builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81))
+     for layer in range(layers):
+         builder.add_cloth_grid(
+@@ -65,7 +66,12 @@ def benchmark(size, layers, repeats):
+     step()
+     graphs = {}
+     graph_owners = {}
+-    for label in ("unfused", "fused"):
++    labels = ("original", "majorized") if contact_majorization else ("unfused", "fused")
++    for label in labels:
++        if contact_majorization:
++            solver._particle_jacobi_self_contact_kernel = particle_vbd_kernels.make_self_contact_kernel(
++                label == "majorized"
++            )
+         with unfused_jacobi(solver) if label == "unfused" else nullcontext() as scratch:
+             graph_owners[label] = scratch
+             with wp.ScopedCapture(device=model.device) as capture:
+@@ -76,7 +82,7 @@ def benchmark(size, layers, repeats):
+             wp.capture_launch(graph)
+     timings = {label: [] for label in graphs}
+     for trial in range(8):
+-        order = ("unfused", "fused") if trial % 2 == 0 else ("fused", "unfused")
++        order = labels if trial % 2 == 0 else labels[::-1]
+         for label in order:
+             wp.synchronize_device(model.device)
+             start = time.perf_counter()
+@@ -96,7 +102,7 @@ def benchmark(size, layers, repeats):
+                 "self_contact_active": bool(solver.has_active_self_contact.numpy()[0]) if layers > 1 else False,
+                 "median_substep_ms": medians,
+                 "samples_ms": timings,
+-                "speedup_percent": (medians["unfused"] / medians["fused"] - 1) * 100,
++                "speedup_percent": (medians[labels[0]] / medians[labels[1]] - 1) * 100,
+             }
+         ),
+         flush=True,
+@@ -106,12 +112,13 @@ def benchmark(size, layers, repeats):
+ def main():
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--repeats", type=int, default=100)
++    parser.add_argument("--contact-majorization", action="store_true")
+     args = parser.parse_args()
+     if args.repeats < 1:
+         parser.error("--repeats must be positive")
+     wp.config.log_level = wp.LOG_WARNING
+     for size, layers in ((8, 1), (32, 1), (64, 1), (32, 2)):
+-        benchmark(size, layers, args.repeats)
++        benchmark(size, layers, args.repeats, args.contact_majorization)
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/scripts/diagnose_mjvbd_v2_convergence.py b/scripts/diagnose_mjvbd_v2_convergence.py
+index ff2d599b..00b2f83d 100644
+--- a/scripts/diagnose_mjvbd_v2_convergence.py
++++ b/scripts/diagnose_mjvbd_v2_convergence.py
+@@ -18,6 +18,7 @@ import warp as wp
+ import newton.examples
+ import newton.viewer
+ from newton._src.solvers.mjvbd_v2.particle_multilevel import ParticleMultilevelCorrection
++from newton._src.solvers.mjvbd_v2.vbd_soft import particle_vbd_kernels
+ from newton.examples.mjvbdv2 import (
+     example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00 as scene,
+ )
+@@ -50,6 +51,7 @@ def main():
+         options.pop("particle_jacobi_polish_iterations", None)
+         kwargs["vbd_options"] = options
+         original_init(self, model, **kwargs)
++        self.vbd_solver._particle_jacobi_self_contact_kernel = particle_vbd_kernels.make_self_contact_kernel(False)
+ 
+     with patch.object(SolverMJVBDV2, "__init__", configure):
+         example = scene.Example(newton.viewer.ViewerNull(), newton.examples.default_args(scene.Example.create_parser()))
+@@ -61,7 +63,9 @@ def main():
+     original_iteration = backend._solve_particle_iteration
+     reference_positions = {}
+     triangles = example.model.tri_indices.numpy()
+-    edges = np.unique(np.sort(np.concatenate([triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]]), axis=1), axis=0)
++    edges = np.unique(
++        np.sort(np.concatenate([triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]]), axis=1), axis=0
++    )
+     source = np.concatenate([edges[:, 0], edges[:, 1]])
+     target = np.concatenate([edges[:, 1], edges[:, 0]])
+     degree = np.maximum(np.bincount(target, minlength=example.model.particle_count), 1)[:, None]
+@@ -73,6 +77,7 @@ def main():
+             np.add.at(neighbor_sum, target, values[source])
+             values = 0.5 * values + 0.5 * neighbor_sum / degree
+         return values
++
+     coarse_operators = {}
+     if args.coarse:
+         for operator in ("graph", "galerkin"):
+@@ -109,6 +114,7 @@ def main():
+                 "particle_multilevel",
+                 "particle_multilevel_checkpoints",
+                 "particle_jacobi_relaxation",
++                "_particle_jacobi_self_contact_kernel",
+             )
+         }
+         q_scratch = wp.empty_like(initial_q)
+@@ -147,9 +153,11 @@ def main():
+             return rms(movement)
+ 
+         try:
+-            labels = ["ordinary", "fast", "fast_final_gs"]
++            labels = ["ordinary", "fast", "fast_majorized", "fast_final_gs"]
+             if args.coarse:
+-                labels.extend(f"{operator}_{relaxation}" for operator in coarse_operators for relaxation in (0.1, 0.5, 1.0))
++                labels.extend(
++                    f"{operator}_{relaxation}" for operator in coarse_operators for relaxation in (0.1, 0.5, 1.0)
++                )
+                 labels.extend(f"{operator}_1.0_smooth" for operator in coarse_operators)
+             if args.history:
+                 labels.extend(("fixed_half", "aa_3_0.5", "aa_5_0.5", "aa_3_0.8", "aa_5_0.8", "aa_5_1.0"))
+@@ -161,6 +169,8 @@ def main():
+                     setattr(backend, name, value)
+                 backend.iterations = 60
+                 backend.particle_chebyshev_weights = backend._build_particle_chebyshev_weights(0.8, 60)
++                if label == "fast_majorized":
++                    backend._particle_jacobi_self_contact_kernel = particle_vbd_kernels.make_self_contact_kernel(True)
+                 if label == "ordinary":
+                     backend.particle_enable_batched_jacobi = False
+                     backend.particle_chebyshev_enabled = False
+@@ -175,7 +185,9 @@ def main():
+                     backend.particle_jacobi_relaxation = float(label.split("_")[2]) if anderson else 0.5
+                 if single_batch:
+                     backend._particle_jacobi_color_schedules = (wp.zeros(example.model.particle_count, dtype=wp.int32),)
+-                    backend._particle_jacobi_group_schedules = ((wp.array(np.arange(example.model.particle_count), dtype=wp.int32),),)
++                    backend._particle_jacobi_group_schedules = (
++                        (wp.array(np.arange(example.model.particle_count), dtype=wp.int32),),
++                    )
+                 restore_start()
+                 previous = initial_q_numpy
+                 samples = []
+@@ -204,7 +216,9 @@ def main():
+                                     if label.startswith("aasmooth"):
+                                         correction = smooth(correction, rounds=2)
+                                     cap = 0.05 * example.model.particle_radius.numpy()
+-                                    correction *= np.minimum(1.0, cap / np.maximum(np.linalg.norm(correction, axis=1), 1e-30))[:, None]
++                                    correction *= np.minimum(
++                                        1.0, cap / np.maximum(np.linalg.norm(correction, axis=1), 1e-30)
++                                    )[:, None]
+                                     # DAT consumes displacement from its collision anchor,
+                                     # not an incremental change from the current iterate.
+                                     backend.particle_displacements.assign(
+@@ -220,15 +234,21 @@ def main():
+                             truncate = backend._penetration_free_truncation
+                             before_coarse = backend.particle_displacements.numpy()
+ 
+-                            def smooth_and_truncate(q):
++                            def smooth_and_truncate(q, before_coarse=before_coarse, truncate=truncate):
+                                 coarse_delta = backend.particle_displacements.numpy() - before_coarse
+                                 coarse_delta = smooth(coarse_delta, rounds=2)
+-                                inactive = (example.model.particle_flags.numpy() & int(newton.ParticleFlags.ACTIVE)) == 0
++                                inactive = (
++                                    example.model.particle_flags.numpy() & int(newton.ParticleFlags.ACTIVE)
++                                ) == 0
+                                 coarse_delta[inactive] = 0.0
+                                 backend.particle_displacements.assign((before_coarse + coarse_delta).astype(np.float32))
+                                 truncate(q)
+ 
+-                            with patch.object(backend, "_penetration_free_truncation", smooth_and_truncate if label.endswith("smooth") else truncate):
++                            with patch.object(
++                                backend,
++                                "_penetration_free_truncation",
++                                smooth_and_truncate if label.endswith("smooth") else truncate,
++                            ):
+                                 backend._apply_particle_multilevel_correction(
+                                     state_in,
+                                     contacts,
+diff --git a/scripts/diagnose_mjvbd_v2_last_sweep.py b/scripts/diagnose_mjvbd_v2_last_sweep.py
+index 29546655..3d045e2d 100644
+--- a/scripts/diagnose_mjvbd_v2_last_sweep.py
++++ b/scripts/diagnose_mjvbd_v2_last_sweep.py
+@@ -13,17 +13,24 @@ import warp as wp
+ 
+ import newton.examples
+ import newton.viewer
++from newton._src.solvers.mjvbd_v2.vbd_soft import particle_vbd_kernels
+ from newton._src.solvers.mjvbd_v2.vbd_soft.solver_vbd import SolverVBD
+ from newton.examples.mjvbdv2 import (
+     example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00 as scene,
+ )
++from newton.examples.mjvbdv2 import example_mjvbd_v2_cloth_twist
+ from newton.solvers import SolverMJVBDV2
++from scripts.diagnose_mjvbd_v2_intersections import intersections
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description=__doc__)
+-    parser.add_argument("--mode", choices=("fast", "final_gs", "ordinary30", "option", "graph7"), required=True)
++    parser.add_argument(
++        "--mode", choices=("fast", "final_gs", "ordinary30", "option", "graph7", "majorized"), required=True
++    )
++    parser.add_argument("--scene", choices=("tshirt", "twist"), default="tshirt")
+     parser.add_argument("--frames", type=int, default=900)
++    parser.add_argument("--check-intersections", action="store_true")
+     args = parser.parse_args()
+     if args.frames < 92:
+         parser.error("--frames must be at least 92")
+@@ -51,6 +58,9 @@ def main():
+                 particle_chebyshev_polish_iterations=1,
+             )
+         original_init(self, model, **kwargs)
++        self.vbd_solver._particle_jacobi_self_contact_kernel = particle_vbd_kernels.make_self_contact_kernel(
++            args.mode == "majorized"
++        )
+ 
+     def solve(self, state_in, state_out, contacts, dt, iter_num):
+         if args.mode != "final_gs" or not self.particle_enable_batched_jacobi or iter_num != self.iterations - 1:
+@@ -68,11 +78,25 @@ def main():
+         patch.object(SolverMJVBDV2, "__init__", configure),
+         patch.object(SolverVBD, "_solve_particle_iteration", solve),
+     ):
+-        example = scene.Example(newton.viewer.ViewerNull(), newton.examples.default_args(scene.Example.create_parser()))
++        module = scene
++        scene_args = newton.examples.default_args(scene.Example.create_parser())
++        if args.scene == "twist":
++            module = example_mjvbd_v2_cloth_twist
++            scene_args = None
++        example = module.Example(newton.viewer.ViewerNull(), scene_args)
+         previous_q = previous_delta = None
+-        speed, peak, jitter = [], [], []
++        speed, peak, jitter, kinetic = [], [], [], []
++        mass = example.model.particle_mass.numpy()
++        intersection_samples = {}
++        if args.check_intersections:
++            faces = example.model.tri_indices.numpy()
++            edges = np.unique(
++                np.sort(np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]), axis=1), axis=0
++            )
+         for frame in range(args.frames):
+             example.step()
++            if args.check_intersections and frame + 1 in (390, args.frames):
++                intersection_samples[frame + 1] = len(intersections(example.state_0.particle_q.numpy(), faces, edges))
+             if frame >= args.frames - 92:
+                 q = example.state_0.particle_q.numpy()
+                 v = example.state_0.particle_qd.numpy()
+@@ -84,6 +108,7 @@ def main():
+                         speed.append(float(np.sqrt(np.mean(np.sum(v**2, axis=1)))))
+                         peak.append(float(np.linalg.norm(v, axis=1).max()))
+                         jitter.append(float(np.sqrt(np.mean(np.sum((delta - previous_delta) ** 2, axis=1)))))
++                        kinetic.append(float(0.5 * np.sum(mass * np.sum(v * v, axis=1))))
+                     previous_delta = delta
+                 previous_q = q
+         example.test_final()
+@@ -97,10 +122,13 @@ def main():
+             json.dumps(
+                 {
+                     "mode": args.mode,
++                    "scene": args.scene,
+                     "frames": args.frames,
+                     "rms_speed": np.mean(speed),
+                     "mean_max_speed": np.mean(peak),
+                     "second_difference_rms": np.mean(jitter),
++                    "kinetic_energy": np.mean(kinetic),
++                    "intersection_pairs": intersection_samples,
+                     "end_frame_ms": elapsed * 1000 / 120,
+                 }
+             ),
+diff --git a/newton/tests/test_mjvbd_v2_contact_majorization.py b/newton/tests/test_mjvbd_v2_contact_majorization.py
+new file mode 100644
+index 00000000..25f9cb4f
+--- /dev/null
++++ b/newton/tests/test_mjvbd_v2_contact_majorization.py
+@@ -0,0 +1,127 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
++# SPDX-License-Identifier: Apache-2.0
++
++"""Exercise simultaneous contact updates independently of robot trajectories."""
++
++import unittest
++
++import numpy as np
++import warp as wp
++
++from newton._src.solvers.mjvbd_v2.vbd_soft import particle_vbd_kernels as k
++
++
++@wp.kernel
++def _normal_update(
++    anchor: wp.array[wp.vec3],
++    forces: wp.array[wp.vec3],
++    hessians: wp.array[wp.mat33],
++    pos: wp.array[wp.vec3],
++):
++    i = wp.tid()
++    q = pos[i]
++    q[2] += (forces[i][2] + 100.0 * (anchor[i][2] - q[2])) / (100.0 + hessians[i][2, 2])
++    pos[i] = q
++
++
++def contact_fixture(device):
++    def array(values, dtype=wp.int32):
++        return wp.array(values, dtype=dtype, device=device)
++
++    anchor = array([[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 0.008]], wp.vec3)
++    pos = wp.clone(anchor)
++    info = k.TriMeshCollisionInfo()
++    info.edge_colliding_edges_count = array([])
++    info.edge_colliding_edges_buffer_sizes = array([])
++    info.edge_colliding_edges_offsets = array([0])
++    info.edge_colliding_edges = array([])
++    info.vertex_colliding_triangles_count = array([0, 0, 0, 1])
++    info.vertex_colliding_triangles_buffer_sizes = array([0, 0, 0, 1])
++    info.vertex_colliding_triangles_offsets = array([0, 0, 0, 0, 1])
++    info.vertex_colliding_triangles = array([3, 0])
++    inputs = [
++        0.1,
++        0,
++        anchor,
++        pos,
++        array([0, 0, 0, 0]),
++        array([[0, 1, 2]]),
++        wp.empty((0, 4), dtype=wp.int32, device=device),
++        array([info], k.TriMeshCollisionInfo),
++        0.01,
++        1000.0,
++        0.0,
++        0.0,
++        wp.empty(0, dtype=wp.vec3, device=device),
++        array([]),
++        False,
++        0.01,
++        1.0e-6,
++        array([1]),
++    ]
++    # Keep owners of the array fields stored as device struct pointers.
++    return anchor, pos, inputs, info
++
++
++class TestMJVBDV2ContactMajorization(unittest.TestCase):
++    def test_contact_forces_and_single_vertex_colors_are_unchanged(self):
++        """Bound EE/VT Hessians without changing forces or uncoupled colors."""
++        for device in ("cpu", "cuda:0") if wp.is_cuda_available() else ("cpu",):
++            for edge_contact in (False, True):
++                anchor, pos, inputs, owner = contact_fixture(device)
++                if edge_contact:
++                    q = np.array([[-1, 0, 0], [1, 0, 0], [0, -1, 0.008], [0, 1, 0.008]], dtype=np.float32)
++                    anchor.assign(q)
++                    pos.assign(q)
++                    owner.edge_colliding_edges_count = wp.ones(2, dtype=wp.int32, device=device)
++                    owner.edge_colliding_edges_buffer_sizes = wp.ones(2, dtype=wp.int32, device=device)
++                    owner.edge_colliding_edges_offsets = wp.array([0, 1, 2], dtype=wp.int32, device=device)
++                    owner.edge_colliding_edges = wp.array([0, 1, 1, 0], dtype=wp.int32, device=device)
++                    owner.vertex_colliding_triangles_count.zero_()
++                    owner.vertex_colliding_triangles_buffer_sizes.zero_()
++                    inputs[6] = wp.array([[0, 0, 0, 1], [0, 0, 2, 3]], dtype=wp.int32, device=device)
++                    inputs[7] = wp.array([owner], dtype=k.TriMeshCollisionInfo, device=device)
++                for colors, multiplicity in (([0, 0, 0, 0], 4), ([0, 1, 0, 1], 2), ([0, 1, 2, 3], 1)):
++                    with self.subTest(device=device, edge_contact=edge_contact, colors=colors):
++                        inputs[4].assign(np.array(colors, dtype=np.int32))
++                        results = []
++                        for enabled in (False, True):
++                            force = wp.zeros(4, dtype=wp.vec3, device=device)
++                            hessian = wp.zeros(4, dtype=wp.mat33, device=device)
++                            wp.launch(
++                                k.make_self_contact_kernel(enabled),
++                                dim=16,
++                                inputs=inputs,
++                                outputs=[force, hessian],
++                                device=device,
++                            )
++                            results.append((force.numpy(), hessian.numpy()))
++                        self.assertGreater(float(np.linalg.norm(results[0][0])), 0.0)
++                        np.testing.assert_allclose(results[1][0], results[0][0], rtol=1e-6, atol=1e-7)
++                        np.testing.assert_allclose(results[1][1], multiplicity * results[0][1], rtol=1e-6, atol=1e-7)
++
++    def test_coupled_contact_converges_without_changing_equilibrium(self):
++        """Eliminate the legacy two-cycle for four simultaneous contact vertices."""
++        device = "cpu"
++        anchor, pos, inputs, owner = contact_fixture(device)
++        forces = wp.zeros(4, dtype=wp.vec3, device=device)
++        hessians = wp.zeros(4, dtype=wp.mat33, device=device)
++        initial = anchor.numpy()
++        b = np.array([-1.0 / 3, -1.0 / 3, -1.0 / 3, 1.0])
++        exact = initial[:, 2] + 1000.0 * (0.01 - b @ initial[:, 2]) / (100.0 + 1000.0 * (b @ b)) * b
++        errors = []
++        for kernel in (k.accumulate_self_contact_force_and_hessian, k.make_self_contact_kernel(True)):
++            pos.assign(initial)
++            for _ in range(256):
++                forces.zero_()
++                hessians.zero_()
++                wp.launch(kernel, dim=16, inputs=inputs, outputs=[forces, hessians], device=device)
++                wp.launch(_normal_update, dim=4, inputs=[anchor, forces, hessians], outputs=[pos], device=device)
++            errors.append(float(np.linalg.norm(pos.numpy()[:, 2] - exact)))
++        self.assertGreater(errors[0], 1.0e-3)
++        self.assertLess(errors[1], 1.0e-7)
++        self.assertEqual(owner.vertex_colliding_triangles.size, 2)
++
++
++if __name__ == "__main__":
++    unittest.main()

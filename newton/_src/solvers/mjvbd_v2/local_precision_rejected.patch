@@ -1,0 +1,408 @@
+diff --git a/newton/_src/solvers/mjvbd_v2/particle_surface_cache.py b/newton/_src/solvers/mjvbd_v2/particle_surface_cache.py
+index 50a21f53..88cb44af 100644
+--- a/newton/_src/solvers/mjvbd_v2/particle_surface_cache.py
++++ b/newton/_src/solvers/mjvbd_v2/particle_surface_cache.py
+@@ -102,7 +102,9 @@ def _evaluate_bending(
+ 
+ 
+ @lru_cache(maxsize=4)
+-def make_surface_kernel(evaluate_membrane, *, jacobi_update: bool = False):
++def make_surface_kernel(
++    evaluate_membrane, *, jacobi_update: bool = False, double_solve: bool = False, adaptive_solve: bool = False
++):
+     """Specialize surface solves, optionally fusing the weighted Jacobi increment.
+ 
+     Jacobi writes only cumulative displacement; positions remain frozen until
+@@ -194,9 +196,24 @@ def make_surface_kernel(evaluate_membrane, *, jacobi_update: bool = False):
+         if lane == 0:
+             inv_dt_sq = 1.0 / (dt * dt)
+             h_total += mass[particle] * inv_dt_sq * wp.identity(n=3, dtype=float) + hessians[particle]
+-            if wp.abs(wp.determinant(h_total)) > 1.0e-8:
++            determinant = wp.float64(wp.determinant(h_total))
++            use_double = wp.bool(False)
++            if wp.static(adaptive_solve):
++                scale = wp.max(wp.abs(h_total[0, 0]), wp.max(wp.abs(h_total[1, 1]), wp.abs(h_total[2, 2])))
++                use_double = not wp.isfinite(determinant) or wp.abs(determinant) < wp.float64(
++                    1.0e-6 * scale * scale * scale
++                )
++            if wp.static(double_solve):
++                use_double = True
++            if use_double:
++                determinant = wp.determinant(wp.mat33d(h_total))
++            if wp.abs(determinant) > wp.float64(1.0e-8):
+                 f_total += mass[particle] * (inertia[particle] - pos[particle]) * inv_dt_sq + forces[particle]
+-                delta = wp.inverse(h_total) * f_total
++                delta = wp.vec3(0.0)
++                if use_double:
++                    delta = wp.vec3(wp.inverse(wp.mat33d(h_total)) * wp.vec3d(f_total))
++                else:
++                    delta = wp.inverse(h_total) * f_total
+                 if wp.static(jacobi_update):
+                     delta *= relaxation
+                 else:
+diff --git a/scripts/benchmark_mjvbd_v2_jacobi_fusion.py b/scripts/benchmark_mjvbd_v2_jacobi_fusion.py
+index 25b93c68..9c613007 100644
+--- a/scripts/benchmark_mjvbd_v2_jacobi_fusion.py
++++ b/scripts/benchmark_mjvbd_v2_jacobi_fusion.py
+@@ -17,11 +17,13 @@ import numpy as np
+ import warp as wp
+ 
+ import newton
++from newton._src.solvers.mjvbd_v2 import particle_surface_cache
++from newton._src.solvers.mjvbd_v2.vbd_soft import particle_vbd_kernels
+ from newton._src.solvers.mjvbd_v2.vbd_soft.solver_vbd import SolverVBD
+ from newton.tests.test_mjvbd_v2_jacobi_fusion import unfused_jacobi
+ 
+ 
+-def benchmark(size, layers, repeats):
++def benchmark(size, layers, repeats, local_precision=False):
+     builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81))
+     for layer in range(layers):
+         builder.add_cloth_grid(
+@@ -65,7 +67,14 @@ def benchmark(size, layers, repeats):
+     step()
+     graphs = {}
+     graph_owners = {}
+-    for label in ("unfused", "fused"):
++    labels = ("single", "adaptive") if local_precision else ("unfused", "fused")
++    for label in labels:
++        if local_precision:
++            solver._surface_jacobi_kernel = particle_surface_cache.make_surface_kernel(
++                particle_vbd_kernels.evaluate_neo_hookean_membrane_force_hessian,
++                jacobi_update=True,
++                adaptive_solve=label == "adaptive",
++            )
+         with unfused_jacobi(solver) if label == "unfused" else nullcontext() as scratch:
+             graph_owners[label] = scratch
+             with wp.ScopedCapture(device=model.device) as capture:
+@@ -76,7 +85,7 @@ def benchmark(size, layers, repeats):
+             wp.capture_launch(graph)
+     timings = {label: [] for label in graphs}
+     for trial in range(8):
+-        order = ("unfused", "fused") if trial % 2 == 0 else ("fused", "unfused")
++        order = labels if trial % 2 == 0 else labels[::-1]
+         for label in order:
+             wp.synchronize_device(model.device)
+             start = time.perf_counter()
+@@ -96,7 +105,7 @@ def benchmark(size, layers, repeats):
+                 "self_contact_active": bool(solver.has_active_self_contact.numpy()[0]) if layers > 1 else False,
+                 "median_substep_ms": medians,
+                 "samples_ms": timings,
+-                "speedup_percent": (medians["unfused"] / medians["fused"] - 1) * 100,
++                "speedup_percent": (medians[labels[0]] / medians[labels[1]] - 1) * 100,
+             }
+         ),
+         flush=True,
+@@ -106,12 +115,13 @@ def benchmark(size, layers, repeats):
+ def main():
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--repeats", type=int, default=100)
++    parser.add_argument("--local-precision", action="store_true")
+     args = parser.parse_args()
+     if args.repeats < 1:
+         parser.error("--repeats must be positive")
+     wp.config.log_level = wp.LOG_WARNING
+     for size, layers in ((8, 1), (32, 1), (64, 1), (32, 2)):
+-        benchmark(size, layers, args.repeats)
++        benchmark(size, layers, args.repeats, args.local_precision)
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/scripts/diagnose_mjvbd_v2_convergence.py b/scripts/diagnose_mjvbd_v2_convergence.py
+index ff2d599b..d614194d 100644
+--- a/scripts/diagnose_mjvbd_v2_convergence.py
++++ b/scripts/diagnose_mjvbd_v2_convergence.py
+@@ -17,7 +17,9 @@ import warp as wp
+ 
+ import newton.examples
+ import newton.viewer
++from newton._src.solvers.mjvbd_v2 import particle_surface_cache
+ from newton._src.solvers.mjvbd_v2.particle_multilevel import ParticleMultilevelCorrection
++from newton._src.solvers.mjvbd_v2.vbd_soft import particle_vbd_kernels
+ from newton.examples.mjvbdv2 import (
+     example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00 as scene,
+ )
+@@ -61,7 +63,9 @@ def main():
+     original_iteration = backend._solve_particle_iteration
+     reference_positions = {}
+     triangles = example.model.tri_indices.numpy()
+-    edges = np.unique(np.sort(np.concatenate([triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]]), axis=1), axis=0)
++    edges = np.unique(
++        np.sort(np.concatenate([triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]]), axis=1), axis=0
++    )
+     source = np.concatenate([edges[:, 0], edges[:, 1]])
+     target = np.concatenate([edges[:, 1], edges[:, 0]])
+     degree = np.maximum(np.bincount(target, minlength=example.model.particle_count), 1)[:, None]
+@@ -73,6 +77,7 @@ def main():
+             np.add.at(neighbor_sum, target, values[source])
+             values = 0.5 * values + 0.5 * neighbor_sum / degree
+         return values
++
+     coarse_operators = {}
+     if args.coarse:
+         for operator in ("graph", "galerkin"):
+@@ -109,6 +114,7 @@ def main():
+                 "particle_multilevel",
+                 "particle_multilevel_checkpoints",
+                 "particle_jacobi_relaxation",
++                "_surface_jacobi_kernel",
+             )
+         }
+         q_scratch = wp.empty_like(initial_q)
+@@ -147,9 +153,11 @@ def main():
+             return rms(movement)
+ 
+         try:
+-            labels = ["ordinary", "fast", "fast_final_gs"]
++            labels = ["ordinary", "fast", "fast_adaptive", "fast_final_gs"]
+             if args.coarse:
+-                labels.extend(f"{operator}_{relaxation}" for operator in coarse_operators for relaxation in (0.1, 0.5, 1.0))
++                labels.extend(
++                    f"{operator}_{relaxation}" for operator in coarse_operators for relaxation in (0.1, 0.5, 1.0)
++                )
+                 labels.extend(f"{operator}_1.0_smooth" for operator in coarse_operators)
+             if args.history:
+                 labels.extend(("fixed_half", "aa_3_0.5", "aa_5_0.5", "aa_3_0.8", "aa_5_0.8", "aa_5_1.0"))
+@@ -161,6 +169,12 @@ def main():
+                     setattr(backend, name, value)
+                 backend.iterations = 60
+                 backend.particle_chebyshev_weights = backend._build_particle_chebyshev_weights(0.8, 60)
++                if label == "fast_adaptive":
++                    backend._surface_jacobi_kernel = particle_surface_cache.make_surface_kernel(
++                        particle_vbd_kernels.evaluate_neo_hookean_membrane_force_hessian,
++                        jacobi_update=True,
++                        adaptive_solve=True,
++                    )
+                 if label == "ordinary":
+                     backend.particle_enable_batched_jacobi = False
+                     backend.particle_chebyshev_enabled = False
+@@ -175,7 +189,9 @@ def main():
+                     backend.particle_jacobi_relaxation = float(label.split("_")[2]) if anderson else 0.5
+                 if single_batch:
+                     backend._particle_jacobi_color_schedules = (wp.zeros(example.model.particle_count, dtype=wp.int32),)
+-                    backend._particle_jacobi_group_schedules = ((wp.array(np.arange(example.model.particle_count), dtype=wp.int32),),)
++                    backend._particle_jacobi_group_schedules = (
++                        (wp.array(np.arange(example.model.particle_count), dtype=wp.int32),),
++                    )
+                 restore_start()
+                 previous = initial_q_numpy
+                 samples = []
+@@ -204,7 +220,9 @@ def main():
+                                     if label.startswith("aasmooth"):
+                                         correction = smooth(correction, rounds=2)
+                                     cap = 0.05 * example.model.particle_radius.numpy()
+-                                    correction *= np.minimum(1.0, cap / np.maximum(np.linalg.norm(correction, axis=1), 1e-30))[:, None]
++                                    correction *= np.minimum(
++                                        1.0, cap / np.maximum(np.linalg.norm(correction, axis=1), 1e-30)
++                                    )[:, None]
+                                     # DAT consumes displacement from its collision anchor,
+                                     # not an incremental change from the current iterate.
+                                     backend.particle_displacements.assign(
+@@ -220,15 +238,21 @@ def main():
+                             truncate = backend._penetration_free_truncation
+                             before_coarse = backend.particle_displacements.numpy()
+ 
+-                            def smooth_and_truncate(q):
++                            def smooth_and_truncate(q, before_coarse=before_coarse, truncate=truncate):
+                                 coarse_delta = backend.particle_displacements.numpy() - before_coarse
+                                 coarse_delta = smooth(coarse_delta, rounds=2)
+-                                inactive = (example.model.particle_flags.numpy() & int(newton.ParticleFlags.ACTIVE)) == 0
++                                inactive = (
++                                    example.model.particle_flags.numpy() & int(newton.ParticleFlags.ACTIVE)
++                                ) == 0
+                                 coarse_delta[inactive] = 0.0
+                                 backend.particle_displacements.assign((before_coarse + coarse_delta).astype(np.float32))
+                                 truncate(q)
+ 
+-                            with patch.object(backend, "_penetration_free_truncation", smooth_and_truncate if label.endswith("smooth") else truncate):
++                            with patch.object(
++                                backend,
++                                "_penetration_free_truncation",
++                                smooth_and_truncate if label.endswith("smooth") else truncate,
++                            ):
+                                 backend._apply_particle_multilevel_correction(
+                                     state_in,
+                                     contacts,
+diff --git a/newton/tests/test_mjvbd_v2_local_precision.py b/newton/tests/test_mjvbd_v2_local_precision.py
+new file mode 100644
+index 00000000..b4668182
+--- /dev/null
++++ b/newton/tests/test_mjvbd_v2_local_precision.py
+@@ -0,0 +1,77 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
++# SPDX-License-Identifier: Apache-2.0
++
++"""Validate local block inversion independently of scene trajectories."""
++
++import unittest
++
++import numpy as np
++import warp as wp
++
++from newton._src.solvers.mjvbd_v2 import particle_surface_cache
++from newton._src.solvers.mjvbd_v2.vbd_soft import particle_vbd_kernels
++from newton._src.solvers.mjvbd_v2.vbd_soft.solver_vbd import SolverVBD
++from newton.tests.test_mjvbd_v2_surface_relaxation import _cloth
++
++
++class TestMJVBDV2LocalPrecision(unittest.TestCase):
++    def test_ill_conditioned_block_matches_reference(self):
++        for device in ("cpu", "cuda:0") if wp.is_cuda_available() else ("cpu",):
++            with self.subTest(device=device):
++                model = _cloth(device)
++                solver = SolverVBD(model)
++                count = model.particle_count
++                model.tri_materials.zero_()
++                model.edge_bending_properties.zero_()
++                model.particle_mass.fill_(1.0)
++                model.particle_flags.fill_(1)
++                rng = np.random.default_rng(2718)
++                basis, _ = np.linalg.qr(rng.normal(size=(count, 3, 3)))
++                matrices = (basis @ np.diag([1.0, 1000.0, 1.0e7]) @ basis.transpose(0, 2, 1)).astype(np.float32)
++                rhs = rng.normal(size=(count, 3)).astype(np.float32)
++                # Match the actual float32 assembly, then solve that system in float64.
++                assembled = matrices + np.eye(3, dtype=np.float32)[None]
++                reference = np.linalg.solve(assembled.astype(np.float64), rhs.astype(np.float64)[..., None])[..., 0]
++                inputs = [
++                    1.0,
++                    wp.array(np.arange(count), dtype=wp.int32, device=device),
++                    model.particle_q,
++                    model.particle_q,
++                    model.particle_mass,
++                    model.particle_q,
++                    model.particle_flags,
++                    model.tri_indices,
++                    model.tri_poses,
++                    model.tri_materials,
++                    model.tri_areas,
++                    model.edge_indices,
++                    model.edge_rest_angle,
++                    model.edge_rest_length,
++                    model.edge_bending_properties,
++                    solver.particle_adjacency,
++                    wp.array(rhs, dtype=wp.vec3, device=device),
++                    wp.array(matrices, dtype=wp.mat33, device=device),
++                    0,
++                    0,
++                    1.0,
++                    wp.zeros(model.edge_count, dtype=wp.vec2, device=device),
++                    None,
++                ]
++                errors = []
++                for mode in ("single", "double", "adaptive"):
++                    kernel = particle_surface_cache.make_surface_kernel(
++                        particle_vbd_kernels.evaluate_neo_hookean_membrane_force_hessian,
++                        jacobi_update=True,
++                        double_solve=mode == "double",
++                        adaptive_solve=mode == "adaptive",
++                    )
++                    result = wp.zeros(count, dtype=wp.vec3, device=device)
++                    wp.launch(kernel, dim=count * 16, block_dim=16, inputs=inputs, outputs=[result], device=device)
++                    errors.append(float(np.linalg.norm(result.numpy() - reference) / np.linalg.norm(reference)))
++                self.assertGreater(errors[0], 1.0e-3)
++                self.assertLess(errors[1], 1.0e-6)
++                self.assertLess(errors[2], 1.0e-6)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/scripts/diagnose_mjvbd_v2_local_precision.py b/scripts/diagnose_mjvbd_v2_local_precision.py
+new file mode 100644
+index 00000000..0b77c178
+--- /dev/null
++++ b/scripts/diagnose_mjvbd_v2_local_precision.py
+@@ -0,0 +1,94 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
++# SPDX-License-Identifier: Apache-2.0
++
++"""Compare local block inversion precision through unchanged scene histories."""
++
++import argparse
++import json
++import time
++from unittest.mock import patch
++
++import numpy as np
++import warp as wp
++
++import newton.examples
++import newton.viewer
++from newton._src.solvers.mjvbd_v2 import particle_surface_cache
++from newton.examples.mjvbdv2 import (
++    example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00 as tshirt,
++)
++from newton.examples.mjvbdv2 import example_mjvbd_v2_cloth_twist as twist
++from scripts.diagnose_mjvbd_v2_intersections import intersections
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--double", action="store_true")
++    parser.add_argument("--adaptive", action="store_true")
++    parser.add_argument("--scene", choices=("tshirt", "twist"), default="tshirt")
++    parser.add_argument("--frames", type=int, default=900)
++    args = parser.parse_args()
++    if args.frames < 92:
++        parser.error("--frames must be at least 92")
++    wp.set_device("cuda:0")
++    wp.config.log_level = wp.LOG_WARNING
++    original = particle_surface_cache.make_surface_kernel
++
++    def make(evaluate_membrane, **kwargs):
++        return original(evaluate_membrane, **kwargs, double_solve=args.double, adaptive_solve=args.adaptive)
++
++    module = tshirt if args.scene == "tshirt" else twist
++    scene_args = newton.examples.default_args(tshirt.Example.create_parser()) if module is tshirt else None
++    with patch.object(particle_surface_cache, "make_surface_kernel", make):
++        example = module.Example(newton.viewer.ViewerNull(), scene_args)
++    faces = example.model.tri_indices.numpy()
++    edges = np.unique(np.sort(np.concatenate((faces[:, :2], faces[:, 1:], faces[:, ::2])), axis=1), axis=0)
++    mass = example.model.particle_mass.numpy()
++    previous_q = previous_delta = None
++    speeds, jitter, kinetic = [], [], []
++    crossing = {}
++    for frame in range(1, args.frames + 1):
++        example.step()
++        if frame in (390, args.frames):
++            crossing[frame] = len(intersections(example.state_0.particle_q.numpy(), faces, edges))
++        if frame > args.frames - 92:
++            q = example.state_0.particle_q.numpy()
++            v = example.state_0.particle_qd.numpy()
++            if not np.all(np.isfinite(q)) or not np.all(np.isfinite(v)):
++                raise ValueError(f"Nonfinite state at frame {frame}")
++            if previous_q is not None:
++                delta = q - previous_q
++                if previous_delta is not None:
++                    jitter.append(float(np.sqrt(np.mean(np.sum((delta - previous_delta) ** 2, axis=1)))))
++                    speeds.append(float(np.sqrt(np.mean(np.sum(v * v, axis=1)))))
++                    kinetic.append(float(0.5 * np.sum(mass * np.sum(v * v, axis=1))))
++                previous_delta = delta
++            previous_q = q
++    example.test_final()
++    wp.synchronize_device(example.model.device)
++    start = time.perf_counter()
++    for _ in range(120):
++        example.step()
++    wp.synchronize_device(example.model.device)
++    elapsed = time.perf_counter() - start
++    example.test_final()
++    print(
++        json.dumps(
++            {
++                "scene": args.scene,
++                "double": args.double,
++                "adaptive": args.adaptive,
++                "frames": args.frames,
++                "rms_speed": np.mean(speeds),
++                "second_difference_rms": np.mean(jitter),
++                "kinetic_energy": np.mean(kinetic),
++                "intersection_pairs": crossing,
++                "end_frame_ms": elapsed * 1000 / 120,
++            }
++        ),
++        flush=True,
++    )
++
++
++if __name__ == "__main__":
++    main()
