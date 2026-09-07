@@ -10,6 +10,8 @@ from ...sim import Contacts, Control, Model, ModelFlags, State
 from ..coupled.interface import CouplingInterface
 from ..solver import SolverBase
 from . import kernels, restitution_kernels
+from .fem import FEMSurface
+from .fem_global import GlobalConstraints
 from .kernels import (
     accumulate_weighted_contact_impulse,
     apply_body_delta_velocities,
@@ -131,6 +133,12 @@ class SolverXPBD(SolverBase, CouplingInterface):
         angular_damping: float = 0.0,
         enable_restitution: bool = False,
         deterministic: wp.DeterministicMode | None = None,
+        particle_fem: bool = False,
+        particle_fem_solver: str = "tgs",
+        particle_fem_linear_iterations: int = 4,
+        particle_self_contact_radius: float = 0.0,
+        particle_self_contact_margin: float | None = None,
+        particle_self_contact_max: int | None = None,
     ):
         """Initialize the XPBD solver.
 
@@ -164,6 +172,30 @@ class SolverXPBD(SolverBase, CouplingInterface):
                 kernel module. Pass a :class:`warp.DeterministicMode`, or
                 ``None`` (default) to inherit the current
                 ``wp.config.deterministic`` mode.
+            particle_fem: Enable experimental triangle cloth FEM and mesh DAT.
+                Requires non-differentiable cloth without rigid shapes, tets,
+                springs, or aerodynamic drag/lift. Uses tri_ke/tri_ka as thickness-
+                integrated Lame parameters and edge_ke as hinge stiffness.
+                The material law and damping units depend on particle_fem_solver.
+                Restitution is not supported in either FEM path.
+            particle_fem_solver: ``"tgs"`` (default) uses PhysX-equation ARAP/area
+                constraints; iterations is the number of temporal slices per step.
+                tri_kd and edge_kd are separate velocity damping rates [1/s];
+                contact uses soft_contact_ke/mu, not soft_contact_kd.
+                ``"global"`` uses stable Neo-Hookean compliant constraints and a
+                matrix-free global XPBD solve; iterations counts nonlinear solves
+                at the full step dt. tri_kd and edge_kd are implicit stiffness-
+                proportional damping times [s], and soft_contact_kd is enabled.
+                The global algorithm is an extension, not a PhysX-equivalent path.
+            particle_fem_linear_iterations: Fixed PCG iterations per global FEM
+                nonlinear solve. Defaults to 4. Only used with global FEM.
+            particle_self_contact_radius: FEM contact response distance [m].
+                Positive values enable conservative VT/EE candidates and Planar-DAT.
+            particle_self_contact_margin: FEM detection radius [m], larger than
+                contact radius. Defaults to twice the contact radius.
+            particle_self_contact_max: Fixed FEM VT/EE stream capacity. Defaults
+                to 128 records per particle. Overflow rejects position updates;
+                call :meth:`validate_particle_contacts` to report failures.
         """
         super().__init__(model=model)
         effective_deterministic = deterministic if deterministic is not None else wp.config.deterministic
@@ -175,6 +207,33 @@ class SolverXPBD(SolverBase, CouplingInterface):
         self._restitution_module_options = module_options
 
         self.iterations = iterations
+        self._fem = None
+        if particle_fem_solver not in ("tgs", "global"):
+            raise ValueError('particle_fem_solver must be "tgs" or "global"')
+        if not particle_fem and (particle_fem_solver != "tgs" or particle_fem_linear_iterations != 4):
+            raise ValueError("FEM solver options require particle_fem=True")
+        if particle_fem_solver == "tgs" and particle_fem_linear_iterations != 4:
+            raise ValueError('particle_fem_linear_iterations requires particle_fem_solver="global"')
+        if particle_fem:
+            if effective_deterministic != wp.DeterministicMode.NOT_GUARANTEED:
+                raise ValueError("XPBD FEM surface does not yet support deterministic atomic reductions")
+            self._fem = FEMSurface(
+                model,
+                iterations,
+                particle_self_contact_radius,
+                2.0 * particle_self_contact_radius
+                if particle_self_contact_margin is None
+                else particle_self_contact_margin,
+                max(1, 128 * model.particle_count) if particle_self_contact_max is None else particle_self_contact_max,
+            )
+            if particle_fem_solver == "global":
+                self._fem.global_constraints = GlobalConstraints(self._fem, particle_fem_linear_iterations)
+        elif (
+            particle_self_contact_radius != 0.0
+            or particle_self_contact_margin is not None
+            or particle_self_contact_max is not None
+        ):
+            raise ValueError("Mesh self-contact options require particle_fem=True")
 
         self.soft_body_relaxation = soft_body_relaxation
         self.soft_contact_relaxation = soft_contact_relaxation
@@ -226,6 +285,34 @@ class SolverXPBD(SolverBase, CouplingInterface):
     def compute_body_velocity_from_position_delta(self, value: bool) -> None:
         warnings.warn(_COMPUTE_BODY_VELOCITY_DEPRECATION_MSG, DeprecationWarning, stacklevel=2)
         self._compute_body_velocity_from_position_delta = value
+
+    @property
+    def particle_kinematic_targets(self) -> wp.array:
+        """FEM target positions [m], initially model.particle_q; only fixed particles read these.
+
+        Write this persistent device buffer to animate anchors under DAT.
+        Do not teleport anchors by overwriting state positions.
+        """
+        if self._fem is None:
+            raise ValueError("particle_kinematic_targets requires particle_fem=True")
+        return self._fem.targets
+
+    def validate_particle_contacts(self) -> None:
+        """Synchronously report sticky FEM collision overflow or invalid geometry."""
+        if self._fem is not None:
+            self._fem.validate()
+
+    def rebuild_bvh(self, state: State) -> None:
+        """Rebuild the experimental FEM self-contact trees from current positions.
+
+        Calling this method opts into externally scheduled topology rebuilds.
+        Subsequent FEM steps still refit bounds and detect contacts every step.
+        For example, record one rebuild before the substeps of a captured frame.
+        Without this call, every FEM step rebuilds its own trees.
+        """
+        if self._fem is None:
+            raise ValueError("rebuild_bvh requires particle_fem=True")
+        self._fem.rebuild_bvh(state)
 
     @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
@@ -407,6 +494,9 @@ class SolverXPBD(SolverBase, CouplingInterface):
         """
         self._ensure_restitution_module_options()
         self._apply_module_options()
+        if self._fem is not None:
+            self._fem.step(state_in, state_out, dt)
+            return
         requires_grad = state_in.requires_grad
         self._particle_delta_counter = 0
         self._body_delta_counter = 0

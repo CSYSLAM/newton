@@ -1,0 +1,1 @@
+Add experimental, opt-in triangle FEM paths to `SolverXPBD`: PhysX-equation temporal constraints and matrix-free global compliant constraints, with conservative mesh self-contact streams, Planar-DAT, and an independent `cloth_twist_xpbd` demo. The demo defaults to global XPBD; the default `SolverXPBD` path remains unchanged.

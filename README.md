@@ -430,6 +430,9 @@ If you run the examples from a source checkout with uv, use
       </a>
     </td>
     <td align="center" width="33%">
+      <a href="newton/examples/cloth/example_cloth_twist_xpbd.py">
+        <img width="320" src="docs/images/examples/example_cloth_twist_xpbd.jpg" alt="Experimental XPBD FEM Cloth Twist with DAT">
+      </a>
     </td>
   </tr>
   <tr>
@@ -440,6 +443,7 @@ If you run the examples from a source checkout with uv, use
       <code>python -m newton.examples cloth_poker_cards</code>
     </td>
     <td align="center" width="33%">
+      <code>python -m newton.examples cloth_twist_xpbd</code>
     </td>
   </tr>
   <tr>
