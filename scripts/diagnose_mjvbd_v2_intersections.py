@@ -58,11 +58,41 @@ def intersections(q, faces, edges):
     return result
 
 
+def crossing_motion(pairs, faces, edges, velocity):
+    """Summarize how much of the current motion is incident to crossings."""
+    velocity = np.asarray(velocity, dtype=np.float64)
+    speed_squared = np.einsum("ij,ij->i", velocity, velocity)
+    involved = np.zeros(len(velocity), dtype=bool)
+    for edge, face in pairs:
+        involved[edges[edge]] = True
+        involved[faces[face]] = True
+    total_energy = speed_squared.sum()
+    return {
+        "crossing_particle_count": int(np.count_nonzero(involved)),
+        "crossing_particle_rms_speed": (float(np.sqrt(np.mean(speed_squared[involved]))) if np.any(involved) else 0.0),
+        "all_particle_rms_speed": float(np.sqrt(np.mean(speed_squared))),
+        "crossing_particle_kinetic_fraction": (
+            float(speed_squared[involved].sum() / total_energy) if total_energy > 0.0 else 0.0
+        ),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--case",
-        choices=("fast", "half", "no_cheb", "gs8", "gs20", "gs20_uncached", "uncached", "legacy20", "legacy30"),
+        choices=(
+            "fast",
+            "polish1",
+            "half",
+            "no_cheb",
+            "gs8",
+            "gs20",
+            "gs20_uncached",
+            "uncached",
+            "legacy20",
+            "legacy30",
+        ),
         required=True,
     )
     parser.add_argument("--frames", type=int, default=900)
@@ -88,6 +118,8 @@ def main():
             )
         if args.case == "half":
             options["particle_jacobi_relaxation"] = 0.5
+        if args.case == "polish1":
+            options["particle_jacobi_polish_iterations"] = 1
         if args.case in ("no_cheb", "gs8", "gs20", "gs20_uncached", "uncached"):
             options["particle_chebyshev_spectral_radius"] = None
         if args.case in ("gs8", "gs20", "gs20_uncached", "uncached"):
@@ -121,6 +153,7 @@ def main():
                         "edge_face_crossings": len(pairs),
                         "first_pairs": pairs[:8],
                         "overflow_rows_at_sample": overflow,
+                        **crossing_motion(pairs, faces, edges, example.state_0.particle_qd.numpy()),
                     }
                 ),
                 flush=True,

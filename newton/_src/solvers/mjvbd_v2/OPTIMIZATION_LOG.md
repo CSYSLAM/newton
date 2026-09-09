@@ -3309,3 +3309,1214 @@ edge strain was 21.698%/21.872%, mean area strain was 6.841%/6.855%, and P95
 area strain was 14.081%/14.372%. RMS particle speed was 0.1711/0.1713 m/s and
 maximum speed was 0.4952/0.4975 m/s. These constraint and velocity statistics
 remain comparable while the visible corner failure is removed.
+
+### 2026-09-08: local acceptance trial of nonlinear coarse/fine Newton
+
+At the user's request, port the candidate from `exp/mjvbd-defect-polish`
+to the local `FAST_MJVBDV2` working tree. This is an uncommitted visual
+acceptance trial, not a declaration of general solver equivalence.
+The T-shirt example now defaults to `--vbd-preset surface-global`;
+`--vbd-preset surface-fast` restores its previous accelerated schedule,
+including its ordinary final sweep. Other example defaults are unchanged.
+
+The experimental preset performs a four-particle-cluster Galerkin predictor
+(eight PCG iterations), followed by a particle-resolution dynamic tangent
+solve (five PCG iterations). CUDA conditional nodes can select up to two
+additional nonlinear fine solves when the radius-normalized candidate
+correction exceeds 0.049. Each correction keeps the existing DAT path and
+0.05-radius bound. This criterion measures the bounded candidate update,
+not an exact nonlinear residual or the accepted post-DAT displacement;
+it is not a convergence proof. Missing reciprocal EE records invalidate
+the projected operator and trigger the ordinary-sweep fallback rather
+than changing directed fine-level contact forces.
+
+CPU, requires-grad, deterministic, tet, pneumatic, spring, and full-VBD
+dynamic-rigid configurations retain ordinary-sweep fallback. Unsupported
+schedule overrides are rejected explicitly. No material, friction,
+damping, prescribed trajectory, substep count or collision frequency is
+changed. The global algorithm is not automatically enabled for cloth twist
+or the loaded plastic bag.
+
+Prior matched 900-frame measurements in the experimental worktree:
+RTX 5060 Ti, Warp 1.17.0, CUDA 12.9, driver 13.3, ten substeps/frame.
+These numbers are historical benchmark evidence, not local migration
+smoke-test timings.
+
+| Mode | Wall ms/frame | Mean / P95 absolute edge strain | Frame-900 RMS speed | Strict edge/face crossing pairs, frame 900 |
+| --- | ---: | ---: | ---: | ---: |
+| Ordinary 30 sweeps | 142.666 | 2.010% / 6.614% | 0.001210 m/s | 48 |
+| Existing surface-fast | 38.017 | 3.729% / 11.165% | 0.003939 m/s | 335 |
+| Adaptive global candidate | 35.609 | 1.903% / 6.285% | 0.007928 m/s | 89 |
+
+Candidate trajectory RMS relative to ordinary30 was 22.728 mm at frame
+900 (surface-fast: 31.433 mm). Strain improves, but terminal velocity is
+worse and self-intersections remain. Crossing counts exclude touching and
+coplanar overlap; they are not counts of visible holes. Neither baseline
+nor candidate establishes collision freedom. A frozen-substep probe also
+did not establish ordinary30-equivalent nonlinear convergence.
+
+Cloth twist's prior 300-frame trial passed its corner check but regressed
+from 10.077 to 20.798 ms/frame, so its default remains unchanged. The loaded
+bag uses dynamic rigid bodies and the full VBD core; this surface-only
+algorithm has not been validated there. Do not advertise a universal
+speedup. Unconditional extra ordinary smoothing was also rejected after
+its 900-frame trial took 43.535 ms/frame without recovering baseline
+terminal speed or the candidate's deformation/crossing measures.
+
+Local integration checks cover preset fallback, conflicting options,
+CUDA graph replay, asymmetric contact rejection and clearing adaptive
+flags between graph launches. Twelve focused unit tests passed. The
+T-shirt default completed a 120-frame startup run and a 900-frame `--test`
+run; the old preset passed a separate 120-frame `--test` run. These checks
+do not test visual self-intersections. The remaining acceptance is visual.
+
+### 2026-09-08: post-DAT nonlinear residual backtracking for settling
+
+The user reported persistent terminal motion in the local global prototype.
+The earlier strain comparison did not establish ordinary30-equivalent
+nonlinear convergence. A same-state frame-900 probe confirmed a remaining
+local Newton defect; merely increasing fine PCG from five to ten or twenty
+iterations did not improve it consistently. Removing the coarse predictor
+made the measured defect worse. This points away from treating the linear
+iteration budget as the sole problem.
+
+Add a private residual-globalization controller to `surface-global`:
+
+- Assemble the original force and block Hessian at the actual post-DAT
+  position. Measure `sum(delta_i^T H_ii delta_i)`, where the local Newton
+  correction is `delta_i = H_ii^-1 f_i`, plus radius-normalized squared
+  local corrections. This is a preconditioned force-residual merit, not
+  physical energy, and does not establish convergence by itself.
+- Check the coarse predictor and each fine Newton step against that merit.
+  On a failed check, try half and quarter steps. Restore both positions and
+  cumulative DAT displacements together and reapply existing DAT to shortened
+  trials. If no trial is accepted, restore the base state and run an ordinary
+  directed-contact sweep; that fallback is not claimed to monotonically
+  decrease the global merit.
+- Reuse the newly assembled local/contact data for the next fine solve.
+  Skip subsequent solve blocks only when merit has decreased by 100x AND
+  RMS radius-normalized local correction is at most 0.001. Keep at most
+  three fine solves. Those are bounded-work stopping rules, not a guarantee
+  that an unconverged substep reaches tolerance.
+- Keep decisions on device with flat CUDA conditional blocks and persistent
+  storage. No frame number, robot trajectory phase, velocity decay, material
+  retuning, substep change or weakened DAT is used.
+
+Matched 1200-frame full-trajectory trials, same RTX 5060 Ti / Warp 1.17.0
+environment as above. Sample speed after every ten frames in the final
+300-frame window, outside timed blocks. Wall/GPU times exclude these
+diagnostic readbacks and initialization. Each example final check passed.
+
+| Mode | Wall / GPU ms per frame | Terminal-window mean / P95 RMS speed (m/s) | Final mean / P95 absolute edge strain |
+| --- | ---: | ---: | ---: |
+| Previous global | 34.670 / 34.663 | 0.011034 / 0.013489 | 1.755% / 5.806% |
+| Coarse + fine residual backtracking, selected | 38.416 / 38.409 | 0.004423 / 0.006276 | 2.242% / 6.971% |
+| Ordinary30 | 142.474 / 142.469 | 0.002383 / 0.005704 | 1.893% / 6.301% |
+
+The selected trial reduces window-mean speed by about 60% with 10.8% more
+frame time, but its mean/P95 strain is worse than the previous global
+trajectory and is not identical to ordinary30. Terminal-window mean speed
+is still 1.86x ordinary30. These are complete trajectories, not matched-state
+convergence measurements. Do not describe this as eliminating jitter,
+achieving ordinary30 accuracy, or proving zero self-intersection. No new
+independent intersection count was collected in this trial.
+
+Rejected/default-off ablations (all 1200 frames):
+
+| Ablation | Wall ms/frame | Window-mean RMS speed (m/s) | Final mean / P95 edge strain |
+| --- | ---: | ---: | ---: |
+| Fine-only backtracking, strict AND stopping | 48.065 | 0.003459 | 1.705% / 5.573% |
+| Fine-only, either relative 0.01 or absolute RMS 0.001 | 34.734 | 0.008155 | 1.964% / 6.277% |
+| Fine-only, either relative 0.001 or absolute RMS 0.0005 | 36.827 | 0.006829 | 1.998% / 6.346% |
+
+Fine-only strict stopping executes 35,817 fine solves in 12,000 substeps.
+The selected coarse+fine controller executes 20,721 fine solves and 7,323
+backtracking trials. Looser stopping largely recovers speed but loses much
+of the settling improvement, so it is not the local default.
+
+A separate integration defect was found while recapturing graphs: lazily
+allocated contact-projection arrays could belong to the first graph, then
+be reused after that graph was destroyed. Compute Sanitizer reported an
+out-of-bounds `_reset` write before the fix. Allocate both coarse and fine
+contact projections during preset construction, before capture. Tests now
+assert allocation before first capture and reuse across destroyed/recaptured
+graphs. Benchmark ablations configure their mode before first capture rather
+than replacing live graph inputs. Thirteen focused tests cover CPU/CUDA
+residual backtracking, restoration of cumulative displacements, rejection,
+converged-block skipping, graph replay, preset fallback and asymmetric EE.
+
+Reproduction: `scripts/benchmark_mjvbd_v2_global_settling.py --frames 1200`
+compares the previous global scheduler, selected residual controller and
+ordinary30. `scripts/probe_mjvbd_v2_global_settling.py --frames 900` performs
+the matched-state diagnostic. Raw local benchmark records are retained in
+ignored `newton/tests/outputs/mjvbd_global_settling/`; the `balanced` and
+`tight` records use the historical OR tolerances listed above, not the
+current strict default. Nothing is staged or committed for this trial.
+
+Validation limitation: Compute Sanitizer 12.8 on this machine still exits
+with a host-side access violation inside `wp_cuda_graph_launch` on the full
+new graph, while reporting zero device memory errors after the allocation
+fix. This is NOT a successful sanitizer run and its cause is not established.
+Normal CUDA replay and the focused CPU/CUDA tests complete; do not infer a
+general absence of memory bugs from those checks.
+The final local default also completed a separate direct example invocation
+with `--viewer null --num-frames 1200 --test` (exit code 0).
+
+### Follow-up: reject frozen-metric search and repair full-backend cache calls
+
+The next experiment kept the same force equations, DAT, stopping tolerances,
+coarse/fine budgets and trajectory. It froze each particle's initial local
+Hessian inverse for the substep and measured `f(x)^T H(x_initial)^-1 f(x)`
+instead of refreshing the weight at every trial. This makes the trial
+comparison use one fixed metric, but does not make it a physical energy.
+
+Matched 1200-frame trials on the same machine, with final checks passing:
+
+| Mode | Wall / GPU ms per frame | Terminal-window mean / P95 RMS speed (m/s) | Final mean / P95 absolute edge strain |
+| --- | ---: | ---: | ---: |
+| Current residual controller | 38.503 / 38.497 | 0.004099 / 0.005949 | 1.999% / 6.468% |
+| Frozen initial-Hessian metric, rejected | 40.967 / 40.961 | 0.004093 / 0.005890 | 1.982% / 6.428% |
+
+The frozen metric costs 6.4% more frame time for essentially unchanged
+terminal-window mean speed. Fine solves increase from 20,681 to 26,085;
+backtracking trials increase from 8,132 to 14,271. These single-trajectory
+results do not establish a meaningful accuracy gain, especially with
+nondeterministic contact ordering. No-Go: remove the experimental metric
+buffer, kernel arguments and benchmark mode; retain the previously selected
+controller. Both timed arms included the initial inverse calculation in
+the experimental implementation, so this comparison is not a separate timing
+of the restored production version. Raw records: local ignored
+`newton/tests/outputs/mjvbd_global_settling/fixed_metric_trial.json`.
+
+An equation audit and independent CPU/CUDA finite-difference tests establish:
+
+- The membrane force, including metric damping, agrees with its scalar
+  energy gradient on compressed, sheared and stretched nondegenerate
+  triangles. The existing projected/Gauss-Newton Hessian is an approximation,
+  not evidence that the force uses a different energy.
+- Fully refreshed friction loads do not in general admit a joint scalar
+  normal/tangential potential with the unchanged normal equation. A simple
+  sliding contact gives `dF_t/dgap = mu*k` but `dF_n/dslip = 0`. A future
+  energy-based globalizer must explicitly define load lagging / outer
+  iterations or change the equations; it must not silently claim an exact
+  energy for the current coupled force field. This observation alone does
+  not identify the cause of the demo's remaining jitter.
+
+Broader regression testing found an actual integration bug in the staged
+surface-cache signature change: the complete private `vbd` backend still
+passed 24 arguments to a 26-argument kernel. Ordinary cached surface updates
+in mixed tet/cloth models and selective polish were affected. Pass null
+optional local-correction/Hessian outputs at both full-backend call sites;
+no residual collection, scheduling or material change is needed there.
+The existing mixed-model and selective-polish CUDA graph tests failed before
+the fix and pass afterward. Update the Jacobi-fusion reference harness too:
+its trailing argument index had started overwriting `selective_active`
+instead of relaxation. Preserve the original equivalence assertions.
+
+Full MJVBD_V2 test discovery also exposed experimental PCG dispatch leaking
+into the established multilevel path. `SplitCoarsePCG.parallel` had become
+true by default, and even its nonparallel path always used the new fused
+float64 product reduction. Ten subcases in the original split-PCG tests
+failed: output rounding differed, residual histories changed, and overflow
+scratch was no longer preserved. Restore block-ordered reductions as the
+default and explicitly opt in to fused fine-PCG / parallel coarse-PCG only
+inside `surface-global`. Keep the global preset's selected numerical route;
+do not relax the old bitwise array-equality assertions. All four split-PCG
+tests now pass, including their CPU/CUDA, linked/packed-contact, rejection
+and repeated-capture subcases.
+
+After these fixes, full discovery
+`uv run python -m unittest discover -s newton/tests -p 'test_mjvbd_v2*.py' -q`
+passes all 136 tests. This is wider regression coverage, not a claim that
+all full-length demos have been rerun or ordinary30 accuracy is achieved.
+
+A separate post-fix 1200-frame T-shirt residual-mode run passes its final
+check: 38.977 wall / 38.971 GPU ms/frame, terminal-window mean/P95 RMS speed
+0.004295 / 0.005880 m/s, final mean/P95 edge strain 2.168% / 7.005%.
+Fine solves: 20,629; backtracking trials: 9,061. This remains in the prior
+roughly 39 ms/frame range, but trajectory statistics vary; it is not a new
+speedup or an accuracy improvement claim. The retained changes in this
+follow-up are compatibility fixes and validation, not a new settling method.
+Record: `newton/tests/outputs/mjvbd_global_settling/compatibility_fix_validation.json`.
+
+Sanitizer isolation is now reproducible independently of Newton using
+`scripts/probe_cuda_conditional_graph.py`. On this machine:
+
+- Uninstrumented conditional graph replay passes.
+- Compute Sanitizer 12.8 ordinary graph replay passes, while conditional
+  replay fails with CUDA error 999 at the following device-to-host copy.
+- A portable official CUDA 13.0.85 sanitizer, downloaded without installing
+  or changing the system toolchain, reproduces the same conditional failure.
+- That 13.0 sanitizer passes the two new objective tests plus the mixed
+  tet/surface ordinary-graph replay test, with zero reported memory errors.
+
+This narrows the conditional-graph failure to an interaction reproducible
+without the solver, but does not identify the responsible Warp/driver/tool
+component or certify the full conditional solver graph. Do not discard
+conditional execution merely to obtain a clean instrumentation result.
+The T-shirt default, ordinary force laws, friction, damping and DAT remain
+unchanged by this follow-up. Existing staged work is preserved; new fixes,
+tests and this record remain unstaged.
+
+### 2026-09-08: nonlinear direction and settling diagnostics (in progress)
+
+The acceptance remains unmet: ordinary30-like same-state convergence and
+substantially less terminal jitter, with a small performance cost. Neither
+similar final strain nor passing the demo's broad final check is sufficient.
+No trajectory-dependent damping, velocity decay, material retuning or DAT
+relaxation is introduced in these experiments.
+
+Rejected preliminary directions, all using the unchanged force equations:
+
+- One-history Anderson mixing of the preconditioned PCG displacement map:
+  38.812 ms/frame, terminal mean/P95 RMS speed 0.004155/0.005691 m/s;
+  allowing four fine corrections gives 41.168 ms/frame and
+  0.004239/0.006031 m/s. There is no convincing settling gain over the
+  roughly 39 ms residual baseline. Remove this private implementation and
+  its benchmark modes, rather than exposing another solver switch.
+- Replacing only the isotropic friction tangent with its exact fixed-load
+  derivative is harmful: 118.819 ms/frame, terminal mean/P95 RMS speed
+  0.204870/0.235159 m/s and mean/P95 edge strain 6.537%/27.666%.
+  The current refreshed normal/friction problem is not a symmetric
+  fixed-load minimization. Revert this incomplete derivative change.
+- A CPU sparse-direct diagnostic of the assembled global matrix does not
+  establish that more accurate PCG solves would fix nonlinear convergence.
+  In one shared frame-900 substep, residual mode has a local defect RMS
+  3.702 um and displacement RMS 13.967 um relative to ordinary30;
+  direct four/eight-step corrections have 7.892 um and 438.875 um,
+  respectively. This is an untimed diagnostic, not a proposed CPU path.
+- Initial-state finite-difference Newton/GMRES with a sparse-direct
+  preconditioner also fails the combined force-defect acceptance. A trial
+  gives 9.803 um displacement RMS relative to ordinary30, but force RMS
+  7.328 N versus 1.018 N for ordinary30. A closer displacement alone is
+  not sufficient. A further diagnostic tests this direction as refinement
+  of the fast solution instead of replacing its initial solve.
+- Six-vector nonlinear residual mixing with an ordinary GS preconditioner
+  reduces the local defect in an eight-step diagnostic, but does not
+  match ordinary30: local RMS 1.703 versus 0.890 um, displacement RMS
+  26.818 um relative to ordinary30. The CPU prototype is removed; no
+  N-GMRES path is enabled in the solver.
+
+One independent tangent consistency fix is under regression validation:
+at exactly zero slip with positive regularization distance, friction force
+is zero but its tangent is `2*mu*N/eps * P`, not zero. Both private soft/full
+helper copies now retain this tangent. The eps=0, slip=0 branch remains
+unchanged. Independent CPU/CUDA tests verify zero force and the finite
+tangent. This fixes a discontinuity in the linearization; it is not by
+itself evidence of eliminating terminal motion.
+
+The new spectral membrane experiment projects all six deformation-gradient
+eigenmodes before mapping to vertex blocks. Unlike clamping the scalar
+stress coefficient, this preserves the stress-free rotational nullspace.
+It replaces only the global membrane tangent (including its diagonal), not
+the force or the established local VBD operator. CPU/CUDA tests compare
+against an independent finite-difference Hessian and eigenprojection, and
+check pinned vertices, merged clusters and preservation of other diagonal
+terms. Degenerate triangles retain the existing conservative tangent.
+This is diagnostic-only, not selected as the preset default.
+
+Matched 1200-frame trials now also record terminal-window net displacement
+and the path sampled every ten frames. These distinguish slow net motion
+from oscillatory motion but are not a full frequency analysis:
+
+| Mode | Wall / GPU ms/frame | Mean / P95 RMS speed (m/s) | Net / sampled-path RMS (mm) |
+| --- | ---: | ---: | ---: |
+| Spectral tangent, original stopping | 38.836 / 38.830 | 0.005425 / 0.013335 | 7.732 / 10.400 |
+| Current residual baseline | 38.492 / 38.486 | 0.004893 / 0.006438 | 3.413 / 4.540 |
+| Ordinary30 | 142.232 / 142.229 | 0.001518 / 0.002169 | 4.834 / 5.376 |
+
+All final checks pass; none proves freedom from self-intersection. Bodies
+also move by up to 0.000109 in transform-component units in that window,
+identically in all three runs, so these are not perfectly fixed-boundary
+static-equilibrium experiments. Full trajectories have nondeterministic
+contact ordering; compare matched-state force defects separately.
+
+Original tangent with stricter stopping (`relative=0.001`, normalized local
+RMS=0.0001) costs 49.971 ms/frame with three fine solves, terminal speed
+0.003106/0.004816 m/s. Five fine solves cost 80.519 ms/frame and give
+0.004394/0.009199 m/s. Merely raising the bounded nonlinear work is not a
+successful default: the latter is slower without a stable settling gain.
+Further spectral/strict trials and force-balance refinement remain under
+evaluation; do not report this section as a completed optimization.
+
+Raw local records are in ignored `newton/tests/outputs/mjvbd_global_settling/`:
+`krylov_trial.json`, `krylov4_trial.json`, `exact_friction_tangent_trial.json`,
+`jfnk_probe.log`, `ngmres_gs_probe.log`,
+`spectral_membrane_trial.json`, `spectral_probe.log`, and
+`strict_spectral_trial.json`. The first direct-solve probe was recorded in
+the console, not in a separate raw file. Solver/demo defaults and the user's existing
+staged work are preserved; nothing is staged or committed in this trial.
+
+### 2026-09-09: nonlinear smoothing experiments (not a selected default)
+
+The acceptance goal is still **not met**. All figures below use the unchanged
+T-shirt trajectory, ten substeps, and 1,200 frames. Timings exclude setup,
+capture and diagnostic readbacks. The terminal window is frames 901--1,200.
+These are separate nondeterministic trajectories, not matched-state errors.
+
+| Experimental schedule | Wall ms/frame | Terminal speed mean / P95 (m/s) | Net / path RMS (mm) |
+| --- | ---: | ---: | ---: |
+| Residual-selected GS, four scans | 56.004 | 0.003019 / 0.005238 | 3.768 / 4.749 |
+| Residual-selected GS, six scans | 66.189 | 0.002773 / 0.004047 | 2.726 / 3.662 |
+| Central-difference right-preconditioned JFNK, four vectors | 57.603 | 0.003501 / 0.006023 | 6.473 / 9.155 |
+| Nonlinear GS-GMRES, four scans, four-vector history | 61.124 | 0.002623 / 0.002972 | 2.319 / 3.176 |
+| Nonlinear GS-GMRES, six scans, four-vector history | 79.776 | 0.002032 / 0.002583 | 2.133 / 3.061 |
+| GS-GMRES, six scans, frozen norm and force-only queries | 71.641 | 0.003038 / 0.003505 | 2.929 / 3.671 |
+| GS-GMRES, six scans, color-local contact gather | 131.864 | 0.003862 / 0.011704 | 6.953 / 9.072 |
+| GS-GMRES, six scans, no projection in norm queries, one mixing trial | 73.406 | 0.002619 / 0.003029 | 2.216 / 2.945 |
+| Same reduced-work schedule, eight scans | 88.404 | 0.002488 / 0.003130 | 3.141 / 3.676 |
+
+All scene final checks passed, but these checks do not certify self-contact
+safety or absence of jitter. None of the above justifies replacing the current
+default: lower terminal motion alone is insufficient at this cost.
+
+The separate `ngmres_gs_probe.log` matched-state test gave:
+
+| Schedule | Local Newton defect RMS (um) | Force RMS (N) | Position RMS relative to 30 sweeps (um) |
+| --- | ---: | ---: | ---: |
+| Current residual globalization | 4.681 | 6.747 | 14.251 |
+| Nonlinear GS-GMRES, four scans | 1.738 | 1.358 | 19.820 |
+| Nonlinear GS-GMRES, six scans | 1.276 | 1.079 | 17.625 |
+| Ordinary 30 sweeps | 0.890 | 2.104 | 0 |
+
+This is evidence of improved local force balance, **not** evidence that all
+solution-error measures improve. A 100-sweep same-state diagnostic is being
+added to distinguish local defect from global position error.
+
+The color-local gather prototype used fixed detector-slot-indexed links,
+four VT endpoint links and two owning-edge EE links. CPU/CUDA and graph replay
+tests matched original forces/Hessians, including asymmetric EE and a device
+material table. Nevertheless the full-frame cost increased sharply. Its two
+new source/test files and solver hooks were removed; the raw benchmark record
+is retained in `ngmres_gather_trial.json`. It is not a retained solver option.
+
+The existing temporal warm-start switch also failed this trajectory:
+27.700 ms/frame but mean/P95 terminal speed 0.385/0.405 m/s. It remains disabled.
+The right-preconditioned matrix-free experiment did not reproduce the CPU
+left-preconditioned oracle: even with 20 inner PCG steps the estimated Krylov
+residual squared stayed about 0.98--0.996 of its initial value. The Arnoldi
+orthogonality check was small (about 1e-7--3e-6); simply increasing the inner
+iteration budget was not a successful remedy.
+
+Current follow-up experiments compare full-history acceleration of global
+Newton steps and inexact **left** preconditioning. They remain private research
+hooks, with unchanged demo/default configuration. No velocity damping, phase
+trigger, material change or weakened DAT was introduced by these experiments.
+
+Follow-up: full-history acceleration of global steps also failed the cost
+gate: four/six steps cost 110.373/169.492 ms per frame. Terminal speed mean/P95
+was 0.004125/0.007044 and 0.002677/0.004967 m/s respectively. The six-step
+matched-state probe had looked promising (1.171 um local defect versus 1.032
+um for 30 sweeps; error relative to 100 sweeps 47.506 versus 55.050 um), but
+that single-state observation did not translate into an acceptable trajectory.
+Block-reducing the GS-GMRES history Gram matrix gave 75.427 ms/frame and
+0.002535/0.003784 m/s, still No-Go. The history, selective nonlinear smoother,
+and spectral membrane experimental modules/tests/hooks were removed after
+these trials; raw JSON/log files remain. Do not try to reproduce removed
+schedules using the remaining benchmark's current mode list.
+
+Two additional hypotheses were checked before further solver changes:
+
+- 4,096 synthetic near-parallel directed EE pairs on CPU had relative net
+  action/reaction error at most 1.57e-7 and no one-sided activation. This test
+  does not support changing canonical pair semantics to fix this jitter.
+- On one shared T-shirt state, local 3x3 Hessian condition numbers were roughly
+  median 8--17, P95 32--39, maximum 205--426. Against an independent double
+  precision solve using freshly queried forces, local-step RMS discrepancies
+  were about 5.6e-6 um. Local matrix inversion precision is not the bottleneck
+  in that sample; no mixed-precision solver change was made.
+
+Changing only the experimental residual acceptance norm from F^T H^-1 F to
+the normalized squared local position defect reduced matched-state defect
+3.741 to 2.681 um and error relative to 30 sweeps 15.321 to 12.599 um. It is
+not yet equivalent to the 30-sweep result (0.862 um local defect). A full
+trajectory check is running; the default acceptance norm is unchanged.
+
+### 2026-09-09: Lagged-dissipation and within-step secant research (in progress)
+
+The position-norm acceptance trial finished at 37.527 ms/frame with terminal
+mean/P95 RMS speed 0.004550/0.005863 m/s. It does not meet the settling goal.
+The default residual merit is unchanged.
+
+A research-only energy difference query freezes friction normal load,
+tangent and interpolation weights at each line-search base, not over time.
+Normal contact and elasticity are refreshed. This is a lagged-dissipation
+surrogate, not a scalar potential for the fully refreshed Coulomb system.
+Original forces are still queried between steps. DAT applies to every
+accepted motion and retry; rejection restores both position and cumulative
+DAT displacement. Overflow and nonreciprocal directed EE rows invalidate
+the energy query; ordinary directed GS remains the rejection fallback.
+
+The fixed-base body/EF energy implementation initially lost accuracy by
+subtracting interpolated absolute positions. It now interpolates particle
+increments in double precision; base force semantics are unchanged. CPU and
+CUDA tests check VT/EE and body point/EF energy gradients. A CPU/CUDA Graph
+replay test checks backtracking, invalid-query rejection and q/D rollback.
+These are targeted checks, not full solver/general-demo certification.
+
+| Research schedule | Wall / GPU ms/frame | Terminal mean / P95 RMS speed (m/s) |
+| --- | ---: | ---: |
+| Energy fine4 + ordinary polish4 | 66.003 / 65.997 | 0.002171 / 0.003898 |
+| Energy fine3 + ordinary polish2 | 53.874 / 53.868 | 0.002803 / 0.004089 |
+| Energy fine1 + ordinary polish4 | 50.936 / 50.930 | 0.002372 / 0.004816 |
+| Energy coarse only + ordinary polish6 | 54.400 / 54.395 | 0.002366 / 0.003488 |
+
+All rows use 1200 unchanged T-shirt frames and the last 300-frame window.
+The first two preceded the increment-precision and reciprocal-row guard
+fixes; do not attribute differences between these rows solely to schedules.
+Final checks pass, but do not certify no self-intersection or no jitter.
+No new preset/demo default is selected. The goal is not achieved.
+
+In one matched-state probe, fine4/polish4 gave local correction RMS/P95
+0.954/1.680 um versus ordinary30 0.884/1.635 um, but force RMS was still
+2.056 versus 1.689 N. Other same-state short schedules gave local RMS
+1.130--1.249 um versus ordinary30 0.857 um. These probes are not trajectory
+or throughput evidence; raw logs are under the ignored global_settling
+output directory.
+
+The next research direction uses within-substep L-BFGS history to avoid
+repeated global matrix assembly/PCG. Its fixed eight-entry compact Gram
+recursion matches an independent two-loop implementation on CPU/CUDA,
+including ring wrap. History is discarded per substep and on a rejected
+step; no velocity/trajectory/material adjustment is involved. A CPU-led
+same-state diagnostic with twelve secant corrections and two GS sweeps gave
+local RMS 0.998 um versus ordinary30 1.106 um and force RMS 0.647 versus
+2.602 N. A GPU implementation and full-trajectory validation are in progress;
+this does not yet establish a general accuracy or speed improvement.
+
+### Follow-up: failed accelerators and contact-motion invariance
+
+The L-BFGS full-trajectory experiment did not reproduce the promising
+single-state result: six/twelve corrections cost 80.934/117.262 ms/frame
+and terminal mean RMS speeds were 0.005135/0.003736 m/s. Contact-centered
+four-vertex Woodbury patches also failed the speed/settling target:
+four/eight corrections cost 56.207/69.446 ms/frame with terminal speeds
+0.003164/0.002398 m/s. These are research paths, not preset defaults.
+Interpolated energy backtracking reduced retries in a 300-frame run, but
+that window contains active manipulation and is not settling evidence.
+
+A separate regularization diagnostic changed friction epsilon from 0.01
+to 0.001 m/s. Ordinary30 terminal speed fell to 0.001049 m/s, whereas the
+fast residual solver still gave 0.004689 m/s. Thus regularized friction
+micro-slip does not explain all fast-solver jitter. This parameter change
+is not an acceleration and was not applied to the demo/default solver.
+Likewise, an ordinary1000 single-state oracle continued moving and did not
+give a smaller local residual; it must not be called converged truth.
+
+New regression tests exposed concrete floating-point contact errors:
+
+- VT used two differently evaluated world-space interpolations for current
+  and previous contact points. With identical particle positions and
+  anchors, the spurious friction/damping force reached 1.487 N on CPU and
+  1.481 N on CUDA in the constructed test (ke=300000, radius=0.002 m).
+- EE similarly produced up to 1.283 N under an exactly represented common
+  translation because current/previous world points were interpolated
+  independently.
+- Body point/face contacts produced about 0.714 N under common translation.
+  The full backend additionally imported the public rigid helpers instead
+  of its private copies, bypassing private fixes.
+
+The correction evaluates material-point motion from per-vertex increments
+and separates body translation from rotated local-point increments. It
+preserves the mathematical force law, contact geometry, material values,
+DAT and trajectory. Both particle and rigid reaction paths are updated.
+CPU/CUDA soft/full rest/common-translation regressions pass after the fix;
+expanded regression and trajectory validation are still in progress.
+
+VT-only 1200-frame timing was 39.194 ms/frame (residual) versus 139.944
+ms/frame (ordinary30), with terminal speeds 0.004061 versus 0.001383 m/s.
+This does not meet the goal, nor does it establish a precise improvement
+over separate nondeterministic trajectories. EE/body fixes were not loaded
+in that run. No new demo or preset default is selected by this research.
+
+The all-material-motion follow-up gave residual 38.513 ms/frame and
+ordinary30 139.322 ms/frame, with terminal mean speeds 0.007682 and
+0.001277 m/s respectively. The fast trajectory did not improve its
+settling target; correcting a floating-point invariance error is not a
+convergence guarantee. A further EE normal-force test found 0.03224 N
+variation under an exactly represented common translation. Evaluating
+the edge separation locally fixes that test; this last geometry fix was
+not loaded in the all-material-motion benchmark above.
+
+The expanded contact tests (15 tests, CPU/CUDA) pass. The dense-reduction
+fixture is offset by 1 mm to avoid exact cancellation of its angular-linear
+block: the finite zero-slip tangent caused different float32 reduction
+trees to differ by 0.001465 at a mathematically zero entry. Existing
+relative/absolute comparison tolerances were not loosened. Full discovery
+before this fixture adjustment ran 148 tests with that one failure.
+
+### Analytic frozen-geometry friction Jacobian (research)
+
+`friction_jacobian.py` builds the radial friction tangent and normal-load
+cross derivative missing from the isotropic SPD approximation. This is
+not the complete geometrically differentiated contact Jacobian. Its
+nonsymmetric operator is solved by right-preconditioned GMRES, not CG;
+the original force query, DAT and nonlinear acceptance remain authoritative.
+All contact storage is fixed-capacity with device counts and overflow
+rejection. It does not introduce a new friction/material model.
+
+Independent finite differences of a frozen-normal/load contact law and
+an independently assembled nonsymmetric stencil product pass on CPU/CUDA.
+An initial implementation incorrectly rejected inactive asymmetric EE
+rows; this was corrected before the full trajectory run. Only active
+contact stencils require reciprocal rows, matching the base projection.
+
+The analytic6 1200-frame result is still No-Go: 71.070 ms/frame, terminal
+mean/P95 speed 0.004279/0.006857 m/s, final 0.006077 m/s. A matched-state
+probe reduced force RMS from 2.287 to 1.373 N, but local correction RMS
+worsened from 2.085 to 3.678 um (ordinary30: 0.759 um). This demonstrates
+why lower total force-work residual alone is not sufficient acceptance.
+A joint force-work/displacement-defect acceptance filter is being tested;
+it is research-only and does not change the default merit policy.
+
+Follow-up 1200-frame trials remain below acceptance:
+
+| Research variant | Wall ms/frame | Terminal mean / P95 speed (m/s) |
+| --- | ---: | ---: |
+| Joint residual filter, original PCG | 38.337 | 0.004016 / 0.004992 |
+| Joint residual filter, analytic GMRES6 | 69.088 | 0.009431 / 0.020477 |
+| Fixed substep residual metric, original PCG | 41.448 | 0.003926 / 0.005670 |
+| Fixed substep residual metric, analytic GMRES6 | 67.183 | 0.007678 / 0.013708 |
+
+The fixed-metric test verifies that increasing the current Hessian alone
+cannot improve the fixed residual norm. This is a mathematical acceptance
+property, not evidence that it solves the trajectory problem. All tests
+for analytic tangents, nonsymmetric products, the joint filter and the
+fixed metric pass on CPU/CUDA. None of these modes becomes a default.
+
+Warp's `closest_point_edge_edge` treats epsilon as a squared-edge-length
+degeneracy threshold (confirmed in installed `warp/native/intersect.h`),
+not solely a near-parallel test as the private solver parameter describes.
+At the current 1e-5 value, 39 of 19174 rest-shape T-shirt edges are treated
+as points. A diagnostic setting epsilon=1e-12 consistently for detection,
+force and DAT costs 38.475 ms/frame on the fast path and 139.603 on
+ordinary30. Terminal speeds remain 0.005340 and 0.001468 m/s respectively.
+This does not establish a jitter remedy; no default epsilon change was
+made. In a separate deformed-state probe, 40 edges met the degeneracy
+threshold, but the largest local residual was not incident on such an edge.
+
+A CPU-only frozen-elastic/nonlinear-contact inner solve was also checked
+before committing to a GPU implementation. Four/ten inner iterations
+reduced original force RMS to about 0.894 N (ordinary30 0.856 N), but local
+defect remained 2.448/2.447 um (ordinary30 0.730 um), and position error
+against ordinary30 was about 115 um. The second outer correction was
+rejected. The normal load was linearized and damping phase frozen inside
+this oracle; actual force and DAT were checked outside. This is not a
+successful full-force solver and has not been ported to GPU.
+
+Next bounded trial: regularize only the global linear step in its local
+block Hessian metric, to control weak global modes. This is Newton-step
+regularization, not physical or velocity damping. The original matrix is
+restored exactly before the nonlinear acceptance check. CPU/CUDA tests,
+including repeated CUDA Graph replay, verify the diagonal modification
+and bitwise restoration. Full trajectory validation is recorded below.
+
+### Further globalization experiments (not enabled by a preset)
+
+The full 1200-frame results still do not meet the settling target. In
+particular, one-state accuracy must not be reported as full-trajectory
+equivalence to ordinary30. All runs retain the trajectory, material,
+friction, substep count and DAT; no terminal velocity decay is applied.
+
+| Variant | Wall ms/frame | Terminal mean / P95 speed (m/s) |
+| --- | ---: | ---: |
+| Diagonal metric shift 0.001 | 37.906 | 0.003801 / 0.004881 |
+| Diagonal metric shift 0.01 | 37.602 | 0.004181 / 0.005569 |
+| Diagonal metric shift 0.1 | 38.628 | 0.004478 / 0.008784 |
+| Shift 0.1, strict five-step limit | 48.924 | 0.003099 / 0.007288 |
+| Shift 0.1, twelve-step maximum-defect guard | 65.419 | 0.004673 / 0.012883 |
+| Frozen-tangent modified Newton6 | 97.393 | 0.010170 / 0.020313 |
+| Frozen tangent with shift 0.1 | 77.878 | 0.006896 / 0.010017 |
+| Refactor rejected tangent, Newton6 | 120.790 | 0.006910 / 0.016446 |
+| Refactor rejected tangent, shift 0.1 | 73.282 | 0.004402 / 0.006923 |
+| Radial friction tangent, shift 0.1, three steps | 65.727 | 0.029411 / 0.081552 |
+| Radial friction tangent, shift 0.1, five steps | 89.736 | 0.014161 / 0.017142 |
+| Global plus up to sixteen residual-controlled GS sweeps | 87.144 | 0.004149 / 0.008029 |
+
+The strict shift-0.1 matched-state correction RMS was 0.715 um against
+ordinary30's 0.727 um, but that did not translate into sufficient settling.
+The independent force-only query agrees with assembled force to about
+2.7e-7 N RMS in the modified-Newton comparison. Tangent reuse failures are
+therefore not explained by a different force law in that query. Adaptive
+refactoring performed 35622 / 21989 rebuilds without / with the shift;
+the old local metric was retained for comparisons across each rebuild.
+
+The radial tangent keeps normal load fixed only in the linearization,
+retains the original force in residual checks, and uses SPD PCG. Matrix
+diagonals and raw contact heads/count/overflow are restored after solving.
+Six CPU/CUDA derivative/restoration tests passed, including repeated Graph
+replay. This correctness coverage does not establish trajectory quality:
+the full runs above failed, and no default selects the radial tangent.
+
+The residual-controlled GS experiment used 72342 additional sweeps over
+12000 substeps. Its decisions contain no trajectory time or terminal-frame
+test. Neither this run nor the radial runs exhibited sampled bending
+degeneracy-threshold switches; that particular mechanism did not explain
+their terminal motion.
+
+A CPU-only TALS trial used the frozen contact frames and closest approach
+to the regularized stiction disk, with a pi/3 angular bound, following
+Castro et al., *A Transition-Aware Method for the Simulation of Compliant
+Contact with Regularized Friction*, Section III-A
+(https://arxiv.org/abs/1909.05700). It avoided inner rejected steps in the
+sampled run but worsened original local defect: 3.702 um versus 2.870 um
+without TALS and 0.702 um for ordinary30. Position difference from
+ordinary30 was 360 / 210 um. It has not been promoted into the GPU solver.
+
+Current bounded checks separate two remaining hypotheses: a symmetric
+color-triangular preconditioner to improve the linear direction, and a
+constant-velocity nonlinear initial guess that leaves the inertial target
+unchanged. Independent CPU/CUDA dense-matrix and Graph-replay checks for
+the symmetric preconditioner pass. Energy-merit and initialization
+trajectory checks remain research, not validated defaults.
+
+### Follow-up: reject more approximate directions; accelerate exact work
+
+The following additional 1200-frame experiments remain No-Go. They do not
+select a preset or change the demo. Velocity-guess runs also visibly change
+the fold outcome; their short runtimes are not acceptable speedups.
+
+| Variant | Wall ms/frame | Terminal mean / P95 RMS speed (m/s) |
+| --- | ---: | ---: |
+| Energy2 + two GS sweeps, radial tangent | 60.535 | 0.004154 / 0.005779 |
+| Energy2 + two GS sweeps, colored SSOR | 112.337 | 0.002804 / 0.004781 |
+| Constant-velocity initial guess, residual controller | 39.995 | 0.113506 / 0.136680 |
+| Previous-position initial guess, residual controller | 73.207 | 0.001585 / 0.001908 |
+| Constant-velocity guess, energy1 + four GS sweeps | 23.416 | 0.077484 / 0.097213 |
+| Energy-selected initial guess, residual controller | 80.907 | 0.001266 / 0.001784 |
+| Energy-selected initial guess, energy1 + four GS sweeps | 56.550 | 0.002960 / 0.007617 |
+| Energy-selected initial guess, energy2 + two GS sweeps | 71.618 | 0.004711 / 0.008176 |
+| Nonlinear merit only, energy1 + four GS sweeps | 50.828 | 0.002869 / 0.007313 |
+| Nonlinear merit only, residual controller | 37.553 | 0.004774 / 0.006940 |
+
+The Euclidean linear residual is not monotone under preconditioned CG.
+An independent 2-block SPD counterexample passes on CPU/CUDA: one step
+reduces quadratic energy while growing the Euclidean residual tenfold.
+Disabling that gate was tested only behind actual nonlinear acceptance;
+finite values, curvature, overflow, clamp and DAT guards remain. This did
+not establish the requested trajectory improvement and is not a default.
+
+The research energy query now computes EE geometry using local differences,
+and rejects asymmetric EE rows only when active at the base or trial.
+Inactive asymmetric rows must not invalidate an otherwise valid energy
+query. Focused CPU/CUDA tests cover inactive, active and activating cases.
+
+The frozen-contact CPU oracle's directional derivative audit gives errors
+around 1e-7 and linear backerrors around 1e-13. Broyden inverse secants on
+the actual force did not repair the outer problem: local defects of about
+2.12 um versus ordinary30's 0.677 um in one matched-state run; another
+run worsened to 6.01 um. These CPU oracles have not been ported to GPU.
+
+Two independent diagnostics also failed to explain/remove the jitter:
+translating the complete physical scene to the table-centered origin gave
+37.973 ms/frame and 0.004097 m/s for the residual controller; ordinary30
+gave 138.050 ms/frame and 0.001580 m/s. Twenty substeps with one fine
+global correction gave 52.189 ms/frame and 0.004522 m/s. Neither the world
+origin nor substep count is changed in the demo.
+
+Terminal diagnostics now separate velocity fluctuations from mean drift.
+Smooth regularized friction can sustain micro-slip; total path length alone
+is not an oscillation measure. No artificial velocity decay or freezing is
+used, and ordinary30 is a reference budget, not a converged exact solution.
+
+New bounded implementation experiment: a **color-bucket contact stream**,
+not the previously rejected serial particle gather or unbucketed stream.
+Each directed EE row is present once for each distinct owning-endpoint
+color; each VT row once per distinct endpoint color. Detection count/fill
+uses fixed worst-case capacity and device prefix offsets. At each color,
+the original contact function is evaluated at current positions. DAT is
+unchanged. CPU/CUDA and repeated Graph tests cover repeated endpoint
+colors, asymmetric EE, device material changes and clamped overflow rows.
+
+The first 1200-frame ordinary30 run with buckets costs 98.171 ms/frame,
+terminal mean/P95 speed 0.001336/0.001763 m/s, final speed 0.000995 m/s.
+This is promising compared with recent unmodified ordinary30 runs near
+139 ms/frame, but paired order-swapped timing and more scene coverage are
+still required. No preset installs the research module.
+
+A separate DAT identity certificate is under test. It bounds distance to
+every cached division plane in the allowed blend interval [0.05, 0.95],
+with conservative roundoff slack. Only when every displacement ball stays
+on its side does it skip pair evaluation; otherwise it executes original
+DAT. The original global displacement cap and output rounding still apply.
+Randomized VT/EE CPU/CUDA tests, including unsafe fallback and Graph replay,
+are bitwise equal to the cached DAT reference. Full-scene hit rate and
+cost are pending; this is not a general no-self-intersection certificate.
+
+### Follow-up: exact-work throughput and coloring experiments (not defaults)
+
+The global conditional DAT certificate was rejected: although roughly 78%
+of queries certified identity, the extra check/flag/branch nodes increased
+ordinary30 with color buckets to 139.454 ms/frame. Moving the sufficient
+certificate inside each existing cached row instead gave 91.188 ms/frame
+(90.971 in a later run). Certified rows skip plane evaluation only; unsafe
+rows still execute the original DAT and the original displacement cap stays.
+Randomized safe/unsafe VT/EE tests remain bitwise equal on CPU/CUDA and Graph.
+
+Additional local/global schedules failed to establish a quality/cost win:
+
+| Schedule, with buckets and row certificate | ms/frame | Terminal mean / P95 speed (m/s) |
+| --- | ---: | ---: |
+| Six GS + coarse/fine + four GS | 67.729 | 0.001991 / 0.004661 |
+| Ten GS + coarse/fine + four GS | 106.862 | 0.004507 / 0.008658 |
+| Six GS + fine only + four GS | 56.383 | 0.002841 / 0.005546 |
+| Six GS + coarse only + four GS | 62.155 | 0.002114 / 0.004866 |
+| Ordinary12 | 50.729 | 0.001755 / 0.003395 |
+| Ordinary16 | 60.293 | 0.001600 / 0.005236 |
+
+In a common frame-900 state, six-GS/coarse/fine/four-GS gave local correction
+RMS 0.830 um and force RMS 1.154 N, versus ordinary30 0.748 um / 0.670 N.
+The smaller position defect alone does not demonstrate equivalent convergence.
+
+The body EF scatter now skips records with no corner of the current color
+before evaluating contact. Both private backends retain the same forces.
+Twenty-two focused contact/projection/global tests passed; the separate
+full-trajectory benefit of this early predicate is not established.
+
+A CUDA-only research launch packs independent 16-thread surface groups into
+32/64/128-thread blocks. Inactive/padded groups participate with zero values;
+16-lane shuffle reductions do not cross particles. The initial tile-axis
+implementation did not compile for vector/matrix tiles and was replaced.
+CPU/gradient/default kernels retain the original path. Padded/inactive/
+selective tests plus the existing Jacobi fusion tests pass (three tests).
+Packing four groups yielded ordinary30 88.975 ms and ordinary12 51.176 ms;
+thus packing alone is only a small candidate gain, not a convergence fix.
+
+Fusing unchanged body and self-contact accumulation into one per-color
+launch gives ordinary30 84.822 ms and ordinary12 49.291 ms in first runs.
+CPU/CUDA tests include particle/edge/face body records, directed EE, duplicate
+colors, device material changes, count overflow and Graph replay. Atomic
+accumulation order changes, so complete trajectories can diverge; final-state
+speed alone is not a paired numerical-equivalence measurement.
+
+Construction-only DSATUR coloring reduced the T-shirt's nine structural
+colors to eight; bounded tabu repair subsequently found a valid seven-color
+assignment. Every original triangle/hinge/tet dependency is retained and
+checked. No material, trajectory or substep is changed. Eight colors with
+the preceding exact-work optimizations gave ordinary30 79.262 ms and
+ordinary12 45.361 ms. The latter still had a different final strain and is
+not an accepted ordinary30 substitute. The first seven-color ordinary30
+run gives 73.853 ms, terminal mean speed 0.001369 m/s and fluctuation RMS
+0.001075 m/s. Paired accuracy and independent trajectory checks are pending.
+
+None of these measurements establishes the full user goal of near-ordinary30
+accuracy at the current fastest cost with no visible terminal oscillation.
+No demo/preset was changed, and no velocity decay or sleeping was introduced.
+
+Alternating forward/reverse seven-color sweeps was also rejected. At a
+shared frame-600 state, 30 alternating sweeps had local defect 1.715 um and
+force RMS 4.578 N, versus original ordinary30 0.848 um / 1.420 N. The scan
+order hook and command-line switch were removed after this diagnostic.
+
+Seven-color ordinary20 gives 58.309 ms/frame over 1200 frames, terminal
+mean/P95 speed 0.001085/0.001819 m/s, last speed 0.000584 m/s, and fluctuation
+RMS 0.001060 m/s. Same-substep frame-600 local RMS is 0.756 um versus
+ordinary30 0.738 um; frame-900 0.954 versus 1.830 um. The latter reference
+has an outlier, so its RMS must not be treated as a clean convergence target.
+At frame 300 both have large unresolved outliers (about 283 um RMS); P95
+is 4.530 um for the candidate versus 3.712 um for ordinary30.
+
+Budget redistribution to 15 substeps with ten seven-color sweeps gives
+54.428 ms/frame, terminal mean/P95 0.000942/0.001159 m/s and fluctuation
+RMS 0.000646 m/s. This follows the conditioning motivation of
+[Small Steps in Physics Simulation](https://matthias-research.github.io/pages/publications/smallsteps.pdf),
+but that paper's XPBD results do not prove equivalence for this VBD schedule.
+Collision detection still runs each substep and DAT remains unchanged.
+
+**The full-frame check is stricter and has not passed.** A new diagnostic
+forks a complete frame, including source IK and every substep, from the same
+state. At frame 900 seven-color 20 differs from original ordinary30 by
+0.291 mm RMS (0.574 mm P95); 15x10 differs by 0.402 mm RMS, and differs from
+its own same-dt 15x30 reference by 0.834 mm RMS. Original ordinary30 A/A
+repeats give 0--0.00172 mm in the sampled checkpoints. Therefore a close
+single-substep residual and lower terminal speed are insufficient acceptance
+evidence. Neither schedule is promoted; the iteration error accumulates
+through the updated velocities over the frame.
+
+An additional frame-900 fork includes ordinary60 as a larger-budget reference
+(not an exact physical solution). Original ordinary30 differs from ordinary60
+by 0.662 mm RMS; seven-color ordinary30 differs by 0.675 mm, while its
+difference from original ordinary30 is 0.0319 mm. Seven-color ordinary20
+differs from ordinary60 by 0.950 mm and the current fast residual path by
+0.886 mm. Thus retaining the actual 30 sweeps is presently the more reliable
+precision direction. Seventy-five focused existing regression tests passed
+before the following execution experiment; this is not a full repository
+or three-demo certification.
+
+### Resident cooperative GS execution experiment (not a preset)
+
+The RTX 5060 Ti reports cooperative-launch support. Official CUDA
+`cooperative_groups::this_grid().sync()` is used, with driver occupancy
+validation; no software spin barrier is introduced. A standalone 64-round
+cross-block exchange test is bitwise correct for 1031, 8193 and 9217 entries,
+including ten CUDA Graph replays. This research adapter currently requires
+installed CUDA SDK headers; unsupported devices/backends are not enabled.
+
+The fused kernel retains all color/sweep boundaries, recomputes contacts at
+the current iterate and applies DAT after every color. Importantly, the
+original body-particle penalty update precedes the particle solve each sweep.
+Membrane, bending, contact and DAT math reuse existing private functions;
+there is no trajectory-dependent velocity decay or material/time-step change.
+
+The initial seven-color resident ordinary30 run is **No-Go for performance**:
+151.414 ms/frame over 1200 frames, terminal mean speed 0.001581 m/s and
+fluctuation RMS 0.001347 m/s. Fusion alone is substantially slower than the
+73.853 ms split-kernel candidate. A second trial increases resident occupancy
+and applies the previously tested sufficient DAT identity certificate inside
+the grid, avoiding standalone certificate/check/conditional Graph nodes.
+Failure to certify still executes original DAT; the global displacement cap
+is unchanged. Its full-trajectory result is pending.
+
+The new resident test compares 1/4/30 sweeps with ordinary launches on pinned,
+nearly coincident cloth sheets with active self contact and ground friction,
+including three reset/replay executions. It passes with a 5 um componentwise
+position tolerance (ordinary30 A/A alone differs by up to 2.3 um on this
+atomic-contact fixture), and the corresponding 0.003 m/s velocity tolerance
+at dt=1/600. Existing color-contact and identity-certificate tests also pass.
+These tests do not prove absence of visible terminal jitter or equivalence
+over a complete robot trajectory. Demo/preset defaults remain unchanged.
+
+**Correction to the initial resident trajectory measurements:** the command
+cache initially keyed only state/contact identities and dt, omitting captured
+scalar material values. The T-shirt captures several friction phases against
+the same buffers, so both the 151.414 ms run above and a subsequent 75.563 ms
+certificate/occupancy run used stale self-friction in later phases. Neither
+is a valid same-material trajectory comparison. An isolated two-sheet,
+self-contact-only multi-material Graph regression fails before the key fix
+(346/546 coordinate components outside 2 um tolerance) and passes afterward.
+The earlier test with a ground collider did not detect this because its
+separately initialized body-contact material changed with the scalar.
+
+After the fix, 16 focused contact/identity/resident tests pass. The corrected
+1200-frame resident ordinary30 run is 75.273 ms/frame, terminal mean/P95
+speed 0.001534/0.001983 m/s and fluctuation RMS 0.001167 m/s. This still does
+not improve the 73.853 ms split candidate or meet the roughly 38 ms fast-path
+target. A complete-frame-900 fork (which installed the experiment only after
+selecting the current material, hence was not affected by the multi-Graph
+cache issue) differed from ordinary30 by 0.00214 mm RMS with original colors;
+seven-color resident30 differed by 0.0426 mm, versus seven-color split30
+0.0409 mm. No default is changed; this execution experiment is not promoted.
+
+A higher-budget full trajectory with seven-color split ordinary120 costs
+219.556 ms/frame and does not settle cleanly throughout frames 900--1200:
+mean speed 0.015015 m/s, fluctuation RMS 0.034122 m/s, last speed
+0.000914 m/s. Its final cloth bounds and strain differ substantially from
+ordinary30, so this separate trajectory cannot prove that more iterations
+are intrinsically worse. A common-state terminal continuation is needed to
+separate solver jitter from a different fold/release event.
+
+An offline static-friction feasibility query was added, not a solver path.
+It freezes geometry, removes velocity-dependent forces, adds gravity, and
+uses projected FISTA to fit tangential tractions within the current penalty
+normal-load disks. Analytic sticking/sliding block checks pass. At a
+fast-path frame-1200 snapshot, fixed-normal static tractions only reduce the
+mass-weighted squared force residual by about 2% (force RMS 4.150 to 4.108 N).
+Thus absence of set-valued static friction alone is not established as the
+main cause. A negative-load record made the initial reported disk-violation
+metric incorrect; the optimization already clipped the load to zero, and
+the diagnostic now uses the same clipped bound. A free-normal cone query
+is explicitly counterfactual: it ignores gap complementarity and is not a
+hard-contact or simulation-accuracy certificate. No material or friction
+model has been replaced on the basis of these diagnostics.
+
+### September 9: terminal continuation and complete contact derivatives
+
+These are offline experiments, not an accepted preset or a claim that the
+requested accuracy, speed and settling target has been achieved.
+
+* The corrected free-normal cone query at a frame-1200 snapshot reduces
+  force RMS from 4.82818 to 0.18187 N, and mass-weighted squared residual to
+  0.0013604 of its original value. Fixed-normal tangential disks only reduce
+  it to 0.970638. The free-normal query ignores gap complementarity and
+  cannot certify a physically valid static equilibrium.
+* Replacing the inner linear normal load with the original reciprocal-gap
+  law passes an analytic scalar-root regression but brings almost no
+  additional reduction in the frame-900 frozen-contact experiment. With
+  extended backtracking both variants reach about 0.918 um local correction
+  RMS and 1.292 N force RMS, versus ordinary30's 0.717 um and 1.187 N.
+* The full geometric bending tangent passes independent double-precision
+  energy differences, symmetry and rigid-translation checks. Adding it to
+  the frozen-contact sparse oracle does not reach ordinary30 accuracy:
+  local correction RMS 1.354 versus 0.718 um in that paired run.
+* A CUDA local-diagonal version of the same bending tangent also fails to
+  accelerate convergence. At frame900 its 12/20-sweep position errors from
+  ordinary30 are 15.899/8.578 um, versus unmodified 15.891/8.570 um.
+  The original bending force is bitwise unchanged and CPU/CUDA diagonal
+  derivatives match the independent reference. Correct derivatives alone
+  are not an improvement certificate; this kernel option is not promoted.
+
+The complete-frame probe now also supports a common-state continuation.
+Every candidate starts at exactly the same fast-path frame1200 with the
+same particle states, robot inputs and material. The following 300 frames
+retain all original motion, contact and damping laws; no velocity reset,
+sleeping or terminal decay is introduced. Optimized traversal/packing is
+used for ordinary sweeps without changing the coloring.
+
+| Continuation | Mean speed (m/s) | Fluctuation RMS (m/s) | Last speed (m/s) |
+| --- | ---: | ---: | ---: |
+| ordinary30 | 0.001651 | 0.001322 | 0.001631 |
+| ordinary60 | 0.002827 | 0.002017 | 0.001962 |
+| ordinary120 | 0.025625 | 0.044255 | 0.001721 |
+| fast residual | 0.004206 | 0.004162 | 0.004080 |
+| ordinary30 A/A repeat | 0.001757 | 0.001504 | 0.003782 |
+
+Ordinary120 releases substantial stored deformation (63.37 mm net RMS
+motion); it is not a clean static-accuracy reference. Ordinary30 A/A final
+positions differ by 0.125 mm RMS after the continuation, and instantaneous
+last speed is noisy. These results reject the assumption that merely
+raising the sweep budget necessarily eliminates terminal jitter; they do
+not identify a unique cause. Performance figures from this diagnostic are
+not a release benchmark (CPU-only analysis overlapped part of the run).
+
+An offline contact oracle differentiates the actual private VT/EE force
+evaluators, including changing closest-point weights, normals, friction
+load and contact damping. CPU finite differences agree within 0.5% relative
+matrix norm on nondegenerate test contacts. Warp deliberately bounds the EE
+adjoint near parallelism, so that region must not be called an exact tangent.
+The resulting matrix is nonsymmetric and is solved by sparse LU, not CG.
+At one frame900 fork, six outer trials plus ordinary polishing reduce force
+RMS to 0.264 N versus ordinary30's 0.956 N, but position differs by 121.9 um;
+this fails the near-ordinary30 position test. A second fork with 100/1000
+sweeps confirms that lower force residual is not sufficient: ordinary1000
+itself retains 0.678 N force RMS and differs from ordinary30 by 418.8 um.
+No runtime solver or material is replaced by this offline experiment.
+
+A separate pending experiment targets simultaneous same-color contacts.
+Elastic graph coloring does not forbid contact between two same-color
+vertices. For a frozen contact Hessian with blocks b_i*b_j*H, Cauchy-Schwarz
+gives the block-diagonal upper bound n*diag(b_i^2*H), where n counts vertices
+of that contact updated simultaneously. Only those contact diagonal blocks
+are enlarged; forces, non-contact blocks, material, time step and DAT stay
+unchanged. This bound is not a global bound on the moving-geometry nonlinear
+force. CPU/CUDA tests cover original-force equality, directed EE ownership,
+per-color multiplicity and Graph replay; a common-state settling comparison
+is pending. No preset selects it.
+
+The same-color bound is **No-Go as a settling solution**. In its 300-frame
+common-state continuation, ordinary30 mean/fluctuation speed is
+0.003411/0.003754 m/s and bounded30 is 0.003339/0.003610 m/s. Bounded12
+ends at 0.000615 m/s but differs from ordinary30 by 9.99 mm RMS after the
+continuation. The lower final speed does not establish comparable dynamics.
+Bounded30 still differs by 1.57 mm (ordinary30 A/A is 0.050 mm). This is not
+the requested accuracy/performance/stability improvement.
+
+Another ablation freezes the actual self-friction basis, barycentric weights
+and load at the physical substep anchor, following the lagged friction
+potential in the [IPC technical supplement, section 9](https://ipc-sim.github.io/file/IPC-supplement-A-technical.pdf).
+Normal force and contact damping still use current geometry; body friction
+is unchanged. This changes finite-iteration friction dynamics, unlike a
+mere search-tangent adjustment. Force equality at the reference, zero-slip
+invariance and nonpositive slip work pass on CPU/CUDA. Candidate membership
+and DAT stay unchanged, but lagged tangential force can persist for one
+inner solve after normal separation, as in the lagged potential; this is
+an approximation, not an exact current-load friction evaluation.
+
+Its common-state 300-frame results are also **No-Go**:
+
+| Variant | ms/frame | Mean / fluctuation speed (m/s) | ordinary30 final q RMS (mm) |
+| --- | ---: | ---: | ---: |
+| ordinary30 | 87.30 | 0.001321 / 0.001074 | 0 |
+| lagged12 | 56.61 | 0.001812 / 0.001948 | 4.983 |
+| lagged20 | 73.96 | 0.001116 / 0.000938 | 2.669 |
+| lagged30 | 93.24 | 0.001423 / 0.001054 | 0.808 |
+| ordinary30 A/A | 87.30 | 0.001354 / 0.001111 | 0.029 |
+
+No default, demo, material or trajectory is changed on the strength of
+either trial. The unsuccessful local geometric-bending kernel option has
+been removed; its double-precision offline derivative reference remains.
+
+Next investigation: formulate the existing finite-stiffness normal
+potential through an auxiliary gap and a compliant augmented Lagrangian.
+For penalty rho and dual load lambda, eliminate the gap by solving
+N = N_original(d + (N-lambda)/rho). Then the primal tangent is
+k_original*rho/(k_original+rho), with dual update lambda <- N after a
+complete primal sweep. At a fixed point lambda=N and the original force
+law is recovered. This is not the existing experimental hard-contact ALM
+(which changes the target contact law). A runtime implementation and
+validation are still required; no benefit is claimed.
+
+### 2026-09-09: archive all unaccepted experiments; retain only this log
+
+**User decision:** stop the experiments and remove the accumulated code
+changes. Restore solver, demo, test, benchmark, and changelog files to
+`8e72b4b91e1c9028bc7ca43e8510abb64b04383e` on `FAST_MJVBDV2`.
+Retain the optimization history in this document only. This includes
+removing the staged `surface-global` implementation, not just its later
+unstaged experimental extensions. It is an archival cleanup, not a claim
+that the requested accuracy, settling, and performance goals were met.
+
+All earlier entries describing these uncommitted prototypes as "retained",
+"pending", "in progress", or available through an option are historical
+experiment descriptions. They do **not** describe the post-cleanup source.
+Previously committed optimizations remain in HEAD and are not rolled back.
+References above to experimental source/test/probe files are archival:
+those files are intentionally absent after this cleanup.
+
+#### Inventory and final disposition
+
+The detailed measurements and qualifications in the preceding September
+8--9 entries are preserved. The following index covers the code removed
+in this cleanup, including variants that only reached a formula/oracle test.
+
+| Attempt / removed implementation family | Finding and disposition |
+| --- | --- |
+| Nonlinear coarse/fine Newton, `surface-global`, `global_newton`, fine-block Schwarz, extended multilevel and split PCG | Some same-state residual/position improvements, but no combined proof of near-30-sweep accuracy, low terminal jitter, and acceptable frame cost. Remove the preset, integration, demo switch, and associated tests/changelog. |
+| Residual/backtracking, energy and lagged-contact merits, force-only residual queries, energy initialization | Lower residual or accepted energy proxy did not reliably imply comparable positions or settling. Remove controllers and diagnostic hooks. |
+| Frozen/fixed metrics, regularized global directions, maximum guards and shifted solves | Tradeoffs remained scene/state-dependent; no robust joint quality/performance win. Remove. |
+| Matrix-free Newton / FD-JFNK / GMRES and frozen-geometry friction Jacobian | Krylov convergence or total runtime insufficient; analytic contact tangents did not solve the nonlinear settling problem. Remove. |
+| Modified Newton, frozen tangent reuse and refactor-on-rejection | Tangent reuse worsened convergence or required costly refactorization. Remove. |
+| L-BFGS, Anderson/history, GS-GMRES and local/global cycles | Promising local probes did not reproduce the required full-history result. Remove remaining code. Earlier removed variants stay documented only. |
+| Radial friction solve, colored SSOR, contact-patch Newton / overlapping contact corrections | Did not achieve the requested accuracy/speed/stability combination. Remove. |
+| Nonlinear/selective polishing and previous-position / velocity / temporal initial guesses | Extra work or altered transient convergence without a robust terminal improvement. Remove experimental paths; keep only HEAD's existing behavior. |
+| Spectral membrane and geometric bending tangents, geometric tangent oracle | Correct derivative checks did not establish a better full simulation. Runtime spectral/geometric trials had already been rejected; remove remaining offline helpers. |
+| Full moving-contact derivative oracle / sparse LU | Force residual could decrease while position error against ordinary30 increased. Near-parallel EE adjoint is bounded, not an exact derivative there. Remove oracle/probe. |
+| Static-friction-cone / frozen-contact CPU oracle and exact radial friction-law checks | Diagnostic only; no validated full complementarity/static-friction implementation or settling fix. Remove. |
+| Contact-majorized same-color blocks | Preserves original force for the frozen test, but short-budget continuation diverges from the reference; lower last speed is not acceptance. Remove. |
+| Lagged self-friction load, basis and barycentric weights | Changed finite-iteration friction behavior and did not meet the reference/settling gate. Remove. |
+| Compliant normal ALM auxiliary-gap formula | Scalar-root/derivative tests only; no integrated runtime or scene benefit. Stop and remove; do not label as a completed solver improvement. |
+| Color contact stream, body-contact fusion and early EF color filtering | Exact-work throughput candidates, but the combined requested acceptance is missing. Remove the uncommitted stream/fusion/early-return changes. |
+| Surface packing (2/4/8 particles), DAT identity/row certificate and worker refactors | Local equivalence/Graph tests and throughput results exist, but no accepted end-to-end configuration meeting the task. Remove all uncommitted variants. |
+| Recoloring / DSATUR / tabular repair and fewer-substep schedules | Reduced launch cost, but lower sweep/substep counts failed matched precision checks. Remove helpers and modes. |
+| Resident cooperative CUDA GS and conditional-graph experiments | Valid launch/material-isolation tests do not overcome measured throughput No-Go. Remove native-launch helpers and probes. |
+| VT/EE/body contact-motion invariance and finite zero-slip tangent fixes | Reproducible formula issues, but not a demonstrated settling solution; HEAD-isolated results below. Per user request, remove these uncommitted fixes too and preserve evidence here. |
+| Full-backend cache-call, PCG dispatch and test-fixture compatibility edits | Fixes/support for the discarded working-tree experiment, not a reason to keep its dependencies. Restore HEAD along with the experiment. |
+| Benchmarks, per-frame/EE-reciprocity probes, derivative tests and new regression modules | Archive together with the code; no leftover imports or public options referencing removed implementations. |
+
+#### Baseline correction: committed HEAD is not the experimental default
+
+The user explicitly clarified that "current default" excludes the working
+tree changes. HEAD `8e72b4b9` uses `surface-fast`, multilevel disabled, and
+seven batched sweeps followed by one ordinary sweep in the T-shirt demo.
+It does not include the working tree's `surface-global` default.
+Measurements of the latter must not be attributed to the former.
+
+An independent detached worktree was created at HEAD. Its harness asserted
+the imported Newton package path belonged to that worktree. On RTX 5060 Ti,
+Warp 1.17.0, each full-history run used 1500 frames, 10 substeps/frame,
+unchanged materials/trajectory, and CUDA Graph replay. The scripted motion
+ends at simulation time 6.55 s; the terminal window below is approximately
+20--25 s. Velocities/positions were sampled every ten frames.
+
+| HEAD-isolated run | Wall ms/frame | Terminal RMS speed (mm/s) | Fluctuating speed RMS (mm/s) | Position range P95 (mm) |
+| --- | ---: | ---: | ---: | ---: |
+| Unmodified HEAD default | 37.236 | 2.458 | 2.413 | 1.779 |
+| Ordinary20, same caches and detection settings | 104.541 | 1.885 | 1.695 | 8.130 |
+| Ordinary20 without preset, constructor defaults | 138.417 | 35.205 | 9.316 | 6.905 |
+| HEAD + VT relative-increment fix only | 37.194 | 3.823 | 3.756 | 3.446 |
+| HEAD + VT fix and finite zero-slip friction tangent | 36.683 | 2.977 | 2.902 | 2.887 |
+
+The no-preset row also changes self-detection interval from -1 to 0 and
+disables caches; it is **not** an iteration-only comparison. Position range
+includes slow drift and is not pure vibration amplitude. These are single
+independent histories, not a statistical benchmark or same-state accuracy
+proof. Existing final-state and finite-value checks passed, but do not
+certify intersection freedom or absence of jitter.
+
+The VT synthetic regression failed in all eight CPU/CUDA, soft/full,
+stationary/translating cases before the relative-increment fix and passed
+afterward. At radius 0.002 m and stiffness 300000 N/m, it exposed a maximum
+spurious dissipative-force component of about 1.48 N. That is a synthetic
+test measurement, not the actual shirt's measured spurious force.
+
+For mu=0.4, normal load=12 N and smoothing distance=0.001 m, the existing
+smooth friction law's zero-slip tangent should be diag(9600, 9600, 0) N/m.
+HEAD returns zero. Four CPU/CUDA and soft/full finite-difference subcases
+failed before the tangent fix and passed afterward. Neither isolated fix
+demonstrated a terminal jitter improvement in the full scene; no promotion.
+
+#### Same-state terminal schedule diagnostic on unmodified HEAD
+
+After saving and removing the formula changes, a diagnostic ran HEAD for
+1200 frames, saved 440 reachable Newton objects and 519 Warp arrays, and
+restored the same particle positions/velocities exactly before each case.
+Each continuation ran 180 frames; the metrics use the final 90 frames,
+except net displacement, which spans the full continuation. Opaque BVH
+handles are not serialized; normal initialization refits/rebuilds them.
+An A/A repetition measures remaining reproducibility rather than assuming
+the entire contact history is deterministic.
+
+| Schedule | RMS speed (mm/s) | Frame second-difference RMS (um) | Net displacement RMS (mm) | ms/frame including readbacks |
+| --- | ---: | ---: | ---: | ---: |
+| HEAD default | 2.116 | 24.070 | 0.745 | 33.679 |
+| Disable Chebyshev only | 1.958 | 22.464 | 1.188 | 32.716 |
+| Ordinary GS8 | 1.058 | 13.297 | 0.951 | 56.421 |
+| Ordinary GS20 | 3.172 | 18.212 | 11.415 | 102.049 |
+| Ordinary GS30 | 8.823 | 27.595 | 15.021 | 142.573 |
+| HEAD default A/A repeat | 2.178 | 29.525 | 0.713 | 33.802 |
+
+The default A/A first-frame positions match exactly; after 180 frames,
+their RMS separation is 0.163 mm. First-frame position differences against
+GS30 are 1.173 mm (default), 1.090 mm (GS8), and 0.421 mm (GS20). This is
+a complete-frame, common-initial-state diagnostic, not a frozen-substep
+Newton-residual measurement. None proves near-30-sweep convergence.
+
+Disabling Chebyshev alone did not remove jitter. GS8 reduced the measured
+high-frequency motion, but at a substantial cost. GS20/30 also produced
+large slow motion; neither can be called a stationary ground truth. The
+data support investigating simultaneous batch updates, not a unique cause
+or a production fix. Timings including per-frame readback are diagnostic.
+
+A second common-state batch was stopped at the user's cleanup request.
+Completed cases from that batch were:
+
+| Schedule | RMS speed (mm/s) | Second-difference RMS (um) | Net displacement RMS (mm) |
+| --- | ---: | ---: | ---: |
+| Default | 1.478 | 15.261 | 0.590 |
+| Jacobi relaxation 0.5 | 1.542 | 15.178 | 3.453 |
+| Jacobi relaxation 0.25 | 2.581 | 32.233 | 5.459 |
+| Two final ordinary sweeps, total budget still eight | 1.181 | 13.110 | 0.601 |
+| Four final ordinary sweeps, total budget still eight | 1.347 | 20.254 | 0.519 |
+
+The GS30 reference and final A/A repeat in this second batch did not
+complete; no accuracy or repeatability acceptance is inferred. Its warmup
+history differs from the first batch, so rows cannot be cross-compared as
+one shared snapshot. Two final ordinary sweeps are at most a partial
+diagnostic lead, not a validated improvement. No default change is retained.
+
+#### Cleanup / recovery
+
+All unaccepted code is archived in local Git stashes before removal from
+the main modification area. The HEAD-isolated helper scripts, tests,
+formula patch and notes are separately archived. Raw measurements under
+the ignored `newton/tests/outputs/mjvbd_global_settling/` directory are left
+untouched; they are not source changes. No assets, committed optimization,
+remote branch, or pre-existing worktree is deleted. No commit or push is
+performed by this cleanup. The sole intended main-worktree change is this
+optimization log, unstaged.
+
+Recovery archives (local stash commits; indices may change as new stashes
+are created):
+
+- Main staged/unstaged/untracked research:
+  `4e3216e9dff3f65a79b43755185ca90f23efb7ee`, message
+  `Archive unaccepted MJVBD research before log-only cleanup 2026-09-09`.
+- HEAD-isolated formula patch, regression tests and terminal diagnostics:
+  `c9962ab7fb3f992ba396309de0713be7af1ea337`, message
+  `Archive HEAD-isolated settling diagnostics 2026-09-09`.
+
+The main cleanup covers 76 code/change paths, excluding this log. Recovery
+should be selective and deliberate; applying the entire archive would
+reintroduce the experimental preset and rejected branches removed here.
+
+### 2026-09-09: T-shirt default versus ordinary GS20 energy diagnostics
+
+Archived the figures, raw CSV measurements, configuration, formula caveats,
+and reproduction commands in
+[the local energy report](../../../../docs/lab/mjvbd_tshirt_energy_2026-09-09/README.md).
+Baseline: `cfe948b9`; no production solver or demo changes.
+
+Both runs cover 1200 frames (20 seconds), with identical scene parameters
+and 10 substeps per frame. Default is seven batched sweeps plus one ordinary
+sweep; the comparison uses 20 ordinary GS sweeps without the acceleration
+preset. Sampled mean kinetic energy over 15–20 seconds is 1.77976e-8 J
+(default) versus 6.10862e-9 J (GS20), approximately 2.91 times higher.
+
+A shared initialized substep after default frame 1200 starts at 21.59356 J
+in the fixed diagnostic objective, ending at 18.32741 J after default eight
+sweeps versus 18.14265 J after ordinary twenty. Both diagnostic curves
+decrease at each sampled sweep. Frozen-contact friction/damping terms make
+this a surrogate, not the changing-contact solver's exact global objective.
+Full-trajectory final energies cannot establish same-state accuracy, and
+these measurements do not prove a unique jitter cause or near-30-sweep
+convergence. Two energy formula tests and both demo final checks pass.
+No new optimization, default change, or timing acceptance is claimed.

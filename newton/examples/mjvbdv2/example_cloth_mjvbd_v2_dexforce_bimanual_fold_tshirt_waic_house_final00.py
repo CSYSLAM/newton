@@ -211,6 +211,10 @@ class Example:
             collision_options={"soft_contact_margin": SOFT_MARGIN},
             vbd_options={
                 "particle_enable_multilevel_correction": False,
+                # End the accelerated schedule with one ordinary colored VBD
+                # sweep so the accepted iterate receives the original local
+                # objective update before velocity reconstruction.
+                "particle_jacobi_polish_iterations": 1,
                 "particle_enable_self_contact": True,
                 "particle_self_contact_radius": SELF_RADIUS,
                 "particle_self_contact_margin": SELF_MARGIN,

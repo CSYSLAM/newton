@@ -58,6 +58,8 @@ def main():
     saved_t = wp.clone(example.t) if args.scene == "twist" else None
     cases = {
         "fast": {},
+        "fast_frozen_ik": {},
+        "polish1": {"particle_jacobi_polish_iterations": 1},
         "jacobi_half": {"particle_jacobi_relaxation": 0.5},
         "gs_cached": {"particle_enable_batched_jacobi": False, "particle_chebyshev_spectral_radius": None},
         "gs20_cached": {
@@ -102,7 +104,7 @@ def main():
             example.ik_q.assign(saved_ik)
             example.frame_index = 900
             example._solve_runtime_ik_frame = ordinary_ik
-            if label == "gs_frozen_ik":
+            if label in ("fast_frozen_ik", "gs_frozen_ik"):
                 example.frame_q_start.assign(example.state_0.joint_q)
                 example.frame_q_end.assign(example.state_0.joint_q)
                 example._solve_runtime_ik_frame = lambda: None

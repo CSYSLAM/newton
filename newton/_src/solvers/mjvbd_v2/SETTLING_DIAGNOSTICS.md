@@ -220,3 +220,49 @@ uv run scripts/diagnose_mjvbd_v2_last_sweep.py --mode fast
 uv run scripts/diagnose_mjvbd_v2_last_sweep.py --mode option
 uv run scripts/diagnose_mjvbd_v2_last_sweep.py --mode ordinary30
 ```
+
+## Rejection of phase-gated velocity decay
+
+A prototype that multiplied particle velocity by a constant only after the
+scripted hand trajectory ended was rejected and removed. It changed momentum
+according to example time rather than a material law or a solver residual. It
+could hide an inexact position solve without reducing that solve's defect, and
+the same physical state would evolve differently depending on where the script
+declared its final phase. No trajectory-end velocity decay remains in the
+example or solver.
+
+The retained correction is numerical rather than constitutive. There are still
+eight total sweeps: the last accelerated frozen/batched sweep is replaced with
+one ordinary ordered-color VBD sweep, and Chebyshev extrapolation is disabled
+for that sweep. Position-based velocity reconstruction, damping parameters,
+contact forces, friction, DAT, collision detection and material parameters are
+unchanged. This final sweep applies the original per-vertex local objective
+update to the accelerated iterate before velocity is reconstructed from the
+accepted positions.
+
+A fresh 900-frame pair followed by a 90-frame settling window measured:
+
+| Policy | RMS speed (m/s) | Mean max speed (m/s) | Second difference (micrometers) | End-frame time (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Fast8 | 0.003833 | 0.081610 | 40.79 | 35.85 |
+| Seven batched + one ordinary | 0.002467 | 0.048636 | 28.45 | 39.50 |
+
+That run reduced RMS speed by 35.6%, mean maximum speed by 40.4%, and
+the second-difference proxy by 30.3%, at a 10.2% end-frame cost. Contact
+histories are nondeterministic, so these values establish a useful scene-level
+improvement rather than a universal ratio. Full-history crossing diagnostics
+also showed that particles incident to strict edge/face crossings accounted
+for only a small fraction of the terminal kinetic energy in one sample. The
+settling issue therefore cannot be attributed only to the crossing set, and
+this change must not be described as a self-intersection fix or as equivalence
+to 30 ordinary sweeps.
+
+Two mechanism-isolation checks were also rejected. From one common frame-900
+state, disabling Chebyshev only for the final batched sweep changed RMS speed
+from 0.002617 m/s to 0.002885 m/s; disabling it for the final two batched
+sweeps changed RMS speed to 0.003327 m/s. This did not reproduce the ordinary
+sweep improvement. Freezing the already-stationary terminal IK boundary also
+left the settling metrics effectively unchanged in a separate common-state
+run (0.002690 m/s versus 0.002660 m/s RMS speed). The measured improvement is
+therefore associated with the ordered local solve, not phase detection,
+terminal robot motion, or merely turning off Chebyshev.
