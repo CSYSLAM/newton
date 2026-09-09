@@ -20,8 +20,8 @@ repos:
     hooks:
       - id: check-added-large-files
         args: [--maxkb=500]
-        # Preserve the vendored FANUC robot asset from upstream PR #3974.
-        exclude: ^newton/examples/assets/fanuc_arm\.usda$
+        # Preserve the vendored FANUC and original DexForce robot meshes.
+        exclude: ^newton/examples/assets/(fanuc_arm\.usda$|dexforce_boxbag/DexforceW1V021/)
       - id: check-case-conflict
       - id: check-illegal-windows-names
       - id: check-json

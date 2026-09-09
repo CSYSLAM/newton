@@ -184,14 +184,20 @@ If you run the examples from a source checkout with uv, use
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_robot_franka_vbd.jpg" alt="Franka FR3 VBD Cube Pick and Place">
       </a>
     </td>
-    <td></td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/vbd/example_vbd_dexforce_boxbag.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_dexforce_boxbag.jpg" alt="DexForce W1 VBD Soft and Rigid Cube Pick into Cloth Bag">
+      </a>
+    </td>
     <td></td>
   </tr>
   <tr>
     <td align="center" width="33%">
       <code>python -m newton.examples robot_franka_vbd</code>
     </td>
-    <td></td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples vbd_dexforce_boxbag</code>
+    </td>
     <td></td>
   </tr>
   <tr>

@@ -726,6 +726,12 @@ add_example_test(
     devices=cuda_test_devices,
     test_options={"num-frames": 780},
 )
+add_example_test(
+    TestRobotExamples,
+    name="vbd.example_vbd_dexforce_boxbag",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 1900},
+)
 
 
 class TestRobotPolicyExamples(unittest.TestCase):
