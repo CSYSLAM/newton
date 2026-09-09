@@ -9,6 +9,9 @@ clutch relative wrist motion, use the trigger to pinch, press A to pause or
 resume trajectory recording, press the right thumbstick to reset the physical
 scene in place, press B to align the full W1 stereo scene with the live Newton
 desktop camera, and press X to switch to the W1 eye camera with head tracking.
+Experimental optical mode automatically follows the right wrist and five
+fingers. Looking toward the panel clutches motion; looking away re-anchors
+the wrist before resuming. Missing tracking holds the robot targets.
 
 The one-command USB workflow avoids certificate setup::
 
@@ -44,12 +47,12 @@ from ._webxr_teleop import (
     pack_scene_geometry,
 )
 from ._webxr_w1_head import FIRST_PERSON_VIEW_MODE, OBSERVER_VIEW_MODE, W1HeadController, serialize_head_pose
+from ._webxr_w1_single_hand import W1SingleHandTeleop
 
 FPS = plug_socket.FPS
 DEFAULT_STALE_SECONDS = 0.25
 TARGET_POSITION_MIN = np.array((-0.28, -0.38, 0.78), dtype=np.float32)
 TARGET_POSITION_MAX = np.array((0.38, 0.28, 1.38), dtype=np.float32)
-IDENTITY_ROTATION = np.eye(3, dtype=np.float32)
 QUEST_A_BUTTON_INDEX = 4
 QUEST_THUMBSTICK_BUTTON_INDEX = 3
 
@@ -59,8 +62,8 @@ def _close_resources(server: WebXRServer, recorder: JsonlTrajectoryRecorder) -> 
     server.stop()
 
 
-class Example(plug_socket.Example):
-    """Drive the physical plug insertion scene from a Quest right controller."""
+class Example(W1SingleHandTeleop, plug_socket.Example):
+    """Drive plug insertion with a Quest right controller or optical hand."""
 
     reset_in_place = True
 
@@ -99,6 +102,7 @@ class Example(plug_socket.Example):
 
         super().__init__(viewer, args)
 
+        self._init_optical_hand(self.robot_urdf)
         self._initial_state = self.model.state()
         self._initial_state.assign(self.state_0)
         self._initial_ik_q = wp.clone(self.ik_q)
@@ -293,41 +297,19 @@ class Example(plug_socket.Example):
     def _prepare_frame(self) -> None:
         """Consume only the newest Quest pose and solve the existing W1 IK."""
         frame = self.xr_state.snapshot(max_age_seconds=self.xr_stale_seconds) if self.teleoperation_active else None
-        controller = None if frame is None else frame.controllers.get("right")
         if not self.teleoperation_active:
             self.view_mode = OBSERVER_VIEW_MODE
             self._head_controller.set_desired_pose(self.view_mode, None)
         elif frame is not None:
             if frame.view_mode != self.view_mode:
                 self.view_mode = frame.view_mode
-                self.retargeter.reset()
+                self._hold_optical_hand()
                 print(f"Quest view mode changed to {self.view_mode}", flush=True)
             self._head_controller.set_desired_pose(self.view_mode, frame.head_pose)
         elif self.view_mode == FIRST_PERSON_VIEW_MODE:
             self._head_controller.set_desired_pose(self.view_mode, None)
-        if controller is None:
-            self.retargeter.reset()
-            self._record_button_pressed = False
-            self._reset_button_pressed = False
-            if self.teleoperation_active:
-                self.phase = "waiting_for_quest" if not self._has_seen_controller else "quest_input_stale"
-            else:
-                self.phase = "teleoperation_standby"
-        else:
-            if self._process_controller_buttons(frame.stream_id, frame.sequence, controller):
-                self.reset_physics(source="quest-controller")
-            target = self.retargeter.update(
-                controller.pose,
-                clutch=controller.clutch,
-                robot_position=self._teleop_position,
-                robot_orientation=self._teleop_orientation,
-                source_to_robot_rotation=IDENTITY_ROTATION if frame.controller_space == "newton-world" else None,
-            )
-            if target is not None:
-                self._teleop_position = np.clip(target.position, TARGET_POSITION_MIN, TARGET_POSITION_MAX)
-                self._teleop_orientation = target.orientation
-            self._teleop_grasp = controller.trigger_value
-            self.phase = "quest_clutched" if controller.clutch else "quest_idle"
+        if self._prepare_teleop_input(frame, TARGET_POSITION_MIN, TARGET_POSITION_MAX):
+            return
 
         self._set_ik_target(
             wp.vec3(*[float(value) for value in self._teleop_position]),
@@ -339,7 +321,10 @@ class Example(plug_socket.Example):
         wp.copy(self.frame_q_start, self.state_0.joint_q)
         wp.copy(self.frame_q_end, self.state_0.joint_q)
         self._copy_ik_to_scene(self.frame_q_end)
-        self._write_hand_pose(self._teleop_grasp, self.frame_q_end)
+        if self._input_mode == "hands":
+            self._write_optical_fingers(self.frame_q_end)
+        else:
+            self._write_hand_pose(self._teleop_grasp, self.frame_q_end)
         self._write_root_pose(self.frame_q_end)
         self._head_controller.write_targets(self.frame_q_end, self.frame_dt)
 
@@ -380,7 +365,7 @@ class Example(plug_socket.Example):
         request_id, teleoperation_active, simulation_active = requested_mode
         self.teleoperation_active = teleoperation_active
         self.simulation_active = simulation_active
-        self.retargeter.reset()
+        self._hold_optical_hand()
         self._record_button_pressed = False
         self._reset_button_pressed = False
         if teleoperation_active:
@@ -424,7 +409,7 @@ class Example(plug_socket.Example):
         )
         self._teleop_grasp = 0.0
         self._head_controller.reset()
-        self.retargeter.reset()
+        self._hold_optical_hand()
         self.phase = "scene_reset"
         self.episode_index += 1
         self.episode_frame = 0
@@ -483,6 +468,7 @@ class Example(plug_socket.Example):
                     "xrSequence": None if input_frame is None else input_frame.sequence,
                     "xrClientTimeMs": None if input_frame is None else input_frame.client_time_ms,
                     "xrControllerSpace": None if input_frame is None else input_frame.controller_space,
+                    **self._optical_record(input_frame),
                     "viewMode": self.view_mode,
                     "headPose": serialize_head_pose(None if input_frame is None else input_frame.head_pose),
                     "neckJointTargets": self._head_controller.targets.tolist(),
@@ -519,11 +505,13 @@ class Example(plug_socket.Example):
                 "type": "scene-state",
                 "version": 1,
                 "sceneKind": "plug-socket",
+                **self._optical_scene_state(),
                 "sceneInfo": {
                     "kind": "plug-socket",
                     "title": "插头遥操作",
                     "description": "Quest 双眼显示完整 W1、插头和插座。也可切换机器人眼睛第一人称。",
                     "controls": [
+                        ["裸手模式", "右手手腕与五指自动跟随。看向面板暂停。移开后接续"],
                         ["右 Grip", "按住并移动机器人右手"],
                         ["右 Trigger", "控制拇指和食指捏合"],
                         ["左摇杆", "观察模式下转动视角"],

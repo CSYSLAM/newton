@@ -9,6 +9,7 @@ const panel = document.querySelector("#teleop-panel");
 const togglePanelButton = document.querySelector("#toggle-panel");
 const toggleViewModeButton = document.querySelector("#toggle-view-mode");
 const enterButton = document.querySelector("#enter-vr");
+const enterHandsButton = document.querySelector("#enter-hands-vr");
 const resetButton = document.querySelector("#reset-scene");
 const secureStatus = document.querySelector("#secure-status");
 const socketStatus = document.querySelector("#socket-status");
@@ -47,6 +48,24 @@ let viewPitchRadians = 0;
 let viewMode = "observer";
 let appliedSceneKind = null;
 let appliedDeformationFrame = null;
+let inputMode = "controllers";
+let handPanel = null;
+let handPanelMatrix = null;
+let handGazePaused = false;
+let handGazeExitStart = null;
+const handResumePending = { left: false, right: false };
+const handRecovery = { left: null, right: null };
+let handRecordingRequest = 0;
+const handActivation = { left: 0, right: 0 };
+const trackedHands = { left: null, right: null };
+const handInputStatus = { left: "等待进入 XR", right: "等待进入 XR" };
+const HAND_JOINT_NAMES = [
+  "wrist", "thumb-metacarpal", "thumb-phalanx-proximal", "thumb-phalanx-distal", "thumb-tip",
+  ...["index", "middle", "ring", "pinky"].flatMap((finger) => [
+    `${finger}-finger-metacarpal`, `${finger}-finger-phalanx-proximal`,
+    `${finger}-finger-phalanx-intermediate`, `${finger}-finger-phalanx-distal`, `${finger}-finger-tip`,
+  ]),
+];
 const MIXED_CUBE_SCENE_KIND = "soft-rigid-cubes-into-bag";
 const TSHIRT_SCENE_KIND = "bimanual-fold-tshirt";
 const OBSERVER_VIEW_MODE = "observer";
@@ -103,6 +122,7 @@ function updateViewModeButton() {
 }
 
 function setViewMode(nextMode, viewerPoseMatrix = latestViewerPoseMatrix) {
+  resetOpticalHands();
   const firstPerson = nextMode === FIRST_PERSON_VIEW_MODE && supportsFirstPerson(latestScene);
   viewMode = firstPerson ? FIRST_PERSON_VIEW_MODE : OBSERVER_VIEW_MODE;
   viewYawRadians = 0;
@@ -878,7 +898,9 @@ function connectSocket() {
     try {
       const message = JSON.parse(event.data);
       if (message.type === "scene-state") {
+        if (latestScene && latestScene.episode !== message.episode) resetOpticalHands();
         latestScene = message;
+        document.querySelector("#hand-controls").hidden = !message.handTrackingEnabled;
         applySceneInfo(message);
         if (viewMode === FIRST_PERSON_VIEW_MODE && !supportsFirstPerson(message)) {
           setViewMode(OBSERVER_VIEW_MODE);
@@ -887,7 +909,7 @@ function connectSocket() {
         }
         updateSceneFromNewton();
         requestDesktopPreview();
-        const mode = message.recording ? "录制中" : "已暂停";
+        const mode = message.recording ? "录制中" : "录制已暂停";
         frameStatus.textContent = `Episode ${message.episode} · Newton #${message.frame} · ${mode} · ${message.recordedFrames} 帧`;
         resetButton.disabled = false;
       } else if (message.type === "reset-accepted") {
@@ -908,6 +930,7 @@ function connectSocket() {
     }
   });
   socket.addEventListener("close", () => {
+    resetOpticalHands();
     socketStatus.textContent = "WebSocket：已断开，正在重连";
     resetButton.disabled = true;
     if (reconnectTimer === null) {
@@ -923,6 +946,7 @@ function connectSocket() {
 }
 
 function requestSceneReset() {
+  resetOpticalHands();
   if (!socket || socket.readyState !== WebSocket.OPEN) {
     frameStatus.textContent = "无法复位：WebSocket 尚未连接";
     return;
@@ -937,7 +961,7 @@ function requestSceneReset() {
 }
 
 function serializeController(frame, source) {
-  if (!source.gripSpace || !["left", "right"].includes(source.handedness)) {
+  if (source.hand || !source.gripSpace || !["left", "right"].includes(source.handedness)) {
     return null;
   }
   const pose = frame.getPose(source.gripSpace, referenceSpace);
@@ -995,6 +1019,13 @@ function sendControllerFrame(frame, timeMs, viewerPose) {
     visibilityState: session.visibilityState,
     viewMode,
     headPose: headPoseRelativeToAnchor(viewerPose),
+    inputMode: latestScene?.handTrackingEnabled ? inputMode : "controllers",
+    hands: latestScene?.handTrackingEnabled ? Object.fromEntries(
+      Object.entries(trackedHands).filter(([, hand]) => hand !== null).map(([side, hand]) => [side, {
+        ...hand, enabled: handIsFollowing(side), activation: handActivation[side],
+      }]),
+    ) : {},
+    recordingRequest: handRecordingRequest,
     controllers,
   }));
   sequence += 1;
@@ -1005,6 +1036,7 @@ function updateScenePlacement(viewerPose) {
   let bPressed = false;
   let xPressed = false;
   for (const source of session.inputSources) {
+    if (source.hand) continue;
     if (source.handedness === "right") {
       bPressed = Boolean(source.gamepad?.buttons?.[5]?.pressed);
     } else if (source.handedness === "left") {
@@ -1015,6 +1047,7 @@ function updateScenePlacement(viewerPose) {
     toggleViewMode(viewerPose.transform.matrix);
   }
   if (initialPlacementPending || (bPressed && !previousBPressed)) {
+    resetOpticalHands();
     viewYawRadians = 0;
     viewPitchRadians = 0;
     viewerAnchorMatrix = new Float32Array(viewerPose.transform.matrix);
@@ -1045,7 +1078,7 @@ function updateViewRotation(timeMs) {
   }
   let thumbstick = null;
   for (const source of session.inputSources) {
-    if (source.handedness === "left" && source.gamepad?.axes?.length >= 2) {
+    if (!source.hand && source.handedness === "left" && source.gamepad?.axes?.length >= 2) {
       thumbstick = Array.from(source.gamepad.axes, Number).slice(-2);
       break;
     }
@@ -1058,6 +1091,7 @@ function updateViewRotation(timeMs) {
   if (yawInput === 0 && pitchInput === 0) {
     return;
   }
+  resetOpticalHands();
   const deltaSeconds = Math.min(Math.max((timeMs - previousTimeMs) / 1000, 0), 0.05);
   viewYawRadians += yawInput * VIEW_YAW_SPEED_RADIANS_S * deltaSeconds;
   viewPitchRadians = Math.min(
@@ -1067,16 +1101,320 @@ function updateViewRotation(timeMs) {
   updateSceneFromNewton();
 }
 
+function resetOpticalHands() {
+  handResumePending.left = false;
+  handResumePending.right = false;
+  for (const side of ["left", "right"]) {
+    trackedHands[side] = null;
+    handRecovery[side] = { since: null, lastTime: null, pose: null };
+  }
+}
+
+function setHandInputMode() {
+  resetOpticalHands();
+  inputMode = inputMode === "hands" ? "controllers" : "hands";
+  handGazePaused = false;
+  handGazeExitStart = null;
+  updateHandButtons();
+}
+
+function updateHandButtons() {
+  document.querySelector("#hand-mode").textContent = inputMode === "hands" ? "切回手柄模式" : "切换裸手模式（实验）";
+}
+
+function handSideSupported(side) {
+  return (latestScene?.handTrackingSides ?? ["left", "right"]).includes(side);
+}
+
+function handIsFollowing(side) {
+  return handSideSupported(side) && inputMode === "hands" && session?.visibilityState === "visible" && Boolean(trackedHands[side])
+    && !handGazePaused && !handResumePending[side] && handRecovery[side] === null;
+}
+
+function updateOpticalHands(frame, timeMs = Date.now()) {
+  trackedHands.left = null;
+  trackedHands.right = null;
+  const featureDenied = session?.enabledFeatures !== undefined
+    && !Array.from(session.enabledFeatures).includes("hand-tracking");
+  for (const side of ["left", "right"]) {
+    handInputStatus[side] = !handSideSupported(side) ? "此场景未使用"
+      : !session ? "等待进入 XR" : featureDenied ? "会话未启用手追踪" : "无手部输入";
+  }
+  if (!latestScene?.handTrackingEnabled || !session) return;
+  for (const source of session.inputSources) {
+    if (!source.hand || !["left", "right"].includes(source.handedness) || !handSideSupported(source.handedness)) continue;
+    const side = source.handedness;
+    try {
+      const poses = HAND_JOINT_NAMES.map((name) => {
+        const space = source.hand.get(name);
+        return space ? frame.getJointPose(space, referenceSpace) : null;
+      });
+      const valid = poses.filter((pose) => pose !== null).length;
+      handInputStatus[side] = `骨架 ${valid}/25`;
+      if (valid !== 25) continue;
+      const wrist = controllerPoseInNewton(poses[0]);
+      if (!wrist) {
+        handInputStatus[side] = "等待场景对齐";
+        continue;
+      }
+      trackedHands[side] = {
+        pose: wrist,
+        joints: poses.map((pose) => {
+          const p = pose.transform.position;
+          return [p.x, p.y, p.z];
+        }),
+      };
+    } catch (error) {
+      handInputStatus[side] = "读取异常";
+      xrStatus.textContent = `手部读取失败：${error.name}: ${error.message}`;
+    }
+  }
+  if (session.visibilityState !== "visible" || inputMode !== "hands") resetOpticalHands();
+  for (const side of ["left", "right"]) {
+    if (!handSideSupported(side) || session.visibilityState !== "visible" || inputMode !== "hands") continue;
+    if (handGazePaused) {
+      handRecovery[side] = null;
+      continue;
+    }
+    const sample = trackedHands[side];
+    if (handResumePending[side]) {
+      if (sample) {
+        handActivation[side] += 1;
+        handResumePending[side] = false;
+        handRecovery[side] = null;
+      }
+      continue;
+    }
+    const acknowledged = latestScene.handTrackingActivation?.[side] === handActivation[side];
+    const backendStatus = acknowledged ? latestScene.handTrackingState?.[side] : null;
+    if (!sample || ["tracking-lost", "invalid-tracking", "paused"].includes(backendStatus)) {
+      // Retry from a new wrist baseline after stable input, including backend rejection.
+      if (!handRecovery[side]) handRecovery[side] = { since: null, lastTime: null, pose: null };
+      if (!sample) {
+        handRecovery[side].since = null;
+        handRecovery[side].pose = null;
+        continue;
+      }
+    }
+    const recovery = handRecovery[side];
+    if (recovery && sample) {
+      const previous = recovery.pose;
+      const distance = previous ? Math.hypot(...sample.pose.position.map((value, i) => value - previous.position[i])) : Infinity;
+      const dot = previous ? Math.abs(sample.pose.orientation.reduce((sum, value, i) => sum + value * previous.orientation[i], 0)) : 0;
+      if (recovery.since === null || timeMs - recovery.lastTime > 100 || distance > .03 || dot < Math.cos(Math.PI / 18)) {
+        recovery.since = timeMs;
+      }
+      recovery.lastTime = timeMs;
+      recovery.pose = sample.pose;
+      if (timeMs - recovery.since >= 200) {
+        // The new token re-anchors the wrist before any resumed motion.
+        handActivation[side] += 1;
+        handRecovery[side] = null;
+      }
+    }
+  }
+  document.querySelector("#hand-input-status").textContent = `左手：${handInputStatus.left}；右手：${handInputStatus.right}`;
+  updateHandButtons();
+}
+
+function handPanelRows() {
+  const status = (side) => !handSideSupported(side) ? "此场景未使用"
+    : inputMode !== "hands" ? "手柄模式"
+    : session?.visibilityState !== "visible" ? "等待 XR 会话"
+    : handGazePaused ? "离合暂停"
+    : !trackedHands[side] ? handInputStatus[side]
+    : handResumePending[side] || handRecovery[side] ? "等待稳定后接续" : "跟随中";
+  return [
+    inputMode === "hands" ? "当前裸手 · 切回手柄" : "切换到裸手模式",
+    `左手：${status("left")}`,
+    `右手：${status("right")}`,
+    "自动跟随 · 看向面板暂停",
+    latestScene?.recording ? "暂停录制" : "开始 / 继续录制",
+    viewMode === FIRST_PERSON_VIEW_MODE ? "切换到桌面观察" : "切换到机器人第一人称",
+    "复位场景（看向面板时点击）",
+  ];
+}
+
+function activateHandPanelRow(row) {
+  if (row === 0) setHandInputMode();
+  if (row === 4) handRecordingRequest += 1;
+  if (row === 5) toggleViewMode();
+  if (row === 6 && (inputMode !== "hands" || handGazePaused)) requestSceneReset();
+}
+
+function updateHandGazeClutch(inside, timeMs) {
+  if (inputMode !== "hands" || session?.visibilityState !== "visible") {
+    handGazePaused = false;
+    handGazeExitStart = null;
+    handResumePending.left = false;
+    handResumePending.right = false;
+    return;
+  }
+  if (inside) {
+    handGazePaused = true;
+    handGazeExitStart = null;
+  } else if (handGazePaused) {
+    if (handGazeExitStart === null) handGazeExitStart = timeMs;
+    if (timeMs - handGazeExitStart >= 200) {
+      handGazePaused = false;
+      handGazeExitStart = null;
+      for (const side of ["left", "right"]) handResumePending[side] = true;
+    }
+  }
+}
+
+function handPanelRayHit(rayMatrix) {
+  if (!handPanelMatrix) return null;
+  const unitPanel = new Float32Array(handPanelMatrix);
+  for (let i = 0; i < 3; i += 1) { unitPanel[i] /= .55; unitPanel[4 + i] /= .64; }
+  const ray = multiplyMat4(rigidInverse(unitPanel), rayMatrix);
+  if (Math.abs(ray[10]) < 1e-6) return null;
+  const t = ray[14] / ray[10];
+  if (t <= 0) return null;
+  return { x: (ray[12] - t * ray[8]) / .55 + .5, y: .5 - (ray[13] - t * ray[9]) / .64 };
+}
+
+function selectHandPanel(event) {
+  if (!latestScene?.handTrackingEnabled || session?.visibilityState !== "visible") return;
+  // Optical pinches select UI only while head pointing has clutched the arms.
+  if (event.inputSource.hand && inputMode === "hands" && !handGazePaused) return;
+  const pose = event.frame.getPose(event.inputSource.targetRaySpace, referenceSpace);
+  const hit = pose && handPanelRayHit(pose.transform.matrix);
+  if (hit && hit.x > .04 && hit.x < .96 && hit.y >= .20 && hit.y < .90) {
+    activateHandPanelRow(Math.floor((hit.y - .20) / .10));
+  }
+}
+
+function updateHandPanel(viewerPose, timeMs, frame = null) {
+  if (!latestScene?.handTrackingEnabled || !handPanel) return;
+  if (!handPanelMatrix) {
+    handPanelMatrix = multiplyMat4(viewerPose.transform.matrix, modelMatrix([-.65, .10, -1.05], [0, 0, 0, 1], [.55, .64, 1]));
+  }
+  const hit = handPanelRayHit(viewerPose.transform.matrix);
+  // A slightly larger exit boundary prevents toggling at the panel edge.
+  const margin = handGazePaused ? .06 : 0;
+  const inside = Boolean(hit && hit.x >= -margin && hit.x <= 1 + margin && hit.y >= -margin && hit.y <= 1 + margin);
+  updateHandGazeClutch(inside, timeMs);
+  const pointers = [];
+  if (frame) {
+    for (const source of session.inputSources) {
+      if (!source.targetRaySpace) continue;
+      const pose = frame.getPose(source.targetRaySpace, referenceSpace);
+      const pointer = pose && handPanelRayHit(pose.transform.matrix);
+      if (pointer && pointer.x >= 0 && pointer.x <= 1 && pointer.y >= 0 && pointer.y <= 1) pointers.push(pointer);
+    }
+  }
+  handPanel.update(handPanelRows(), handGazePaused, timeMs, pointers);
+}
+
+function createHandPanelRenderer(context) {
+  const surface = document.createElement("canvas");
+  surface.width = 768;
+  surface.height = 896;
+  const paint = surface.getContext("2d");
+  const vertex = compileShader(context, context.VERTEX_SHADER, `
+    attribute vec2 point; uniform mat4 transform; varying vec2 uv;
+    void main() { uv = point + .5; gl_Position = transform * vec4(point, 0., 1.); }
+  `);
+  const fragment = compileShader(context, context.FRAGMENT_SHADER, `
+    precision mediump float; varying vec2 uv; uniform sampler2D panel;
+    void main() { gl_FragColor = texture2D(panel, uv); }
+  `);
+  const program = context.createProgram();
+  context.attachShader(program, vertex);
+  context.attachShader(program, fragment);
+  context.linkProgram(program);
+  if (!context.getProgramParameter(program, context.LINK_STATUS)) throw new Error("Hand panel shader link failed");
+  const point = context.getAttribLocation(program, "point");
+  const transform = context.getUniformLocation(program, "transform");
+  const sampler = context.getUniformLocation(program, "panel");
+  const buffer = context.createBuffer();
+  context.bindBuffer(context.ARRAY_BUFFER, buffer);
+  context.bufferData(context.ARRAY_BUFFER, new Float32Array([-.5,-.5, .5,-.5, .5,.5, -.5,-.5, .5,.5, -.5,.5]), context.STATIC_DRAW);
+  const texture = context.createTexture();
+  context.bindTexture(context.TEXTURE_2D, texture);
+  context.texParameteri(context.TEXTURE_2D, context.TEXTURE_MIN_FILTER, context.LINEAR);
+  context.texParameteri(context.TEXTURE_2D, context.TEXTURE_MAG_FILTER, context.LINEAR);
+  context.texParameteri(context.TEXTURE_2D, context.TEXTURE_WRAP_S, context.CLAMP_TO_EDGE);
+  context.texParameteri(context.TEXTURE_2D, context.TEXTURE_WRAP_T, context.CLAMP_TO_EDGE);
+  let lastPaint = -Infinity;
+  return {
+    update(rows, paused, now, pointers = []) {
+      if (now - lastPaint < 80) return;
+      lastPaint = now;
+      paint.fillStyle = paused ? "#49321b" : "#102338";
+      paint.fillRect(0, 0, 768, 896);
+      paint.fillStyle = "white";
+      paint.font = "bold 38px sans-serif";
+      paint.fillText(paused ? "离合暂停 · 可调整真实双手" : "看向此区域暂停 · 移开后接续", 32, 62);
+      paint.font = "27px sans-serif";
+      paint.fillText("选项需射线点击；注视不会触发按钮", 32, 112);
+      rows.forEach((label, row) => {
+        const y = (.20 + row * .10) * 896;
+        paint.fillStyle = "#1c374d";
+        paint.fillRect(30, y, 708, 80);
+        paint.fillStyle = "white";
+        paint.font = "32px sans-serif";
+        paint.fillText(label, 46, y + 51);
+      });
+      paint.font = "25px sans-serif";
+      paint.fillStyle = "#93c5fd";
+      paint.fillText("头部朝向离合 · 机器人从暂停位置继续", 32, 854);
+      for (const pointer of pointers) {
+        paint.beginPath();
+        paint.arc(pointer.x * 768, pointer.y * 896, 10, 0, 2 * Math.PI);
+        paint.fillStyle = "#34d399";
+        paint.fill();
+        paint.strokeStyle = "white";
+        paint.lineWidth = 3;
+        paint.stroke();
+      }
+      context.activeTexture(context.TEXTURE0);
+      context.bindTexture(context.TEXTURE_2D, texture);
+      context.pixelStorei(context.UNPACK_FLIP_Y_WEBGL, true);
+      context.texImage2D(context.TEXTURE_2D, 0, context.RGBA, context.RGBA, context.UNSIGNED_BYTE, surface);
+      context.pixelStorei(context.UNPACK_FLIP_Y_WEBGL, false);
+    },
+    draw(viewProjection, matrix) {
+      const depth = context.isEnabled(context.DEPTH_TEST);
+      const cull = context.isEnabled(context.CULL_FACE);
+      context.disable(context.DEPTH_TEST);
+      context.disable(context.CULL_FACE);
+      context.useProgram(program);
+      context.bindBuffer(context.ARRAY_BUFFER, buffer);
+      context.enableVertexAttribArray(point);
+      context.vertexAttribPointer(point, 2, context.FLOAT, false, 0, 0);
+      context.uniformMatrix4fv(transform, false, multiplyMat4(viewProjection, matrix));
+      context.activeTexture(context.TEXTURE0);
+      context.bindTexture(context.TEXTURE_2D, texture);
+      context.uniform1i(sampler, 0);
+      context.drawArrays(context.TRIANGLES, 0, 6);
+      if (depth) context.enable(context.DEPTH_TEST);
+      if (cull) context.enable(context.CULL_FACE);
+    },
+    dispose() {
+      context.deleteBuffer(buffer);
+      context.deleteTexture(texture);
+      context.deleteProgram(program);
+      context.deleteShader(vertex);
+      context.deleteShader(fragment);
+    },
+  };
+}
+
 function onXRFrame(timeMs, frame) {
   session.requestAnimationFrame(onXRFrame);
   const layer = session.renderState.baseLayer;
   const viewerPose = frame.getViewerPose(referenceSpace);
   if (!viewerPose) {
+    resetOpticalHands();
     return;
   }
   latestViewerPoseMatrix = new Float32Array(viewerPose.transform.matrix);
   updateScenePlacement(viewerPose);
   updateViewRotation(timeMs);
+  updateHandPanel(viewerPose, timeMs, frame);
+  updateOpticalHands(frame, timeMs);
   sendControllerFrame(frame, timeMs, viewerPose);
   if (!layer || !renderer) {
     return;
@@ -1090,10 +1428,21 @@ function onXRFrame(timeMs, frame) {
     gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
     renderer.begin(multiplyMat4(view.projectionMatrix, view.transform.inverse.matrix));
     drawSimulationScene();
+    if (latestScene?.handTrackingEnabled && handPanelMatrix) {
+      handPanel.draw(multiplyMat4(view.projectionMatrix, view.transform.inverse.matrix), handPanelMatrix);
+    }
   }
 }
 
-async function enterVR() {
+function xrSessionOptions(requireHands) {
+  return {
+    requiredFeatures: requireHands ? ["hand-tracking"] : [],
+    optionalFeatures: ["local-floor", "bounded-floor", "dom-overlay", ...(requireHands ? [] : ["hand-tracking"])],
+    domOverlay: { root: overlay },
+  };
+}
+
+async function enterVR({ hands = false } = {}) {
   try {
     connectSocket();
     const geometry = await geometryPromise;
@@ -1102,10 +1451,16 @@ async function enterVR() {
     }
     ensureRenderer();
     await gl.makeXRCompatible();
-    session = await navigator.xr.requestSession("immersive-vr", {
-      optionalFeatures: ["local-floor", "bounded-floor", "dom-overlay"],
-      domOverlay: { root: overlay },
-    });
+    const requireHands = Boolean(latestScene?.handTrackingEnabled && (hands || inputMode === "hands"));
+    if (requireHands) {
+      inputMode = "hands";
+      updateHandButtons();
+    }
+    session = await navigator.xr.requestSession("immersive-vr", xrSessionOptions(requireHands));
+    if (requireHands) {
+      const response = await fetch("/control/resume", { method: "POST" });
+      if (!response.ok) throw new Error("Newton 未能退出待机，请重试启动脚本");
+    }
     session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
     try {
       referenceSpaceName = "local-floor";
@@ -1114,11 +1469,31 @@ async function enterVR() {
       referenceSpaceName = "local";
       referenceSpace = await session.requestReferenceSpace(referenceSpaceName);
     }
+    resetOpticalHands();
+    handGazePaused = false;
+    handGazeExitStart = null;
+    handPanelMatrix = null;
+    handPanel = createHandPanelRenderer(gl);
+    session.addEventListener("visibilitychange", () => {
+      if (session.visibilityState !== "visible") resetOpticalHands();
+    });
+    referenceSpace.addEventListener("reset", () => {
+      resetOpticalHands();
+      initialPlacementPending = true;
+      handPanelMatrix = null;
+    });
     session.addEventListener("squeezestart", (event) => squeezeState.set(event.inputSource, true));
     session.addEventListener("squeezeend", (event) => squeezeState.set(event.inputSource, false));
-    session.addEventListener("selectstart", (event) => selectState.set(event.inputSource, true));
+    session.addEventListener("selectstart", (event) => {
+      selectState.set(event.inputSource, true);
+      selectHandPanel(event);
+    });
     session.addEventListener("selectend", (event) => selectState.set(event.inputSource, false));
     session.addEventListener("end", () => {
+      resetOpticalHands();
+      handPanel.dispose();
+      handPanel = null;
+      handPanelMatrix = null;
       session = null;
       referenceSpace = null;
       referenceSpaceName = null;
@@ -1132,6 +1507,7 @@ async function enterVR() {
       viewMode = OBSERVER_VIEW_MODE;
       updateViewModeButton();
       enterButton.disabled = false;
+      enterHandsButton.disabled = false;
       xrStatus.textContent = "WebXR：会话已结束";
       requestDesktopPreview();
     });
@@ -1142,11 +1518,15 @@ async function enterVR() {
     viewPitchRadians = 0;
     xrStatus.textContent = `WebXR：运行中（${referenceSpaceName}）`;
     enterButton.disabled = true;
+    enterHandsButton.disabled = true;
     session.requestAnimationFrame(onXRFrame);
   } catch (error) {
+    const failedSession = session;
     session = null;
-    xrStatus.textContent = `WebXR 启动失败：${error.message}`;
+    if (failedSession) await failedSession.end().catch(() => {});
+    xrStatus.textContent = `WebXR 启动失败：${error.message}${hands || inputMode === "hands" ? "。请启用 Quest 手部追踪后重试裸手入口。" : ""}`;
     enterButton.disabled = false;
+    enterHandsButton.disabled = false;
   }
 }
 
@@ -1176,13 +1556,16 @@ async function initialize() {
     }
     xrStatus.textContent = supported ? "WebXR：Quest 沉浸模式可用" : "WebXR：沉浸模式不可用";
     enterButton.disabled = !supported || !geometry;
+    enterHandsButton.disabled = !supported || !geometry;
   } catch (error) {
     xrStatus.textContent = `WebXR 检查失败：${error.message}`;
   }
 }
 
-enterButton.addEventListener("click", enterVR);
+enterButton.addEventListener("click", () => enterVR());
+enterHandsButton.addEventListener("click", () => enterVR({ hands: true }));
 resetButton.addEventListener("click", requestSceneReset);
 togglePanelButton.addEventListener("click", () => setPanelHidden(!panel.hidden));
 toggleViewModeButton.addEventListener("click", () => toggleViewMode());
+document.querySelector("#hand-mode").addEventListener("click", setHandInputMode);
 initialize();

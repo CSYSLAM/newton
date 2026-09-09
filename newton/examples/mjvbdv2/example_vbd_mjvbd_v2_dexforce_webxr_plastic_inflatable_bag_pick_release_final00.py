@@ -9,6 +9,9 @@ recorded grasp poses, A toggles trajectory recording, B realigns the stereo
 view, X switches to the W1 eye camera with head tracking, and the right
 thumbstick resets the physical scene in place. The Quest renderer receives all
 216 deforming bag vertices rather than a rigid proxy.
+Experimental optical mode follows the right wrist and five fingers without
+manual activation. Tracking loss holds targets; looking toward the panel
+clutches motion and looking away re-anchors the wrist before resuming.
 
 Use the guarded USB workflow from the repository root::
 
@@ -39,6 +42,7 @@ from ._webxr_teleop import (
     pack_scene_geometry,
 )
 from ._webxr_w1_head import FIRST_PERSON_VIEW_MODE, OBSERVER_VIEW_MODE, W1HeadController, serialize_head_pose
+from ._webxr_w1_single_hand import W1SingleHandTeleop
 
 robot_reference = bag_scene.robot_reference
 bag_recorder = robot_reference.hand_reference.recorder
@@ -48,7 +52,6 @@ FPS = robot_reference.FPS
 DEFAULT_STALE_SECONDS = 0.25
 TARGET_POSITION_MIN = np.array((-0.75, -3.45, 0.85), dtype=np.float32)
 TARGET_POSITION_MAX = np.array((0.35, -2.15, 1.85), dtype=np.float32)
-IDENTITY_ROTATION = np.eye(3, dtype=np.float32)
 BAG_COLOR = (0.86, 0.68, 0.34)
 QUEST_A_BUTTON_INDEX = 4
 QUEST_THUMBSTICK_BUTTON_INDEX = 3
@@ -60,7 +63,7 @@ def _close_resources(server: WebXRServer, recorder: JsonlTrajectoryRecorder) -> 
     server.stop()
 
 
-class Example(bag_scene.Example):
+class Example(W1SingleHandTeleop, bag_scene.Example):
     """Drive the W1 right hand against the deformable pneumatic bag."""
 
     reset_in_place = True
@@ -99,6 +102,9 @@ class Example(bag_scene.Example):
         self._teleop_grasp = 0.0
         self._open_finger_q = np.asarray(self.hand_open.numpy(), dtype=np.float32)
         self._grasp_finger_q = np.asarray(self.hand_grasp.numpy(), dtype=np.float32)
+        self._init_optical_hand(self.urdf_path)
+        optical_order = {int(index): offset for offset, index in enumerate(self._optical_indices_host)}
+        self._optical_finger_order = np.asarray([optical_order[int(index)] for index in self.hand_indices.numpy()])
         self._initial_state = self.model.state()
         self._initial_state.assign(self.state_0)
         self._initial_ik_q = wp.clone(self.ik_q)
@@ -364,43 +370,21 @@ class Example(bag_scene.Example):
         self.release_material_applied = released
 
     def _prepare_frame(self) -> None:
-        """Retarget the newest right Quest controller pose into W1 IK."""
+        """Retarget the newest right controller or optical hand into W1 IK."""
         frame = self.xr_state.snapshot(max_age_seconds=self.xr_stale_seconds) if self.teleoperation_active else None
-        controller = None if frame is None else frame.controllers.get("right")
         if not self.teleoperation_active:
             self.view_mode = OBSERVER_VIEW_MODE
             self._head_controller.set_desired_pose(self.view_mode, None)
         elif frame is not None:
             if frame.view_mode != self.view_mode:
                 self.view_mode = frame.view_mode
-                self.retargeter.reset()
+                self._hold_optical_hand()
                 print(f"Quest view mode changed to {self.view_mode}", flush=True)
             self._head_controller.set_desired_pose(self.view_mode, frame.head_pose)
         elif self.view_mode == FIRST_PERSON_VIEW_MODE:
             self._head_controller.set_desired_pose(self.view_mode, None)
-        if controller is None:
-            self.retargeter.reset()
-            self._record_button_pressed = False
-            self._reset_button_pressed = False
-            if self.teleoperation_active:
-                self.phase = "waiting_for_quest" if not self._has_seen_controller else "quest_input_stale"
-            else:
-                self.phase = "teleoperation_standby"
-        else:
-            if self._process_controller_buttons(frame.stream_id, frame.sequence, controller):
-                self.reset_physics(source="quest-controller")
-            target = self.retargeter.update(
-                controller.pose,
-                clutch=controller.clutch,
-                robot_position=self._teleop_position,
-                robot_orientation=self._teleop_orientation,
-                source_to_robot_rotation=IDENTITY_ROTATION if frame.controller_space == "newton-world" else None,
-            )
-            if target is not None:
-                self._teleop_position = np.clip(target.position, TARGET_POSITION_MIN, TARGET_POSITION_MAX)
-                self._teleop_orientation = target.orientation
-            self._teleop_grasp = controller.trigger_value
-            self.phase = "quest_clutched" if controller.clutch else "quest_idle"
+        if self._prepare_teleop_input(frame, TARGET_POSITION_MIN, TARGET_POSITION_MAX):
+            return
 
         self.active_phase_name = self.phase
         self._set_hand_material(released=self._teleop_grasp <= RELEASE_TRIGGER_THRESHOLD)
@@ -428,7 +412,11 @@ class Example(bag_scene.Example):
             [self.ik_q[0], self.frame_q_end],
             device=self.device,
         )
-        desired_finger_q = self._open_finger_q + self._teleop_grasp * (self._grasp_finger_q - self._open_finger_q)
+        desired_finger_q = (
+            self._optical_target[self._optical_finger_order]
+            if self._input_mode == "hands"
+            else self._open_finger_q + self._teleop_grasp * (self._grasp_finger_q - self._open_finger_q)
+        )
         self.desired_finger_q.assign(desired_finger_q)
         wp.launch(
             robot_reference._limit_right_finger_target_step,
@@ -481,7 +469,7 @@ class Example(bag_scene.Example):
         request_id, teleoperation_active, simulation_active = requested_mode
         self.teleoperation_active = teleoperation_active
         self.simulation_active = simulation_active
-        self.retargeter.reset()
+        self._hold_optical_hand()
         self._record_button_pressed = False
         self._reset_button_pressed = False
         if teleoperation_active:
@@ -523,7 +511,7 @@ class Example(bag_scene.Example):
         self._teleop_grasp = 0.0
         self._head_controller.reset()
         self._set_hand_material(released=False)
-        self.retargeter.reset()
+        self._hold_optical_hand()
         self.maximum_soft_contact_count.zero_()
         self.maximum_body_particle_contact_count.zero_()
         self.minimum_volume_ratio = 1.0
@@ -601,6 +589,7 @@ class Example(bag_scene.Example):
                     "xrSequence": None if input_frame is None else input_frame.sequence,
                     "xrClientTimeMs": None if input_frame is None else input_frame.client_time_ms,
                     "xrControllerSpace": None if input_frame is None else input_frame.controller_space,
+                    **self._optical_record(input_frame),
                     "viewMode": self.view_mode,
                     "headPose": serialize_head_pose(None if input_frame is None else input_frame.head_pose),
                     "neckJointTargets": self._head_controller.targets.tolist(),
@@ -630,11 +619,13 @@ class Example(bag_scene.Example):
                 "type": "scene-state",
                 "version": 1,
                 "sceneKind": "plastic-inflatable-bag",
+                **self._optical_scene_state(),
                 "sceneInfo": {
                     "kind": "plastic-inflatable-bag",
                     "title": "充气塑料袋遥操作",
                     "description": "Quest 双眼显示完整 W1、桌面和实时变形袋子。也可切换机器人眼睛第一人称。",
                     "controls": [
+                        ["裸手模式", "右手手腕与五指自动跟随。看向面板暂停。移开后接续"],
                         ["右 Grip", "按住并移动机器人右手"],
                         ["右 Trigger", "控制右手全部手指抓握"],
                         ["左摇杆", "观察模式下转动视角"],

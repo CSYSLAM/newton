@@ -18,7 +18,7 @@ import struct
 import threading
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -298,6 +298,32 @@ class ControllerState:
 
 
 @dataclass(frozen=True)
+class HandState:
+    """Optical wrist pose and 25 reference-space joint positions [m]."""
+
+    pose: Pose
+    joints: np.ndarray
+    enabled: bool
+    activation: int
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> HandState:
+        if not isinstance(value, Mapping):
+            raise ProtocolError("hand must be an object")
+        try:
+            joints = np.asarray(value["joints"], dtype=np.float64)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProtocolError("hand joints must contain 25 positions") from exc
+        if joints.shape != (25, 3) or not np.all(np.isfinite(joints)):
+            raise ProtocolError("hand joints must contain 25 finite positions")
+        enabled = value.get("enabled", False)
+        activation = value.get("activation", 0)
+        if not isinstance(enabled, bool) or type(activation) is not int or not 0 <= activation < 2**31:
+            raise ProtocolError("hand enabled/activation is invalid")
+        return cls(Pose.from_mapping(value.get("pose"), "hand.pose"), joints, enabled, activation)
+
+
+@dataclass(frozen=True)
 class XRFrame:
     """A validated, latest-value WebXR head and controller frame."""
 
@@ -311,6 +337,9 @@ class XRFrame:
     controllers: Mapping[str, ControllerState]
     view_mode: str = "observer"
     head_pose: Pose | None = None
+    input_mode: str = "controllers"
+    hands: Mapping[str, HandState] = field(default_factory=dict)
+    recording_request: int = 0
 
     @classmethod
     def from_mapping(
@@ -359,6 +388,16 @@ class XRFrame:
             for handedness, controller in controllers_value.items()
             if handedness in _VALID_HANDS
         }
+        input_mode = value.get("inputMode", "controllers")
+        if input_mode not in ("controllers", "hands"):
+            raise ProtocolError("unsupported input mode")
+        hands_value = value.get("hands", {})
+        if not isinstance(hands_value, Mapping):
+            raise ProtocolError("hands must be an object")
+        hands = {side: HandState.from_mapping(hand) for side, hand in hands_value.items() if side in _VALID_HANDS}
+        recording_request = value.get("recordingRequest", 0)
+        if type(recording_request) is not int or not 0 <= recording_request < 2**31:
+            raise ProtocolError("recordingRequest is invalid")
         return cls(
             stream_id=stream_id,
             sequence=sequence,
@@ -370,6 +409,9 @@ class XRFrame:
             controllers=controllers,
             view_mode=view_mode,
             head_pose=head_pose,
+            input_mode=input_mode,
+            hands=hands,
+            recording_request=recording_request,
         )
 
     @classmethod

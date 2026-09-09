@@ -248,7 +248,8 @@ echo "[7/8] 旧进程已退出；CUDA guard 保持设备活跃，等待 ${restar
 sleep "${restart_delay}"
 
 echo "[8/8] 启动更新后的 ${teleop_name} 场景。"
-if ! "${start_script}" "$@"; then
+# Keep the lock in this coordinator; ADB may daemonize inside the launcher.
+if ! "${start_script}" "$@" 9>&-; then
   echo "错误：新场景启动失败。CUDA guard 仍在运行，请修复错误后重新执行本重载脚本。" >&2
   exit 1
 fi

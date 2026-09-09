@@ -37,6 +37,7 @@ from ._webxr_teleop import (
     WebXRServer,
     pack_scene_geometry,
 )
+from ._webxr_w1_hand import W1HandRetargeter
 
 DEFAULT_STALE_SECONDS = 0.25
 IDENTITY_ROTATION = np.eye(3, dtype=np.float32)
@@ -224,6 +225,15 @@ class Example(shirt_scene.Example):
             self._target_position_max = np.maximum(self._target_position_max, position + 0.10)
 
         self._build_independent_hand_control()
+        self._optical_retargeters = {hand: W1HandRetargeter(self.urdf_path, hand) for hand in HANDS}
+        self._input_mode = "controllers"
+        self._optical_targets = dict.fromkeys(HANDS)
+        self._optical_tokens = dict.fromkeys(HANDS)
+        self._optical_blocked = dict.fromkeys(HANDS)
+        self._optical_sequences = dict.fromkeys(HANDS)
+        self._optical_last_poses = dict.fromkeys(HANDS)
+        self._optical_status = dict.fromkeys(HANDS, "paused")
+        self._recording_request = None
         self._robot_q_host_indices = self._robot_coordinate_indices()
         self.robot_body_end = self.model.body_count
         self._robot_body_ids = tuple(range(self.robot_body_end))
@@ -552,7 +562,21 @@ class Example(shirt_scene.Example):
                 self._desired_neck_targets = self._neck_neutral.copy()
         elif self.view_mode == FIRST_PERSON_VIEW_MODE:
             self._desired_neck_targets = self._neck_neutral.copy()
-        if controllers and not self._has_seen_controller:
+        if frame is not None and frame.visibility_state != "visible":
+            frame = None
+            controllers = {}
+        if frame is not None:
+            request = (frame.stream_id, frame.recording_request)
+            if request != self._recording_request:
+                if frame.recording_request:
+                    self.trajectory_recorder.toggle()
+                self._recording_request = request
+            if frame.input_mode != self._input_mode:
+                self._hold_optical_hands()
+                self._input_mode = frame.input_mode
+                if self._input_mode == "controllers":
+                    self._optical_targets = dict.fromkeys(HANDS)
+        if (controllers or (frame is not None and frame.hands)) and not self._has_seen_controller:
             self._has_seen_controller = True
             if self.args.record_on_connect:
                 self.trajectory_recorder.start()
@@ -560,6 +584,11 @@ class Example(shirt_scene.Example):
         if frame is not None and "right" in controllers:
             if self._process_controller_buttons(frame.stream_id, frame.sequence, controllers["right"]):
                 self.reset_physics(source="quest-controller")
+                return
+
+        if self._input_mode == "hands":
+            self._prepare_optical_hands(frame)
+            return
 
         clutched: list[str] = []
         for hand in HANDS:
@@ -597,6 +626,85 @@ class Example(shirt_scene.Example):
             self.phase = "quest_" + "_".join(clutched) + "_clutched"
         else:
             self.phase = "quest_idle"
+
+    def _hold_optical_hands(self) -> None:
+        """Hold actual current coordinates and require a new activation after loss."""
+        current = None
+        for hand in HANDS:
+            self.retargeters[hand].reset()
+            if self._optical_tokens[hand] is not None:
+                self._optical_blocked[hand] = self._optical_tokens[hand]
+            self._optical_last_poses[hand] = None
+            self._optical_status[hand] = "paused"
+            if self._input_mode == "hands" or self._optical_targets[hand] is not None:
+                if current is None:
+                    current = self.state_0.joint_q.numpy()
+                indices = self._hand_indices_by_side[hand].numpy()
+                self._optical_targets[hand] = current[indices].copy()
+
+    def _prepare_optical_hands(self, frame) -> None:
+        """Drive arms and fingers only from explicitly enabled, valid optical data."""
+        for hand in HANDS:
+            sample = None if frame is None else frame.hands.get(hand)
+            token = None if sample is None else (frame.stream_id, sample.activation)
+            active = sample is not None and sample.enabled and token != self._optical_blocked[hand]
+            if not active:
+                self.retargeters[hand].reset()
+                if self._optical_status[hand] == "tracking" or self._optical_targets[hand] is None:
+                    current = self.state_0.joint_q.numpy()[self._hand_indices_by_side[hand].numpy()]
+                    self._optical_targets[hand] = current.copy()
+                if self._optical_tokens[hand] is not None:
+                    self._optical_blocked[hand] = self._optical_tokens[hand]
+                self._optical_last_poses[hand] = None
+                self._optical_status[hand] = "paused" if sample is not None else "tracking-lost"
+                continue
+            new_activation = token != self._optical_tokens[hand]
+            if new_activation:
+                self.retargeters[hand].reset()
+                self._optical_retargeters[hand].reset(
+                    self.state_0.joint_q.numpy()[self._hand_indices_by_side[hand].numpy()]
+                )
+                self._optical_last_poses[hand] = None
+                self._optical_tokens[hand] = token
+            sequence = (frame.stream_id, frame.sequence)
+            if sequence == self._optical_sequences[hand]:
+                continue
+            self._optical_sequences[hand] = sequence
+            previous_pose = self._optical_last_poses[hand]
+            try:
+                if previous_pose is not None:
+                    distance = np.linalg.norm(sample.pose.position - previous_pose.position)
+                    angle = 2 * np.arccos(
+                        np.clip(abs(np.dot(sample.pose.orientation, previous_pose.orientation)), 0, 1)
+                    )
+                    if distance > 0.15 or angle > np.radians(60):
+                        raise ValueError("Optical wrist pose jumped")
+                desired = self._optical_retargeters[hand].solve(sample.joints)
+            except (ValueError, np.linalg.LinAlgError):
+                self._optical_blocked[hand] = token
+                self._optical_status[hand] = "invalid-tracking"
+                self.retargeters[hand].reset()
+                self._optical_targets[hand] = self.state_0.joint_q.numpy()[
+                    self._hand_indices_by_side[hand].numpy()
+                ].copy()
+                continue
+            self._optical_targets[hand] = desired
+            self._optical_last_poses[hand] = sample.pose
+            self._optical_status[hand] = "tracking"
+            target = self.retargeters[hand].update(
+                sample.pose,
+                clutch=True,
+                robot_position=self._teleop_positions[hand],
+                robot_orientation=self._teleop_orientations[hand],
+                source_to_robot_rotation=IDENTITY_ROTATION if frame.controller_space == "newton-world" else None,
+            )
+            if target is not None:
+                self._teleop_positions[hand] = np.clip(
+                    target.position, self._target_position_min, self._target_position_max
+                )
+                self._teleop_orientations[hand] = target.orientation
+            self._teleop_grasps[hand] = float(np.clip(desired[2] / 1.309, 0, 1))
+        self.phase = "optical_" + "_".join(f"{hand}:{self._optical_status[hand]}" for hand in HANDS)
 
     def _process_controller_buttons(self, stream_id: str, sequence: int, controller) -> bool:
         new_stream = stream_id != self._last_input_stream
@@ -638,17 +746,20 @@ class Example(shirt_scene.Example):
         super()._solve_runtime_ik_frame()
         for hand in HANDS:
             indices = self._hand_indices_by_side[hand]
-            wp.launch(
-                _write_hand_target,
-                indices.shape[0],
-                [
-                    self._hand_open_by_side[hand],
-                    self._hand_grasp_by_side[hand],
-                    float(self._teleop_grasps[hand]),
-                    self._desired_hand_q_by_side[hand],
-                ],
-                device=self.device,
-            )
+            if self._optical_targets[hand] is not None:
+                self._desired_hand_q_by_side[hand].assign(self._optical_targets[hand])
+            else:
+                wp.launch(
+                    _write_hand_target,
+                    indices.shape[0],
+                    [
+                        self._hand_open_by_side[hand],
+                        self._hand_grasp_by_side[hand],
+                        float(self._teleop_grasps[hand]),
+                        self._desired_hand_q_by_side[hand],
+                    ],
+                    device=self.device,
+                )
             wp.launch(
                 _limit_hand_target_step,
                 indices.shape[0],
@@ -692,6 +803,7 @@ class Example(shirt_scene.Example):
         if requested_mode is None:
             return
         request_id, teleoperation_active, simulation_active = requested_mode
+        self._hold_optical_hands()
         self.teleoperation_active = teleoperation_active
         self.simulation_active = simulation_active
         for retargeter in self.retargeters.values():
@@ -722,6 +834,8 @@ class Example(shirt_scene.Example):
 
     def reset_physics(self, *, source: str) -> None:
         """Restore W1 and the complete T-shirt without rebuilding CUDA resources."""
+        self._hold_optical_hands()
+        self._optical_targets = dict.fromkeys(HANDS)
         self.state_0.assign(self._initial_state)
         self.state_1.assign(self._initial_state)
         self.solver.reset(self.state_0, flags=0)
@@ -815,6 +929,22 @@ class Example(shirt_scene.Example):
                     "neckJointTargets": self._neck_targets.tolist(),
                     "phase": self.phase,
                     "targetPoses": {hand: target_poses[index] for index, hand in enumerate(HANDS)},
+                    "inputMode": self._input_mode,
+                    "handTrackingState": dict(self._optical_status),
+                    "handJointTargets": {
+                        hand: None if q is None else q.tolist() for hand, q in self._optical_targets.items()
+                    },
+                    "xrHands": {}
+                    if input_frame is None
+                    else {
+                        hand: {
+                            "joints": sample.joints.tolist(),
+                            "enabled": sample.enabled,
+                            "activation": sample.activation,
+                            "pose": [*sample.pose.position.tolist(), *sample.pose.orientation.tolist()],
+                        }
+                        for hand, sample in input_frame.hands.items()
+                    },
                     "grasps": dict(self._teleop_grasps),
                     "robotJointQ": [float(joint_q[index]) for index in self._robot_q_host_indices],
                     "shirtParticleQ": shirt_positions.reshape(-1).tolist(),
@@ -852,6 +982,12 @@ class Example(shirt_scene.Example):
                 "type": "scene-state",
                 "version": 1,
                 "sceneKind": "bimanual-fold-tshirt",
+                "handTrackingEnabled": True,
+                "inputMode": self._input_mode,
+                "handTrackingState": dict(self._optical_status),
+                "handTrackingActivation": {
+                    hand: None if token is None else token[1] for hand, token in self._optical_tokens.items()
+                },
                 "sceneInfo": {
                     "kind": "bimanual-fold-tshirt",
                     "title": "双手叠 T 恤遥操作",

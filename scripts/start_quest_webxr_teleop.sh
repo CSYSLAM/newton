@@ -37,7 +37,11 @@ else
     "${repo_root}/newton/examples/mjvbdv2/_webxr_w1_head.py"
   )
   if [[ "${example_name}" == "mjvbd_v2_dexforce_webxr_plug_socket" ]]; then
-    reload_sources+=("${repo_root}/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_realtime_plug_socket.py")
+    reload_sources+=(
+      "${repo_root}/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_realtime_plug_socket.py"
+      "${repo_root}/newton/examples/mjvbdv2/_webxr_w1_hand.py"
+      "${repo_root}/newton/examples/mjvbdv2/_webxr_w1_single_hand.py"
+    )
   fi
   reload_sources+=("${repo_root}/newton/examples/mjvbdv2/example_${example_name}.py")
 fi

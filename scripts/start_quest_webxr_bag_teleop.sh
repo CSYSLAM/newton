@@ -13,5 +13,5 @@ export NEWTON_WEBXR_RUNTIME_NAME="newton-webxr-bag-teleop"
 export NEWTON_WEBXR_STATE_NAME="newton-webxr-bag-teleop"
 export NEWTON_WEBXR_SDF_CACHE=0
 export NEWTON_WEBXR_RELOAD_COMMAND="./scripts/reload_quest_webxr_bag_teleop.sh"
-export NEWTON_WEBXR_RELOAD_SOURCES="${repo_root}/newton/examples/mjvbdv2/_webxr_teleop.py:${repo_root}/newton/examples/mjvbdv2/_webxr_w1_head.py:${repo_root}/newton/examples/mjvbdv2/example_vbd_mjvbd_v2_dexforce_recorded_plastic_inflatable_bag_pick_release_final00.py:${repo_root}/newton/examples/mjvbdv2/example_vbd_mjvbd_v2_dexforce_webxr_plastic_inflatable_bag_pick_release_final00.py"
+export NEWTON_WEBXR_RELOAD_SOURCES="${repo_root}/newton/examples/mjvbdv2/_webxr_teleop.py:${repo_root}/newton/examples/mjvbdv2/_webxr_w1_head.py:${repo_root}/newton/examples/mjvbdv2/_webxr_w1_hand.py:${repo_root}/newton/examples/mjvbdv2/_webxr_w1_single_hand.py:${repo_root}/newton/examples/mjvbdv2/example_vbd_mjvbd_v2_dexforce_recorded_plastic_inflatable_bag_pick_release_final00.py:${repo_root}/newton/examples/mjvbdv2/example_vbd_mjvbd_v2_dexforce_webxr_plastic_inflatable_bag_pick_release_final00.py"
 exec "${script_dir}/start_quest_webxr_teleop.sh" "$@"
