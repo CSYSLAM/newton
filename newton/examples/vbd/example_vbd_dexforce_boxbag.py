@@ -120,6 +120,8 @@ class Example:
         self.bag_opacity = args.bag_opacity
         if not 0.0 <= self.bag_opacity <= 1.0:
             raise ValueError("--bag-opacity must be between 0 and 1")
+        if args.bag_stretch_stiffness <= 0 or args.bag_bend_stiffness < 0:
+            raise ValueError("Bag stretch stiffness must be positive and bending stiffness nonnegative")
         asset_root = Path(newton.examples.get_asset_directory()) / "dexforce_boxbag"
         with np.load(asset_root / "robot_targets.npz") as recording:
             trajectory = recording["joint_q"]
@@ -184,11 +186,13 @@ class Example:
             vertices=vertices.tolist(),
             indices=indices,
             density=0.08,
-            tri_ke=5.0e4,
-            tri_ka=5.0e4,
-            tri_kd=50.0,
-            edge_ke=25.0,
-            edge_kd=0.25,
+            # Low bending resistance lets the walls fold instead of retaining
+            # the initial box shape. Moderate membrane stiffness carries the cubes.
+            tri_ke=args.bag_stretch_stiffness,
+            tri_ka=args.bag_stretch_stiffness,
+            tri_kd=1.0,
+            edge_ke=args.bag_bend_stiffness,
+            edge_kd=0.001,
             particle_radius=0.003,
             label="box_bag",
         )
@@ -403,6 +407,8 @@ class Example:
         parser.add_argument(
             "--bag-opacity", type=float, default=0.55, help="Bag display opacity; 1 shows an opaque bag"
         )
+        parser.add_argument("--bag-stretch-stiffness", type=float, default=1000.0, help="Bag membrane stiffness")
+        parser.add_argument("--bag-bend-stiffness", type=float, default=0.02, help="Bag bending stiffness")
         parser.add_argument(
             "--rigid-articulation-solve", choices=("local", "block_sparse_joints"), default="block_sparse_joints"
         )

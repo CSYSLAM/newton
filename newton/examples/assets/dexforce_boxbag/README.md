@@ -29,6 +29,13 @@ The bag is partly transparent so both deposited cubes remain visible. Use
 substeps with 24 VBD iterations each; 1900 frames represent 31.7 seconds of
 simulation, and take longer than real time on the tested GPU.
 
+The bag uses membrane stiffness 1000 and bending stiffness 0.02, with
+reduced damping, so its walls can fold and its bottom sags under the cubes.
+The original final00 values (50000 and 25) largely preserved the initial
+box shape. Adjust `--bag-stretch-stiffness` and `--bag-bend-stiffness` to
+control stretching and resistance to folding independently; the top rim
+remains fixed.
+
 This port uses `SolverVBD` for the dynamic robot, rigid cube, tetrahedral soft
 cube, and cloth bag. The recording drives position and velocity targets.
 URDF mimic relations are disabled because the recorded finger PIP targets
