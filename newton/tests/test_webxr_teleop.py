@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
@@ -213,6 +215,20 @@ class TestWebXRServerReadiness(unittest.TestCase):
 
 
 class TestWebXRExampleConfiguration(unittest.TestCase):
+    def test_tshirt_validation_accepts_kinematic_cloth_backends(self):
+        """Accept the fast cloth backend while retaining base state validation."""
+        example = webxr_tshirt_example.Example.__new__(webxr_tshirt_example.Example)
+        example.solver = SimpleNamespace(features=SimpleNamespace(backend="mjvbd_kinematic_soft"))
+        with patch.object(webxr_tshirt_example.shirt_scene.Example, "test_final", autospec=True) as validate_state:
+            for backend in ("mjvbd_kinematic_soft", "vbd_kinematic_full"):
+                with self.subTest(backend=backend):
+                    example.solver.features.backend = backend
+                    example.test_final()
+                    validate_state.assert_called_with(example)
+            example.solver.features.backend = "kinematic_passthrough"
+            with self.assertRaisesRegex(ValueError, "Unexpected MJVBDV2 backend"):
+                example.test_final()
+
     def test_teleop_parsers_disable_automatic_recording(self):
         examples = (
             webxr_example,

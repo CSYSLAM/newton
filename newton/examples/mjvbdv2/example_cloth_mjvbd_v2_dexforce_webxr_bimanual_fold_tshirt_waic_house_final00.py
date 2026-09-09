@@ -921,7 +921,7 @@ class Example(shirt_scene.Example):
 
     def test_final(self) -> None:
         super().test_final()
-        if self.solver.features.backend != "vbd_kinematic_full":
+        if self.solver.features.backend not in ("mjvbd_kinematic_soft", "vbd_kinematic_full"):
             raise ValueError(f"Unexpected MJVBDV2 backend: {self.solver.features.backend}")
 
     @staticmethod
