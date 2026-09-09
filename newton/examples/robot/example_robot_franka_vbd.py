@@ -43,8 +43,8 @@ class Example:
             enable_self_collisions=False,
             collapse_fixed_joints=True,
         )
-        # VBD does not enforce URDF mimic constraints: drive both fingers explicitly.
-        builder.constraint_mimic_enabled[:] = [False] * len(builder.constraint_mimic_enabled)
+        # Keep the example's two independently driven fingers after importing mimic metadata.
+        builder.joint_mimic_joint[:] = [-1] * builder.joint_count
         builder.joint_q[:] = [0.0, -0.4, 0.0, -1.6, 0.0, 1.2, 0.7, 0.04, 0.04]
         builder.joint_target_ke[:] = [5000.0] * 7 + [1000.0] * 2
         builder.joint_target_kd[:] = [100.0] * 7 + [10.0] * 2

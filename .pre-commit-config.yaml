@@ -20,6 +20,8 @@ repos:
     hooks:
       - id: check-added-large-files
         args: [--maxkb=500]
+        # Preserve the vendored FANUC robot asset from upstream PR #3974.
+        exclude: ^newton/examples/assets/fanuc_arm\.usda$
       - id: check-case-conflict
       - id: check-illegal-windows-names
       - id: check-json

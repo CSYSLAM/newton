@@ -381,6 +381,15 @@ add_basic_example_test(
     test_suffix="vbd",
 )
 
+for mimic_solver in ("featherstone", "semi_implicit", "xpbd", "mujoco", "vbd"):
+    add_basic_example_test(
+        name="basic.example_basic_mimic_joint",
+        devices=test_devices,
+        use_viewer=True,
+        test_options={"num-frames": 120, "solver": mimic_solver},
+        test_suffix=mimic_solver,
+    )
+
 add_basic_example_test(
     name="basic.example_basic_shapes",
     devices=test_devices,
@@ -615,6 +624,13 @@ add_example_test(
     name="vbd.example_vbd_gripper_soft_grid",
     devices=cuda_test_devices,
     test_options={"num-frames": 360},
+    use_viewer=True,
+)
+add_example_test(
+    TestClothExamples,
+    name="vbd.example_vbd_dat_rigid_soft",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 300},
     use_viewer=True,
 )
 
@@ -1374,6 +1390,21 @@ add_example_test(
     name="controllers.example_controller_differential_ik",
     devices=cuda_test_devices,
     test_options={"usd_required": True, "num-frames": 100},
+    use_viewer=True,
+)
+
+
+class TestSurfaceGripperExamples(unittest.TestCase):
+    pass
+
+
+# 120 frames reaches the first engagement (~1.0 s) and holds the panel well past the seal settling,
+# so test_final can assert that the pads latched, the body lifted, and the seal quality stayed healthy.
+add_example_test(
+    TestSurfaceGripperExamples,
+    name="surface_gripper.example_surface_gripper",
+    devices=test_devices,
+    test_options={"usd_required": True, "num-frames": 120},
     use_viewer=True,
 )
 

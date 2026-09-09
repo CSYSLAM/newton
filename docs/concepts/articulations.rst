@@ -136,6 +136,74 @@ In order to update the body poses (maximal coordinates), we need to use the forw
 Now, the body poses (maximal coordinates) have been updated by the forward kinematics and a maximal-coordinate solver can simulate the scene starting from these initial conditions.
 As mentioned above, this call is not needed for generalized-coordinate solvers.
 
+Mimic joints
+------------
+
+A joint can derive its coordinates from another joint with the same position
+and velocity dimensions. The joint being derived is the *follower*. Newton
+calls the other joint the *reference joint*: it is the leader whose motion the
+follower mimics. Configure this relationship with
+:meth:`newton.ModelBuilder.set_joint_mimic`:
+
+.. testcode::
+
+  builder = newton.ModelBuilder()
+  link_0 = builder.add_link()
+  link_1 = builder.add_link()
+  reference = builder.add_joint_revolute(parent=-1, child=link_0, axis=wp.vec3(0.0, 0.0, 1.0))
+  follower = builder.add_joint_revolute(parent=link_0, child=link_1, axis=wp.vec3(0.0, 0.0, 1.0))
+  builder.add_articulation([reference, follower])
+  builder.set_joint_mimic(follower, reference, coeffs=(0.25, -2.0))
+
+  model = builder.finalize()
+  state = model.state()
+  state.joint_q.assign([0.5, 0.0])
+  state.joint_qd.assign([1.0, 0.0])
+  newton.eval_mimic(model, state)
+
+  assert np.allclose(state.joint_q.numpy(), [0.5, -0.75])
+  assert np.allclose(state.joint_qd.numpy(), [1.0, -2.0])
+
+Every joint has a :attr:`newton.Model.joint_mimic_joint` entry. ``-1`` means
+that the joint is independent; otherwise it stores the reference joint index.
+:attr:`newton.Model.joint_mimic_coeffs` stores ``(offset, multiplier)``. The
+same relationship, ``q_follower = offset + multiplier * q_reference``, is
+applied componentwise when the joints have more than one coordinate.
+The joint types do not need to match; only their position and velocity
+dimensions must match. For example, a one-axis D6 joint can mimic another
+one-dimensional joint.
+
+:func:`newton.eval_mimic` updates the follower coordinates in a state. For each
+follower, it reads all position and velocity coordinates of the reference joint
+and writes the corresponding follower coordinates. Independent joints are
+left unchanged. By default the function updates the input state in place; pass
+a different output state to copy the input coordinates and update the
+followers in that state instead.
+
+Mimic chains are not supported. The reference joint must be independent, and a
+joint that is already the reference for a follower cannot itself become a
+follower. :meth:`newton.ModelBuilder.set_joint_mimic` raises an error if either
+case would create a chain.
+
+Call :func:`newton.eval_mimic` before :func:`newton.eval_fk` when
+maximal-coordinate body poses should reflect the mimic relationship.
+:class:`newton.solvers.SolverSemiImplicit` enforces these relationships with
+penalty spring and damping forces. Configure the global gains with
+``joint_mimic_ke`` and ``joint_mimic_kd`` on the solver. As with other explicit
+springs, stronger gains may require a smaller simulation time step.
+:class:`newton.solvers.SolverXPBD` and :class:`newton.solvers.SolverVBD` enforce
+relationships between revolute, prismatic, and D6 joints with coupled
+maximal-coordinate corrections. Both approaches act on the follower and the
+reference joint, so forces applied to the follower also affect the reference.
+VBD performs one mimic correction after each rigid-body iteration. Increase
+the solver's ``iterations`` setting when mimic relationships need tighter
+convergence.
+:class:`newton.solvers.SolverFeatherstone` applies the same relationships in
+generalized coordinates. It removes follower degrees of freedom from the
+dynamics solve and transfers their forces and inertia to the reference joint.
+:class:`newton.solvers.SolverMuJoCo` applies the joint-owned mimic metadata
+directly through its joint equality constraints.
+
 When declaring an articulation using the :class:`~newton.ModelBuilder`, the rigid body poses (maximal coordinates :attr:`newton.State.body_q`) are initialized by the ``xform`` argument:
 
 .. testcode::
@@ -1022,11 +1090,11 @@ a USD asset can author a four-bar linkage or other parallel mechanism.
      ``control.joint_f``) and joint limits are applied alongside the
      loop-closure constraint, subject to each solver's general joint-feature
      support (see :ref:`Joint feature support`).
-     :class:`~newton.solvers.SolverVBD` and
-     :class:`~newton.solvers.SolverKamino` use the same flat per-joint
-     iteration but support a narrower set of joint types and features, so
-     the same loop-closure pattern works only within their respective
-     supported subsets.
+     :class:`~newton.solvers.SolverVBD` in local mode and
+     :class:`~newton.solvers.SolverKamino` use flat constraint iterations but
+     support a narrower set of joint types and features, so the same
+     loop-closure pattern works only within their respective supported
+     subsets. SolverVBD's block-sparse mode is described below.
 
    - **Generalized-coordinate solvers** carry only tree-joint coordinates in
      their state vector and must handle the loop closure separately.
@@ -1040,6 +1108,48 @@ a USD asset can author a four-bar linkage or other parallel mechanism.
    In all cases the loop-closing joint is invisible to :func:`newton.eval_fk`,
    :func:`newton.eval_ik`, and :class:`~newton.selection.ArticulationView` —
    those walk the articulation tree only.
+
+.. _Loop closure inside an articulation:
+
+Loop closures inside an articulation
+------------------------------------
+
+A maximal-coordinate solver that assembles and factorizes a whole articulation
+at once benefits from having the loop-closing joint inside the articulation
+range, so the closure is part of the same linear system as the tree joints. For
+that case :meth:`~newton.ModelBuilder.add_articulation` accepts
+``allow_closed_loops=True``, which relaxes the single-parent check and lets a
+body be the child of more than one joint in the range:
+
+.. code-block:: python
+
+   # Same four-bar as above, but the closure joint is declared as part of the
+   # articulation instead of being left outside it.
+   builder.add_articulation([j_root, j_a, j_b, j_loop], allow_closed_loops=True)
+
+:class:`~newton.solvers.SolverVBD` with
+``rigid_articulation_solve="block_sparse_joints"`` uses this to include the
+closure in the articulation's direct block solve.
+
+The sparse solve is deliberately articulation-centric: bodies outside every
+declared articulation continue through VBD's regular colored local solve.
+Joints between standalone bodies remain on that local path. A joint outside the
+articulation ranges may not touch an articulation body, so cross-articulation
+joints and omitted loop closures are rejected when the sparse solver is
+constructed. Put a loop-closing joint inside a single articulation to include
+it in the direct factorization, or use the local solve for models whose joints
+must cross articulation boundaries.
+
+.. warning::
+
+   An articulation built with ``allow_closed_loops=True`` is **not** a kinematic
+   tree, so routines that sweep an articulation range as a tree do not produce
+   meaningful results for it. In particular :func:`newton.eval_fk` will place a
+   body using whichever joint in the range it visits last, and
+   :class:`~newton.solvers.SolverFeatherstone` accepts the model without
+   reporting the topology. Use this option only for models driven by a solver
+   that consumes the articulation in maximal coordinates, and prefer the
+   omit-from-articulation pattern above otherwise.
 
 .. note::
 

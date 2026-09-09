@@ -305,14 +305,14 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - |no|
      - |no|
      - |yes|
-     - |no|
+     - 🟨 :sup:`8`
      - |yes|
    * - :attr:`~newton.Model.joint_friction`
      - |no|
      - |no|
      - |no|
      - |yes|
-     - |no|
+     - |yes| :sup:`9`
      - |yes|
    * - :attr:`~newton.Model.joint_limit_lower` / :attr:`~newton.Model.joint_limit_upper`
      - |yes|
@@ -326,7 +326,7 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - |yes| :sup:`2`
      - |no|
      - |yes|
-     - |yes| :sup:`4`
+     - |yes| :sup:`7`
      - |no|
    * - :attr:`~newton.Model.joint_effort_limit`
      - |no|
@@ -344,6 +344,7 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - |no|
 
 | :sup:`2` Not enforced for BALL joints in SemiImplicit.
+| :sup:`8` VBD applies regularized Coulomb friction to each free coordinate of REVOLUTE, PRISMATIC, and D6 joints. The force is ``-joint_friction * tanh(qd / 0.01)``; near rest this allows slow creep rather than exact sticking. Friction on either joint in a mimic pair resists the coupled motion.
 
 **Actuation and control**
 
@@ -364,7 +365,7 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - |yes| :sup:`2`
      - |yes|
      - |yes|
-     - |yes| :sup:`4`
+     - |yes| :sup:`7`
      - |yes|
    * - :attr:`~newton.Model.joint_target_mode`
      - |no|
@@ -402,16 +403,21 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - |yes|
      - |no|
      - |no|
-   * - Mimic constraints
-     - |no|
-     - |no|
-     - |no|
+   * - Mimic joints
      - |yes| :sup:`3`
-     - |no|
+     - |yes| :sup:`4`
+     - |yes| :sup:`5`
+     - |yes| :sup:`6`
+     - |yes| :sup:`5`
      - |no|
 
-| :sup:`3` Mimic constraints in MuJoCo are supported for REVOLUTE and PRISMATIC joints only.
-| :sup:`4` VBD interprets ``joint_target_kd`` and ``joint_limit_kd`` as absolute damping coefficients in physical units.
+| :sup:`3` Featherstone eliminates follower degrees of freedom from its reduced dynamics and transfers follower forces and inertia to the reference joint.
+| :sup:`4` SemiImplicit enforces joint-owned mimic relationships with penalty springs configured by ``joint_mimic_ke`` and ``joint_mimic_kd``.
+| :sup:`5` XPBD uses mass-weighted mimic corrections. VBD local mode uses its assembled body Hessians and retains the mimic reaction forces within the timestep, so drives, friction, and contacts participate in the coupled solve. Both perform one mimic solve per solver iteration.
+| :sup:`6` MuJoCo lowers each joint-owned relationship to joint equality constraints. Multi-axis D6 relationships produce one equality constraint per axis.
+| :sup:`7` VBD interprets ``joint_target_kd`` and ``joint_limit_kd`` as absolute damping coefficients in physical units.
+| :sup:`8` VBD supports revolute-joint armature with the experimental ``block_sparse_joints`` articulation solve. Sparse mode does not support joint friction or mimic relationships.
+| :sup:`9` VBD local mode supports smoothed Coulomb joint friction for REVOLUTE, PRISMATIC, and D6 joints.
 
 
 

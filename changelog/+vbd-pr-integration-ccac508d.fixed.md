@@ -1,0 +1,1 @@
+Preserve rigid-soft DAT and log-barrier contact handling in the sparse VBD path when integrating the experimental solver branches; reject joint friction and mimic relationships in sparse mode instead of silently ignoring them.
