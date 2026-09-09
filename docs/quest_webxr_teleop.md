@@ -38,6 +38,60 @@ cd /home/oem/code/repos/newton
 ./scripts/reload_quest_webxr_plug_socket_teleop.sh
 ```
 
+## W1 二指夹插头场景
+
+独立例子 `mjvbd_v2_dexforce_webxr_gripper_plug_socket` 使用 [Dexsim MR 1269](http://192.168.3.16/Engine/dexsim/-/merge_requests/1269)
+中提交 `57acb4907f639d2af86cbb159b5fd0cf20e0f396` 的 W1 Pikka 二指夹模型。原五指插头例子继续保留。
+MR 中两侧末端均为二指夹，本例沿用右臂插头任务，左臂保持初始姿态。
+
+模型随仓库保存在 `assets/w1-pikka-gripper/`，网格使用 Git LFS 管理。克隆后如未自动下载网格，运行：
+
+```bash
+git lfs pull --include="assets/w1-pikka-gripper/**"
+```
+
+需要从原始 MR 重新获取模型时运行：
+
+```bash
+uv run scripts/download_quest_w1_gripper.py
+```
+
+下载器通过已认证的 `glab` 获取固定提交的 URDF 和夹爪网格；MR 未纳入版本控制的通用主体网格复用
+`assets/W1-hand-obj/Visual/`（可用 `--body-assets` 指定）。`source.json` 记录来源、复用列表与逐文件 SHA-256。
+URDF、来源记录和全部依赖网格均纳入版本控制，运行例子无需访问原始 GitLab。
+
+启动、重载和停止分别使用以下命令，每次选择需要的操作：
+
+```bash
+./scripts/start_quest_webxr_gripper_plug_socket_teleop.sh
+./scripts/reload_quest_webxr_gripper_plug_socket_teleop.sh
+./scripts/stop_quest_webxr_gripper_plug_socket_teleop.sh
+```
+
+独立端口为 `8772`，服务名为 `newton-quest-webxr-gripper-plug.service`，与其余场景使用同一套互斥切换流程。
+
+- **手柄**：右 Grip 按住移动右臂；右 Trigger 松开张开二指夹、按下闭合。A 录制、B 重对齐、X 视角切换和右摇杆复位保留。
+- **裸手**：点击“进入裸手遥操”，右手手腕自动跟随；拇指尖与食指尖间距控制开合。默认 15 mm 及以下完全闭合、100 mm 及以上完全张开，中间连续映射。
+- **暂停与丢失**：看向面板区域保持右臂与夹爪目标，移开后重新建立手腕基准并接续；识别丢失也保持目标，恢复后自动接续，无需手动启用。
+
+两片夹指使用源 URDF 的相反平移轴，分别限制在 0–50 mm，并保持一比一随动关系。
+手柄与裸手均使用每片 0.08 m/s 的速度上限，可通过 `--gripper-speed` 调整；
+`--pinch-closed-span` 和 `--pinch-open-span` 调整裸手映射阈值，单位为米。
+IK 使用源模型 `right_gripper_tcp`，位于 `right_ee` 的 +Z 方向 140 mm。
+碰撞使用 MR 自带的夹指分块凸网格，不重复运行 V-HACD。
+
+目前已完成不导入 Newton/Warp 的 CPU 映射测试、URDF 依赖检查，以及独立 CPU 运动学可达性检查。
+初始 TCP 在独立运动学求解中的位置误差小于 0.001 mm。下图为实际资产的 CPU 几何预览，尚未进行 Newton 接触仿真或 Quest 插拔验收。
+
+![W1 二指夹模型预览](images/examples/example_mjvbd_v2_dexforce_webxr_gripper_plug_socket.jpg)
+
+独立回归测试：
+
+```bash
+uv run --no-sync python newton/tests/test_webxr_parallel_gripper.py
+uv run --no-sync python newton/tests/test_webxr_hand_client.py
+```
+
 ## 双手推椅场景
 
 启动：

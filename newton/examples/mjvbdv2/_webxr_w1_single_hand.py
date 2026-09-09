@@ -42,10 +42,14 @@ class W1SingleHandTeleop:
             if starts[joint + 1] - starts[joint] != 1:
                 raise ValueError(f"W1 hand joint must have one coordinate: {name}")
             indices.append(int(starts[joint]))
+        self._configure_optical_hand(W1HandRetargeter(Path(urdf_path), "right"), indices)
+
+    def _configure_optical_hand(self, mapper, indices) -> None:
+        """Initialize shared tracking state for a hand or parallel-gripper mapper."""
         self._optical_indices_host = np.asarray(indices, dtype=np.int32)
         self._optical_indices = wp.array(indices, dtype=wp.int32, device=self.device)
         self._optical_command = wp.zeros(len(indices), dtype=wp.float32, device=self.device)
-        self._optical_mapper = W1HandRetargeter(Path(urdf_path), "right")
+        self._optical_mapper = mapper
         self._optical_target = None
         self._optical_token = None
         self._optical_blocked = None
@@ -154,7 +158,7 @@ class W1SingleHandTeleop:
         self._optical_last_pose = sample.pose
         self._optical_status = "tracking"
         # Keep the bag's existing release/material signal tied to finger closure.
-        self._teleop_grasp = float(np.clip(np.mean(desired[[2, 4, 6, 8]]) / 1.309, 0, 1))
+        self._teleop_grasp = self._optical_grasp_fraction(desired)
         target = self.retargeter.update(
             sample.pose,
             clutch=True,
@@ -166,6 +170,10 @@ class W1SingleHandTeleop:
             self._teleop_position = np.clip(target.position, lower, upper)
             self._teleop_orientation = target.orientation
         self.phase = "optical_right:tracking"
+
+    def _optical_grasp_fraction(self, desired: np.ndarray) -> float:
+        """Express dexterous finger closure in the scene's normalized grasp channel."""
+        return float(np.clip(np.mean(desired[[2, 4, 6, 8]]) / 1.309, 0, 1))
 
     def _write_optical_fingers(self, destination: wp.array[float]) -> None:
         """Limit optical finger motion to 180 degrees per second in the plug example."""

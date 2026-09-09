@@ -19,6 +19,9 @@ unit_name="${NEWTON_WEBXR_UNIT:-newton-quest-webxr.service}"
 example_name="${NEWTON_WEBXR_EXAMPLE:-mjvbd_v2_dexforce_webxr_plug_socket}"
 sdf_cache_enabled="${NEWTON_WEBXR_SDF_CACHE:-1}"
 read -r -a peer_specs <<< "${NEWTON_WEBXR_PEERS:-newton-quest-webxr-chair.service:8766 newton-quest-webxr-bag.service:8767 newton-quest-webxr-soft-rigid-bag.service:8768 newton-quest-webxr-tshirt.service:8769 newton-quest-webxr-nut-bolt.service:8770 newton-quest-webxr-nonwoven-bag.service:8771}"
+if [[ "${unit_name}" != "newton-quest-webxr-gripper-plug.service" ]]; then
+  peer_specs+=("newton-quest-webxr-gripper-plug.service:8772")
+fi
 host="${NEWTON_WEBXR_HOST:-127.0.0.1}"
 port="${NEWTON_WEBXR_PORT:-8765}"
 device="${NEWTON_WEBXR_DEVICE:-cuda:0}"

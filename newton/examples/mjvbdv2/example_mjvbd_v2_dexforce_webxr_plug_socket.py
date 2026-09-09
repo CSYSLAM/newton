@@ -66,6 +66,7 @@ class Example(W1SingleHandTeleop, plug_socket.Example):
     """Drive plug insertion with a Quest right controller or optical hand."""
 
     reset_in_place = True
+    TARGET_ROTATION = plug_socket.HAND_TARGET_ROTATION
 
     def __init__(self, viewer, args):
         self._startup_started_at = time.perf_counter()
@@ -83,7 +84,7 @@ class Example(W1SingleHandTeleop, plug_socket.Example):
             dtype=np.float32,
         )
         self._teleop_orientation = np.array(
-            [float(plug_socket.HAND_TARGET_ROTATION[index]) for index in range(4)],
+            [float(self.TARGET_ROTATION[index]) for index in range(4)],
             dtype=np.float32,
         )
         self._teleop_grasp = 0.0
@@ -404,7 +405,7 @@ class Example(W1SingleHandTeleop, plug_socket.Example):
             dtype=np.float32,
         )
         self._teleop_orientation = np.array(
-            [float(plug_socket.HAND_TARGET_ROTATION[index]) for index in range(4)],
+            [float(self.TARGET_ROTATION[index]) for index in range(4)],
             dtype=np.float32,
         )
         self._teleop_grasp = 0.0
@@ -483,6 +484,24 @@ class Example(W1SingleHandTeleop, plug_socket.Example):
         if should_publish:
             self._publish_scene_state(body_q=body_q, plug_pose=plug_pose, target_pose=target_pose)
 
+    def _scene_info(self) -> dict:
+        """Describe the end effector and controls for the shared browser client."""
+        return {
+            "kind": "plug-socket",
+            "title": "插头遥操作",
+            "description": "Quest 双眼显示完整 W1、插头和插座。也可切换机器人眼睛第一人称。",
+            "controls": [
+                ["裸手模式", "右手手腕与五指自动跟随。看向面板暂停。移开后接续"],
+                ["右 Grip", "按住并移动机器人右手"],
+                ["右 Trigger", "控制拇指和食指捏合"],
+                ["左摇杆", "观察模式下转动视角"],
+                ["X / 视角按钮", "切换观察模式与机器人第一人称"],
+                ["A", "开始 / 暂停 / 继续轨迹录制"],
+                ["B", "用当前头部位姿重新对齐 Newton 相机"],
+                ["右摇杆按下", "原地复位物理场景"],
+            ],
+        }
+
     def _publish_scene_state(
         self,
         *,
@@ -506,21 +525,7 @@ class Example(W1SingleHandTeleop, plug_socket.Example):
                 "version": 1,
                 "sceneKind": "plug-socket",
                 **self._optical_scene_state(),
-                "sceneInfo": {
-                    "kind": "plug-socket",
-                    "title": "插头遥操作",
-                    "description": "Quest 双眼显示完整 W1、插头和插座。也可切换机器人眼睛第一人称。",
-                    "controls": [
-                        ["裸手模式", "右手手腕与五指自动跟随。看向面板暂停。移开后接续"],
-                        ["右 Grip", "按住并移动机器人右手"],
-                        ["右 Trigger", "控制拇指和食指捏合"],
-                        ["左摇杆", "观察模式下转动视角"],
-                        ["X / 视角按钮", "切换观察模式与机器人第一人称"],
-                        ["A", "开始 / 暂停 / 继续轨迹录制"],
-                        ["B", "用当前头部位姿重新对齐 Newton 相机"],
-                        ["右摇杆按下", "原地复位物理场景"],
-                    ],
-                },
+                "sceneInfo": self._scene_info(),
                 "frame": self.frame_index,
                 "episode": self.episode_index,
                 "episodeFrame": self.episode_frame,

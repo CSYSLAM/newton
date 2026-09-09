@@ -756,6 +756,18 @@ If you run the examples from a source checkout with uv, use
   </tr>
   <tr>
     <td align="center" width="33%">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_webxr_gripper_plug_socket.py">
+        <img width="320" height="320" src="docs/images/examples/example_mjvbd_v2_dexforce_webxr_gripper_plug_socket.jpg" alt="W1 Pikka gripper plug teleoperation model preview">
+      </a><br>
+      W1 Pikka gripper: controller and optical hand teleoperation<br>
+      <code>python -m newton.examples mjvbd_v2_dexforce_webxr_gripper_plug_socket</code><br>
+      <a href="docs/quest_webxr_teleop.md#w1-二指夹插头场景">Model download and Quest setup</a> · CPU model preview
+    </td>
+    <td width="33%"></td>
+    <td width="33%"></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
       <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_vbd_inflatable_bag_v0.py">
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_inflatable_bag_v0.jpg" alt="MJVBDV2 Inflatable Chip Bag">
       </a>

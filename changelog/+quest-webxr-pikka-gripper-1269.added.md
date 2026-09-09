@@ -1,0 +1,1 @@
+Add a separate W1 Pikka parallel-gripper plug insertion example with Quest controller and optical pinch teleoperation, automatic tracking recovery, head-directed clutching, rate-limited jaw motion, an authored TCP, and dedicated launch/reload/stop scripts. Include a pinned GitLab asset downloader and CPU-only mapping tests.
