@@ -155,7 +155,7 @@ class Example:
             mujoco_articulations=self.robot_articulations,
             joint_mode="kinematic",
             contact_mode="full",
-            vbd_preset="surface-fast",
+            # vbd_preset="surface-fast",
             vbd_options={
                 "friction_epsilon": 1.0e-4,
                 "rigid_body_contact_buffer_size": 2048,
