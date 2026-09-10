@@ -752,187 +752,113 @@ If you run the examples from a source checkout with uv, use
     <td align="center" width="33%"></td>
   </tr>
   <tr>
-    <td colspan="3"><h3>MJVBDV2 Examples</h3></td>
+    <td colspan="3"><h3>MJVBDV2 Examples</h3><a href="newton/examples/mjvbdv2/README.md">Scene catalog, name migration, and support tools</a></td>
   </tr>
   <tr>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_w1_conveyor_sorting.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_w1_conveyor_sorting.jpg" alt="MJVBDV2 W1 Conveyor Sorting">
-      </a>
-    </td>
-    <td colspan="2">Full Dexforce W1 sorts rigid parcels, soft bodies, cloth, and pneumatic bags from an indexed conveyor into four trays using articulated hand contact and realtime IK.</td>
-  </tr>
-  <tr>
-    <td align="center"><code>python -m newton.examples mjvbd_v2_w1_conveyor_sorting</code></td>
-    <td colspan="2">Run the complete validation with <code>--viewer null --num-frames 3600 --test</code>. Uses the bundled W1 robot, recorded grasp poses, and sealed bag asset.</td>
-  </tr>
-  <tr>
-    <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_vbd_inflatable_bag_v0.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_inflatable_bag_v0.jpg" alt="MJVBDV2 Inflatable Chip Bag">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_tshirt_fold.py">
+        <img width="320" src="docs/images/examples/example_mjvbd_v2_tshirt_fold.jpg" alt="MJVBDV2 W1 T-shirt folding">
       </a>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_vbd_inflatable_bag_v1.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_inflatable_bag_v1.jpg" alt="MJVBDV2 Perimeter-Sealed Inflatable Bag">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_tablecloth_place.py">
+        <img width="320" src="docs/images/examples/example_cloth_mjvbd_v2_dexforce_bimanual_place_tablecloth_waic_house.jpg" alt="MJVBDV2 W1 tablecloth placement">
       </a>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_cloth_mjvbd_v2_dynamic_dexforce_bimanual_fold_tshirt_waic_house.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_mjvbd_v2_dynamic_dexforce_bimanual_fold_tshirt_waic_house.jpg" alt="MJVBDV2 Dynamic Dexforce T-Shirt Fold">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_tshirt_fold_dynamic.py">
+        <img width="320" src="docs/images/examples/example_cloth_mjvbd_v2_dynamic_dexforce_bimanual_fold_tshirt_waic_house.jpg" alt="MJVBDV2 Dynamic W1 T-shirt folding">
       </a>
     </td>
   </tr>
   <tr>
-    <td align="center" width="33%">
-      <code>python -m newton.examples vbd_inflatable_bag_v0</code>
-    </td>
-    <td align="center" width="33%">
-      <code>python -m newton.examples vbd_inflatable_bag_v1</code>
-    </td>
-    <td align="center" width="33%">
-      <code>python -m newton.examples cloth_mjvbd_v2_dynamic_dexforce_bimanual_fold_tshirt_waic_house</code>
-    </td>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_tshirt_fold</code><br>W1 T-shirt folding</td>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_tablecloth_place</code><br>W1 tablecloth placement</td>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_tshirt_fold_dynamic</code><br>Dynamic W1 T-shirt folding</td>
   </tr>
   <tr>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_cloth_twist.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_twist.jpg" alt="MJVBDV2 Cloth Twist">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_nut_bolt.py">
+        <img width="320" src="docs/images/examples/example_mjvbd_v2_bimanual_nut_bolt.jpg" alt="MJVBDV2 Bimanual nut and bolt">
       </a>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_gear_crusher.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_gear_crusher.jpg" alt="MJVBDV2 Gear Crusher">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_cloth_twist.py">
+        <img width="320" src="docs/images/examples/example_cloth_twist.jpg" alt="MJVBDV2 Cloth twist">
       </a>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_vbd_mjvbd_v2_right_hand_armadillo_into_gear_crusher_final00.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_mjvbd_v2_right_hand_armadillo_into_gear_crusher.jpg" alt="MJVBDV2 Right-Hand Armadillo Gear-Crusher Handoff">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_plug_socket.py">
+        <img width="320" src="docs/images/examples/example_mjvbd_v2_dexforce_realtime_plug_socket.jpg" alt="MJVBDV2 W1 plug insertion">
       </a>
     </td>
   </tr>
   <tr>
-    <td align="center" width="33%">
-      <code>python -m newton.examples mjvbd_v2_cloth_twist</code>
-    </td>
-    <td align="center" width="33%">
-      <code>python -m newton.examples mjvbd_v2_gear_crusher</code>
-    </td>
-    <td align="center" width="33%">
-      <code>python -m newton.examples vbd_mjvbd_v2_right_hand_armadillo_into_gear_crusher_final00</code>
-    </td>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_nut_bolt</code><br>Bimanual nut and bolt</td>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_cloth_twist</code><br>Cloth twist</td>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_plug_socket</code><br>W1 plug insertion</td>
   </tr>
   <tr>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_vbd_mjvbd_v2_right_hand_recorded_plastic_inflatable_bag_pick_release.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_mjvbd_v2_right_hand_recorded_plastic_inflatable_bag_pick_release.jpg" alt="MJVBDV2 Plastic Inflatable Bag Grasp">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_push_chair.py">
+        <img width="320" src="docs/images/examples/example_mjvbd_v2_dexforce_realtime_push_chair.jpg" alt="MJVBDV2 W1 chair pushing">
       </a>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_supermarket_plastic_bag.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_supermarket_plastic_bag.jpg" alt="MJVBDV2 Supermarket Plastic Bag">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_bag_rod.py">
+        <img width="320" src="docs/images/examples/example_vbd_supermarket_plastic_bag.jpg" alt="MJVBDV2 W1 bag transfer from a rod">
       </a>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_bimanual_plastic_bag_pose_recorder.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_supermarket_plastic_bag.jpg" alt="MJVBDV2 Bimanual Plastic Bag Pose Recorder">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_gear_crusher.py">
+        <img width="320" src="docs/images/examples/example_gear_crusher.jpg" alt="MJVBDV2 Soft-body gear crusher">
       </a>
     </td>
   </tr>
   <tr>
-    <td align="center" width="33%">
-      <code>python -m newton.examples vbd_mjvbd_v2_right_hand_recorded_plastic_inflatable_bag_pick_release</code>
-    </td>
-    <td align="center" width="33%">
-      <code>python -m newton.examples mjvbd_v2_supermarket_plastic_bag</code>
-    </td>
-    <td align="center" width="33%">
-      <code>python -m newton.examples mjvbd_v2_dexforce_bimanual_plastic_bag_pose_recorder</code>
-    </td>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_push_chair</code><br>W1 chair pushing</td>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_bag_rod</code><br>W1 bag transfer from a rod</td>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_gear_crusher</code><br>Soft-body gear crusher</td>
   </tr>
   <tr>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_bimanual_plastic_bag_carry.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_supermarket_plastic_bag.jpg" alt="MJVBDV2 Dexforce Bimanual Plastic Bag Carry">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_bag_drop.py">
+        <img width="320" src="docs/images/examples/example_mjvbd_v2_nonwoven_bag_table_drop.jpg" alt="MJVBDV2 Nonwoven bag table drop">
       </a>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_bimanual_plastic_bag_rod_handoff.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_supermarket_plastic_bag.jpg" alt="MJVBDV2 Dexforce Bimanual Plastic Bag Rod Handoff">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_conveyor_sorting.py">
+        <img width="320" src="docs/images/examples/example_mjvbd_v2_w1_conveyor_sorting.jpg" alt="MJVBDV2 W1 conveyor sorting">
       </a>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_vbd_mjvbd_v2_dexforce_recorded_plastic_inflatable_bag_pick_release_final00.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_mjvbd_v2_right_hand_recorded_plastic_inflatable_bag_pick_release.jpg" alt="MJVBDV2 Full-W1 Plastic Inflatable Bag Grasp">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_inflatable_bag_grasp.py">
+        <img width="320" src="docs/images/examples/example_vbd_mjvbd_v2_right_hand_recorded_plastic_inflatable_bag_pick_release.jpg" alt="MJVBDV2 W1 plastic inflatable bag grasp and release">
       </a>
     </td>
   </tr>
   <tr>
-    <td align="center" width="33%">
-      <code>python -m newton.examples mjvbd_v2_dexforce_bimanual_plastic_bag_carry</code>
-    </td>
-    <td align="center" width="33%">
-      <code>python -m newton.examples mjvbd_v2_dexforce_bimanual_plastic_bag_rod_handoff</code>
-    </td>
-    <td align="center" width="33%">
-      <code>python -m newton.examples vbd_mjvbd_v2_dexforce_recorded_plastic_inflatable_bag_pick_release_final00</code>
-    </td>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_bag_drop</code><br>Nonwoven bag table drop</td>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_conveyor_sorting</code><br>W1 conveyor sorting</td>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_inflatable_bag_grasp</code><br>W1 plastic inflatable bag grasp and release</td>
   </tr>
   <tr>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_w1_bimanual_plastic_bag_rod_final00.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_supermarket_plastic_bag.jpg" alt="MJVBDV2 Full-W1 Bimanual Plastic Bag Rod Handoff">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_cubes_into_bag.py">
+        <img width="320" src="docs/images/examples/example_mjvbd_v2_cubes_into_bag.jpg" alt="MJVBDV2 W1 soft-then-rigid cube placement into a bag">
       </a>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_nonwoven_bag_table_drop.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_nonwoven_bag_table_drop.jpg" alt="MJVBDV2 Nonwoven Bag Table Drop">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_armadillo_crusher.py">
+        <img width="320" src="docs/images/examples/example_vbd_mjvbd_v2_right_hand_armadillo_into_gear_crusher.jpg" alt="MJVBDV2 Right-hand Armadillo transfer into a gear crusher">
       </a>
     </td>
-    <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_realtime_push_chair.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_dexforce_realtime_push_chair.jpg" alt="MJVBDV2 Realtime Dexforce Chair Push">
-      </a>
-    </td>
+    <td></td>
   </tr>
   <tr>
-    <td align="center" width="33%">
-      <code>python -m newton.examples mjvbd_v2_dexforce_w1_bimanual_plastic_bag_rod_final00</code>
-    </td>
-    <td align="center" width="33%">
-      <code>python -m newton.examples mjvbd_v2_nonwoven_bag_table_drop</code>
-    </td>
-    <td align="center" width="33%">
-      <code>python -m newton.examples mjvbd_v2_dexforce_realtime_push_chair</code>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_bimanual_nut_bolt.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_bimanual_nut_bolt.jpg" alt="MJVBDV2 Bimanual Nut and Bolt">
-      </a>
-    </td>
-    <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_realtime_plug_socket.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_dexforce_realtime_plug_socket.jpg" alt="MJVBDV2 Realtime Dexforce Plug Insertion">
-      </a>
-    </td>
-    <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_cloth_mjvbd_v2_dexforce_bimanual_place_tablecloth_waic_house.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_mjvbd_v2_dexforce_bimanual_place_tablecloth_waic_house.jpg" alt="MJVBDV2 Dexforce Bimanual Tablecloth Placement">
-      </a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="33%">
-      <code>python -m newton.examples mjvbd_v2_bimanual_nut_bolt</code>
-    </td>
-    <td align="center" width="33%">
-      <code>python -m newton.examples mjvbd_v2_dexforce_realtime_plug_socket</code>
-    </td>
-    <td align="center" width="33%">
-      <code>python -m newton.examples cloth_mjvbd_v2_dexforce_bimanual_place_tablecloth_waic_house</code>
-    </td>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_cubes_into_bag</code><br>W1 soft-then-rigid cube placement into a bag</td>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_armadillo_crusher</code><br>Right-hand Armadillo transfer into a gear crusher</td>
+    <td></td>
   </tr>
   <tr>
     <td colspan="3"><h3>Multi-Physics Examples</h3></td>

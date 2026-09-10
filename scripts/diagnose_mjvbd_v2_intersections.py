@@ -18,9 +18,7 @@ import warp as wp
 import newton
 import newton.examples
 import newton.viewer
-from newton.examples.mjvbdv2 import (
-    example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00 as scene,
-)
+from newton.examples.mjvbdv2 import example_mjvbd_v2_tshirt_fold as scene
 
 
 def intersections(q, faces, edges):

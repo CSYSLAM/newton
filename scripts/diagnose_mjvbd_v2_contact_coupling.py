@@ -15,10 +15,8 @@ import warp as wp
 import newton.examples
 import newton.viewer
 from newton._src.solvers.mjvbd_v2.vbd_soft import tri_mesh_collision as soft_collision
-from newton.examples.mjvbdv2 import (
-    example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00 as tshirt,
-)
 from newton.examples.mjvbdv2 import example_mjvbd_v2_cloth_twist as twist
+from newton.examples.mjvbdv2 import example_mjvbd_v2_tshirt_fold as tshirt
 from newton.solvers import SolverMJVBDV2
 from scripts.diagnose_mjvbd_v2_intersections import intersections
 

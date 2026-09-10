@@ -26,7 +26,7 @@ from newton._src.solvers.mjvbd_v2 import particle_surface_cache
 from newton._src.solvers.mjvbd_v2.vbd_soft.solver_vbd import SolverVBD as SolverVBDSoft
 from newton.solvers import SolverMJVBDV2
 
-_EXAMPLE_MODULE = "newton.examples.mjvbdv2.example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00"
+_EXAMPLE_MODULE = "newton.examples.mjvbdv2.example_mjvbd_v2_tshirt_fold"
 
 
 def _demo_mode_options(mode):
