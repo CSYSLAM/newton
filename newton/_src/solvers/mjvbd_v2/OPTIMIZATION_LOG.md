@@ -4572,3 +4572,234 @@ The registered W1 conveyor sorting test also passes all 3600 frames, including
 its final four-object sorting checks (one test, 239.294 s including setup and
 compilation; not a frame-time benchmark). Reproduce with `uv run --no-sync
 python -m newton.tests -k test_mjvbdv2.example_mjvbd_v2_w1_conveyor_sorting`.
+
+### 2026-09-10: compare energy descent per unit of iteration GPU time
+
+**Status:** diagnostic candidates only; no solver or demo policy change.
+On `ec862cfa`, compare 14 schedules at four common initialized T-shirt
+substeps (frames 150, 390, 900, 1200), restoring solver/state/contact/cache
+arrays before each trial. CUDA graph prefix timing excludes restoration,
+energy observation, initialization and collision detection. Five alternating
+groups of three replays run on RTX 5090 D v2 / Warp 1.17.0.
+
+At frame 1200, current 7+1 finishes at 18.882400 J in 0.972800 ms. Eight
+batched plus one ordinary sweep with Chebyshev disabled reaches 18.870644 J
+in 0.978944 ms. Nine batched plus one ordinary sweep reaches 18.855863 J
+in 1.167360 ms, versus 18.876739 J in 1.175552 ms for 6+2. Cached ordinary20
+reaches 18.695939 J but costs 6.451232 ms for this iteration-only graph.
+These are fixed diagnostic objectives, not mechanical-energy equilibria.
+
+Eight-plus-one without Chebyshev also improves the frozen objective at
+frames 390 and 900 at similar cost, but worsens it at active-grasp frame
+150. Multiple schedules are nonmonotone in that active state. This does
+not justify a global schedule change or using the frozen dissipative
+surrogate as a universal acceptance criterion. Complete candidate histories
+and geometric/settling quality remain unvalidated. A/A snapshot repeats
+match exactly; graph/eager endpoint RMS differences stay below 2.25e-8 m.
+
+Raw curves, endpoint timing distributions, methodology and a plot are in
+[the energy descent report](../../../../docs/lab/mjvbd_energy_descent_2026-09-10/README.md).
+
+### 2026-09-10: expose T-shirt candidates for manual acceptance
+
+**Status:** rejected after user feedback that the effect was unsatisfactory.
+Reverted the uncommitted demo changes and removed the two experimental
+scripts and changelog fragment at the user's request. Only logs and measured
+data remain; nothing from this trial was committed or pushed. The following
+description and report commands document the discarded experiment.
+
+Added `--solver-schedule` choices for default 7+1, 8+1 without
+Chebyshev, 9+1 with Chebyshev, and cached ordinary20. Apply these through
+existing constructor options; the solver and other examples are unchanged.
+Reject batch candidates when the nondeterministic CUDA surface path is
+unavailable. Record effective settings at startup.
+
+Run each short-budget schedule through two independently initialized
+1500-frame histories (10 substeps, CUDA Graph), reversing the second run
+order, plus one ordinary20 reference. All seven histories pass per-frame
+position/velocity finite checks and the example's existing final checks.
+Sampled overflow is zero and maximum asymmetric EE count is one in each.
+These checks do not establish successful folding or intersection freedom.
+
+Default tail RMS speed is 2.20--2.49 mm/s, with 81--226 strict nonincident
+edge/face crossings at frame 1500. Eight-plus-one without Chebyshev yields
+2.44--2.78 mm/s and 495--502 crossings; do not adopt this globally based on
+its better frozen late-state objective. Nine-plus-one yields 2.07--2.50 mm/s
+and 108--190 crossings, overlapping the default's variability. Its tail
+frame GPU cost is 22.33--24.26 ms versus 20.93--21.65 ms for default.
+The single ordinary20 run has 1.13 mm/s and 16 crossings at 71.05 ms/frame.
+These are separate complete histories, not paired convergence measurements.
+
+Frame timing uses five unobserved 20-frame batches after the quality run;
+it includes IK/collision/solve, excludes rendering/setup/readback, and
+measures only the late stationary phase. Existing strict geometry diagnostics
+exclude touching and coplanar overlap; counts are pairs, not independent
+holes. Two repeats are observation ranges, not confidence intervals.
+
+Commands, raw per-run summaries and manual grasp/fold/release/settling checks
+are in [the acceptance report](../../../../docs/lab/mjvbd_tshirt_schedule_acceptance_2026-09-10/README.md).
+
+### 2026-09-10: rebuild global cloth Newton-PCG with prescribed boundaries
+
+**Status:** opt-in implementation and two-scene validation; defaults unchanged,
+manual acceptance pending. Adapt the archived Newton prototype into a private
+solver module and expose the experimental `surface-newton` policy through
+the public MJVBDV2 dispatcher. Both T-shirt and cloth twist accept
+`--solver-mode newton`, with two outer iterations and six PCG steps by default.
+Unsupported execution/model combinations and conflicting schedules reject.
+
+Assemble the fine-space elastic/contact block operator, solve with 3x3 block
+Jacobi PCG, and accept after DAT using the elastic/inertial/normal potential
+plus the per-outer frozen contact quadratic surrogate. This is not a common
+global friction potential or an intersection-freedom guarantee. Eliminate
+prescribed rows/columns and explicitly restore anchors after DAT; the old
+all-particles-active restriction is removed. No MAS or trajectory retuning.
+
+Each scene/policy completes 1200 frames with ten substeps and a further
+120 timed frames. T-shirt baseline/Newton cost 21.85/21.75 ms per late frame,
+with mean late RMS speed 1.90/4.34 mm/s and final strict crossing pairs
+315/159. Both images show a compact inward fold, but Newton settles worse.
+Twist baseline/Newton cost 19.46/53.54 ms, with late RMS speed 8.42/2.44 mm/s
+and final crossings 179/90. Lower late motion costs about 2.75x frame time;
+final mean/P95 edge strain also rises from 11.22%/28.37% to 12.40%/29.33%.
+These are single independent histories, not a paired accuracy comparison.
+
+Twist passes the existing frame-300 corner threshold (Newton 0.957,
+baseline 0.769, limit 1.2). Every saved anchor coordinate matches baseline
+bitwise at frames 300, 390, 600 and 1200. T-shirt rejects 56 linear solves
+for nonpositive curvature; neither scene records nonfinite/overflow status.
+Rejected steps restore positions and cumulative DAT displacement.
+
+Twelve CPU/CUDA tests cover independent derivatives, dense PCG references,
+prescribed anchors, graph replay, canonical EE assembly and public guards.
+The anchor test fails when row/column elimination is removed and passes
+after restoration. Together with contact invariants and MJVBDV2 integration,
+61 tests pass. Both actual example commands pass 20-frame headless GL tests;
+changed-file pre-commit passes. Runtime measurements exclude observation and
+rendering. Images and metrics are preserved in
+[the global Newton report](../../../../docs/lab/mjvbd_global_newton_2026-09-10/README.md).
+
+
+### 2026-09-10: repair global rejection handling and validate long histories
+
+**Status:** the first Newton implementation failed user acceptance: twist
+could explode and the folded T-shirt kept moving. Reproduce an independent
+twist failure around frame 470. Detector row overflow sets projection bit 8
+and PCG status 32; every subsequent Newton correction is rejected while the
+inertial predictor keeps advancing. At frame 660, max absolute position grows
+to 1.614 m and RMS speed remains 147 mm/s. Another history first reports the
+same overflow at frame 900. Earlier one-run 1200-frame success was insufficient.
+
+Increase the experimental preset's VT/EE row budgets to 128/128 and retain
+fatal overflow diagnostics. After a rejected direction, restore position and
+DAT displacement, then perform one ordinary VBD sweep. This preserves elastic
+response instead of leaving only ballistic prediction. Use a conditional CUDA
+Graph branch. Evaluate membrane and bending line-search geometry in double
+precision before reduction; an independent NumPy membrane test fails with the
+old float geometry, and passes with the corrected geometry.
+
+More PCG/Newton iterations alone do not pass folding acceptance: 2x24 and
+4x24 produce about 0.48/0.47 m final cloth widths, with sleeves opening.
+Retain 2x6 and expose final VBD polishing separately. The public preset uses
+one sweep; the T-shirt example uses eight, twist uses one. A rejected last
+Newton iteration supplies the first polishing sweep, avoiding double work.
+This is a hybrid method, not a pure Newton convergence or speed improvement.
+The original baseline modes and all material/trajectory parameters stay intact.
+
+In complete 3600-frame T-shirt histories, rejection-only Newton has late
+speed/jitter 3.84 mm/s and 28.20 um at 24.72 ms/frame. Eight finishing VBD
+sweeps reduce these to 2.01 mm/s and 18.71 um at 52.58 ms/frame, preserving a
+compact inward fold; strict crossing pairs fall from 174 to 8 in these separate
+histories. The original default yields 5.24 mm/s, 41.69 um and 276 crossing
+pairs at 22.63 ms/frame. This is one history per configuration, not a statistical
+or paired energy comparison. Residual motion and crossings remain.
+
+The final twist policy passes two independent 3600-frame histories without
+nonfinite state or candidate overflow. Late RMS speed is 0.181/0.187 mm/s,
+second difference 0.275/0.244 um and frame time 50.33/51.44 ms. Both end with
+42 strict crossing pairs. Frame-300 corner ratios 1.169/1.142 pass the existing
+1.2 threshold. All 74400 linear status records per run are zero, but line-search
+rejections still trigger 11755/12379 fallback sweeps; do not call these solves
+converged or intersection-free.
+
+Sixteen CPU/CUDA global checks plus contact invariants and integration tests
+pass (65 total). New regression checks fail before the rejection/precision
+fixes and pass afterward; tests also cover repeated captured fallback,
+multiple finishing sweeps, anchors, dense PCG and negative polish budgets.
+Changed-file pre-commit passes. Code remains uncommitted for manual acceptance.
+Full long-run evidence, rejected candidates, images and manual commands are in
+[the stability report](../../../../docs/lab/mjvbd_global_newton_stability_2026-09-10/README.md).
+
+
+### 2026-09-10: reject and roll back the global Newton experiment
+
+User rejected this direction because it provides no useful improvement
+to the current surface-fast solver. The stability changes target the
+separate experimental Newton path; the T-shirt hybrid also increases
+frame cost substantially. Stop this experiment rather than treating
+those measurements as a surface-fast optimization.
+
+Restore the five modified solver/example files to their indexed
+versions and remove the uncommitted Newton module, tests, benchmark
+script and changelog fragment. Retain all reports, measured data and
+pre-existing staged content. No commit or push was performed.
+Pre-rollback code archive: `/home/oem/code/archives/newton-global-newton-rejected-20260910-162238`.
+
+### 2026-09-10: opt-in particle displacement deadband
+
+Add `particle_displacement_threshold` to the particle solver, default zero
+(disabled). After all VBD iterations, restore free particles whose Euclidean
+displacement from the substep starting position is strictly below the threshold.
+Run this before the existing velocity reconstruction, so restored particles
+naturally get zero velocity without a separate velocity override. Keep the DAT
+displacement cache consistent; exclude prescribed, proxy and zero-mass particles.
+Force and contact evaluation still run every substep, allowing particles to move
+again when the solved displacement exceeds the threshold. Reject negative or
+nonfinite thresholds, differentiable models with a positive threshold, and
+unsupported full rigid/pneumatic backends with a nonzero threshold.
+
+Expose `--particle-displacement-threshold` in the T-shirt folding and cloth twist
+examples. The trial value `5e-6` means 5 micrometers per substep, equivalent to
+3 mm/s at their 600 Hz substep rate. This is a hard deadband that can suppress
+real slow motion and undo tiny contact corrections; it is not an energy
+convergence improvement. The surface-fast preset, materials, iteration counts
+and prescribed motion remain unchanged. Disabled mode adds no kernel launch;
+enabled mode adds one particle kernel per substep.
+
+Run both examples for 1800 frames (30 seconds), once with zero and once with
+`5e-6`. All four histories have finite positions/velocities and pass their final
+checks. Twist also passes its frame-300 corner check; prescribed positions match
+exactly between configurations at frames 300, 600 and 1800. Inspect rendered
+final images: the T-shirt keeps its compact inward fold and twist keeps its
+held twisted shape. Manual acceptance remains pending.
+
+| Last 300 frames / final state | T-shirt 0 | T-shirt 5e-6 | Twist 0 | Twist 5e-6 |
+| --- | ---: | ---: | ---: | ---: |
+| Mean particle speed RMS (mm/s) | 2.168 | 0.278 | 11.766 | 4.589 |
+| Position second difference RMS (um) | 20.460 | 0.957 | 65.687 | 3.950 |
+| Zero-velocity fraction | 0.0180 | 0.9982 | 0.0000 | 0.9649 |
+| Median simulation time (ms/frame) | 22.410 | 21.390 | 17.255 | 18.681 |
+| Strict crossing pairs | 295 | 341 | 188 | 111 |
+
+Each configuration is one independent history, not a statistical or paired
+energy comparison. Timings use five synchronized batches of 20 further frames
+without observation or rendering. Existing crossings remain; the T-shirt
+crossing count increases, so do not interpret reduced motion as collision
+correctness. Do not claim a speedup from these timings.
+
+The displacement regression fails behaviorally before implementation. Nine
+new CPU/CUDA and validation checks cover Euclidean distance, the strict threshold,
+prescribed exclusions, cached displacement, disabled behavior, force response
+and repeated CUDA graph replay. Together with contact invariants and integration
+checks, 58 tests pass. Changed-file pre-commit and both real CLI headless smoke
+runs pass. Raw metrics, snapshots, images, probe script and validation logs are
+retained under the ignored directory
+`newton/tests/outputs/displacement_deadband_20260910/`.
+Code remains in the working tree, uncommitted and unpushed for user acceptance.
+
+User subsequently authorized committing and pushing this version to the fork's
+`FAST_MJVBDV2` branch. Before committing, `uvx pre-commit run -a` reports 737
+Ruff errors; the unchanged `ec862cfa` baseline in a detached worktree reports
+the same diagnostic messages and count. All other full-repository hooks pass,
+and pre-commit passes for all nine files in this change. Retain the existing
+optimization history alongside this opt-in feature.

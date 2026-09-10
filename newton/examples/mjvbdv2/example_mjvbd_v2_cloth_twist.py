@@ -7,6 +7,9 @@ This intentionally matches ``cloth_twist`` so the two examples can be
 compared directly. Run with::
 
     python -m newton.examples mjvbd_v2_cloth_twist
+
+Add ``--particle-displacement-threshold 5e-6`` to discard displacements below
+5 micrometers per substep. The default zero threshold disables this filter.
 """
 
 import math
@@ -93,6 +96,7 @@ class Example:
         self.model.particle_flags = wp.array(flags)
 
         vbd_options: dict[str, object] = {
+            "particle_displacement_threshold": getattr(args, "particle_displacement_threshold", 0.0),
             "iterations": self.iterations,
             "particle_enable_self_contact": True,
             "particle_self_contact_radius": 0.002,
@@ -223,9 +227,20 @@ class Example:
                 f"fixed-boundary corner formed a transverse spike: ratios={corner_transverse_ratios}"
             )
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        parser.set_defaults(num_frames=300)
+        parser.add_argument(
+            "--particle-displacement-threshold",
+            type=float,
+            default=0.0,
+            help="Discard particle displacements below this distance [m] per substep; zero disables",
+        )
+        return parser
+
 
 if __name__ == "__main__":
-    parser = newton.examples.create_parser()
-    parser.set_defaults(num_frames=300)
+    parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
     newton.examples.run(Example(viewer, args), args)

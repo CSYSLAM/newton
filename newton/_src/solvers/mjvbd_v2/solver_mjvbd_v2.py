@@ -219,6 +219,10 @@ class SolverMJVBDV2(_OneWayCoupledProxy):
         vbd_kwargs["one_way_proxy_bodies"] = True
         pneumatic_cavity_count, _ = _get_pneumatic_counts(model)
         vbd_solver_type = SolverVBDSoft if external_rigid and pneumatic_cavity_count == 0 else SolverVBD
+        if vbd_solver_type is not SolverVBDSoft and vbd_kwargs.pop("particle_displacement_threshold", 0.0) != 0.0:
+            raise ValueError(
+                "particle_displacement_threshold requires the particle solver with external rigid colliders"
+            )
 
         collision_kwargs = dict(collision_options or {})
         soft_contact_margin = float(collision_kwargs.get("soft_contact_margin", 0.0))

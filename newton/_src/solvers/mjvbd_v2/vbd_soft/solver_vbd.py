@@ -314,6 +314,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         one_way_proxy_bodies: bool = False,
         # Particle parameters
         particle_enable_self_contact: bool = False,
+        particle_displacement_threshold: float = 0.0,
         particle_self_contact_radius: float = 0.2,
         particle_self_contact_margin: float = 0.2,
         particle_conservative_bound_relaxation: float = 0.85,
@@ -399,6 +400,12 @@ class SolverVBD(SolverBase, CouplingInterface):
             Particle parameters:
 
             particle_enable_self_contact: Whether to enable self-contact detection for particles.
+            particle_displacement_threshold: Experimental displacement deadband [m] per solver substep.
+                Zero disables it. Restore free particles whose final displacement is strictly below
+                this threshold to their substep starting position before reconstructing velocity.
+                Exclude prescribed, zero-mass and proxy particles. This suppresses slow motion as
+                well as jitter, depends on the timestep, and can undo small contact corrections.
+                Positive thresholds are not supported for differentiable models.
             particle_self_contact_radius: The radius used for self-contact detection. This is the distance at which
                 vertex-triangle pairs and edge-edge pairs will start to interact with each other.
             particle_self_contact_margin: The margin used for self-contact detection. This is the distance at which
@@ -579,6 +586,11 @@ class SolverVBD(SolverBase, CouplingInterface):
               enabled only when positive Dahl parameters are authored.
 
         """
+        if not math.isfinite(particle_displacement_threshold) or particle_displacement_threshold < 0.0:
+            raise ValueError("particle_displacement_threshold must be finite and nonnegative")
+        if particle_displacement_threshold > 0.0 and model.requires_grad:
+            raise ValueError("Particle displacement deadband is not supported for differentiable models")
+        self.particle_displacement_threshold = float(particle_displacement_threshold)
         if rigid_avbd_beta < 0:
             raise ValueError(f"rigid_avbd_beta must be >= 0, got {rigid_avbd_beta}")
         rigid_avbd_linear_beta = rigid_avbd_linear_beta if rigid_avbd_linear_beta is not None else rigid_avbd_beta
@@ -2547,6 +2559,8 @@ class SolverVBD(SolverBase, CouplingInterface):
                     run_selective_polish()
 
         if self.model.particle_count:
+            if self.particle_displacement_threshold > 0.0:
+                self._apply_particle_displacement_deadband(state_in)
             wp.copy(state_out.particle_q, state_in.particle_q)
 
         # Snapshot solved rigid contact state for next-frame warm-start.
@@ -4680,6 +4694,23 @@ class SolverVBD(SolverBase, CouplingInterface):
             self._rigid_contact_point1_world,
             contacts.rigid_contact_force,
             contacts.rigid_contact_count,
+        )
+
+    def _apply_particle_displacement_deadband(self, state: State):
+        """Filter accepted positions while keeping the DAT displacement cache consistent."""
+        wp.launch(
+            kernel=particle_vbd_kernels.apply_particle_displacement_deadband,
+            dim=self.model.particle_count,
+            inputs=[
+                self.particle_displacement_threshold,
+                self.particle_q_prev,
+                self.model.particle_flags,
+                self.model.particle_inv_mass,
+                self.pos_prev_collision_detection,
+                state.particle_q,
+                self.particle_displacements,
+            ],
+            device=self.device,
         )
 
     def _finalize_particles(self, state_out: State, dt: float):

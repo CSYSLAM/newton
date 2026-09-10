@@ -11,7 +11,10 @@ a collider or a particle-contact candidate.
 
 Run, from the repository root::
 
-    uv run --extra examples -m newton.examples cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house
+    uv run --extra examples -m newton.examples cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00
+
+Add ``--particle-displacement-threshold 5e-6`` to discard displacements below
+5 micrometers per substep. The default zero threshold disables this filter.
 """
 
 from __future__ import annotations
@@ -210,6 +213,7 @@ class Example:
             vbd_preset="surface-fast",
             collision_options={"soft_contact_margin": SOFT_MARGIN},
             vbd_options={
+                "particle_displacement_threshold": args.particle_displacement_threshold,
                 "particle_enable_multilevel_correction": False,
                 # End the accelerated schedule with one ordinary colored VBD
                 # sweep so the accepted iterate receives the original local
@@ -817,6 +821,12 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         parser.set_defaults(num_frames=900)
+        parser.add_argument(
+            "--particle-displacement-threshold",
+            type=float,
+            default=0.0,
+            help="Discard particle displacements below this distance [m] per substep; zero disables",
+        )
         parser.add_argument(
             "--robot-urdf", default=None, help="Optional Dexforce W1 URDF; defaults to the ignored tablecloth asset."
         )

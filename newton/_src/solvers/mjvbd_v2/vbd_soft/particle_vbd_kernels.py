@@ -1601,6 +1601,24 @@ def apply_conservative_bound_truncation(
 
 
 @wp.kernel
+def apply_particle_displacement_deadband(
+    threshold: float,
+    pos_prev: wp.array[wp.vec3],
+    flags: wp.array[wp.int32],
+    inv_mass: wp.array[float],
+    collision_anchor: wp.array[wp.vec3],
+    pos: wp.array[wp.vec3],
+    displacements: wp.array[wp.vec3],
+):
+    """Discard small free-particle steps before velocity reconstruction."""
+    i = wp.tid()
+    if flags[i] & ParticleFlags.ACTIVE and not flags[i] & ParticleFlags.PROXY and inv_mass[i] > 0.0:
+        if wp.length(pos[i] - pos_prev[i]) < threshold:
+            pos[i] = pos_prev[i]
+            displacements[i] = pos[i] - collision_anchor[i]
+
+
+@wp.kernel
 def update_velocity(dt: float, pos_prev: wp.array[wp.vec3], pos: wp.array[wp.vec3], vel: wp.array[wp.vec3]):
     particle = wp.tid()
     vel[particle] = (pos[particle] - pos_prev[particle]) / dt

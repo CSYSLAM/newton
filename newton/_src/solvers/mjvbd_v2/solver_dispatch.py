@@ -419,6 +419,12 @@ class SolverMJVBDV2(SolverBase):
             including volumetric, pneumatic, spring, differentiable,
             deterministic, and VBD-dynamic-rigid scenes.
         vbd_options: Expert VBD overrides applied after ``vbd_preset``.
+            Experimental ``particle_displacement_threshold`` sets a displacement
+            deadband [m] per solver substep for the particle solver with external
+            rigid colliders; zero disables it. Small free-particle displacements
+            are discarded before reconstructing velocity. This also suppresses
+            slow motion and can undo small contact corrections. It does not
+            change the iteration budget or skip force/contact evaluation.
         mujoco_options: Keyword arguments forwarded to the private MuJoCo
             implementation when the selected backend uses MuJoCo.
         collision_options: Keyword arguments forwarded to the selected contact
