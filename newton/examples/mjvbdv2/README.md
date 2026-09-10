@@ -32,6 +32,32 @@ uv run --extra examples -m newton.examples mjvbd_v2_conveyor_sorting --help
 The T-shirt fold and cloth twist inherit the surface-fast displacement
 deadband; use `--particle-displacement-threshold 0` to disable it.
 
+### Conveyor sorting
+
+```bash
+uv run --extra examples -m newton.examples mjvbd_v2_conveyor_sorting --num-frames 4200
+```
+
+The W1 sorts a rigid block, a volumetric soft block, woven cloth, and a
+sealed pneumatic parcel into labeled trays on a shared workbench. The
+cloth uses a 40 x 25 cm tray to accommodate draping and placement variation,
+the soft block uses a 19 x 25 cm tray, and the other trays are 25 x 25 cm.
+Collision geometry and placement checks use the same dimensions.
+The scene includes textured belt treads, fabric stitching, package printing,
+concrete flooring, and OpenGL lighting tuned for the workstation.
+
+The mixed-material scene uses the full VBD backend. Its scene-local
+`--cloth-displacement-threshold` filters small solved cloth displacements
+per 60 Hz simulation frame near the receiving tray after placement is
+verified and the hand has withdrawn; set it to `0` for comparison. It does
+not change particle masses or disable collisions. Velocity is reconstructed
+from the accepted position, and subsequent forces can move the cloth again.
+The default is 0.5 mm; the effective threshold is also capped at
+`0.25 * gravity * frame_dt**2` so unsupported cloth continues to fall,
+independently of the substep count. Test mode additionally requires the
+released cloth's RMS speed to average below 2 mm/s over the last second.
+The other materials and other demos are unaffected by this filter.
+
 ## Support modules
 
 The 30 modules under `support/` remain available for imports and recording

@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import json
 import math
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import warp as wp
+from PIL import Image, ImageDraw, ImageFont
 
 import newton
 import newton.examples
@@ -34,7 +36,10 @@ BELT_X = 0.60
 PICK_Y = -0.12
 COLORS = ((0.95, 0.48, 0.12), (0.26, 0.70, 0.40), (0.23, 0.57, 0.95), (0.78, 0.38, 0.83))
 KINDS = ("rigid", "soft", "cloth", "inflatable")
-TRAYS = ((0.60, -0.44), (0.34, -0.44), (0.07, -0.44), (0.34, -0.70))
+# Give the draped fabric lateral clearance; the compact soft block needs
+# less space. Keep the rigid and pneumatic drop points within the arm's reach.
+TRAYS = ((0.60, -0.44), (0.375, -0.44), (0.07, -0.44), (0.34, -0.70))
+TRAY_HALF_EXTENTS = ((0.125, 0.125), (0.095, 0.125), (0.20, 0.125), (0.125, 0.125))
 TCP_OFFSET = wp.vec3(-0.066, 0.0, 0.0)
 HOME = np.array((0.43, -0.30, 1.05), dtype=np.float32)
 
@@ -43,6 +48,7 @@ HOME = np.array((0.43, -0.30, 1.05), dtype=np.float32)
 class _Parcel:
     kind: str
     destination: np.ndarray
+    tray_half_extent: tuple[float, float] = (0.125, 0.125)
     body: int = -1
     begin: int = 0
     end: int = 0
@@ -81,6 +87,29 @@ def _lock_coordinates(indices: wp.array[int], values: wp.array[float], q: wp.arr
 
 
 @wp.kernel
+def _discard_cloth_microsteps(
+    begin: int,
+    tray: wp.vec3,
+    threshold: float,
+    dt: float,
+    previous: wp.array[wp.vec3],
+    q: wp.array[wp.vec3],
+    qd: wp.array[wp.vec3],
+):
+    """Discard frame-to-frame noise near the tray after all contact substeps."""
+    local = wp.tid()
+    i = begin + local
+    p = q[i]
+    # Include the rim and a small fabric overhang, so a fold crossing the rim
+    # is not split into filtered and persistently vibrating particles.
+    if wp.abs(p[0] - tray[0]) < 0.25 and wp.abs(p[1] - tray[1]) < 0.18 and 0.684 < p[2] < 0.82:
+        if wp.length(p - previous[local]) < threshold:
+            q[i] = previous[local]
+            # Reconstruct from the accepted position, just as the solver does.
+            qd[i] = (q[i] - previous[local]) / dt
+
+
+@wp.kernel
 def _move_belt(
     bodies: wp.array[int],
     motion: wp.array[float],
@@ -104,6 +133,8 @@ class Example:
             raise ValueError("Substep and iteration counts must be positive")
         if not 0.02 <= args.belt_speed <= 0.20:
             raise ValueError("--belt-speed must be between 0.02 and 0.20 m/s")
+        if not math.isfinite(args.cloth_displacement_threshold) or args.cloth_displacement_threshold < 0.0:
+            raise ValueError("--cloth-displacement-threshold must be finite and nonnegative")
         self.viewer, self.args = viewer, args
         self.frame_dt = 1.0 / FPS
         self.sim_dt = self.frame_dt / args.substeps
@@ -119,7 +150,12 @@ class Example:
         self.release_target = HOME.copy()
         self.release_rotation = wp.quat_identity()
         self.parcels = []
+        self.cloth_speed_samples = deque(maxlen=FPS)
         self._build_scene(Path(args.robot_urdf).expanduser())
+        # A free-fall frame must remain larger than the deadband. Work at frame
+        # boundaries so the threshold does not depend on the substep count.
+        gravity = float(np.linalg.norm(self.model.gravity.numpy()[0]))
+        self.cloth_displacement_threshold = min(args.cloth_displacement_threshold, 0.25 * gravity * self.frame_dt**2)
         self._build_materials()
         self._load_grasps()
         self._build_ik()
@@ -128,6 +164,8 @@ class Example:
         self.control = self.model.control()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.state_1.assign(self.state_0)
+        cloth = self.parcels[2]
+        self.cloth_previous = wp.empty(cloth.end - cloth.begin, dtype=wp.vec3, device=self.model.device)
         self.frame_start, self.frame_end = wp.clone(self.model.joint_q), wp.clone(self.model.joint_q)
         self.solver = SolverMJVBDV2(
             self.model,
@@ -162,7 +200,15 @@ class Example:
             self.viewer.register_ui_callback(self._render_ui)
         self.viewer.show_particles = False
         self.viewer.show_triangles = False
-        self.viewer.set_camera(wp.vec3(2.0, -1.9, 1.7), -23.0, 125.0)
+        self.viewer.set_camera(wp.vec3(2.2, -2.3, 1.9), -24.0, 126.0)
+        if isinstance(self.viewer, newton.viewer.ViewerGL):
+            renderer = self.viewer.renderer
+            renderer.sky_upper = (0.19, 0.23, 0.28)
+            renderer.sky_lower = (0.38, 0.41, 0.44)
+            renderer.ambient_sky = (0.68, 0.72, 0.78)
+            renderer.ambient_ground = (0.25, 0.26, 0.28)
+            renderer.exposure = 1.3
+            renderer.shadow_extents = 3.5
         self.graph = None
         self.belt_motion = wp.zeros(2, dtype=float, device=self.model.device)
         self.rest_volume = float(self.state_0.pneumatic.volume.numpy()[0])
@@ -261,7 +307,8 @@ class Example:
         self.ik_model.joint_label = list(self.ik_model.joint_label)
         self.ik_model.body_label = list(self.ik_model.body_label)
         self.robot_coord_count = builder.joint_coord_count
-        builder.add_ground_plane(color=(0.16, 0.19, 0.23))
+        ground = builder.add_ground_plane(color=(0.16, 0.19, 0.23))
+        builder.shape_flags[ground] &= ~int(newton.ShapeFlags.VISIBLE)
 
         def box(position, half_size, color, *, body=-1, label=""):
             return builder.add_shape_box(
@@ -278,6 +325,19 @@ class Example:
         belt_bodies = []
         belt_collision = cfg.copy()
         belt_collision.is_visible = False
+        visual = newton.ModelBuilder.ShapeConfig(density=0.0, has_shape_collision=False, has_particle_collision=False)
+        yy, xx = np.indices((128, 256))
+        rubber = 35 + 3 * ((xx + yy) % 3) + 5 * (yy % 32 < 2)
+        belt_texture = np.uint8(np.stack((rubber * 0.85, rubber, rubber * 1.08), axis=-1))
+        belt_surface = newton.Mesh(
+            vertices=[(-0.15, -0.04, 0.0301), (0.15, -0.04, 0.0301), (0.15, 0.04, 0.0301), (-0.15, 0.04, 0.0301)],
+            indices=[0, 1, 2, 0, 2, 3],
+            uvs=[(0, 0), (1, 0), (1, 1), (0, 1)],
+            compute_inertia=False,
+            texture=belt_texture,
+            roughness=0.92,
+            metallic=0.0,
+        )
         for i in range(25):
             body = builder.add_body(
                 xform=wp.transform(wp.vec3(BELT_X, -0.24 + i * 0.08, 0.73), wp.quat_identity()),
@@ -287,6 +347,7 @@ class Example:
             belt_bodies.append(body)
             shape = box((0, 0, 0), (0.15, 0.04, 0.03), (0.12, 0.15, 0.18) if i % 4 else (0.26, 0.31, 0.34), body=body)
             builder.shape_flags[shape] = int(newton.ShapeFlags.VISIBLE)
+            builder.add_shape_mesh(body, mesh=belt_surface, cfg=visual, color=(1.0, 1.0, 1.0))
             # Overlapping collision sections form a continuous belt surface.
             # Butt-jointed boxes can wedge cloth between their vertical faces.
             builder.add_shape_box(body, hx=0.175, hy=0.08, hz=0.03, cfg=belt_collision)
@@ -295,20 +356,24 @@ class Example:
             for y in (-0.14, 1.66):
                 box((x, y, 0.33), (0.025, 0.035, 0.33), (0.34, 0.40, 0.47))
         for i, (x, y) in enumerate(TRAYS):
-            box((x, y, 0.66), (0.115, 0.115, 0.025), (0.28, 0.31, 0.34), label=f"{KINDS[i]}_tray")
+            tray_hx, tray_hy = TRAY_HALF_EXTENTS[i]
+            box((x, y, 0.66), (tray_hx - 0.01, tray_hy - 0.01, 0.025), (0.28, 0.31, 0.34), label=f"{KINDS[i]}_tray")
             for dx, dy, hx, hy in (
-                (-0.115, 0, 0.01, 0.125),
-                (0.115, 0, 0.01, 0.125),
-                (0, -0.115, 0.105, 0.01),
-                (0, 0.115, 0.105, 0.01),
+                (0.01 - tray_hx, 0, 0.01, tray_hy),
+                (tray_hx - 0.01, 0, 0.01, tray_hy),
+                (0, 0.01 - tray_hy, tray_hx - 0.02, 0.01),
+                (0, tray_hy - 0.01, tray_hx - 0.02, 0.01),
             ):
-                box((x + dx, y + dy, 0.705), (hx, hy, 0.025), COLORS[i])
-            for dx in (-0.10, 0.10):
-                box((x + dx, y, 0.32), (0.015, 0.11, 0.32), (0.30, 0.35, 0.41))
+                box((x + dx, y + dy, 0.705), (hx, hy, 0.025), tuple(0.65 * c for c in COLORS[i]))
+        # A common workbench supports the removable sorting trays.
+        box((0.335, -0.555, 0.62), (0.465, 0.285, 0.015), (0.48, 0.52, 0.55))
+        for x in (-0.045, 0.715):
+            for y in (-0.785, -0.325):
+                box((x, y, 0.31), (0.022, 0.022, 0.295), (0.29, 0.34, 0.39))
 
         for i, kind in enumerate(KINDS):
             y = 0.12 + i * 0.34
-            parcel = _Parcel(kind, np.array((*TRAYS[i], 0.76), dtype=np.float32))
+            parcel = _Parcel(kind, np.array((*TRAYS[i], 0.76), dtype=np.float32), tray_half_extent=TRAY_HALF_EXTENTS[i])
             parcel.begin = builder.particle_count
             tri_start = len(builder.tri_indices)
             if kind == "rigid":
@@ -396,6 +461,7 @@ class Example:
         self.render_materials = {
             "cloth": wp.array([wp.vec4(0.9, 0.0, 0.0, 1.0)], dtype=wp.vec4, device=self.model.device),
             "inflatable": wp.array([wp.vec4(0.35, 0.12, 0.0, 1.0)], dtype=wp.vec4, device=self.model.device),
+            "station": wp.array([wp.vec4(0.85, 0.0, 0.0, 1.0)], dtype=wp.vec4, device=self.model.device),
         }
         for index in (2, 3):
             parcel = self.parcels[index]
@@ -407,6 +473,10 @@ class Example:
                 weave = 0.82 + 0.12 * ((xx + yy) % 2) + 0.06 * (xx % 3 == 0)
                 pattern = np.ones((256, 256, 3)) * np.array(COLORS[index])
                 pattern[(xx % 64 < 5) | (yy % 64 < 5)] = (0.80, 0.88, 0.94)
+                hem = (xx < 5) | (xx > 250) | (yy < 5) | (yy > 250)
+                pattern[hem] *= 0.65
+                stitches = (((xx == 3) | (xx == 252)) & (yy % 6 < 3)) | (((yy == 3) | (yy == 252)) & (xx % 6 < 3))
+                pattern[stitches] = (0.72, 0.80, 0.88)
                 parcel.texture = np.uint8(255 * pattern * weave[..., None])
             else:
                 pattern = np.ones((256, 256, 3)) * np.array(COLORS[index])
@@ -416,7 +486,69 @@ class Example:
                 pattern[115:120, 65:145] = (0.28, 0.26, 0.30)
                 for column in range(66, 184, 5):
                     pattern[152:184, column : column + 2 + column % 3] = (0.12, 0.11, 0.14)
-                parcel.texture = np.uint8(255 * pattern)
+                wrapper = Image.fromarray(np.uint8(255 * pattern))
+                draw = ImageDraw.Draw(wrapper)
+                draw.text((65, 128), "SEALED / 04", font=ImageFont.load_default(size=12), fill=(45, 40, 48))
+                parcel.texture = np.asarray(wrapper)
+
+        self.decals = []
+
+        def decal(name, points, texture, roughness=0.85, repeats=1.0):
+            self.decals.append(
+                (
+                    name,
+                    wp.array(points, dtype=wp.vec3, device=self.model.device),
+                    wp.array([0, 1, 2, 0, 2, 3], dtype=int, device=self.model.device),
+                    wp.array(
+                        [(0, 0), (repeats, 0), (repeats, repeats), (0, repeats)],
+                        dtype=wp.vec2,
+                        device=self.model.device,
+                    ),
+                    texture,
+                    roughness,
+                )
+            )
+
+        # Deterministic fine aggregate and expansion joints, at world scale.
+        rng = np.random.default_rng(42)
+        yy, xx = np.indices((1024, 1024))
+        grain = rng.normal(0.0, 1.5, (1024, 1024))
+        concrete = np.clip(116 + grain, 0, 255)
+        concrete[(xx % 128 < 1) | (yy % 128 < 1)] *= 0.78
+        floor = np.uint8(np.stack((concrete * 0.96, concrete, concrete * 1.03), axis=-1))
+        decal("floor", [(-64, -64, 0.0), (64, -64, 0.0), (64, 64, 0.0), (-64, 64, 0.0)], floor, repeats=8.0)
+        for i, (x, y) in enumerate(TRAYS):
+            panel = Image.new("RGB", (512, 128), (26, 33, 40))
+            draw = ImageDraw.Draw(panel)
+            draw.rectangle((0, 0, 14, 127), fill=tuple(int(255 * c) for c in COLORS[i]))
+            draw.text(
+                (32, 14), f"0{i + 1}  {KINDS[i].upper()}", font=ImageFont.load_default(size=38), fill=(229, 234, 238)
+            )
+            draw.text((34, 76), "MATERIAL SORTING", font=ImageFont.load_default(size=22), fill=(152, 170, 182))
+            decal(
+                f"tray_{i}_label",
+                [
+                    (x - 0.095, y - 0.1252, 0.681),
+                    (x + 0.095, y - 0.1252, 0.681),
+                    (x + 0.095, y - 0.1252, 0.728),
+                    (x - 0.095, y - 0.1252, 0.728),
+                ],
+                np.asarray(panel),
+            )
+        panel = Image.new("RGB", (768, 128), (28, 37, 45))
+        draw = ImageDraw.Draw(panel)
+        draw.text((28, 16), "W1 / MATERIAL SORTING", font=ImageFont.load_default(size=43), fill=(226, 232, 236))
+        draw.text(
+            (30, 80),
+            "CONTACT-DRIVEN HANDLING    /    CELL 01",
+            font=ImageFont.load_default(size=24),
+            fill=(147, 175, 187),
+        )
+        decal(
+            "station_label",
+            [(0.8002, 0.28, 0.68), (0.8002, 0.88, 0.68), (0.8002, 0.88, 0.78), (0.8002, 0.28, 0.78)],
+            np.asarray(panel),
+        )
 
     @staticmethod
     def _add_station_details(builder):
@@ -427,15 +559,6 @@ class Example:
             has_particle_collision=False,
         )
         steel = (0.32, 0.37, 0.41)
-        builder.add_shape_box(
-            -1,
-            xform=wp.transform(wp.vec3(0.3, 0.3, -0.018), wp.quat_identity()),
-            hx=2.0,
-            hy=2.3,
-            hz=0.02,
-            cfg=visual,
-            color=(0.26, 0.29, 0.31),
-        )
         for y in (-1.15, 2.02):
             builder.add_shape_box(
                 -1,
@@ -502,6 +625,56 @@ class Example:
                     cfg=visual,
                     color=(0.10, 0.12, 0.14),
                 )
+        # Extrusion slots, end caps, and fasteners make the frame readable at close range.
+        for x in (0.398, 0.802):
+            for z in (0.665, 0.755):
+                builder.add_shape_box(
+                    -1,
+                    xform=wp.transform(wp.vec3(x, 0.76, z), wp.quat_identity()),
+                    hx=0.001,
+                    hy=0.98,
+                    hz=0.0025,
+                    cfg=visual,
+                    color=(0.12, 0.16, 0.19),
+                )
+            for y in (-0.14, 0.18, 1.28, 1.66):
+                for z in (0.645, 0.775):
+                    builder.add_shape_cylinder(
+                        -1,
+                        xform=wp.transform(wp.vec3(x, y, z), wp.quat_from_axis_angle(wp.vec3(0, 1, 0), math.pi / 2)),
+                        radius=0.006,
+                        half_height=0.002,
+                        cfg=visual,
+                        color=(0.24, 0.27, 0.29),
+                    )
+        for x in (-0.045, 0.715):
+            for y in (-0.785, -0.325):
+                builder.add_shape_cylinder(
+                    -1,
+                    xform=wp.transform(wp.vec3(x, y, 0.016), wp.quat_identity()),
+                    radius=0.036,
+                    half_height=0.012,
+                    cfg=visual,
+                    color=(0.10, 0.12, 0.14),
+                )
+            builder.add_shape_box(
+                -1,
+                xform=wp.transform(wp.vec3(x, -0.555, 0.20), wp.quat_identity()),
+                hx=0.018,
+                hy=0.23,
+                hz=0.018,
+                cfg=visual,
+                color=steel,
+            )
+        builder.add_shape_box(
+            -1,
+            xform=wp.transform(wp.vec3(0.335, -0.785, 0.20), wp.quat_identity()),
+            hx=0.38,
+            hy=0.018,
+            hz=0.018,
+            cfg=visual,
+            color=steel,
+        )
         builder.add_shape_cylinder(
             -1,
             xform=wp.transform(wp.vec3(0.87, 1.59, 0.63), wp.quat_from_axis_angle(wp.vec3(0, 1, 0), math.pi / 2)),
@@ -756,6 +929,10 @@ class Example:
         end[self.thumb_opposition_index] = self.thumb_angle
         self.frame_end.assign(end)
         self.belt_motion.assign(np.array((self.belt_offset, speed), dtype=np.float32))
+        cloth = self.parcels[2]
+        settle_cloth = cloth.sorted and self.cloth_displacement_threshold > 0.0
+        if settle_cloth:
+            wp.copy(self.cloth_previous, self.state_0.particle_q, src_offset=cloth.begin, count=cloth.end - cloth.begin)
         if self.graph is None:
             self._simulate()
             if self.use_graph:
@@ -769,8 +946,26 @@ class Example:
                 self.graph = capture.graph
         else:
             wp.capture_launch(self.graph)
+        if settle_cloth:
+            wp.launch(
+                _discard_cloth_microsteps,
+                cloth.end - cloth.begin,
+                [
+                    cloth.begin,
+                    wp.vec3(*cloth.destination),
+                    self.cloth_displacement_threshold,
+                    self.frame_dt,
+                    self.cloth_previous,
+                    self.state_0.particle_q,
+                    self.state_0.particle_qd,
+                ],
+            )
         self.belt_offset += speed * self.frame_dt
         self.sim_time += self.frame_dt
+        cloth = self.parcels[2]
+        if cloth.released:
+            velocities = self.state_0.particle_qd.numpy()[cloth.begin : cloth.end]
+            self.cloth_speed_samples.append(float(np.sqrt(np.mean(np.sum(velocities**2, axis=1)))))
 
     def _simulate(self):
         for substep in range(self.args.substeps):
@@ -814,6 +1009,26 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
+        for name, points, indices, uvs, texture, roughness in self.decals:
+            self.viewer.log_mesh(
+                f"/station/{name}",
+                points,
+                indices,
+                uvs=uvs,
+                texture=texture,
+                hidden=True,
+                roughness=roughness,
+                metallic=0.0,
+                backface_culling=False,
+            )
+            self.viewer.log_instances(
+                f"/station/{name}/material",
+                f"/station/{name}",
+                self.render_transform,
+                self.render_scale,
+                self.render_color,
+                self.render_materials["station"],
+            )
         for i, parcel in enumerate(self.parcels):
             if parcel.body < 0:
                 self.viewer.log_mesh(
@@ -843,6 +1058,8 @@ class Example:
         imgui.text("W1 conveyor sorting")
         imgui.text(f"Station: {self.phase.replace('_', ' ').title()}")
         imgui.text(f"Sorted: {sum(parcel.sorted for parcel in self.parcels)} / 4")
+        if self.cloth_speed_samples:
+            imgui.text(f"Cloth motion: {1000 * np.mean(self.cloth_speed_samples):.2f} mm/s")
         imgui.separator()
         for parcel in self.parcels:
             status = (
@@ -854,17 +1071,18 @@ class Example:
 
     def _check_placement(self, parcel):
         center = self._center(parcel)
-        if np.max(np.abs(center[:2] - parcel.destination[:2])) > 0.10 or not 0.68 < center[2] < 0.82:
+        allowance = np.asarray(parcel.tray_half_extent) - 0.02
+        if np.any(np.abs(center[:2] - parcel.destination[:2]) > allowance) or not 0.68 < center[2] < 0.82:
             raise AssertionError(f"{parcel.kind} did not settle in its tray: {center}")
         if parcel.body < 0:
             positions = self.state_0.particle_q.numpy()[parcel.begin : parcel.end]
-            inside = np.all(np.abs(positions[:, :2] - parcel.destination[:2]) <= 0.125, axis=1)
+            inside = np.all(np.abs(positions[:, :2] - parcel.destination[:2]) <= parcel.tray_half_extent, axis=1)
             if np.mean(inside) < 0.90:
                 raise AssertionError(f"{parcel.kind} extends too far outside its tray")
 
     def test_post_step(self):
         """Check finite dynamics and keep every parcel above the floor."""
-        for values in (self.state_0.body_q.numpy(), self.state_0.particle_q.numpy()):
+        for values in (self.state_0.body_q.numpy(), self.state_0.particle_q.numpy(), self.state_0.particle_qd.numpy()):
             if not np.isfinite(values).all():
                 raise AssertionError("Sorting produced a non-finite simulation state")
         for parcel in self.parcels:
@@ -885,6 +1103,9 @@ class Example:
         volume = float(self.state_0.pneumatic.volume.numpy()[0])
         if not 0.4 < volume / self.rest_volume < 1.6:
             raise AssertionError("The pneumatic parcel lost its inflated volume")
+        speed = float(np.mean(self.cloth_speed_samples)) if self.cloth_speed_samples else math.inf
+        if len(self.cloth_speed_samples) < FPS or not math.isfinite(speed) or speed > 0.002:
+            raise AssertionError("The released cloth has not settled below 2 mm/s RMS over the last second")
 
     @staticmethod
     def create_parser():
@@ -895,6 +1116,12 @@ class Example:
         parser.add_argument("--substeps", type=int, default=8)
         parser.add_argument("--vbd-iterations", type=int, default=16)
         parser.add_argument("--ik-iterations", type=int, default=24)
+        parser.add_argument(
+            "--cloth-displacement-threshold",
+            type=float,
+            default=5.0e-4,
+            help="Cloth displacement threshold per 60 Hz simulation frame near its tray [m]; 0 disables it.",
+        )
         return parser
 
 
