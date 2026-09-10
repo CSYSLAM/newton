@@ -15,11 +15,6 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.math import orthonormal_basis
-from newton._src.solvers.vbd.rigid_vbd_kernels import (
-    _eval_body_particle_contact,
-    _eval_soft_ef_contact,
-    evaluate_body_particle_contact,
-)
 
 from ....geometry import ParticleFlags
 from ....geometry.kernels import triangle_closest_point
@@ -32,7 +27,12 @@ from ....utils.mesh import (
     get_vertex_num_adjacent_faces,
     get_vertex_num_adjacent_tets,
 )
-from .rigid_vbd_kernels import _select_soft_contact_material
+from .rigid_vbd_kernels import (
+    _eval_body_particle_contact,
+    _eval_soft_ef_contact,
+    _select_soft_contact_material,
+    evaluate_body_particle_contact,
+)
 from .tri_mesh_collision import (
     TriMeshCollisionInfo,
     get_edge_colliding_edges_count,
@@ -939,10 +939,12 @@ def evaluate_edge_edge_contact(
         collision_hessian = d2E_dDdD * v_bary * v_bary * wp.outer(collision_normal, collision_normal)
 
         # friction
-        c1_prev = pos_anchor[e1_v1] + (pos_anchor[e1_v2] - pos_anchor[e1_v1]) * s
-        c2_prev = pos_anchor[e2_v1] + (pos_anchor[e2_v2] - pos_anchor[e2_v1]) * t
-
-        dx = (c1 - c1_prev) - (c2 - c2_prev)
+        # Interpolate vertex increments, avoiding cancellation of world-space points.
+        d1 = pos[e1_v1] - pos_anchor[e1_v1]
+        d2 = pos[e1_v2] - pos_anchor[e1_v2]
+        d3 = pos[e2_v1] - pos_anchor[e2_v1]
+        d4 = pos[e2_v2] - pos_anchor[e2_v2]
+        dx = (d1 - d3) + s * (d2 - d1) - t * (d4 - d3)
         axis_1, axis_2 = orthonormal_basis(collision_normal)
 
         T = mat32(
@@ -1055,10 +1057,12 @@ def evaluate_edge_edge_contact_2_vertices(
         collision_hessian = d2E_dDdD * wp.outer(collision_normal, collision_normal)
 
         # friction
-        c1_prev = pos_anchor[e1_v1] + (pos_anchor[e1_v2] - pos_anchor[e1_v1]) * s
-        c2_prev = pos_anchor[e2_v1] + (pos_anchor[e2_v2] - pos_anchor[e2_v1]) * t
-
-        dx = (c1 - c1_prev) - (c2 - c2_prev)
+        # Interpolate vertex increments, avoiding cancellation of world-space points.
+        d1 = pos[e1_v1] - pos_anchor[e1_v1]
+        d2 = pos[e1_v2] - pos_anchor[e1_v2]
+        d3 = pos[e2_v1] - pos_anchor[e2_v1]
+        d4 = pos[e2_v2] - pos_anchor[e2_v2]
+        dx = (d1 - d3) + s * (d2 - d1) - t * (d4 - d3)
         axis_1, axis_2 = orthonormal_basis(collision_normal)
 
         T = mat32(
@@ -1155,13 +1159,12 @@ def evaluate_vertex_triangle_collision_force_hessian(
         # friction force
         dx_v = p - pos_anchor[v]
 
-        closest_p_prev = (
-            bary[0] * pos_anchor[tri_indices[tri, 0]]
-            + bary[1] * pos_anchor[tri_indices[tri, 1]]
-            + bary[2] * pos_anchor[tri_indices[tri, 2]]
+        # Form relative increments before interpolation so common motion cancels.
+        dx = (
+            bary[0] * (dx_v - (a - pos_anchor[tri_indices[tri, 0]]))
+            + bary[1] * (dx_v - (b - pos_anchor[tri_indices[tri, 1]]))
+            + bary[2] * (dx_v - (c - pos_anchor[tri_indices[tri, 2]]))
         )
-
-        dx = dx_v - (closest_p - closest_p_prev)
 
         e0, e1 = orthonormal_basis(collision_normal)
 
@@ -1234,13 +1237,12 @@ def evaluate_vertex_triangle_collision_force_hessian_4_vertices(
         # friction force
         dx_v = p - pos_anchor[v]
 
-        closest_p_prev = (
-            bary[0] * pos_anchor[tri_indices[tri, 0]]
-            + bary[1] * pos_anchor[tri_indices[tri, 1]]
-            + bary[2] * pos_anchor[tri_indices[tri, 2]]
+        # Form relative increments before interpolation so common motion cancels.
+        dx = (
+            bary[0] * (dx_v - (a - pos_anchor[tri_indices[tri, 0]]))
+            + bary[1] * (dx_v - (b - pos_anchor[tri_indices[tri, 1]]))
+            + bary[2] * (dx_v - (c - pos_anchor[tri_indices[tri, 2]]))
         )
-
-        dx = dx_v - (closest_p - closest_p_prev)
 
         e0, e1 = orthonormal_basis(collision_normal)
 
@@ -1347,7 +1349,10 @@ def compute_friction(mu: float, normal_contact_force: float, T: mat32, u: wp.vec
         hessian = mu * normal_contact_force * T * (f1_SF_over_x * wp.identity(2, float)) * wp.transpose(T)
     else:
         force = wp.vec3(0.0, 0.0, 0.0)
-        hessian = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        # The smooth friction force has a finite tangent at zero slip.
+        hessian = wp.mat33(0.0)
+        if eps_u > 0.0:
+            hessian = (2.0 * mu * normal_contact_force / eps_u) * (T * wp.transpose(T))
 
     return force, hessian
 

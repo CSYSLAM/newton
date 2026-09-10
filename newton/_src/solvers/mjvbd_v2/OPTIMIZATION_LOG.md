@@ -4520,3 +4520,55 @@ Full-trajectory final energies cannot establish same-state accuracy, and
 these measurements do not prove a unique jitter cause or near-30-sweep
 convergence. Two energy formula tests and both demo final checks pass.
 No new optimization, default change, or timing acceptance is claimed.
+
+### 2026-09-10: isolate contact-motion and zero-slip correctness fixes
+
+**Status:** working-tree correctness candidate on `FAST_MJVBDV2`, based on
+`2635c776`. This revisits the independently reproducible formula issues
+archived above, without restoring the discarded research implementations.
+
+Both private backends now form VT/EE relative motion from vertex increments.
+Body point/edge/face contacts separate body translation from local rotation
+and surface motion, and interpolate relative vertex increments instead of
+subtracting interpolated world points. The full particle backend uses its
+private rigid contact helpers. Regularized self/body friction retains its
+finite tangent at zero slip; zero smoothing keeps the existing zero-slip
+fallback. The force law, materials, contact geometry, DAT, trajectory,
+iteration schedule, caches and preset parameters are unchanged.
+
+`test_mjvbd_v2_contact_invariants` fails on the original kernels (14 subcases
+in the three initial test methods). In the constructed CUDA cases, VT
+common motion produced up to 1.7515264 N of spurious dissipative force;
+the zero-slip tangent returned zero instead of diag(9600, 9600, 0) N/m.
+These are synthetic measurements, not measured forces on the shirt.
+The final five test methods pass on CPU/CUDA for both backends, including
+actual particle slip, body rotation, velocity fallback, moving surfaces,
+zero load/friction, finite differences and zero smoothing.
+
+The new tests plus contact optimizations/projection/rows, batched Jacobi,
+Jacobi fusion, surface/truncation caches and solver integration pass all
+87 tests on RTX 5090 D v2 / Warp 1.17.0. The dense reaction fixture gains a
+1 mm contact offset to avoid exact cancellation in the angular-linear block
+when comparing float32 reduction trees; comparison tolerances are unchanged.
+
+The T-shirt default completes 1200 frames with ten substeps and seven batched
+plus one ordinary sweep, multilevel disabled, CUDA Graph replay and diagnostic
+readbacks. Its existing final checks pass. Sampled overflow is zero; at most
+one asymmetric EE pair is observed. Mean kinetic energy over 15--20 s is
+1.23099674e-8 J. The common-state fixed diagnostic objective decreases from
+21.89292168 J to 18.55049002 J (default eight) and 18.37765135 J (ordinary20).
+Both measured curves decrease monotonically. This is a different history
+and GPU from the September 9 report, not a paired improvement measurement,
+performance benchmark, or proof of intersection freedom or solved jitter.
+
+Reproduce the tests with `uv run --no-sync python -m unittest
+newton.tests.test_mjvbd_v2_contact_invariants`. The T-shirt diagnostic command
+is `uv run --no-sync python scripts/plot_mjvbd_tshirt_energy.py --mode default
+--output newton/tests/outputs/mjvbd_contact_fix_2026_09_10`; original September
+9 measurements remain unchanged. Changed-file pre-commit checks pass; the
+full-repository run still reports 737 existing unrelated Ruff violations.
+
+The registered W1 conveyor sorting test also passes all 3600 frames, including
+its final four-object sorting checks (one test, 239.294 s including setup and
+compilation; not a frame-time benchmark). Reproduce with `uv run --no-sync
+python -m newton.tests -k test_mjvbdv2.example_mjvbd_v2_w1_conveyor_sorting`.

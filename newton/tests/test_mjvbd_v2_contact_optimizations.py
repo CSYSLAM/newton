@@ -174,7 +174,9 @@ def _make_body_particle_reaction_data(device, contact_count=192, capacity=256):
     particle_q_prev = particle_q.copy()
     particle_q_prev[:, 2] = 0.045
     body_positions = np.zeros((capacity, 3), dtype=np.float32)
-    body_positions[:, 0] = np.linspace(-0.12, 0.12, capacity)
+    # Avoid an exactly cancelling angular-linear block when comparing float32
+    # reduction trees with the finite zero-slip friction tangent.
+    body_positions[:, 0] = np.linspace(-0.12, 0.12, capacity) + 0.001
     return {
         "dt": 1.0 / 120.0,
         "contact_count": wp.array([contact_count], dtype=int, device=device),

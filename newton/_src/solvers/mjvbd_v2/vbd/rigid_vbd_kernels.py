@@ -898,8 +898,17 @@ def _eval_body_particle_contact(
             X_wb_prev = wp.transform_identity()
             if body_index >= 0:
                 X_wb_prev = body_q_prev[body_index]
-            bx_prev = wp.transform_point(X_wb_prev, contact_body_pos[contact_index])
-            bv = (bx - bx_prev) / dt + wp.transform_vector(X_wb, contact_body_vel[contact_index])
+            # Separate translation from local rotation; do not subtract world points
+            # or divide and multiply by dt when the displacement is already known.
+            body_delta = (
+                wp.transform_get_translation(X_wb)
+                - wp.transform_get_translation(X_wb_prev)
+                + (
+                    wp.transform_vector(X_wb, contact_body_pos[contact_index])
+                    - wp.transform_vector(X_wb_prev, contact_body_pos[contact_index])
+                )
+                + dt * wp.transform_vector(X_wb, contact_body_vel[contact_index])
+            )
         else:
             r = bx - wp.transform_point(X_wb, X_com)
             body_v_s = wp.spatial_vector()
@@ -908,8 +917,9 @@ def _eval_body_particle_contact(
             body_w = wp.spatial_bottom(body_v_s)
             body_v = wp.spatial_top(body_v_s)
             bv = body_v + wp.cross(body_w, r) + wp.transform_vector(X_wb, contact_body_vel[contact_index])
+            body_delta = bv * dt
 
-        relative_translation = dx - bv * dt
+        relative_translation = dx - body_delta
 
         return _compute_body_particle_contact_force(
             penetration_depth,
@@ -964,15 +974,12 @@ def _eval_soft_ef_contact(
     c2 = corners[2]
 
     x = bary[0] * pos[v0]
-    x_prev = bary[0] * pos_prev[v0]
     radius = particle_radius[v0]
     if c1 >= 0:
         x += bary[1] * pos[c1]
-        x_prev += bary[1] * pos_prev[c1]
         radius = wp.max(radius, particle_radius[c1])
     if c2 >= 0:
         x += bary[2] * pos[c2]
-        x_prev += bary[2] * pos_prev[c2]
         radius = wp.max(radius, particle_radius[c2])
 
     shape_index = contact_shape[contact_index]
@@ -995,14 +1002,21 @@ def _eval_soft_ef_contact(
 
     penetration_depth = -(wp.dot(n, x - bx) - radius - margin)
     if penetration_depth > 0.0:
-        dx = x - x_prev
-
         if body_q_prev:
             X_wb_prev = wp.transform_identity()
             if body_index >= 0:
                 X_wb_prev = body_q_prev[body_index]
-            bx_prev = wp.transform_point(X_wb_prev, contact_body_pos[contact_index])
-            bv = (bx - bx_prev) / dt + wp.transform_vector(X_wb, contact_body_vel[contact_index])
+            # Separate translation from local rotation; do not subtract world points
+            # or divide and multiply by dt when the displacement is already known.
+            body_delta = (
+                wp.transform_get_translation(X_wb)
+                - wp.transform_get_translation(X_wb_prev)
+                + (
+                    wp.transform_vector(X_wb, contact_body_pos[contact_index])
+                    - wp.transform_vector(X_wb_prev, contact_body_pos[contact_index])
+                )
+                + dt * wp.transform_vector(X_wb, contact_body_vel[contact_index])
+            )
         else:
             r = bx - wp.transform_point(X_wb, X_com)
             body_v_s = wp.spatial_vector()
@@ -1011,8 +1025,14 @@ def _eval_soft_ef_contact(
             body_w = wp.spatial_bottom(body_v_s)
             body_v = wp.spatial_top(body_v_s)
             bv = body_v + wp.cross(body_w, r) + wp.transform_vector(X_wb, contact_body_vel[contact_index])
+            body_delta = bv * dt
 
-        relative_translation = dx - bv * dt
+        # Cancel common motion at each vertex before barycentric interpolation.
+        relative_translation = bary[0] * ((pos[v0] - pos_prev[v0]) - body_delta)
+        if c1 >= 0:
+            relative_translation += bary[1] * ((pos[c1] - pos_prev[c1]) - body_delta)
+        if c2 >= 0:
+            relative_translation += bary[2] * ((pos[c2] - pos_prev[c2]) - body_delta)
 
         # contact_ke/kd/mu are the per-contact AVBD values (ramped penalty + pre-mixed material,
         # cached by init_body_particle_contacts) -- the same source the particle path uses.
@@ -1126,7 +1146,10 @@ def compute_projected_isotropic_friction(
         K = scale * (wp.identity(3, float) - wp.outer(n_hat, n_hat))
     else:
         f = wp.vec3(0.0)
+        # Continue the regularized tangent through zero tangential displacement.
         K = wp.mat33(0.0)
+        if eps_u > 0.0:
+            K = (2.0 * friction_mu * normal_load / eps_u) * (wp.identity(3, float) - wp.outer(n_hat, n_hat))
 
     return f, K
 
