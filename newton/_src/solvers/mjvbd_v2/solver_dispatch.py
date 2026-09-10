@@ -414,14 +414,17 @@ class SolverMJVBDV2(SolverBase):
             ``"full"`` for the complete collision pipeline, or ``"auto"`` to
             choose full contact only when VBD owns dynamic rigid bodies.
         vbd_preset: Optional high-level VBD policy. ``"surface-fast"`` selects
-            the validated CUDA surface schedule and falls back to 20 ordinary
+            the CUDA surface schedule with an experimental 5e-6 m displacement
+            deadband per substep, and falls back to 20 ordinary
             sweeps outside externally driven, triangle-only surface solves,
             including volumetric, pneumatic, spring, differentiable,
-            deterministic, and VBD-dynamic-rigid scenes.
+            deterministic, and VBD-dynamic-rigid scenes. The fallback does not
+            enable the deadband.
         vbd_options: Expert VBD overrides applied after ``vbd_preset``.
             Experimental ``particle_displacement_threshold`` sets a displacement
             deadband [m] per solver substep for the particle solver with external
-            rigid colliders; zero disables it. Small free-particle displacements
+            rigid colliders; zero disables it, including under ``"surface-fast"``.
+            Small free-particle displacements
             are discarded before reconstructing velocity. This also suppresses
             slow motion and can undo small contact corrections. It does not
             change the iteration budget or skip force/contact evaluation.

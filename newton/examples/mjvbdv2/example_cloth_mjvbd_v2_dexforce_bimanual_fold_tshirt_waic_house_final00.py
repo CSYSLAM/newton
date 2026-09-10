@@ -13,8 +13,9 @@ Run, from the repository root::
 
     uv run --extra examples -m newton.examples cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00
 
-Add ``--particle-displacement-threshold 5e-6`` to discard displacements below
-5 micrometers per substep. The default zero threshold disables this filter.
+The CUDA surface-fast preset discards displacements below 5 micrometers per
+substep by default. Add ``--particle-displacement-threshold 0`` to disable
+this filter, or specify another distance in meters.
 """
 
 from __future__ import annotations
@@ -205,6 +206,20 @@ class Example:
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_1)
 
+        vbd_options = {
+            "particle_enable_multilevel_correction": False,
+            # End the accelerated schedule with one ordinary colored VBD
+            # sweep so the accepted iterate receives the original local
+            # objective update before velocity reconstruction.
+            "particle_jacobi_polish_iterations": 1,
+            "particle_enable_self_contact": True,
+            "particle_self_contact_radius": SELF_RADIUS,
+            "particle_self_contact_margin": SELF_MARGIN,
+            "particle_topological_contact_filter_threshold": 1,
+            "particle_rest_shape_contact_exclusion_radius": 0.03,
+        }
+        if args.particle_displacement_threshold is not None:
+            vbd_options["particle_displacement_threshold"] = args.particle_displacement_threshold
         self.solver = SolverMJVBDV2(
             self.model,
             mujoco_articulations=self.robot_articulations,
@@ -212,19 +227,7 @@ class Example:
             contact_mode="soft",
             vbd_preset="surface-fast",
             collision_options={"soft_contact_margin": SOFT_MARGIN},
-            vbd_options={
-                "particle_displacement_threshold": args.particle_displacement_threshold,
-                "particle_enable_multilevel_correction": False,
-                # End the accelerated schedule with one ordinary colored VBD
-                # sweep so the accepted iterate receives the original local
-                # objective update before velocity reconstruction.
-                "particle_jacobi_polish_iterations": 1,
-                "particle_enable_self_contact": True,
-                "particle_self_contact_radius": SELF_RADIUS,
-                "particle_self_contact_margin": SELF_MARGIN,
-                "particle_topological_contact_filter_threshold": 1,
-                "particle_rest_shape_contact_exclusion_radius": 0.03,
-            },
+            vbd_options=vbd_options,
         )
         self.contacts = getattr(self.solver, "contacts", None)
         if self.contacts is None:
@@ -824,8 +827,8 @@ class Example:
         parser.add_argument(
             "--particle-displacement-threshold",
             type=float,
-            default=0.0,
-            help="Discard particle displacements below this distance [m] per substep; zero disables",
+            default=None,
+            help="Override the substep displacement threshold [m]; surface-fast defaults to 5e-6, zero disables",
         )
         parser.add_argument(
             "--robot-urdf", default=None, help="Optional Dexforce W1 URDF; defaults to the ignored tablecloth asset."

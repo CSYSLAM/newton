@@ -4803,3 +4803,100 @@ Ruff errors; the unchanged `ec862cfa` baseline in a detached worktree reports
 the same diagnostic messages and count. All other full-repository hooks pass,
 and pre-commit passes for all nine files in this change. Retain the existing
 optimization history alongside this opt-in feature.
+
+### 2026-09-10: enable the deadband in surface-fast by default
+
+At the user's request, set the CUDA surface-fast preset's
+`particle_displacement_threshold` to `5e-6` m per substep. Both cloth examples
+inherit the resolved preset when their CLI option is omitted, instead of
+overriding it with zero. Explicit `--particle-displacement-threshold 0` and
+`vbd_options={"particle_displacement_threshold": 0.0}` still disable the filter.
+Low-level ordinary VBD and unsupported-preset fallbacks keep zero; CPU,
+differentiable, deterministic, volumetric, pneumatic and dynamic-rigid models
+do not acquire a default deadband from this change.
+
+The updated preset regression fails before the change. All 58 displacement,
+contact-invariant and MJVBDV2 integration tests pass after it. Both examples
+run 20 steps and pass final checks with omitted and explicit-zero CLI options;
+their actual solver thresholds are respectively `5e-6` and `0.0`.
+This changes default selection only; the preceding 30-second trials already
+exercise the same enabled threshold and solver schedule.
+
+Current surface-fast implementation versus 20 ordinary colored sweeps:
+
+- The generic preset uses eight sweeps, grouping original colors into two
+  topology-aware, rotating batches. A batch uses a frozen iterate internally;
+  later batches see earlier committed updates. This changes the iteration
+  operator as well as reducing launch/synchronization boundaries.
+- Contact-aware Chebyshev extrapolation uses spectral radius 0.8, excludes
+  constrained/contact-limited particles, bounds the correction by particle
+  radius and retains DAT truncation. It does not guarantee GS20 accuracy.
+- Cached surface tiles reuse substep bending damping anchors and use a closed
+  form angle gradient. Cached DAT reuses fixed VT/EE geometry while retaining
+  displacement-dependent plane calculations. Current elasticity and contact
+  force/Hessian evaluations remain active.
+- Self-contact detection interval -1 detects before initialization once per
+  substep, instead of the private ordinary solver's default two passes. The
+  candidate set is reused during iteration, while contact forces and DAT are
+  still evaluated. This is a scheduling tradeoff, not unchanged collision work.
+- The private solver copies final particle positions to output once per
+  substep; the current native solver copies after each particle sweep.
+- The generic preset additionally uses a guarded graph coarse correction
+  after sweep four. On rejection, it can append ordinary sweeps to bring the
+  total iteration count to 20, with Jacobi/Chebyshev disabled for the appended
+  sweeps. It does not restart an independent ordinary GS20 solve.
+- The actual T-shirt demo disables coarse correction and uses seven batched
+  sweeps plus one ordinary polishing sweep: with nine colors, 23 color/batch
+  stages versus 180 for GS20, excluding extra acceleration/cache kernels.
+  Twist also disables coarse correction and uses three two-batch sweeps on
+  its three-color grid. Thus neither demo currently has coarse fallback.
+- The new final displacement deadband suppresses small motion but adds a
+  kernel, can suppress real slow motion and cannot establish convergence or
+  repair intersections. Rejected global Newton-PCG/MAS-PNCG experiments remain
+  absent. CUDA Graph replay is also available to ordinary VBD, so it is not
+  itself an exclusive surface-fast optimization.
+
+### 2026-09-10: measure the self-contact detection frequency tradeoff
+
+Compare only detection interval -1 (before initialization) against 0 (before
+and after initialization) on the current default-deadband working tree. Use
+the actual captured T-shirt and twist examples, unchanged materials and
+iteration schedules, for 1200 frames / 20 seconds each. Alternate -1, 0, 0,
+-1 per scene. Time synchronized 100-frame simulation batches, excluding
+readback, rendering and analysis. Keep the existing machine configuration.
+
+On RTX 5090 D v2, T-shirt mean wall time is 21.136 versus 25.272 ms/frame:
+one detection saves 4.135 ms or 16.36% relative to two. Individual runs are
+21.053/21.219 versus 25.522/25.021. Twist averages 17.261 versus 35.098 ms,
+saving 50.82%, but the two-pass histories vary substantially (29.340/40.855)
+and both policies overflow the original VT32/EE64 candidate buffers at sampled
+states. Repeat twist with both buffers enlarged to 128: no sampled overflow,
+18.426 versus 35.869 ms/frame, saving 48.63%. This supplemental comparison is
+one history per policy and does not change production buffer sizes.
+
+Final strict crossing pairs for T-shirt are 195/183 (-1) versus 137/16 (0),
+with no sampled candidate overflow. However, two detections also spread the
+fold to width 0.382/0.395 m versus 0.262/0.265 m and produce sampled late RMS
+speeds of 33.42-38.83 versus 0.52-1.73 mm/s. Rendered sleeves unfold. Fewer
+crossings on this different shape do not establish improved collision quality.
+Twist's original-capacity counts are 139/127 versus 110/94, but overflow limits
+that comparison. With enlarged buffers the counts are 110 versus 115, with no
+improvement from extra detection in this single comparison. All ten histories
+pass existing final checks and have finite sampled states; neither certifies
+intersection freedom. Prescribed twist positions match exactly in the
+default-capacity comparisons at the crossing sample frames.
+
+A frozen-final-position microbenchmark measures a complete detection including
+BVH refit and DAT cache refresh at roughly 0.6-0.8 ms for T-shirt and 1.2-1.6 ms
+for twist. Costs depend on each history's final shape and are not a paired
+same-geometry explanation of the entire runtime difference. Extra detection
+resets DAT anchors and cumulative displacements as well as refreshing
+candidates, so it changes the solve trajectory. This is a material speed/
+behavior tradeoff, not a lossless cache optimization. Keep production interval
+-1 unchanged while investigating these mechanisms separately.
+
+Full methods, individual timings, snapshots, crossing counts, probe scripts
+and representative renders are retained under the ignored directory
+`newton/tests/outputs/self_detection_interval_20260910/`, with `README.md` as
+the entry point. This investigation changes only the optimization log in Git;
+previously staged default-deadband changes remain intact. No commit or push.

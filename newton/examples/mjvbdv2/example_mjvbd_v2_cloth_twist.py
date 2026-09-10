@@ -8,8 +8,9 @@ compared directly. Run with::
 
     python -m newton.examples mjvbd_v2_cloth_twist
 
-Add ``--particle-displacement-threshold 5e-6`` to discard displacements below
-5 micrometers per substep. The default zero threshold disables this filter.
+The CUDA surface-fast preset discards displacements below 5 micrometers per
+substep by default. Add ``--particle-displacement-threshold 0`` to disable
+this filter, or specify another distance in meters.
 """
 
 import math
@@ -96,12 +97,14 @@ class Example:
         self.model.particle_flags = wp.array(flags)
 
         vbd_options: dict[str, object] = {
-            "particle_displacement_threshold": getattr(args, "particle_displacement_threshold", 0.0),
             "iterations": self.iterations,
             "particle_enable_self_contact": True,
             "particle_self_contact_radius": 0.002,
             "particle_self_contact_margin": 0.0035,
         }
+        displacement_threshold = getattr(args, "particle_displacement_threshold", None)
+        if displacement_threshold is not None:
+            vbd_options["particle_displacement_threshold"] = displacement_threshold
         if self.use_surface_fast:
             # This regular grid has only three original colors. Two batched
             # sweeps plus one final batched sweep are sufficient. Keep the
@@ -234,8 +237,8 @@ class Example:
         parser.add_argument(
             "--particle-displacement-threshold",
             type=float,
-            default=0.0,
-            help="Discard particle displacements below this distance [m] per substep; zero disables",
+            default=None,
+            help="Override the substep displacement threshold [m]; surface-fast defaults to 5e-6, zero disables",
         )
         return parser
 

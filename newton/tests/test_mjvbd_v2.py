@@ -408,6 +408,7 @@ class TestMJVBDV2(unittest.TestCase):
 
         solver = SolverMJVBDV2(model, vbd_preset="surface-fast", contact_mode="soft")
         self.assertEqual(solver.vbd_solver.iterations, 20)
+        self.assertEqual(solver.vbd_solver.particle_displacement_threshold, 0.0)
         self.assertEqual(solver.vbd_preset, "surface-fast")
 
         with self.assertRaisesRegex(ValueError, "vbd_preset"):
@@ -421,6 +422,10 @@ class TestMJVBDV2(unittest.TestCase):
         options = _resolve_vbd_options(model, "surface-fast", None)
 
         self.assertEqual(options["iterations"], 8)
+        self.assertEqual(options["particle_displacement_threshold"], 5e-6)
+        disabled_options = _resolve_vbd_options(model, "surface-fast", {"particle_displacement_threshold": 0.0})
+        self.assertEqual(disabled_options["particle_displacement_threshold"], 0.0)
+        self.assertEqual(_resolve_vbd_options(model, None, None), {})
         self.assertEqual(options["particle_multilevel_checkpoints"], (4,))
         self.assertEqual(options["particle_multilevel_fallback_iterations"], 20)
         self.assertEqual(options["particle_multilevel_selective_polish_iterations"], 0)

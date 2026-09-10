@@ -26,6 +26,7 @@ _PNEUMATIC_STATE_FIELDS = ("volume", "absolute_pressure", "volume_rate", "clamp_
 
 _SURFACE_FAST_VBD_OPTIONS: dict[str, object] = {
     "iterations": 8,
+    "particle_displacement_threshold": 5e-6,
     "particle_chebyshev_spectral_radius": 0.8,
     "particle_enable_batched_jacobi": True,
     "particle_jacobi_batch_count": 2,
