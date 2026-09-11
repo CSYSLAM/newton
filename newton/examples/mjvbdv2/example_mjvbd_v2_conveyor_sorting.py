@@ -27,6 +27,7 @@ import newton
 import newton.examples
 import newton.ik as ik
 from newton.examples.mjvbdv2.support import example_vbd_mjvbd_v2_right_hand_inflatable_bag_recorder as bag_reference
+from newton.examples.mjvbdv2.support.conveyor_belt import ConveyorBeltVisual
 from newton.solvers import SolverMJVBDV2, add_inflatable_mesh
 
 ROBOT_URDF = Path(__file__).resolve().parents[3] / "assets/DexforceW1V021/DexforceW1V021.urdf"
@@ -157,6 +158,7 @@ class Example:
         gravity = float(np.linalg.norm(self.model.gravity.numpy()[0]))
         self.cloth_displacement_threshold = min(args.cloth_displacement_threshold, 0.25 * gravity * self.frame_dt**2)
         self._build_materials()
+        self.belt_visual = ConveyorBeltVisual(ROBOT_URDF.parents[1] / "conveyor_station", self.model.device)
         self._load_grasps()
         self._build_ik()
         self.rotation = self.grasp_rotations[0]
@@ -285,12 +287,30 @@ class Example:
         ]
         self.hand_body = next(i for i, name in enumerate(builder.body_label) if name.endswith("/right_j7"))
         posture = {"ANKLE": 55.0, "KNEE": -110.0, "BUTTOCK": 70.0}
+        idle_left = {
+            "LEFT_J1": -12.0,
+            "LEFT_J2": -78.0,
+            "LEFT_J3": -10.0,
+            "LEFT_J4": -35.0,
+            "LEFT_J5": 0.0,
+            "LEFT_J6": 0.0,
+            "LEFT_J7": 0.0,
+        }
+        self.idle_left_indices, self.idle_left_values = [], []
         self.finger_indices = []
         self.finger_names = []
         for j, name in enumerate(builder.joint_label):
             suffix = name.rsplit("/", 1)[-1]
             if suffix in posture:
                 builder.joint_q[builder.joint_q_start[j]] = math.radians(posture[suffix])
+            if suffix in idle_left:
+                self.idle_left_indices.append(builder.joint_q_start[j])
+                self.idle_left_values.append(math.radians(idle_left[suffix]))
+            if suffix.startswith("LEFT_") and ("HAND_" in suffix or suffix.endswith("_PIP")):
+                self.idle_left_indices.append(builder.joint_q_start[j])
+                self.idle_left_values.append(
+                    0.35 if suffix.endswith("THUMB2") else (0.18 if suffix.endswith("_PIP") else 0.12)
+                )
             if suffix.endswith("HAND_THUMB2"):
                 builder.joint_q[builder.joint_q_start[j]] = math.pi / 2.0
                 if suffix.startswith("RIGHT_"):
@@ -311,7 +331,7 @@ class Example:
         builder.shape_flags[ground] &= ~int(newton.ShapeFlags.VISIBLE)
 
         def box(position, half_size, color, *, body=-1, label=""):
-            return builder.add_shape_box(
+            shape = builder.add_shape_box(
                 body,
                 xform=wp.transform(wp.vec3(*position), wp.quat_identity()),
                 hx=half_size[0],
@@ -321,11 +341,17 @@ class Example:
                 color=color,
                 label=label,
             )
+            if body == -1:
+                builder.shape_flags[shape] &= ~int(newton.ShapeFlags.VISIBLE)
+            return shape
 
         belt_bodies = []
         belt_collision = cfg.copy()
         belt_collision.is_visible = False
         visual = newton.ModelBuilder.ShapeConfig(density=0.0, has_shape_collision=False, has_particle_collision=False)
+        # Keep the section shape numbering used by the calibrated contact grasp.
+        # A separate closed mesh renders the entire belt, including its return run.
+        visual.is_visible = False
         yy, xx = np.indices((128, 256))
         rubber = 35 + 3 * ((xx + yy) % 3) + 5 * (yy % 32 < 2)
         belt_texture = np.uint8(np.stack((rubber * 0.85, rubber, rubber * 1.08), axis=-1))
@@ -346,7 +372,7 @@ class Example:
             )
             belt_bodies.append(body)
             shape = box((0, 0, 0), (0.15, 0.04, 0.03), (0.12, 0.15, 0.18) if i % 4 else (0.26, 0.31, 0.34), body=body)
-            builder.shape_flags[shape] = int(newton.ShapeFlags.VISIBLE)
+            builder.shape_flags[shape] = 0
             builder.add_shape_mesh(body, mesh=belt_surface, cfg=visual, color=(1.0, 1.0, 1.0))
             # Overlapping collision sections form a continuous belt surface.
             # Butt-jointed boxes can wedge cloth between their vertical faces.
@@ -528,10 +554,10 @@ class Example:
             decal(
                 f"tray_{i}_label",
                 [
-                    (x - 0.095, y - 0.1252, 0.681),
-                    (x + 0.095, y - 0.1252, 0.681),
-                    (x + 0.095, y - 0.1252, 0.728),
-                    (x - 0.095, y - 0.1252, 0.728),
+                    (x - 0.095, y - 0.1282, 0.681),
+                    (x + 0.095, y - 0.1282, 0.681),
+                    (x + 0.095, y - 0.1282, 0.728),
+                    (x - 0.095, y - 0.1282, 0.728),
                 ],
                 np.asarray(panel),
             )
@@ -546,176 +572,36 @@ class Example:
         )
         decal(
             "station_label",
-            [(0.8002, 0.28, 0.68), (0.8002, 0.88, 0.68), (0.8002, 0.88, 0.78), (0.8002, 0.28, 0.78)],
+            [(0.804, 0.28, 0.68), (0.804, 0.88, 0.68), (0.804, 0.88, 0.78), (0.804, 0.28, 0.78)],
             np.asarray(panel),
         )
 
     @staticmethod
     def _add_station_details(builder):
-        """Dress the belt frame with rollers, bracing, a motor, and a sensor."""
+        """Load Blender-authored surfaces over the validated collision geometry."""
+        path = ROBOT_URDF.parents[1] / "conveyor_station/station.npz"
         visual = newton.ModelBuilder.ShapeConfig(
             density=0.0,
             has_shape_collision=False,
             has_particle_collision=False,
         )
-        steel = (0.32, 0.37, 0.41)
-        for y in (-1.15, 2.02):
-            builder.add_shape_box(
-                -1,
-                xform=wp.transform(wp.vec3(0.30, y, 0.003), wp.quat_identity()),
-                hx=1.08,
-                hy=0.018,
-                hz=0.001,
-                cfg=visual,
-                color=(0.82, 0.61, 0.12),
-            )
-        for x in (-0.78, 1.38):
-            builder.add_shape_box(
-                -1,
-                xform=wp.transform(wp.vec3(x, 0.44, 0.003), wp.quat_identity()),
-                hx=0.018,
-                hy=1.59,
-                hz=0.001,
-                cfg=visual,
-                color=(0.82, 0.61, 0.12),
-            )
-        for y in (-0.23, 1.75):
-            builder.add_shape_cylinder(
-                -1,
-                xform=wp.transform(wp.vec3(BELT_X, y, 0.70), wp.quat_from_axis_angle(wp.vec3(0, 1, 0), math.pi / 2)),
-                radius=0.055,
-                half_height=0.16,
-                cfg=visual,
-                color=steel,
-            )
-            for x in (0.405, 0.795):
-                builder.add_shape_sphere(
-                    -1,
-                    xform=wp.transform(wp.vec3(x, y, 0.70), wp.quat_identity()),
-                    radius=0.018,
-                    cfg=visual,
-                    color=(0.12, 0.15, 0.18),
+        with np.load(path, allow_pickle=False) as asset:
+            for i, (r, g, b, roughness, metallic) in enumerate(asset["materials"]):
+                mesh = newton.Mesh(
+                    vertices=asset[f"vertices_{i}"],
+                    indices=asset[f"indices_{i}"],
+                    normals=asset[f"normals_{i}"],
+                    compute_inertia=False,
+                    roughness=float(roughness),
+                    metallic=float(metallic),
                 )
-        builder.add_shape_box(
-            -1,
-            xform=wp.transform(wp.vec3(BELT_X, 0.76, 0.65), wp.quat_identity()),
-            hx=0.145,
-            hy=0.99,
-            hz=0.014,
-            cfg=visual,
-            color=(0.08, 0.10, 0.12),
-        )
-        for x in (0.425, 0.775):
-            builder.add_shape_box(
-                -1,
-                xform=wp.transform(wp.vec3(x, 0.76, 0.24), wp.quat_identity()),
-                hx=0.02,
-                hy=0.92,
-                hz=0.025,
-                cfg=visual,
-                color=steel,
-            )
-            for y in (-0.14, 1.66):
-                builder.add_shape_box(
+                builder.add_shape_mesh(
                     -1,
-                    xform=wp.transform(wp.vec3(x, y, 0.025), wp.quat_identity()),
-                    hx=0.055,
-                    hy=0.06,
-                    hz=0.025,
+                    mesh=mesh,
                     cfg=visual,
-                    color=(0.10, 0.12, 0.14),
+                    color=(float(r), float(g), float(b)),
+                    label=f"station_material_{i}",
                 )
-        # Extrusion slots, end caps, and fasteners make the frame readable at close range.
-        for x in (0.398, 0.802):
-            for z in (0.665, 0.755):
-                builder.add_shape_box(
-                    -1,
-                    xform=wp.transform(wp.vec3(x, 0.76, z), wp.quat_identity()),
-                    hx=0.001,
-                    hy=0.98,
-                    hz=0.0025,
-                    cfg=visual,
-                    color=(0.12, 0.16, 0.19),
-                )
-            for y in (-0.14, 0.18, 1.28, 1.66):
-                for z in (0.645, 0.775):
-                    builder.add_shape_cylinder(
-                        -1,
-                        xform=wp.transform(wp.vec3(x, y, z), wp.quat_from_axis_angle(wp.vec3(0, 1, 0), math.pi / 2)),
-                        radius=0.006,
-                        half_height=0.002,
-                        cfg=visual,
-                        color=(0.24, 0.27, 0.29),
-                    )
-        for x in (-0.045, 0.715):
-            for y in (-0.785, -0.325):
-                builder.add_shape_cylinder(
-                    -1,
-                    xform=wp.transform(wp.vec3(x, y, 0.016), wp.quat_identity()),
-                    radius=0.036,
-                    half_height=0.012,
-                    cfg=visual,
-                    color=(0.10, 0.12, 0.14),
-                )
-            builder.add_shape_box(
-                -1,
-                xform=wp.transform(wp.vec3(x, -0.555, 0.20), wp.quat_identity()),
-                hx=0.018,
-                hy=0.23,
-                hz=0.018,
-                cfg=visual,
-                color=steel,
-            )
-        builder.add_shape_box(
-            -1,
-            xform=wp.transform(wp.vec3(0.335, -0.785, 0.20), wp.quat_identity()),
-            hx=0.38,
-            hy=0.018,
-            hz=0.018,
-            cfg=visual,
-            color=steel,
-        )
-        builder.add_shape_cylinder(
-            -1,
-            xform=wp.transform(wp.vec3(0.87, 1.59, 0.63), wp.quat_from_axis_angle(wp.vec3(0, 1, 0), math.pi / 2)),
-            radius=0.065,
-            half_height=0.085,
-            cfg=visual,
-            color=(0.19, 0.27, 0.33),
-        )
-        builder.add_shape_box(
-            -1,
-            xform=wp.transform(wp.vec3(0.84, 0.10, 0.65), wp.quat_identity()),
-            hx=0.055,
-            hy=0.10,
-            hz=0.08,
-            cfg=visual,
-            color=(0.58, 0.62, 0.66),
-        )
-        builder.add_shape_sphere(
-            -1,
-            xform=wp.transform(wp.vec3(0.87, 0.08, 0.735), wp.quat_identity()),
-            radius=0.018,
-            cfg=visual,
-            color=(0.72, 0.04, 0.025),
-        )
-        for x in (0.42, 0.78):
-            builder.add_shape_box(
-                -1,
-                xform=wp.transform(wp.vec3(x, PICK_Y, 0.79), wp.quat_identity()),
-                hx=0.012,
-                hy=0.024,
-                hz=0.018,
-                cfg=visual,
-                color=(0.10, 0.13, 0.16),
-            )
-            builder.add_shape_sphere(
-                -1,
-                xform=wp.transform(wp.vec3(x, PICK_Y - 0.025, 0.80), wp.quat_identity()),
-                radius=0.004,
-                cfg=visual,
-                color=(0.95, 0.18, 0.05),
-            )
 
     def _load_grasps(self):
         yaw = wp.quat_from_axis_angle(wp.vec3(0, 0, 1), -0.5 * math.pi)
@@ -770,6 +656,9 @@ class Example:
             wp.array([wp.vec4(*self.grasp_rotations[0])], dtype=wp.vec4, device=self.ik_model.device),
             weight=1.0,
         )
+        # Preserve the recorded grasp's bimanual IK reference. The idle left
+        # arm is prescribed separately so its posture cannot perturb the right
+        # arm's redundant IK solution and the contact-only cloth pinch.
         left_body = next(i for i, name in enumerate(self.ik_model.body_label) if name.endswith("/left_j7"))
         left_position = ik.IKObjectivePosition(
             left_body,
@@ -795,6 +684,37 @@ class Example:
         self.ik_solver.step(self.ik_q, self.ik_q, iterations=300)
         wp.launch(_lock_coordinates, len(locked), [self.lock_indices, self.lock_values, self.ik_q])
         wp.copy(self.model.joint_q, self.ik_q[0], count=self.robot_coord_count)
+        initial = self.model.joint_q.numpy()
+        initial[self.idle_left_indices] = self.idle_left_values
+        self.model.joint_q.assign(initial)
+        neck_joints = [
+            next(j for j, name in enumerate(self.model.joint_label) if name.endswith("/" + neck))
+            for neck in ("NECK1", "NECK2")
+        ]
+        self.neck_indices = np.asarray([starts[j] for j in neck_joints])
+        self.neck_lower = self.model.joint_limit_lower.numpy()[[dofs[j] for j in neck_joints]]
+        self.neck_upper = self.model.joint_limit_upper.numpy()[[dofs[j] for j in neck_joints]]
+        self.neck_angles = self.model.joint_q.numpy()[self.neck_indices].copy()
+        self.neck_velocity = np.zeros(2)
+        self.neck_parent = int(self.model.joint_parent.numpy()[neck_joints[0]])
+        self.neck_origin = wp.transform(*self.model.joint_X_p.numpy()[neck_joints[0]])
+
+    def _track_parcel(self, end):
+        """Aim the head at the parcel with bounded neck speed and acceleration."""
+        parent = wp.transform(*self.state_0.body_q.numpy()[self.neck_parent])
+        neck = parent * self.neck_origin
+        center = self._center(self.parcels[min(self.active, len(self.parcels) - 1)])
+        local = np.asarray(wp.transform_point(wp.transform_inverse(neck), wp.vec3(*center)))
+        # NECK2 sits 81 mm above the yaw pivot. Its positive angle looks up.
+        local[2] -= 0.081
+        desired = np.array((math.atan2(local[1], local[0]), math.atan2(local[2], math.hypot(local[0], local[1]))))
+        desired = np.clip(desired, self.neck_lower, self.neck_upper)
+        velocity = np.clip((desired - self.neck_angles) / 0.20, -0.70, 0.70)
+        self.neck_velocity += np.clip(velocity - self.neck_velocity, -2.0 * self.frame_dt, 2.0 * self.frame_dt)
+        self.neck_angles = np.clip(
+            self.neck_angles + self.neck_velocity * self.frame_dt, self.neck_lower, self.neck_upper
+        )
+        end[self.neck_indices] = self.neck_angles
 
     def _center(self, parcel):
         if parcel.body >= 0:
@@ -923,10 +843,14 @@ class Example:
         end[: self.robot_coord_count] = self.ik_q.numpy().reshape(-1)
         end[self.finger_indices] = closure * self.grasp_fingers[min(self.active, 3)]
         thumb_target = 0.84 if self.active == 2 else math.pi / 2.0
-        if self.phase in ("release", "drop_wait", "withdraw", "clear", "retreat", "complete"):
+        # Open the cloth pinch without sweeping the thumb's opposition joint
+        # through the hanging fabric. Reorient it after the hand has retreated.
+        if self.active != 2 and self.phase in ("release", "drop_wait", "withdraw", "clear", "retreat", "complete"):
             thumb_target *= closure
         self.thumb_angle += float(np.clip(thumb_target - self.thumb_angle, -math.pi / 120.0, math.pi / 120.0))
         end[self.thumb_opposition_index] = self.thumb_angle
+        end[self.idle_left_indices] = self.idle_left_values
+        self._track_parcel(end)
         self.frame_end.assign(end)
         self.belt_motion.assign(np.array((self.belt_offset, speed), dtype=np.float32))
         cloth = self.parcels[2]
@@ -1009,6 +933,7 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
+        self.belt_visual.render(self.viewer, self.belt_offset)
         for name, points, indices, uvs, texture, roughness in self.decals:
             self.viewer.log_mesh(
                 f"/station/{name}",

@@ -38,6 +38,18 @@ deadband; use `--particle-displacement-threshold 0` to disable it.
 uv run --extra examples -m newton.examples mjvbd_v2_conveyor_sorting --num-frames 4200
 ```
 
+The workstation uses Blender-authored industrial equipment with rounded trays,
+aluminum extrusions, a gearmotor, control cabinet, and cables. The idle left arm
+rests beside the torso with relaxed fingers. The head tracks the current parcel
+through feeding, grasping, transfer, and release, with bounded neck speed and
+acceleration. The editable authoring script and runtime meshes are documented in
+[the workstation asset guide](../../../assets/conveyor_station/README.md).
+Blender is needed only to rebuild the asset, not to run the demo.
+The conveyor renders a continuous 4 mm belt around both end drums, with rubber
+texture moving along the entire loop and synchronized rotating hubs. Take-up
+screws, lock nuts, end guards, and a return guard pan complete the mechanism.
+The existing overlapping belt collision sections continue to transport parcels.
+
 The W1 sorts a rigid block, a volumetric soft block, woven cloth, and a
 sealed pneumatic parcel into labeled trays on a shared workbench. The
 cloth uses a 40 x 25 cm tray to accommodate draping and placement variation,
@@ -60,7 +72,7 @@ The other materials and other demos are unaffected by this filter.
 
 ## Support modules
 
-The 30 modules under `support/` remain available for imports and recording
+The modules under `support/` remain available for imports and recording
 workflows, but do not appear in `python -m newton.examples --list`.
 Run a support tool by its complete module path, for example:
 
