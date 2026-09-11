@@ -647,6 +647,14 @@ class Example:
                 lower[dofs[joint]], upper[dofs[joint]] = q[idx] - 1.0e-5, q[idx] + 1.0e-5
         self.lock_indices = wp.array(locked, dtype=int, device=self.ik_model.device)
         self.lock_values = wp.array(q[locked], dtype=float, device=self.ik_model.device)
+        waist = next(j for j, name in enumerate(self.ik_model.joint_label) if name.endswith("/WAIST"))
+        self.waist_index = int(starts[waist])
+        self.waist_dof = int(dofs[waist])
+        self.waist_lock = locked.index(self.waist_index)
+        self.waist_angle = float(q[self.waist_index])
+        self.waist_velocity = 0.0
+        self.ik_lower, self.ik_upper = lower, upper
+        self.lock_targets = q[locked].copy()
         self.position_objective = ik.IKObjectivePosition(
             self.hand_body, TCP_OFFSET, wp.array([HOME], dtype=wp.vec3, device=self.ik_model.device)
         )
@@ -673,6 +681,7 @@ class Example:
         limits = ik.IKObjectiveJointLimit(
             wp.array(lower, device=self.ik_model.device), wp.array(upper, device=self.ik_model.device), weight=30.0
         )
+        self.ik_limits = limits
         self.ik_solver = ik.IKSolver(
             self.ik_model,
             n_problems=1,
@@ -683,6 +692,7 @@ class Example:
         self.ik_q = wp.clone(self.ik_model.joint_q).reshape((1, -1))
         self.ik_solver.step(self.ik_q, self.ik_q, iterations=300)
         wp.launch(_lock_coordinates, len(locked), [self.lock_indices, self.lock_values, self.ik_q])
+        self.ik_reference_q = wp.clone(self.ik_q)
         wp.copy(self.model.joint_q, self.ik_q[0], count=self.robot_coord_count)
         initial = self.model.joint_q.numpy()
         initial[self.idle_left_indices] = self.idle_left_values
@@ -698,6 +708,22 @@ class Example:
         self.neck_velocity = np.zeros(2)
         self.neck_parent = int(self.model.joint_parent.numpy()[neck_joints[0]])
         self.neck_origin = wp.transform(*self.model.joint_X_p.numpy()[neck_joints[0]])
+
+    def _turn_waist(self):
+        """Turn toward the receiving trays while preserving the world-space grasp."""
+        placing = self.phase in ("transfer", "lower", "release", "drop_wait", "clear")
+        desired = math.radians(-30.0 if self.active == 2 else -15.0) if placing and self.active in (2, 3) else 0.0
+        velocity = float(np.clip((desired - self.waist_angle) / 0.35, -0.45, 0.45))
+        self.waist_velocity += float(np.clip(velocity - self.waist_velocity, -0.8 * self.frame_dt, 0.8 * self.frame_dt))
+        self.waist_angle += self.waist_velocity * self.frame_dt
+
+    def _set_waist_target(self, angle):
+        self.lock_targets[self.waist_lock] = angle
+        self.lock_values.assign(self.lock_targets)
+        self.ik_lower[self.waist_dof] = angle - 1.0e-5
+        self.ik_upper[self.waist_dof] = angle + 1.0e-5
+        self.ik_limits.joint_limit_lower.assign(self.ik_lower)
+        self.ik_limits.joint_limit_upper.assign(self.ik_upper)
 
     def _track_parcel(self, end):
         """Aim the head at the parcel with bounded neck speed and acceleration."""
@@ -770,8 +796,7 @@ class Example:
             "lower": 1.0,
             "release": 1.2,
             "drop_wait": 1.0,
-            "withdraw": 0.8,
-            "clear": 0.8,
+            "clear": 1.6,
             "retreat": 1.2,
         }
         duration = durations[self.phase]
@@ -785,7 +810,6 @@ class Example:
             "lower": self.place_target,
             "release": self.release_target,
             "drop_wait": self.release_target,
-            "withdraw": self.release_target + np.array((-0.12, 0, 0.0)),
             "clear": self.release_target + np.array((-0.12, 0, 0.18)),
             "retreat": HOME,
         }
@@ -798,7 +822,7 @@ class Example:
             tilt = self._release_tilt(smooth)
             self.rotation = tilt * self.grasp_rotations[self.active]
             self.target = parcel.destination + np.asarray(wp.quat_rotate(tilt, wp.vec3(*self.grip_offset)))
-        elif self.phase in ("drop_wait", "withdraw", "clear"):
+        elif self.phase in ("drop_wait", "clear"):
             self.rotation = self.release_rotation
         elif self.phase == "retreat":
             self.rotation = wp.quat_slerp(self.release_rotation, self.grasp_rotations[min(self.active + 1, 3)], smooth)
@@ -834,8 +858,18 @@ class Example:
 
     def step(self):
         speed, closure = self._controller()
+        self._turn_waist()
         self.position_objective.set_target_position(0, wp.vec3(*self.target))
         self.rotation_objective.set_target_rotation(0, wp.vec4(*self.rotation))
+        # Keep the original grasp branch independent of the temporary torso turn.
+        self._set_waist_target(0.0)
+        self.ik_solver.step(self.ik_reference_q, self.ik_reference_q, iterations=self.args.ik_iterations)
+        wp.launch(_lock_coordinates, len(self.lock_indices), [self.lock_indices, self.lock_values, self.ik_reference_q])
+        if self.phase in ("feed", "settle"):
+            # Recover the grasp branch gradually while the hand is empty.
+            self.ik_q.assign(0.95 * self.ik_q.numpy() + 0.05 * self.ik_reference_q.numpy())
+        self._set_waist_target(self.waist_angle)
+        wp.launch(_lock_coordinates, len(self.lock_indices), [self.lock_indices, self.lock_values, self.ik_q])
         self.ik_solver.step(self.ik_q, self.ik_q, iterations=self.args.ik_iterations)
         wp.launch(_lock_coordinates, len(self.lock_indices), [self.lock_indices, self.lock_values, self.ik_q])
         wp.copy(self.frame_start, self.state_0.joint_q)
@@ -845,7 +879,7 @@ class Example:
         thumb_target = 0.84 if self.active == 2 else math.pi / 2.0
         # Open the cloth pinch without sweeping the thumb's opposition joint
         # through the hanging fabric. Reorient it after the hand has retreated.
-        if self.active != 2 and self.phase in ("release", "drop_wait", "withdraw", "clear", "retreat", "complete"):
+        if self.active != 2 and self.phase in ("release", "drop_wait", "clear", "retreat", "complete"):
             thumb_target *= closure
         self.thumb_angle += float(np.clip(thumb_target - self.thumb_angle, -math.pi / 120.0, math.pi / 120.0))
         end[self.thumb_opposition_index] = self.thumb_angle
