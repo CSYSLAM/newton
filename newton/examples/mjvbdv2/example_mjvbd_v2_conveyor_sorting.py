@@ -252,6 +252,30 @@ class Example:
                 "rigid_soft_full_surface_shape_indices": self.hand_shapes,
             },
         )
+        self._configure_viewer()
+        self.graph = None
+        self.belt_motion = wp.zeros(2, dtype=float, device=self.model.device)
+        self.rest_volume = float(self.state_0.pneumatic.volume.numpy()[0])
+        self.use_graph = self.model.device.is_cuda and args.substeps % 2 == 0
+
+    @classmethod
+    def create_render_scene(cls, viewer, args):
+        """Build matching render geometry without constructing IK or physics solvers."""
+        scene = cls.__new__(cls)
+        scene.viewer, scene.args = viewer, args
+        scene.parcels = []
+        scene.cloth_speed_samples = deque(maxlen=FPS)
+        scene.sim_time = scene.belt_offset = 0.0
+        scene.phase, scene.active, scene.completed = "feed", 0, False
+        scene._build_scene(Path(args.robot_urdf).expanduser())
+        scene._build_materials()
+        scene.belt_visual = ConveyorBeltVisual(ROBOT_URDF.parents[1] / "conveyor_station", scene.model.device)
+        scene.state_0 = scene.model.state()
+        scene._configure_viewer()
+        return scene
+
+    def _configure_viewer(self):
+        """Share lighting, materials, camera, and status between simulation and replay."""
         self.viewer.set_model(self.model)
         if hasattr(self.viewer, "register_ui_callback"):
             self.viewer.register_ui_callback(self._render_ui)
@@ -266,10 +290,6 @@ class Example:
             renderer.ambient_ground = (0.25, 0.26, 0.28)
             renderer.exposure = 1.3
             renderer.shadow_extents = 3.5
-        self.graph = None
-        self.belt_motion = wp.zeros(2, dtype=float, device=self.model.device)
-        self.rest_volume = float(self.state_0.pneumatic.volume.numpy()[0])
-        self.use_graph = self.model.device.is_cuda and args.substeps % 2 == 0
 
     def _build_scene(self, robot_path: Path):
         if not robot_path.is_file():
