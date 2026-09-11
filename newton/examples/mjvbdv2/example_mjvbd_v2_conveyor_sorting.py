@@ -28,6 +28,12 @@ import newton.examples
 import newton.ik as ik
 from newton.examples.mjvbdv2.support import example_vbd_mjvbd_v2_right_hand_inflatable_bag_recorder as bag_reference
 from newton.examples.mjvbdv2.support.conveyor_belt import ConveyorBeltVisual
+from newton.examples.mjvbdv2.support.conveyor_clearance import RobotClearanceAudit
+from newton.examples.mjvbdv2.support.conveyor_motion import (
+    JointMotionRetimer,
+    interpolate_waypoints,
+    read_motion_limits,
+)
 from newton.solvers import SolverMJVBDV2, add_inflatable_mesh
 
 ROBOT_URDF = Path(__file__).resolve().parents[3] / "assets/DexforceW1V021/DexforceW1V021.urdf"
@@ -39,10 +45,15 @@ COLORS = ((0.95, 0.48, 0.12), (0.26, 0.70, 0.40), (0.23, 0.57, 0.95), (0.78, 0.3
 KINDS = ("rigid", "soft", "cloth", "inflatable")
 # Give the draped fabric lateral clearance; the compact soft block needs
 # less space. Keep the rigid and pneumatic drop points within the arm's reach.
-TRAYS = ((0.60, -0.44), (0.375, -0.44), (0.07, -0.44), (0.34, -0.70))
-TRAY_HALF_EXTENTS = ((0.125, 0.125), (0.095, 0.125), (0.20, 0.125), (0.125, 0.125))
+TRAYS = ((0.65, -0.60), (0.28, -0.34), (0.04, -0.48), (0.34, -0.60))
+TRAY_HALF_EXTENTS = ((0.125, 0.125), (0.095, 0.125), (0.125, 0.20), (0.125, 0.125))
 TCP_OFFSET = wp.vec3(-0.066, 0.0, 0.0)
 HOME = np.array((0.43, -0.30, 1.05), dtype=np.float32)
+# World-space TCP correction at 80% pinch closure, preserving the grasp center [m].
+CLOTH_OPEN_CORRECTION = np.array((-0.0053969, -0.0048804, 0.0027935))
+CLOTH_THUMB_OPPOSITION = 0.74
+CLOTH_CELLS = 40
+CLOTH_GRASP_NODE = 36
 
 
 @dataclass
@@ -113,6 +124,9 @@ def _discard_cloth_microsteps(
 @wp.kernel
 def _move_belt(
     bodies: wp.array[int],
+    shapes: wp.array[int],
+    shape_scale: wp.array[wp.vec3],
+    shape_transform: wp.array[wp.transform],
     motion: wp.array[float],
     substep_dt: float,
     q: wp.array[wp.transform],
@@ -122,8 +136,28 @@ def _move_belt(
     speed = motion[1]
     offset = motion[0] + speed * substep_dt
     y = -0.24 + wp.mod(float(i) * 0.08 - offset + 20.0, 2.0)
+    lower = wp.max(-0.24, y - 0.08)
+    upper = wp.min(1.76, y + 0.08)
+    shape_scale[shapes[i]] = wp.vec3(0.175, 0.5 * (upper - lower), 0.03)
+    shape_transform[shapes[i]] = wp.transform(wp.vec3(0.0, 0.5 * (upper + lower) - y, 0.0), wp.quat_identity())
     q[bodies[i]] = wp.transform(wp.vec3(0.60, y, 0.73), wp.quat_identity())
     qd[bodies[i]] = wp.spatial_vector(0.0, -speed, 0.0, 0.0, 0.0, 0.0)
+
+
+@wp.kernel
+def _move_rollers(
+    bodies: wp.array[int],
+    motion: wp.array[float],
+    substep_dt: float,
+    q: wp.array[wp.transform],
+    qd: wp.array[wp.spatial_vector],
+):
+    i = wp.tid()
+    radius = 0.0521
+    angle = (motion[0] + motion[1] * substep_dt) / radius
+    y = -0.24 + 2.0 * float(i)
+    q[bodies[i]] = wp.transform(wp.vec3(0.6, y, 0.708), wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), angle))
+    qd[bodies[i]] = wp.spatial_vector(0.0, 0.0, 0.0, motion[1] / radius, 0.0, 0.0)
 
 
 class Example:
@@ -143,6 +177,10 @@ class Example:
         self.phase = "feed"
         self.active = 0
         self.completed = False
+        self.robot_clearance = None
+        self.motion_peak_speed_ratio = 0.0
+        self.motion_min_arm_margin = math.inf
+        self.robot_min_separation = math.inf
         self.gripping = False
         self.thumb_angle = math.pi / 2.0
         self.target = HOME.copy()
@@ -160,7 +198,24 @@ class Example:
         self._build_materials()
         self.belt_visual = ConveyorBeltVisual(ROBOT_URDF.parents[1] / "conveyor_station", self.model.device)
         self._load_grasps()
+        self.motion_lower, self.motion_upper, self.motion_speed = read_motion_limits(
+            self.model,
+            Path(args.robot_urdf).expanduser(),
+            self.robot_coord_count,
+            finger_speed=math.radians(args.finger_speed),
+        )
+        self.arm_indices = np.asarray(
+            [
+                self.model.joint_q_start.numpy()[j]
+                for j, name in enumerate(self.model.joint_label)
+                if name.rsplit("/", 1)[-1] in {f"{side}_J{i}" for side in ("LEFT", "RIGHT") for i in range(1, 8)}
+            ]
+        )
+        self.motion_lower[self.arm_indices] += math.radians(3.0)
+        self.motion_upper[self.arm_indices] -= math.radians(3.0)
+        self.motion_retimer = JointMotionRetimer(self.motion_speed, self.frame_dt)
         self._build_ik()
+        self.feed_rotation = self.grasp_rotations[0]
         self.rotation = self.grasp_rotations[0]
         self.state_0, self.state_1 = self.model.state(), self.model.state()
         self.control = self.model.control()
@@ -346,6 +401,7 @@ class Example:
             return shape
 
         belt_bodies = []
+        belt_shapes = []
         belt_collision = cfg.copy()
         belt_collision.is_visible = False
         visual = newton.ModelBuilder.ShapeConfig(density=0.0, has_shape_collision=False, has_particle_collision=False)
@@ -376,7 +432,7 @@ class Example:
             builder.add_shape_mesh(body, mesh=belt_surface, cfg=visual, color=(1.0, 1.0, 1.0))
             # Overlapping collision sections form a continuous belt surface.
             # Butt-jointed boxes can wedge cloth between their vertical faces.
-            builder.add_shape_box(body, hx=0.175, hy=0.08, hz=0.03, cfg=belt_collision)
+            belt_shapes.append(builder.add_shape_box(body, hx=0.175, hy=0.08, hz=0.03, cfg=belt_collision))
         for x in (0.425, 0.775):
             box((x, 0.76, 0.70), (0.025, 1.04, 0.08), (0.55, 0.61, 0.66))
             for y in (-0.14, 1.66):
@@ -391,15 +447,20 @@ class Example:
                 (0, tray_hy - 0.01, tray_hx - 0.02, 0.01),
             ):
                 box((x + dx, y + dy, 0.705), (hx, hy, 0.025), tuple(0.65 * c for c in COLORS[i]))
-        # A common workbench supports the removable sorting trays.
-        box((0.335, -0.555, 0.62), (0.465, 0.285, 0.015), (0.48, 0.52, 0.55))
+        # A notched workbench supports the trays and leaves a cloth pickup opening.
+        box((0.16, -0.52, 0.62), (0.29, 0.32, 0.015), (0.48, 0.52, 0.55))
+        box((0.625, -0.62, 0.62), (0.175, 0.22, 0.015), (0.48, 0.52, 0.55))
         for x in (-0.045, 0.715):
-            for y in (-0.785, -0.325):
+            for y in (-0.785, -0.255 if x < 0.45 else -0.45):
                 box((x, y, 0.31), (0.022, 0.022, 0.295), (0.29, 0.34, 0.39))
 
         for i, kind in enumerate(KINDS):
             y = 0.12 + i * 0.34
-            parcel = _Parcel(kind, np.array((*TRAYS[i], 0.76), dtype=np.float32), tray_half_extent=TRAY_HALF_EXTENTS[i])
+            parcel = _Parcel(
+                kind,
+                np.array((*TRAYS[i], 0.81 if kind in ("soft", "inflatable") else 0.76), dtype=np.float32),
+                tray_half_extent=TRAY_HALF_EXTENTS[i],
+            )
             parcel.begin = builder.particle_count
             tri_start = len(builder.tri_indices)
             if kind == "rigid":
@@ -430,11 +491,11 @@ class Example:
                     pos=wp.vec3(BELT_X - 0.10, y - 0.10, 0.773),
                     rot=wp.quat_identity(),
                     vel=wp.vec3(),
-                    dim_x=20,
-                    dim_y=20,
-                    cell_x=0.01,
-                    cell_y=0.01,
-                    mass=0.000033,
+                    dim_x=CLOTH_CELLS,
+                    dim_y=CLOTH_CELLS,
+                    cell_x=0.20 / CLOTH_CELLS,
+                    cell_y=0.20 / CLOTH_CELLS,
+                    mass=0.000033 * 441 / (CLOTH_CELLS + 1) ** 2,
                     tri_ke=500.0,
                     tri_ka=500.0,
                     tri_kd=0.002,
@@ -468,9 +529,26 @@ class Example:
             parcel.triangles = np.asarray(builder.tri_indices[tri_start:], dtype=np.int32).reshape(-1)
             self.parcels.append(parcel)
         self._add_station_details(builder)
+        rollers = []
+        for y in (-0.24, 1.76):
+            body = builder.add_body(
+                xform=wp.transform(wp.vec3(BELT_X, y, 0.708), wp.quat_identity()),
+                is_kinematic=True,
+                label="belt_roller",
+            )
+            rollers.append(body)
+            builder.add_shape_cylinder(
+                body,
+                xform=wp.transform(wp.vec3(), wp.quat_from_axis_angle(wp.vec3(0, 1, 0), math.pi / 2)),
+                radius=0.0521,
+                half_height=0.175,
+                cfg=belt_collision,
+            )
         builder.color()
         self.model = builder.finalize()
         self.belt_bodies = wp.array(belt_bodies, dtype=int, device=self.model.device)
+        self.belt_collision_shapes = wp.array(belt_shapes, dtype=int, device=self.model.device)
+        self.belt_rollers = wp.array(rollers, dtype=int, device=self.model.device)
         for parcel in self.parcels:
             parcel.triangles = wp.array(parcel.triangles, dtype=int, device=self.model.device)
         self.model.soft_contact_ke = 2.0e5
@@ -623,15 +701,18 @@ class Example:
             self.grasp_fingers.append(
                 1.07 * np.radians([fingers[name] for name in self.finger_names]).astype(np.float32)
             )
-        # Pinch the leading cloth corner with thumb and index, as in the W1
-        # tablecloth demo. Its TCP is 114 mm farther along the wrist axis.
-        cloth_rotation = wp.quat(0.0245, 0.6878, 0.7139, -0.1294)
-        self.grasp_rotations[2] = cloth_rotation
-        self.grasp_offsets[2] = np.array((0.088, -0.088, 0.051)) + np.asarray(
-            wp.quat_rotate(cloth_rotation, wp.vec3(0.114, 0, 0))
+        self.grasp_fingers[3] *= 1.10
+        self.grasp_offsets[3][2] += 0.006
+        # Reorient the recorded pinch to approach the hanging cloth below the roller.
+        cloth_rotation = wp.quat_from_axis_angle(wp.vec3(1, 0, 0), math.radians(10.0)) * wp.quat(
+            0.0245, 0.6878, 0.7139, -0.1294
         )
-        pinch = {"RIGHT_HAND_THUMB1": 0.51, "RIGHT_HAND_INDEX": 0.80, "RIGHT_INDEX_PIP": 1.00}
+        self.grasp_rotations[2] = cloth_rotation
+        pinch = {"RIGHT_HAND_THUMB1": 0.61, "RIGHT_HAND_INDEX": 1.02, "RIGHT_INDEX_PIP": 0.85}
         self.grasp_fingers[2] = np.array([pinch.get(name, 0.0) for name in self.finger_names], dtype=np.float32)
+        # Calibrated thumb/index contact midpoint in the wrist frame [m].
+        pinch_local = wp.vec3(-0.18888462, -0.04892516, 0.03359285)
+        self.cloth_tcp_from_pinch = np.asarray(wp.quat_rotate(cloth_rotation, TCP_OFFSET - pinch_local))
 
     def _build_ik(self):
         q = self.ik_model.joint_q.numpy()
@@ -640,6 +721,8 @@ class Example:
         locked = []
         for joint, label in enumerate(self.ik_model.joint_label):
             if label.rsplit("/", 1)[-1] in {f"{side}_J{i}" for side in ("LEFT", "RIGHT") for i in range(1, 8)}:
+                lower[dofs[joint]] = self.motion_lower[starts[joint]]
+                upper[dofs[joint]] = self.motion_upper[starts[joint]]
                 continue
             if starts[joint + 1] > starts[joint]:
                 idx = starts[joint]
@@ -655,6 +738,15 @@ class Example:
         self.waist_velocity = 0.0
         self.ik_lower, self.ik_upper = lower, upper
         self.lock_targets = q[locked].copy()
+        stance_joints = [
+            next(j for j, name in enumerate(self.ik_model.joint_label) if name.endswith("/" + part))
+            for part in ("ANKLE", "KNEE", "BUTTOCK")
+        ]
+        self.stance_indices = starts[stance_joints]
+        self.stance_dofs = dofs[stance_joints]
+        self.stance_locks = np.asarray([locked.index(i) for i in self.stance_indices])
+        self.stance_reference = q[self.stance_indices].copy()
+        self.stance_angle = self.stance_velocity = 0.0
         self.position_objective = ik.IKObjectivePosition(
             self.hand_body, TCP_OFFSET, wp.array([HOME], dtype=wp.vec3, device=self.ik_model.device)
         )
@@ -693,9 +785,13 @@ class Example:
         self.ik_solver.step(self.ik_q, self.ik_q, iterations=300)
         wp.launch(_lock_coordinates, len(locked), [self.lock_indices, self.lock_values, self.ik_q])
         self.ik_reference_q = wp.clone(self.ik_q)
+        self.ik_home_seed = wp.clone(self.ik_q)
         wp.copy(self.model.joint_q, self.ik_q[0], count=self.robot_coord_count)
         initial = self.model.joint_q.numpy()
         initial[self.idle_left_indices] = self.idle_left_values
+        initial[: self.robot_coord_count] = np.clip(
+            initial[: self.robot_coord_count], self.motion_lower, self.motion_upper
+        )
         self.model.joint_q.assign(initial)
         neck_joints = [
             next(j for j, name in enumerate(self.model.joint_label) if name.endswith("/" + neck))
@@ -717,7 +813,19 @@ class Example:
         self.waist_velocity += float(np.clip(velocity - self.waist_velocity, -0.8 * self.frame_dt, 0.8 * self.frame_dt))
         self.waist_angle += self.waist_velocity * self.frame_dt
 
+    def _lower_body(self):
+        """Lower the shoulders for the hanging cloth while preserving torso pitch."""
+        desired = math.radians(10.0) if self.active == 2 else 0.0
+        velocity = float(np.clip((desired - self.stance_angle) / 0.35, -0.2, 0.2))
+        self.stance_velocity += float(
+            np.clip(velocity - self.stance_velocity, -0.4 * self.frame_dt, 0.4 * self.frame_dt)
+        )
+        self.stance_angle += self.stance_velocity * self.frame_dt
+
     def _set_waist_target(self, angle):
+        self.lock_targets[self.stance_locks] = self.stance_reference + self.stance_angle * np.array((1, -2, 1))
+        self.ik_lower[self.stance_dofs] = self.lock_targets[self.stance_locks] - 1.0e-5
+        self.ik_upper[self.stance_dofs] = self.lock_targets[self.stance_locks] + 1.0e-5
         self.lock_targets[self.waist_lock] = angle
         self.lock_values.assign(self.lock_targets)
         self.ik_lower[self.waist_dof] = angle - 1.0e-5
@@ -747,9 +855,18 @@ class Example:
             return self.state_0.body_q.numpy()[parcel.body, :3]
         return self.state_0.particle_q.numpy()[parcel.begin : parcel.end].mean(axis=0)
 
+    def _pickup_y(self):
+        return -0.26 if self.active == 2 else PICK_Y
+
     def _enter(self, phase):
         self.phase, self.phase_time = phase, 0.0
         self.motion_start = self.target.copy()
+        if phase == "feed":
+            self.feed_rotation = self.rotation
+            # Recover a known empty-hand branch after the cloth's rotated
+            # grasp. Only the IK seed changes; executed joints remain retimed.
+            if self.active == 3:
+                wp.copy(self.ik_reference_q, self.ik_home_seed)
 
     def _grasp(self, parcel):
         self.gripping = parcel.picked = True
@@ -776,24 +893,35 @@ class Example:
         self.rotation = self.grasp_rotations[self.active]
         self.phase_time += self.frame_dt
         if self.phase == "feed":
+            fraction = min(self.phase_time / 2.5, 1.0)
+            blend = fraction * fraction * (3.0 - 2.0 * fraction)
+            self.rotation = wp.quat_slerp(self.feed_rotation, self.grasp_rotations[self.active], blend)
             center = self._center(parcel)
-            if center[1] > PICK_Y:
+            if center[1] > self._pickup_y():
                 if self.phase_time > 40.0:
                     raise RuntimeError(f"{parcel.kind} did not reach the pickup station")
                 return self.args.belt_speed, 0.0
+            if fraction < 1.0:
+                # The next parcel can arrive before the empty hand finishes
+                # reorienting. Stop the belt, but complete that motion first.
+                return 0.0, 0.0
             self._enter("settle")
         if self.phase == "settle":
             if self.phase_time >= 0.35:
                 center = self._center(parcel).copy()
                 self.pick_target = center + self.grasp_offsets[self.active]
+                if parcel.kind == "cloth":
+                    # Target a cloth node: this contact model resolves particle/shape contacts.
+                    corner = self.state_0.particle_q.numpy()[parcel.begin + CLOTH_GRASP_NODE]
+                    self.pick_target = corner + self.cloth_tcp_from_pinch
                 self._enter("approach")
             return 0.0, 0.0
         durations = {
             "approach": 1.4,
             "close": 1.2,
-            "lift": 1.2,
-            "transfer": 1.8,
-            "lower": 1.0,
+            "lift": 2.0 if parcel.kind == "cloth" else 1.2,
+            "transfer": 3.0 if parcel.kind == "cloth" else 1.8,
+            "lower": 1.4 if parcel.kind == "cloth" else 1.0,
             "release": 1.2,
             "drop_wait": 1.0,
             "clear": 1.6,
@@ -805,8 +933,8 @@ class Example:
         destinations = {
             "approach": self.pick_target,
             "close": self.pick_target,
-            "lift": self.pick_target + np.array((0, 0, 0.34 if parcel.kind == "cloth" else 0.24)),
-            "transfer": self.place_target + np.array((0, 0, 0.08 if parcel.kind == "cloth" else 0.22)),
+            "lift": self.pick_target + np.array((0, 0, 0.45 if parcel.kind == "cloth" else 0.24)),
+            "transfer": self.place_target + np.array((0, 0, 0.22)),
             "lower": self.place_target,
             "release": self.release_target,
             "drop_wait": self.release_target,
@@ -814,9 +942,26 @@ class Example:
             "retreat": HOME,
         }
         self.target = (1.0 - smooth) * self.motion_start + smooth * destinations[self.phase]
+        if parcel.kind == "cloth" and self.phase == "approach":
+            opened = self.pick_target + CLOTH_OPEN_CORRECTION
+            below = opened + np.array((0, 0, -0.035))
+            front = below + np.array((0, -0.04, 0))
+            high = front.copy()
+            high[2] = max(self.motion_start[2], self.pick_target[2] + 0.16)
+            self.target = interpolate_waypoints((self.motion_start, high, front, below, opened), fraction)
+        elif parcel.kind == "cloth" and self.phase == "lift":
+            peel = self.pick_target + np.array((0, -0.04, 0.0))
+            raised = self.pick_target + np.array((0, -0.04, 0.45))
+            self.target = interpolate_waypoints((self.motion_start, peel, raised), fraction)
         closure = (
             smooth if self.phase == "close" else (1.0 - smooth if self.phase == "release" else float(self.gripping))
         )
+        if parcel.kind == "cloth" and self.phase in ("approach", "close"):
+            closure = 0.8 * min(1.0, 3.0 * smooth) if self.phase == "approach" else 0.8 + 0.2 * smooth
+            if self.phase == "close":
+                self.target = self.pick_target + (1.0 - smooth) * CLOTH_OPEN_CORRECTION
+        elif parcel.kind == "cloth" and self.gripping:
+            closure = 1.0
         if self.phase == "release":
             closure = max(0.0, 1.0 - 3.0 * fraction)
             tilt = self._release_tilt(smooth)
@@ -825,7 +970,7 @@ class Example:
         elif self.phase in ("drop_wait", "clear"):
             self.rotation = self.release_rotation
         elif self.phase == "retreat":
-            self.rotation = wp.quat_slerp(self.release_rotation, self.grasp_rotations[min(self.active + 1, 3)], smooth)
+            self.rotation = self.release_rotation
         if self.gripping:
             parcel.lift = max(parcel.lift, float(self._center(parcel)[2]) - self.pick_height)
         if fraction >= 1.0:
@@ -836,6 +981,12 @@ class Example:
             if self.phase == "lift" and parcel.kind == "cloth":
                 hand = wp.transform(*self.state_0.body_q.numpy()[self.hand_body])
                 self.grip_offset = np.asarray(wp.transform_point(hand, TCP_OFFSET)) - self._center(parcel)
+                self._set_place_target(parcel)
+            if self.phase == "lift" and parcel.kind == "inflatable":
+                # Recenter the deformed bag while preserving the calibrated
+                # wrist height needed for opening clearance.
+                hand = wp.transform(*self.state_0.body_q.numpy()[self.hand_body])
+                self.grip_offset[:2] = np.asarray(wp.transform_point(hand, TCP_OFFSET))[:2] - self._center(parcel)[:2]
                 self._set_place_target(parcel)
             if self.phase == "lower":
                 self.gripping = False
@@ -856,9 +1007,10 @@ class Example:
                 self._enter(phases[phases.index(self.phase) + 1])
         return 0.0, closure
 
-    def step(self):
+    def _plan_motion(self):
         speed, closure = self._controller()
         self._turn_waist()
+        self._lower_body()
         self.position_objective.set_target_position(0, wp.vec3(*self.target))
         self.rotation_objective.set_target_rotation(0, wp.vec4(*self.rotation))
         # Keep the original grasp branch independent of the temporary torso turn.
@@ -872,20 +1024,41 @@ class Example:
         wp.launch(_lock_coordinates, len(self.lock_indices), [self.lock_indices, self.lock_values, self.ik_q])
         self.ik_solver.step(self.ik_q, self.ik_q, iterations=self.args.ik_iterations)
         wp.launch(_lock_coordinates, len(self.lock_indices), [self.lock_indices, self.lock_values, self.ik_q])
-        wp.copy(self.frame_start, self.state_0.joint_q)
         end = self.state_0.joint_q.numpy()
         end[: self.robot_coord_count] = self.ik_q.numpy().reshape(-1)
         end[self.finger_indices] = closure * self.grasp_fingers[min(self.active, 3)]
-        thumb_target = 0.84 if self.active == 2 else math.pi / 2.0
-        # Open the cloth pinch without sweeping the thumb's opposition joint
-        # through the hanging fabric. Reorient it after the hand has retreated.
-        if self.active != 2 and self.phase in ("release", "drop_wait", "clear", "retreat", "complete"):
+        thumb_target = CLOTH_THUMB_OPPOSITION if self.active == 2 else math.pi / 2.0
+        # Open cloth and bag grasps without sweeping the thumb opposition
+        # joint through the parcel. Reorient it after the hand has retreated.
+        if self.active not in (2, 3) and self.phase in ("release", "drop_wait", "clear", "retreat", "complete"):
             thumb_target *= closure
         self.thumb_angle += float(np.clip(thumb_target - self.thumb_angle, -math.pi / 120.0, math.pi / 120.0))
         end[self.thumb_opposition_index] = self.thumb_angle
         end[self.idle_left_indices] = self.idle_left_values
+        start = self.state_0.joint_q.numpy()[: self.robot_coord_count]
+        end[self.neck_indices] = start[self.neck_indices]
+        goal = np.clip(end[: self.robot_coord_count], self.motion_lower, self.motion_upper)
+        self.motion_retimer.begin(start, goal)
+        self.motion_belt_speed = speed
+
+    def step(self):
+        if self.motion_retimer.remaining == 0:
+            self._plan_motion()
+        wp.copy(self.frame_start, self.state_0.joint_q)
+        end = self.state_0.joint_q.numpy()
+        end[: self.robot_coord_count] = self.motion_retimer.advance()
         self._track_parcel(end)
         self.frame_end.assign(end)
+        previous = self.frame_start.numpy()[: self.robot_coord_count]
+        ratio = np.abs(end[: self.robot_coord_count] - previous) / (self.motion_speed * self.frame_dt)
+        self.motion_peak_speed_ratio = max(self.motion_peak_speed_ratio, float(np.max(ratio)))
+        arm = end[self.arm_indices]
+        margin = np.minimum(arm - self.motion_lower[self.arm_indices], self.motion_upper[self.arm_indices] - arm)
+        self.motion_min_arm_margin = min(self.motion_min_arm_margin, float(np.min(margin)) + math.radians(3.0))
+        speed = self.motion_belt_speed
+        if self.phase == "feed":
+            distance = float(self._center(self.parcels[self.active])[1]) - self._pickup_y()
+            speed = min(speed, max(0.0, distance / self.frame_dt))
         self.belt_motion.assign(np.array((self.belt_offset, speed), dtype=np.float32))
         cloth = self.parcels[2]
         settle_cloth = cloth.sorted and self.cloth_displacement_threshold > 0.0
@@ -953,6 +1126,20 @@ class Example:
                 len(self.belt_bodies),
                 [
                     self.belt_bodies,
+                    self.belt_collision_shapes,
+                    self.model.shape_scale,
+                    self.model.shape_transform,
+                    self.belt_motion,
+                    (substep + 1) * self.sim_dt,
+                    self.state_0.body_q,
+                    self.state_0.body_qd,
+                ],
+            )
+            wp.launch(
+                _move_rollers,
+                2,
+                [
+                    self.belt_rollers,
                     self.belt_motion,
                     (substep + 1) * self.sim_dt,
                     self.state_0.body_q,
@@ -1044,6 +1231,20 @@ class Example:
         for values in (self.state_0.body_q.numpy(), self.state_0.particle_q.numpy(), self.state_0.particle_qd.numpy()):
             if not np.isfinite(values).all():
                 raise AssertionError("Sorting produced a non-finite simulation state")
+        if self.motion_peak_speed_ratio > 1.0001:
+            raise AssertionError(f"Robot exceeds its configured joint speeds: {self.motion_peak_speed_ratio:.4f}")
+        if self.motion_min_arm_margin < math.radians(3.0) - 1e-5:
+            raise AssertionError("Robot arm violates its 3-degree joint-limit margin")
+        if self.robot_clearance is None:
+            self.robot_clearance = RobotClearanceAudit(self.model, self.ik_model.body_count)
+        separation = self.robot_clearance.minimum_separation(self.state_0)
+        self.robot_min_separation = min(self.robot_min_separation, separation)
+        if separation < -0.001:
+            contact = self.robot_clearance.inspect(self.state_0)[0]
+            raise AssertionError(
+                f"Robot collision in {self.phase}: {self.model.shape_label[contact[1]]} / "
+                f"{self.model.shape_label[contact[2]]}, separation {contact[0]:.4f} m"
+            )
         for parcel in self.parcels:
             if self._center(parcel)[2] < 0.55:
                 raise AssertionError(f"{parcel.kind} fell off the conveyor or missed its tray")
@@ -1054,7 +1255,7 @@ class Example:
         if self.solver.features.backend != "vbd_kinematic_full":
             raise AssertionError("Sorting requires the full kinematic MJVBDV2 backend")
         if not self.completed:
-            raise AssertionError("Sorting is incomplete; increase --num-frames (3600 at the default belt speed)")
+            raise AssertionError("Sorting is incomplete; increase --num-frames (9000 at the default belt speed)")
         for parcel in self.parcels:
             self._check_placement(parcel)
             if not parcel.sorted or not parcel.released or parcel.lift < 0.12:
@@ -1069,12 +1270,18 @@ class Example:
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
-        parser.set_defaults(num_frames=3600)
+        parser.set_defaults(num_frames=9000)
         parser.add_argument("--robot-urdf", default=str(ROBOT_URDF))
         parser.add_argument("--belt-speed", type=float, default=0.12, help="Indexed conveyor speed [m/s], 0.02-0.20.")
         parser.add_argument("--substeps", type=int, default=8)
         parser.add_argument("--vbd-iterations", type=int, default=16)
         parser.add_argument("--ik-iterations", type=int, default=24)
+        parser.add_argument(
+            "--finger-speed",
+            type=float,
+            default=90.0,
+            help="Demo finger speed [deg/s]; URDF finger velocities are unspecified (zero).",
+        )
         parser.add_argument(
             "--cloth-displacement-threshold",
             type=float,

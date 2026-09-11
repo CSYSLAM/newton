@@ -35,7 +35,7 @@ deadband; use `--particle-displacement-threshold 0` to disable it.
 ### Conveyor sorting
 
 ```bash
-uv run --extra examples -m newton.examples mjvbd_v2_conveyor_sorting --num-frames 4200
+uv run --extra examples -m newton.examples mjvbd_v2_conveyor_sorting --num-frames 9000
 ```
 
 The workstation uses Blender-authored industrial equipment with rounded trays,
@@ -48,15 +48,27 @@ Blender is needed only to rebuild the asset, not to run the demo.
 The conveyor renders a continuous 4 mm belt around both end drums, with rubber
 texture moving along the entire loop and synchronized rotating hubs. Take-up
 screws, lock nuts, end guards, and a return guard pan complete the mechanism.
-The existing overlapping belt collision sections continue to transport parcels.
+Overlapping flat contact sections are clipped at the end tangents; rotating
+cylinders provide the curved contact surface around both end drums.
 
 The W1 sorts a rigid block, a volumetric soft block, woven cloth, and a
 sealed pneumatic parcel into labeled trays on a shared workbench. The
-cloth uses a 40 x 25 cm tray to accommodate draping and placement variation,
+cloth uses a 25 x 40 cm tray to accommodate draping and placement variation,
 the soft block uses a 19 x 25 cm tray, and the other trays are 25 x 25 cm.
 Collision geometry and placement checks use the same dimensions.
 The scene includes textured belt treads, fabric stitching, package printing,
 concrete flooring, and OpenGL lighting tuned for the workstation.
+
+The controller retimes complete joint motion segments to respect the source
+URDF velocity limits and keeps a three-degree margin inside both arms' position
+limits. URDF finger velocities are zero; `--finger-speed 90` supplies an explicit
+demo fallback in degrees/second. This is not a measured hardware finger limit.
+The cloth uses a 5 mm mesh with unchanged total mass, a calibrated thumb/index
+pinch approached from below, and an elevated transfer over the neighboring trays.
+The notched worktop leaves space below the hanging edge. Test mode also checks
+robot clearance independently of the simulation's self-collision filters.
+These checks do not establish hardware acceleration, torque, or continuous
+collision feasibility.
 
 The mixed-material scene uses the full VBD backend. Its scene-local
 `--cloth-displacement-threshold` filters small solved cloth displacements

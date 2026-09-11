@@ -255,20 +255,32 @@ for z, mat in ((1.20, "green"), (1.244, "yellow"), (1.288, "red")):
     cylinder("Stack light lens", (0.79, 1.64, z), 0.024, 0.038, mat)
     cylinder("Stack light divider", (0.79, 1.64, z + 0.021), 0.025, 0.004, "dark")
 # Folded stainless bench top, underside apron, hollow square legs and feet.
-box("Folded stainless worktop", (0.335, -0.555, 0.62), (0.93, 0.57, 0.030), "stainless", 0.009)
-for y in (-0.817, -0.293):
-    box("Workbench folded apron", (0.335, y, 0.582), (0.88, 0.018, 0.07), "paint", 0.004)
+outline = [(-0.13, -0.84), (0.8, -0.84), (0.8, -0.40), (0.45, -0.40), (0.45, -0.20), (-0.13, -0.20)]
+vertices = [(x, y, z) for z in (0.605, 0.635) for x, y in outline]
+faces = [tuple(reversed(range(6))), tuple(range(6, 12))]
+faces.extend((i, (i + 1) % 6, (i + 1) % 6 + 6, i + 6) for i in range(6))
+mesh = bpy.data.meshes.new("Notched stainless worktop")
+mesh.from_pydata(vertices, [], faces)
+obj = bpy.data.objects.new(mesh.name, mesh)
+collection.objects.link(obj)
+finish(obj, mesh.name, "stainless", 0.006)
+box("Workbench front apron", (0.335, -0.817, 0.582), (0.88, 0.018, 0.07), "paint", 0.004)
+box("Workbench rear left apron", (0.16, -0.223, 0.582), (0.54, 0.018, 0.07), "paint", 0.004)
+box("Workbench pickup apron", (0.625, -0.423, 0.582), (0.30, 0.018, 0.07), "paint", 0.004)
+box("Workbench notch return", (0.427, -0.312, 0.582), (0.018, 0.20, 0.07), "paint", 0.004)
 for x in (-0.105, 0.775):
-    box("Workbench end apron", (x, -0.555, 0.582), (0.018, 0.52, 0.07), "paint", 0.004)
+    rear = -0.223 if x < 0.45 else -0.423
+    box("Workbench end apron", (x, (-0.817 + rear) / 2, 0.582), (0.018, rear + 0.817, 0.07), "paint", 0.004)
 for x in (-0.045, 0.715):
-    for y in (-0.785, -0.325):
+    rear = -0.255 if x < 0.45 else -0.45
+    for y in (-0.785, rear):
         box("Bench tubular leg", (x, y, 0.315), (0.044, 0.044, 0.574), "stainless", 0.004)
         cylinder("Bench leveling screw", (x, y, 0.037), 0.010, 0.045, "stainless")
         cylinder("Bench rubber foot", (x, y, 0.013), 0.035, 0.026, "rubber")
-    box("Bench end stretcher", (x, -0.555, 0.21), (0.036, 0.46, 0.036), "stainless", 0.003)
-box("Bench rear stretcher", (0.335, -0.325, 0.21), (0.76, 0.035, 0.035), "stainless", 0.003)
+    box("Bench end stretcher", (x, (-0.785 + rear) / 2, 0.21), (0.036, rear + 0.785, 0.036), "stainless", 0.003)
+box("Bench rear stretcher", (0.335, -0.45, 0.21), (0.76, 0.035, 0.035), "stainless", 0.003)
 for i, (x, y, hx, hy) in enumerate(
-    ((0.6, -0.44, 0.125, 0.125), (0.375, -0.44, 0.095, 0.125), (0.07, -0.44, 0.20, 0.125), (0.34, -0.70, 0.125, 0.125))
+    ((0.65, -0.60, 0.125, 0.125), (0.28, -0.34, 0.095, 0.125), (0.04, -0.48, 0.125, 0.20), (0.34, -0.60, 0.125, 0.125))
 ):
     tub(i, x, y, hx, hy)
 # Industrial bay: architectural scale, panel seams and skirting, kept behind the cell.

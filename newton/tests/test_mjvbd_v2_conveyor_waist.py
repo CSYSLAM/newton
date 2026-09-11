@@ -10,6 +10,23 @@ from newton.examples.mjvbdv2.example_mjvbd_v2_conveyor_sorting import Example
 
 
 class TestConveyorWaist(unittest.TestCase):
+    def test_crouch_and_return(self):
+        """Lower the torso smoothly and return without changing the net torso pitch."""
+        example = Example.__new__(Example)
+        example.frame_dt = 1.0 / 60.0
+        example.stance_angle = example.stance_velocity = 0.0
+        for active, target in ((2, 10.0), (3, 0.0)):
+            example.active = active
+            for _ in range(360):
+                previous = example.stance_angle
+                velocity = example.stance_velocity
+                example._lower_body()
+                self.assertLessEqual(abs(example.stance_angle - previous), 0.2 * example.frame_dt + 1e-8)
+                self.assertLessEqual(abs(example.stance_velocity - velocity), 0.4 * example.frame_dt + 1e-8)
+                self.assertLessEqual(abs(example.stance_velocity), 0.2 + 1e-8)
+                self.assertAlmostEqual(sum(example.stance_angle * factor for factor in (1, -2, 1)), 0.0)
+            self.assertAlmostEqual(example.stance_angle, math.radians(target), places=5)
+
     def test_turn_and_return(self):
         """Bound torso speed and acceleration through placement and return."""
         example = Example.__new__(Example)
