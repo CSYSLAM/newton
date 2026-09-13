@@ -1,0 +1,1 @@
+Add an experimental `rigid_avbd_contact_beta` override to MJVBD_V2's private VBD backends, allowing body-body contact penalty growth without changing joint or deformable-contact penalties; omitted values preserve existing behavior.

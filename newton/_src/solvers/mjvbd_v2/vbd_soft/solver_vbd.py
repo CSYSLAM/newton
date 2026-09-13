@@ -361,6 +361,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         rigid_avbd_contact_alpha: float | None = None,  # Body-body contact alpha; None selects default
         rigid_avbd_beta: float = 0.0,  # Penalty ramp rate per iteration (0 = fixed-k)
         rigid_avbd_linear_beta: float | None = None,  # Linear beta override; None uses rigid_avbd_beta
+        rigid_avbd_contact_beta: float | None = None,  # Body-body override; None uses linear beta
         rigid_avbd_angular_beta: float | None = None,  # Angular beta override; None uses rigid_avbd_beta
         rigid_avbd_gamma: float = 0.999,  # Per-step decay for penalty k and persisted hard-mode lambda
         # Rigid body - contacts
@@ -519,6 +520,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                 for production tuning.
             rigid_avbd_linear_beta: Linear beta override for linear constraints (meters).
                 ``None`` (default) uses ``rigid_avbd_beta``.
+            rigid_avbd_contact_beta: Experimental body-body penalty growth override [N/m^2].
+                ``None`` preserves the linear beta. Zero selects fixed material stiffness.
+                Does not change joint or body-particle penalties; this allows ramped
+                small-rigid contacts alongside fixed-stiffness deformable contacts.
             rigid_avbd_angular_beta: Angular beta override for angular constraints (radians).
                 ``None`` (default) uses ``rigid_avbd_beta``.
             rigid_avbd_gamma: Per-step decay factor for penalty k and persisted hard-mode lambda. Hard joint/contact
@@ -547,9 +552,10 @@ class SolverVBD(SolverBase, CouplingInterface):
             rigid_contact_stick_freeze_angular_eps: Angular threshold [rad] for the body-level
                 deadzone snap on dynamic-dynamic sticking contacts. Set to ``0.0`` to disable
                 angular snapping.
-            rigid_contact_k_start: Body-body and body-particle contact penalty seed for AVBD ramping. Used when
-                ``rigid_avbd_linear_beta`` (or ``rigid_avbd_beta`` fallback) is greater than zero.
-                When the linear beta is 0, k is fixed at the contact stiffness regardless of this value.
+            rigid_contact_k_start: Contact penalty seed [N/m] when AVBD ramping is enabled.
+                Body-body contacts use the resolved ``rigid_avbd_contact_beta``; body-particle contacts
+                use ``rigid_avbd_linear_beta`` (or ``rigid_avbd_beta`` fallback). A zero growth rate
+                fixes the corresponding penalty at material stiffness, ignoring this seed.
             rigid_body_contact_buffer_size: Max body-body contacts per rigid body for per-body contact lists.
             rigid_body_particle_contact_buffer_size: Max body-particle soft contacts tracked per rigid
                 body, covering both particle-vs-surface and full-surface edge/face contacts.
@@ -857,6 +863,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             rigid_avbd_gamma,
             rigid_avbd_joint_alpha,
             rigid_avbd_contact_alpha,
+            rigid_avbd_contact_beta,
             rigid_contact_hard,
             rigid_contact_history,
             rigid_contact_stick_motion_eps,
@@ -1227,6 +1234,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         rigid_avbd_gamma: float,
         rigid_avbd_joint_alpha: float | None,
         rigid_avbd_contact_alpha: float | None,
+        rigid_avbd_contact_beta: float | None,
         rigid_contact_hard: bool,
         rigid_contact_history: bool,
         rigid_contact_stick_motion_eps: float,
@@ -1283,6 +1291,11 @@ class SolverVBD(SolverBase, CouplingInterface):
         if rigid_joint_angular_ke < 0:
             raise ValueError(f"rigid_joint_angular_ke must be >= 0, got {rigid_joint_angular_ke}")
         self.rigid_avbd_gamma = rigid_avbd_gamma
+        contact_beta = rigid_avbd_linear_beta if rigid_avbd_contact_beta is None else rigid_avbd_contact_beta
+        if not np.isfinite(contact_beta) or contact_beta < 0:
+            raise ValueError(f"rigid_avbd_contact_beta must be finite and >= 0, got {contact_beta}")
+        self.rigid_contact_beta = float(contact_beta)
+        self.rigid_body_contact_k_start_value = -1.0 if contact_beta == 0.0 else float(rigid_contact_k_start)
         self.rigid_contact_k_start_value = -1.0 if rigid_avbd_linear_beta == 0.0 else float(rigid_contact_k_start)
         self.rigid_joint_linear_k_start = rigid_joint_linear_k_start if rigid_avbd_linear_beta > 0.0 else None
         self.rigid_joint_angular_k_start = rigid_joint_angular_k_start if rigid_avbd_angular_beta > 0.0 else None
@@ -3070,7 +3083,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                                 model.shape_world,
                                 model.shape_body,
                                 model.body_world,
-                                self.rigid_contact_k_start_value,
+                                self.rigid_body_contact_k_start_value,
                             ],
                             outputs=[
                                 contacts.rigid_contact_point0,
@@ -3095,7 +3108,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                                 model.shape_material_ke,
                                 model.shape_material_kd,
                                 model.shape_material_mu,
-                                self.rigid_contact_k_start_value,
+                                self.rigid_body_contact_k_start_value,
                             ],
                             outputs=[
                                 self.body_body_contact_penalty_k,
@@ -3142,7 +3155,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         contact_lambda_decay,
                         self.rigid_avbd_gamma,
                         self.body_body_contact_material_ke,
-                        self.rigid_contact_k_start_value,
+                        self.rigid_body_contact_k_start_value,
                     ],
                     outputs=[
                         self.body_body_contact_penalty_k,
@@ -4470,7 +4483,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self.rigid_contact_hard,
                     self.body_inv_mass_effective,
                     self.body_body_contact_material_ke,
-                    self.rigid_linear_beta,
+                    self.rigid_contact_beta,
                     self.body_body_contact_penalty_k,  # input/output
                     self.body_body_contact_lambda,  # input/output
                 ],

@@ -226,6 +226,10 @@ class IKSolver:
             must not be modified after construction. Currently supported by
             the LM optimizer with sampling disabled.
         history_len: Number of correction pairs retained by L-BFGS.
+        compact_dof_mask: Experimental CUDA LM optimization eliminating immutable masked-zero columns.
+            Requires at least one active and one masked DOF; preserves the iteration count and damping law.
+        parallel_objectives: Evaluate LM objectives on separate CUDA streams. Disable for small batches
+            where stream synchronization costs more than the objective kernels. Does not change objective weights.
         h0_scale: Initial inverse-Hessian scale for L-BFGS.
         line_search_alphas: Candidate line-search step sizes for L-BFGS.
         wolfe_c1: Armijo constant for the L-BFGS line search.
@@ -251,6 +255,8 @@ class IKSolver:
         lambda_max: float = 1e10,
         rho_min: float = 1e-3,
         joint_dof_mask: wp.array[wp.bool] | None = None,
+        compact_dof_mask: bool = False,
+        parallel_objectives: bool = True,
         # L-BFGS parameters
         history_len: int = 10,
         h0_scale: float = 1.0,
@@ -275,6 +281,8 @@ class IKSolver:
             if sampler is not IKSampler.NONE:
                 raise ValueError("joint_dof_mask requires sampler='none'")
             # remaining mask validation happens in IKOptimizerLM
+        if optimizer is not IKOptimizer.LM and (compact_dof_mask or not parallel_objectives):
+            raise ValueError("compact_dof_mask and parallel_objectives are LM execution options")
 
         self.model = model
         self.device = model.device
@@ -326,6 +334,8 @@ class IKSolver:
                 lambda_max=lambda_max,
                 rho_min=rho_min,
                 joint_dof_mask=joint_dof_mask,
+                compact_dof_mask=compact_dof_mask,
+                parallel_objectives=parallel_objectives,
             )
         elif optimizer is IKOptimizer.LBFGS:
             self._impl = IKOptimizerLBFGS(

@@ -659,6 +659,35 @@ def _restrict_energy_galerkin(
 
 
 @wp.kernel(enable_backward=False)
+def _restrict_energy_galerkin_tiled(
+    cluster_particle_offsets: wp.array[wp.int32],
+    cluster_particles: wp.array[wp.int32],
+    local_correction: wp.array[wp.vec3],
+    local_hessian: wp.array[wp.mat33],
+    diagonal_slots: wp.array[wp.int32],
+    coarse_rhs: wp.array[wp.vec3],
+    coarse_blocks: wp.array[wp.mat33],
+):
+    cluster = wp.tid() // 64
+    lane = wp.tid() % 64
+    force_sum = wp.vec3(0.0)
+    hessian_sum = wp.mat33(0.0)
+    slot = cluster_particle_offsets[cluster] + lane
+    end = cluster_particle_offsets[cluster + 1]
+    while slot < end:
+        particle = cluster_particles[slot]
+        hessian = local_hessian[particle]
+        force_sum += hessian * local_correction[particle]
+        hessian_sum += hessian
+        slot += 64
+    force_total = wp.tile_reduce(wp.add, wp.tile(force_sum, preserve_type=True))[0]
+    hessian_total = wp.tile_reduce(wp.add, wp.tile(hessian_sum, preserve_type=True))[0]
+    if lane == 0:
+        coarse_rhs[cluster] = force_total
+        coarse_blocks[diagonal_slots[cluster]] = hessian_total
+
+
+@wp.kernel(enable_backward=False)
 def _assemble_triangle_energy_galerkin(
     dt: float,
     pos: wp.array[wp.vec3],
@@ -1937,6 +1966,7 @@ class ParticleMultilevelCorrection:
         max_radius_fraction: float,
         minimum_residual_reduction: float | None,
         max_clamp_fraction: float,
+        full_space: bool = False,
     ):
         operator = _normalize_multilevel_operator(operator)
         if cluster_size < 2:
@@ -1973,7 +2003,9 @@ class ParticleMultilevelCorrection:
             coarse_neighbor_multiplicity,
             coarse_incident_edges,
             coarse_anchor_edges,
-        ) = _build_clusters(model, cluster_size)
+        ) = _build_clusters(model, 1 if full_space else cluster_size)
+        self.full_space = full_space
+        self._coupled_solver = None
         self.cluster_count = int(cluster_offsets.size - 1)
         self.active_particle_count = int(cluster_particles.size)
         self.operator = operator
@@ -2230,6 +2262,8 @@ class ParticleMultilevelCorrection:
         """Restrict the local system, solve its coarse approximation, and prolong."""
         if not self.enabled:
             return
+        if self._coupled_solver is not None:
+            self._coupled_solver.ritz.q = particle_q
         # Keep the validated mixed/tet six-DOF path independent of the optional
         # three-DOF surface operator; do not project tet updates as translations.
         if self.use_rigid_basis:
@@ -2237,9 +2271,11 @@ class ParticleMultilevelCorrection:
             return
         if self.operator == "galerkin":
             self.coarse_matrix_blocks.zero_()
+            tiled = model.device.is_cuda and not self.full_space
             wp.launch(
-                _restrict_energy_galerkin,
-                dim=self.cluster_count,
+                _restrict_energy_galerkin_tiled if tiled else _restrict_energy_galerkin,
+                dim=self.cluster_count * (64 if tiled else 1),
+                block_dim=64 if tiled else 256,
                 inputs=[
                     self.cluster_particle_offsets,
                     self.cluster_particles,
@@ -2429,6 +2465,9 @@ class ParticleMultilevelCorrection:
             outputs=[particle_displacements],
             device=model.device,
         )
+
+        if self._coupled_solver is not None:
+            self._coupled_solver.commit()
 
     def build_selective_polish_mask(self, model) -> wp.array | None:
         """Select unresolved particles and expand them over the fine constraint graph."""

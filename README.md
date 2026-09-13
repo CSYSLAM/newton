@@ -1080,6 +1080,23 @@ If you run the examples from a source checkout with uv, use
   </tr>
 </table>
 
+### Experimental MJVBD_V2 Popcorn Demo
+
+<img src="docs/images/examples/example_mjvbd_v2_popcorn.jpg" width="320" height="320" alt="W1 holding a deformable paper cup and a scoop of rigid popcorn">
+
+*Illustration from an earlier scene revision; not validation of the current grasp.*
+
+```bash
+uv run --extra examples -m newton.examples mjvbd_v2_popcorn
+```
+
+The W1 follows prescribed IK motion and grasps dynamic props through contact:
+an elastoplastic paper cup, a cylindrical-handled scoop, and rigid popcorn.
+The paper material is experimental and uncalibrated. The current grasp revision
+has not passed full delivery validation: grasp loss and contact instability remain.
+See the [experiment log](docs/lab/mjvbd_popcorn_2026-09-10/README.md)
+for validation results and limitations.
+
 ### Example Options
 
 All examples share a common set of command-line options. The most commonly used ones are:

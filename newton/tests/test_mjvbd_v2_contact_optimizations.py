@@ -226,11 +226,20 @@ def _body_particle_accumulation_outputs(device, body_count):
     )
 
 
-def _launch_legacy_contacts(kernels, uses_color_masks, data, contact_count, forces, hessians, device):
+def _launch_legacy_contacts(
+    kernels, uses_color_masks, data, contact_count, forces, hessians, device, enable_masks=False
+):
     for color, _color_group in enumerate(data["color_groups"]):
         color_mask_inputs = []
         if uses_color_masks:
-            color_mask_inputs = [wp.zeros(data["capacity"], dtype=wp.uint32, device=device), False]
+            masks = np.zeros(data["capacity"], dtype=np.uint32)
+            if enable_masks:
+                colors = data["particle_colors"].numpy()
+                for row, corners in enumerate(data["contact_indices"].numpy()):
+                    for corner in corners:
+                        if corner >= 0:
+                            masks[row] |= np.uint32(1) << np.uint32(colors[corner])
+            color_mask_inputs = [wp.array(masks, dtype=wp.uint32, device=device), enable_masks]
         wp.launch(
             kernels.accumulate_particle_body_contact_force_and_hessian,
             dim=data["capacity"],
@@ -347,11 +356,42 @@ def _make_dual_data(device, capacity=7):
 
 
 class TestMJVBDV2ContactOptimizations(unittest.TestCase):
+    def test_complete_contact_workers_cover_active_prefix(self):
+        """Match the independent soft path beyond one worker pass for mixed contact rows."""
+        for device in ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else []):
+            capacity = 4103
+            data = _make_point_contact_data(device, capacity=capacity)
+            corners = np.tile([[0, -1, -1], [1, 2, -1], [0, 1, 3]], (1368, 1))[:capacity]
+            weights = np.tile([[1, 0, 0], [0.5, 0.5, 0], [0.2, 0.3, 0.5]], (1368, 1))[:capacity]
+            data["contact_indices"] = wp.array(corners, dtype=wp.vec3i, device=device)
+            data["contact_barycentric"] = wp.array(weights, dtype=wp.vec3, device=device)
+            for count in (0, 7, 4097, capacity + 13):
+                with self.subTest(device=device, count=count):
+                    outputs = []
+                    active = wp.array([count], dtype=int, device=device)
+                    for kernels, masks in ((soft_particle_kernels, False), (complete_particle_kernels, True)):
+                        forces = wp.zeros(data["particle_count"], dtype=wp.vec3, device=device)
+                        hessians = wp.zeros(data["particle_count"], dtype=wp.mat33, device=device)
+                        _launch_legacy_contacts(
+                            kernels, masks, data, active, forces, hessians, device, enable_masks=True
+                        )
+                        outputs.append((forces.numpy().copy(), hessians.numpy().copy()))
+                    for expected, actual in zip(*outputs, strict=True):
+                        np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=5e-4)
+
     @unittest.skipUnless(wp.is_cuda_available(), "Dense rigid-side reduction requires CUDA")
     def test_dense_body_particle_reduction_matches_legacy(self):
         """Match legacy rigid reactions with dense contact chunk reduction."""
+        self._check_dense_body_particle_reduction(1024)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Dense rigid-side reduction requires CUDA")
+    def test_dense_body_particle_reduction_ignores_unused_capacity(self):
+        """Ignore poisoned unused chunks and handle a partly occupied last chunk."""
+        self._check_dense_body_particle_reduction(257)
+
+    def _check_dense_body_particle_reduction(self, contact_count):
         device = wp.get_device("cuda:0")
-        data = _make_body_particle_reaction_data(device, contact_count=1024, capacity=1024)
+        data = _make_body_particle_reaction_data(device, contact_count=contact_count, capacity=1024)
         legacy = _body_particle_accumulation_outputs(device, data["body_count"])
         dense = _body_particle_accumulation_outputs(device, data["body_count"])
         common_inputs = [
@@ -401,6 +441,8 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
             wp.zeros(partial_count, dtype=wp.mat33, device=device),
             wp.zeros(partial_count, dtype=wp.mat33, device=device),
         )
+        for partial in partials:
+            partial.fill_(partial.dtype(float("nan")))
         wp.launch(
             complete_rigid_kernels.accumulate_body_particle_contact_dense_partials,
             dim=data["color_group"].size * chunks_per_body * block_dim,
@@ -455,6 +497,31 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
 
         for legacy_array, dense_array in zip(legacy, dense, strict=True):
             np.testing.assert_allclose(dense_array.numpy(), legacy_array.numpy(), rtol=2.0e-5, atol=5.0e-4)
+
+        single = _body_particle_accumulation_outputs(device, data["body_count"])
+        single_inputs = [
+            *common_inputs[:2],
+            chunks_per_body,
+            128,
+            *common_inputs[2:9],
+            *common_inputs[10:13],
+            *common_inputs[14:],
+        ]
+        with wp.ScopedCapture(device=device) as capture:
+            for output in single:
+                output.zero_()
+            wp.launch(
+                complete_rigid_kernels.accumulate_body_particle_contact_dense_single,
+                dim=data["color_group"].size * block_dim,
+                block_dim=block_dim,
+                inputs=single_inputs,
+                outputs=list(single),
+                device=device,
+            )
+        for _ in range(2):
+            wp.capture_launch(capture.graph)
+            for expected, actual in zip(legacy, single, strict=True):
+                np.testing.assert_allclose(actual.numpy(), expected.numpy(), rtol=2e-5, atol=5e-4)
 
     @unittest.skipUnless(wp.is_cuda_available(), "Private full-surface pruning requires CUDA")
     def test_private_full_surface_pipeline_matches_shared_contacts(self):

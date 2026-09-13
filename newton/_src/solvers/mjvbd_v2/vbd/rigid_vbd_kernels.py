@@ -48,6 +48,8 @@ _USE_SMALL_ANGLE_APPROX = wp.constant(True)
 _DAHL_KAPPADOT_DEADBAND = wp.constant(1.0e-6)
 """Deadband threshold for hysteresis direction selection"""
 
+# A warp exposes dense contact lists in parallel instead of four long loops.
+_NUM_RIGID_CONTACT_THREADS_PER_BODY = wp.constant(32)
 _NUM_CONTACT_THREADS_PER_BODY = wp.constant(4)
 """Threads per body for sparse contact accumulation using strided iteration."""
 
@@ -2869,6 +2871,7 @@ def accumulate_body_body_contacts_per_body(
     body_q: wp.array[wp.transform],
     body_com: wp.array[wp.vec3],
     body_inv_mass: wp.array[float],
+    body_colors: wp.array[int],
     friction_epsilon: float,
     contact_penalty_k: wp.array[float],
     contact_material_ke: wp.array[float],
@@ -2899,11 +2902,11 @@ def accumulate_body_body_contacts_per_body(
     body_hessian_aa: wp.array[wp.mat33],
 ):
     """
-    Per-body augmented-Lagrangian contact accumulation with _NUM_CONTACT_THREADS_PER_BODY strided threads.
+    Per-body augmented-Lagrangian contact accumulation with _NUM_RIGID_CONTACT_THREADS_PER_BODY strided threads.
     """
     tid = wp.tid()
-    body_idx_in_group = tid // _NUM_CONTACT_THREADS_PER_BODY
-    thread_id_within_body = tid % _NUM_CONTACT_THREADS_PER_BODY
+    body_idx_in_group = tid // _NUM_RIGID_CONTACT_THREADS_PER_BODY
+    thread_id_within_body = tid % _NUM_RIGID_CONTACT_THREADS_PER_BODY
 
     if body_idx_in_group >= color_group.shape[0]:
         return
@@ -2915,6 +2918,10 @@ def accumulate_body_body_contacts_per_body(
     num_contacts = body_contact_counts[body_id]
     if num_contacts > body_contact_buffer_pre_alloc:
         num_contacts = body_contact_buffer_pre_alloc
+
+    # Sparse bodies need no zero-valued atomic updates from unused lanes.
+    if thread_id_within_body >= num_contacts:
+        return
 
     contact_count = rigid_contact_count[0]
 
@@ -2928,7 +2935,7 @@ def accumulate_body_body_contacts_per_body(
     while i < num_contacts:
         contact_idx = body_contact_indices[body_id * body_contact_buffer_pre_alloc + i]
         if contact_idx >= contact_count:
-            i += _NUM_CONTACT_THREADS_PER_BODY
+            i += _NUM_RIGID_CONTACT_THREADS_PER_BODY
             continue
 
         s0 = rigid_contact_shape0[contact_idx]
@@ -2937,7 +2944,7 @@ def accumulate_body_body_contacts_per_body(
         b1 = shape_body[s1] if s1 >= 0 else -1
 
         if b0 != body_id and b1 != body_id:
-            i += _NUM_CONTACT_THREADS_PER_BODY
+            i += _NUM_RIGID_CONTACT_THREADS_PER_BODY
             continue
 
         cp0_local = rigid_contact_point0[contact_idx]
@@ -2970,12 +2977,12 @@ def accumulate_body_body_contacts_per_body(
             friction_c0 = (1.0 - avbd_alpha) * (C0_vec - contact_normal * C0_n)
 
         if C_n <= _SMALL_LENGTH_EPS and lam_n <= 0.0:
-            i += _NUM_CONTACT_THREADS_PER_BODY
+            i += _NUM_RIGID_CONTACT_THREADS_PER_BODY
             continue
 
         f_n_check = k * C_eff + lam_n
         if f_n_check <= 0.0 and lam_n <= 0.0:
-            i += _NUM_CONTACT_THREADS_PER_BODY
+            i += _NUM_RIGID_CONTACT_THREADS_PER_BODY
             continue
 
         contact_kd = contact_material_kd[contact_idx]
@@ -3015,20 +3022,28 @@ def accumulate_body_body_contacts_per_body(
             friction_c0,
         )
 
+        # For simultaneous soft-contact endpoints, 2*diag(H00,H11) majorizes
+        # the linearized pair energy. Keep the hard-contact AL update unchanged.
+        factor = 1.0
+        if hard_contacts == 0 and b0 >= 0 and b1 >= 0:
+            if body_inv_mass[b0] > 0.0 and body_inv_mass[b1] > 0.0:
+                if body_colors[b0] == body_colors[b1]:
+                    factor = 2.0
+
         if body_id == b0:
             force_acc += force_0
             torque_acc += torque_0
-            h_ll_acc += h_ll_0
-            h_al_acc += h_al_0
-            h_aa_acc += h_aa_0
+            h_ll_acc += factor * h_ll_0
+            h_al_acc += factor * h_al_0
+            h_aa_acc += factor * h_aa_0
         else:
             force_acc += force_1
             torque_acc += torque_1
-            h_ll_acc += h_ll_1
-            h_al_acc += h_al_1
-            h_aa_acc += h_aa_1
+            h_ll_acc += factor * h_ll_1
+            h_al_acc += factor * h_al_1
+            h_aa_acc += factor * h_aa_1
 
-        i += _NUM_CONTACT_THREADS_PER_BODY
+        i += _NUM_RIGID_CONTACT_THREADS_PER_BODY
 
     wp.atomic_add(body_forces, body_id, force_acc)
     wp.atomic_add(body_torques, body_id, torque_acc)
@@ -3419,6 +3434,111 @@ def accumulate_body_particle_contacts_per_body(
 
 
 @wp.kernel
+def accumulate_body_particle_contact_dense_single(
+    dt: float,
+    color_group: wp.array[wp.int32],
+    chunks_per_body: int,
+    dense_contact_threshold: int,
+    particle_q: wp.array[wp.vec3],
+    particle_q_prev: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    body_q_prev: wp.array[wp.transform],
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    shape_body: wp.array[int],
+    friction_epsilon: float,
+    body_particle_contact_penalty_k: wp.array[float],
+    body_particle_contact_material_kd: wp.array[float],
+    body_particle_contact_material_mu: wp.array[float],
+    body_particle_contact_count: wp.array[int],
+    soft_contact_indices: wp.array[wp.vec3i],
+    body_particle_contact_shape: wp.array[int],
+    body_particle_contact_body_pos: wp.array[wp.vec3],
+    body_particle_contact_body_vel: wp.array[wp.vec3],
+    body_particle_contact_normal: wp.array[wp.vec3],
+    soft_contact_barycentric: wp.array[wp.vec3],
+    shape_margin: wp.array[float],
+    body_particle_contact_buffer_pre_alloc: int,
+    body_particle_contact_counts: wp.array[wp.int32],
+    body_particle_contact_indices: wp.array[wp.int32],
+    partial_forces: wp.array[wp.vec3],
+    partial_torques: wp.array[wp.vec3],
+    partial_hessian_ll: wp.array[wp.mat33],
+    partial_hessian_al: wp.array[wp.mat33],
+    partial_hessian_aa: wp.array[wp.mat33],
+):
+    """Reduce all active contacts with one block per dense body."""
+    tid = wp.tid()
+    block_idx = tid // _BODY_PARTICLE_CONTACT_BLOCK_DIM
+    lane = tid % _BODY_PARTICLE_CONTACT_BLOCK_DIM
+    body_idx_in_group = block_idx
+    body_id = color_group[body_idx_in_group]
+
+    num_contacts = body_particle_contact_counts[body_id]
+    if num_contacts > body_particle_contact_buffer_pre_alloc:
+        num_contacts = body_particle_contact_buffer_pre_alloc
+    if num_contacts < dense_contact_threshold:
+        return
+    partial_idx = body_id
+
+    force = wp.vec3(0.0)
+    torque = wp.vec3(0.0)
+    h_ll = wp.mat33(0.0)
+    h_al = wp.mat33(0.0)
+    h_aa = wp.mat33(0.0)
+    for contact_offset in range(lane, num_contacts, _BODY_PARTICLE_CONTACT_BLOCK_DIM):
+        contact_idx = body_particle_contact_indices[body_id * body_particle_contact_buffer_pre_alloc + contact_offset]
+        if contact_idx < body_particle_contact_count[0]:
+            X_wb = body_q[body_id]
+            X_wb_prev = body_q_prev[body_id]
+            com_world = wp.transform_point(X_wb, body_com[body_id])
+            f, t, ll, al, aa = _evaluate_body_particle_contact_reaction(
+                dt,
+                contact_idx,
+                X_wb,
+                X_wb_prev,
+                com_world,
+                particle_q,
+                particle_q_prev,
+                particle_radius,
+                body_q_prev,
+                body_q,
+                body_qd,
+                body_com,
+                shape_body,
+                friction_epsilon,
+                body_particle_contact_penalty_k,
+                body_particle_contact_material_kd,
+                body_particle_contact_material_mu,
+                soft_contact_indices,
+                body_particle_contact_shape,
+                body_particle_contact_body_pos,
+                body_particle_contact_body_vel,
+                body_particle_contact_normal,
+                soft_contact_barycentric,
+                shape_margin,
+            )
+            force += f
+            torque += t
+            h_ll += ll
+            h_al += al
+            h_aa += aa
+
+    force_total = wp.tile_reduce(wp.add, wp.tile(force, preserve_type=True))[0]
+    torque_total = wp.tile_reduce(wp.add, wp.tile(torque, preserve_type=True))[0]
+    h_ll_total = wp.tile_reduce(wp.add, wp.tile(h_ll, preserve_type=True))[0]
+    h_al_total = wp.tile_reduce(wp.add, wp.tile(h_al, preserve_type=True))[0]
+    h_aa_total = wp.tile_reduce(wp.add, wp.tile(h_aa, preserve_type=True))[0]
+    if lane == 0:
+        wp.atomic_add(partial_forces, partial_idx, force_total)
+        wp.atomic_add(partial_torques, partial_idx, torque_total)
+        wp.atomic_add(partial_hessian_ll, partial_idx, h_ll_total)
+        wp.atomic_add(partial_hessian_al, partial_idx, h_al_total)
+        wp.atomic_add(partial_hessian_aa, partial_idx, h_aa_total)
+
+
+@wp.kernel
 def accumulate_body_particle_contact_dense_partials(
     dt: float,
     color_group: wp.array[wp.int32],
@@ -3465,6 +3585,10 @@ def accumulate_body_particle_contact_dense_partials(
     if num_contacts > body_particle_contact_buffer_pre_alloc:
         num_contacts = body_particle_contact_buffer_pre_alloc
     if num_contacts < dense_contact_threshold:
+        return
+    # Uniform per block: unused capacity has no contact contribution. The
+    # reduction below reads only live chunks, never these stale partials.
+    if chunk * _BODY_PARTICLE_CONTACT_BLOCK_DIM >= num_contacts:
         return
     partial_idx = body_id * chunks_per_body + chunk
 
@@ -3556,7 +3680,8 @@ def accumulate_body_particle_contact_dense_reduction(
     h_al = wp.mat33(0.0)
     h_aa = wp.mat33(0.0)
     chunk = lane
-    while chunk < chunks_per_body:
+    active_chunks = (num_contacts + _BODY_PARTICLE_CONTACT_BLOCK_DIM - 1) // _BODY_PARTICLE_CONTACT_BLOCK_DIM
+    while chunk < active_chunks:
         partial_idx = partial_offset + chunk
         force += partial_forces[partial_idx]
         torque += partial_torques[partial_idx]

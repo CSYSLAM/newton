@@ -40,6 +40,7 @@ from ..particle_multilevel import (
 )
 from . import particle_vbd_kernels, rigid_vbd_kernels, vbd_coupling_kernels
 from .particle_vbd_kernels import (
+    _PARTICLE_CONTACT_WORKER_COUNT,
     NUM_THREADS_PER_COLLISION_PRIMITIVE,
     TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
     # Solver kernels (particle VBD)
@@ -66,6 +67,7 @@ from .particle_vbd_kernels import (
 from .rigid_vbd_kernels import (
     _BODY_PARTICLE_CONTACT_BLOCK_DIM,
     _NUM_CONTACT_THREADS_PER_BODY,
+    _NUM_RIGID_CONTACT_THREADS_PER_BODY,
     RigidContactHistory,
     RigidForceElementAdjacencyInfo,
     _count_num_adjacent_joints,
@@ -73,6 +75,7 @@ from .rigid_vbd_kernels import (
     accumulate_body_body_contacts_per_body,
     accumulate_body_particle_contact_dense_partials,
     accumulate_body_particle_contact_dense_reduction,
+    accumulate_body_particle_contact_dense_single,
     accumulate_body_particle_contacts_per_body,
     build_body_body_contact_lists,
     build_body_particle_contact_lists,
@@ -281,6 +284,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_multilevel_max_clamp_fraction: float | None = None,
         particle_multilevel_fallback_iterations: int | None = None,
         particle_multilevel_checkpoints: tuple[int, ...] | None = None,
+        particle_enable_coupled_translation: bool = False,
         particle_topological_contact_filter_threshold: int = 2,
         particle_rest_shape_contact_exclusion_radius: float = 0.0,
         particle_external_vertex_contact_filtering_map: dict | None = None,
@@ -293,6 +297,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         rigid_avbd_contact_alpha: float | None = None,  # Body-body contact alpha; None selects default
         rigid_avbd_beta: float = 0.0,  # Penalty ramp rate per iteration (0 = fixed-k)
         rigid_avbd_linear_beta: float | None = None,  # Linear beta override; None uses rigid_avbd_beta
+        rigid_avbd_contact_beta: float | None = None,  # Body-body override; None uses linear beta
         rigid_avbd_angular_beta: float | None = None,  # Angular beta override; None uses rigid_avbd_beta
         rigid_avbd_gamma: float = 0.999,  # Per-step decay for penalty k and persisted hard-mode lambda
         # Rigid body - contacts
@@ -383,6 +388,9 @@ class SolverVBD(SolverBase, CouplingInterface):
                 elastic anisotropy but rebuilds a block-sparse operator for each correction. Models with movable
                 tetrahedral clusters retain the six-DOF mixed/tet operator regardless of this surface-only option.
             particle_multilevel_cluster_size: Target number of topologically adjacent particles per coarse cluster.
+            particle_enable_coupled_translation: Experimental full-space cloth/free-body translation PCG correction.
+                Requires explicit Galerkin multilevel, CUDA, movable particles, soft contacts and free solved bodies.
+                Body rotations retain the ordinary local solve. Disabled by default; not an articulation/tet solver.
             particle_multilevel_coarse_iterations: Number of fixed PCG iterations on the coarse graph.
             particle_multilevel_selective_polish_iterations: Additional fine sweeps restricted to unresolved surface
                 particles selected by the coarse residual probe. Zero disables selective polishing.
@@ -443,6 +451,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                 for production tuning.
             rigid_avbd_linear_beta: Linear beta override for linear constraints (meters).
                 ``None`` (default) uses ``rigid_avbd_beta``.
+            rigid_avbd_contact_beta: Experimental body-body penalty growth override [N/m^2].
+                ``None`` preserves the linear beta. Zero selects fixed material stiffness.
+                Does not change joint or body-particle penalties; this allows ramped
+                small-rigid contacts alongside fixed-stiffness deformable contacts.
             rigid_avbd_angular_beta: Angular beta override for angular constraints (radians).
                 ``None`` (default) uses ``rigid_avbd_beta``.
             rigid_avbd_gamma: Per-step decay factor for penalty k and persisted hard-mode lambda. Hard joint/contact
@@ -471,9 +483,10 @@ class SolverVBD(SolverBase, CouplingInterface):
             rigid_contact_stick_freeze_angular_eps: Angular threshold [rad] for the body-level
                 deadzone snap on dynamic-dynamic sticking contacts. Set to ``0.0`` to disable
                 angular snapping.
-            rigid_contact_k_start: Body-body and body-particle contact penalty seed for AVBD ramping. Used when
-                ``rigid_avbd_linear_beta`` (or ``rigid_avbd_beta`` fallback) is greater than zero.
-                When the linear beta is 0, k is fixed at the contact stiffness regardless of this value.
+            rigid_contact_k_start: Contact penalty seed [N/m] when AVBD ramping is enabled.
+                Body-body contacts use the resolved ``rigid_avbd_contact_beta``; body-particle contacts
+                use ``rigid_avbd_linear_beta`` (or ``rigid_avbd_beta`` fallback). A zero growth rate
+                fixes the corresponding penalty at material stiffness, ignoring this seed.
             rigid_body_contact_buffer_size: Max body-body contacts per rigid body for per-body contact lists.
             rigid_body_particle_contact_buffer_size: Max body-particle soft contacts tracked per rigid
                 body, covering both particle-vs-surface and full-surface edge/face contacts.
@@ -534,6 +547,8 @@ class SolverVBD(SolverBase, CouplingInterface):
         gather_head_size = model.particle_count if self._particle_contact_gather_supported else 0
         self._particle_contact_head = wp.full(gather_head_size, -1, dtype=wp.int32, device=self.device)
         self._particle_contact_next = wp.empty(0, dtype=wp.int32, device=self.device)
+        self.particle_enable_coupled_translation = bool(particle_enable_coupled_translation)
+        self._coupled_fusion = None
         self._particle_contact_adjacency_initialized = False
         particle_deterministic_max_records = 0
         coupling_deterministic_max_records = 0
@@ -729,6 +744,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             rigid_avbd_gamma,
             rigid_avbd_joint_alpha,
             rigid_avbd_contact_alpha,
+            rigid_avbd_contact_beta,
             rigid_contact_hard,
             rigid_contact_history,
             rigid_contact_stick_motion_eps,
@@ -751,6 +767,30 @@ class SolverVBD(SolverBase, CouplingInterface):
         self._update_rigid_history = True
 
         self._coupling_has_rigid_avbd_state = not self.integrate_with_external_rigid_solver and model.body_count > 0
+        if self.particle_enable_coupled_translation:
+            from ..coupled_free_body.coupled_translation import CoupledTranslationPCG  # noqa: PLC0415
+            from ..coupled_free_body.rigid_fusion import RigidFusionAdapter  # noqa: PLC0415
+            from ..coupled_free_body.rigid_ritz import RigidRitz  # noqa: PLC0415
+
+            correction = self.particle_multilevel
+            if (
+                correction is None
+                or correction.operator != "galerkin"
+                or model.tet_count
+                or _get_pneumatic_counts(model)[0]
+                or self.integrate_with_external_rigid_solver
+                or not model.body_count
+                or not model.tri_count
+                or correction.active_particle_count != model.particle_count
+            ):
+                raise ValueError(
+                    "Coupled translation requires CUDA Galerkin cloth with movable particles and free bodies"
+                )
+            self._coupled_fusion = RigidFusionAdapter(wp.launch, model)
+            ritz = RigidRitz(model, correction, particle_multilevel_cluster_size)
+            correction._coupled_solver = CoupledTranslationPCG(self, correction, ritz, self._coupled_fusion)
+            correction.coarse_use_split_pcg = True
+            correction._split_coarse_pcg = correction._coupled_solver
 
     def _init_particle_system(
         self,
@@ -916,6 +956,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 max_radius_fraction=particle_multilevel_max_radius_fraction,
                 minimum_residual_reduction=minimum_residual_reduction,
                 max_clamp_fraction=max_clamp_fraction,
+                full_space=self.particle_enable_coupled_translation,
             )
             if multilevel_mode == "auto":
                 self.particle_multilevel_auto_rejection_reason = _automatic_rejection_reason(model, correction)
@@ -1515,6 +1556,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         rigid_avbd_gamma: float,
         rigid_avbd_joint_alpha: float | None,
         rigid_avbd_contact_alpha: float | None,
+        rigid_avbd_contact_beta: float | None,
         rigid_contact_hard: bool,
         rigid_contact_history: bool,
         rigid_contact_stick_motion_eps: float,
@@ -1571,6 +1613,11 @@ class SolverVBD(SolverBase, CouplingInterface):
         if rigid_joint_angular_ke < 0:
             raise ValueError(f"rigid_joint_angular_ke must be >= 0, got {rigid_joint_angular_ke}")
         self.rigid_avbd_gamma = rigid_avbd_gamma
+        contact_beta = rigid_avbd_linear_beta if rigid_avbd_contact_beta is None else rigid_avbd_contact_beta
+        if not np.isfinite(contact_beta) or contact_beta < 0:
+            raise ValueError(f"rigid_avbd_contact_beta must be finite and >= 0, got {contact_beta}")
+        self.rigid_contact_beta = float(contact_beta)
+        self.rigid_body_contact_k_start_value = -1.0 if contact_beta == 0.0 else float(rigid_contact_k_start)
         self.rigid_contact_k_start_value = -1.0 if rigid_avbd_linear_beta == 0.0 else float(rigid_contact_k_start)
         self.rigid_joint_linear_k_start = rigid_joint_linear_k_start if rigid_avbd_linear_beta > 0.0 else None
         self.rigid_joint_angular_k_start = rigid_joint_angular_k_start if rigid_avbd_angular_beta > 0.0 else None
@@ -2779,6 +2826,8 @@ class SolverVBD(SolverBase, CouplingInterface):
             RuntimeError: If required rigid contact-matching data is unavailable, or contact-history storage would
                 need to be allocated or grown during CUDA graph capture.
         """
+        if self._coupled_fusion is not None and contacts is None:
+            raise ValueError("Coupled translation requires a Contacts buffer (an empty active contact set is valid)")
         self._apply_module_options()
         update_rigid = self._update_rigid_history
         self._update_rigid_history = True
@@ -3319,7 +3368,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                                 model.shape_world,
                                 model.shape_body,
                                 model.body_world,
-                                self.rigid_contact_k_start_value,
+                                self.rigid_body_contact_k_start_value,
                             ],
                             outputs=[
                                 contacts.rigid_contact_point0,
@@ -3344,7 +3393,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                                 model.shape_material_ke,
                                 model.shape_material_kd,
                                 model.shape_material_mu,
-                                self.rigid_contact_k_start_value,
+                                self.rigid_body_contact_k_start_value,
                             ],
                             outputs=[
                                 self.body_body_contact_penalty_k,
@@ -3391,7 +3440,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         contact_lambda_decay,
                         self.rigid_avbd_gamma,
                         self.body_body_contact_material_ke,
-                        self.rigid_contact_k_start_value,
+                        self.rigid_body_contact_k_start_value,
                     ],
                     outputs=[
                         self.body_body_contact_penalty_k,
@@ -3802,7 +3851,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 else:
                     wp.launch(
                         kernel=accumulate_particle_body_contact_force_and_hessian,
-                        dim=contacts.soft_contact_max,
+                        dim=min(contacts.soft_contact_max, _PARTICLE_CONTACT_WORKER_COUNT),
                         inputs=[
                             dt,
                             color,
@@ -4138,7 +4187,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         if contacts is not None and contacts.soft_contact_max > 0:
             wp.launch(
                 kernel=accumulate_particle_body_contact_force_and_hessian,
-                dim=contacts.soft_contact_max,
+                dim=min(contacts.soft_contact_max, _PARTICLE_CONTACT_WORKER_COUNT),
                 inputs=[
                     dt,
                     -1,
@@ -4261,19 +4310,25 @@ class SolverVBD(SolverBase, CouplingInterface):
         Accumulates contact and joint forces/hessians, solves 6x6 rigid body systems per color,
         and updates AVBD penalty parameters (dual update).
         """
+        launch = self._coupled_fusion or wp.launch
         model = self.model
 
         # Body-particle soft contacts still need penalty updates when VBD skips rigid solves:
         # external rigid mode uses state_out.body_q, while static-shape contacts use _empty_body_q.
         skip_rigid_solve = self.integrate_with_external_rigid_solver or model.body_count == 0
         if skip_rigid_solve:
-            if model.particle_count > 0 and contacts is not None and contacts.soft_contact_max > 0:
+            if (
+                self.rigid_linear_beta > 0.0
+                and model.particle_count > 0
+                and contacts is not None
+                and contacts.soft_contact_max > 0
+            ):
                 body_q = state_out.body_q if self.integrate_with_external_rigid_solver else state_in.body_q
                 if body_q is None:
                     body_q = self._empty_body_q
 
                 soft_contact_launch_dim = self._active_soft_contact_worker_dim(contacts.soft_contact_max)
-                wp.launch(
+                launch(
                     kernel=update_duals_body_particle_contacts,
                     dim=soft_contact_launch_dim,
                     block_dim=_SOFT_CONTACT_BLOCK_DIM,
@@ -4299,12 +4354,13 @@ class SolverVBD(SolverBase, CouplingInterface):
                 )
             return
 
-        # Zero out forces and hessians
-        self.body_torques.zero_()
-        self.body_forces.zero_()
-        self.body_hessian_aa.zero_()
-        self.body_hessian_al.zero_()
-        self.body_hessian_ll.zero_()
+        # The fused kernel overwrites all five accumulators for each solved body.
+        if self._coupled_fusion is None:
+            self.body_torques.zero_()
+            self.body_forces.zero_()
+            self.body_hessian_aa.zero_()
+            self.body_hessian_al.zero_()
+            self.body_hessian_ll.zero_()
 
         body_color_groups = model.body_color_groups
 
@@ -4321,7 +4377,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 dense_contact_threshold = (
                     _BODY_PARTICLE_DENSE_CONTACT_THRESHOLD if use_dense_body_particle_contacts else 0
                 )
-                wp.launch(
+                launch(
                     kernel=accumulate_body_particle_contacts_per_body,
                     dim=color_group.size * _NUM_CONTACT_THREADS_PER_BODY,
                     inputs=[
@@ -4365,9 +4421,16 @@ class SolverVBD(SolverBase, CouplingInterface):
                 )
                 if use_dense_body_particle_contacts:
                     chunks_per_body = self._body_particle_dense_chunks_per_body
-                    wp.launch(
-                        kernel=accumulate_body_particle_contact_dense_partials,
-                        dim=color_group.size * chunks_per_body * _BODY_PARTICLE_CONTACT_BLOCK_DIM,
+                    use_single_block = self.body_particle_contact_buffer_pre_alloc <= 4096
+                    launch(
+                        kernel=(
+                            accumulate_body_particle_contact_dense_single
+                            if use_single_block
+                            else accumulate_body_particle_contact_dense_partials
+                        ),
+                        dim=color_group.size
+                        * (1 if use_single_block else chunks_per_body)
+                        * _BODY_PARTICLE_CONTACT_BLOCK_DIM,
                         block_dim=_BODY_PARTICLE_CONTACT_BLOCK_DIM,
                         inputs=[
                             dt,
@@ -4399,45 +4462,55 @@ class SolverVBD(SolverBase, CouplingInterface):
                             self.body_particle_contact_indices,
                         ],
                         outputs=[
-                            self._body_particle_partial_forces,
-                            self._body_particle_partial_torques,
-                            self._body_particle_partial_hessian_ll,
-                            self._body_particle_partial_hessian_al,
-                            self._body_particle_partial_hessian_aa,
-                        ],
-                        device=self.device,
-                    )
-                    wp.launch(
-                        kernel=accumulate_body_particle_contact_dense_reduction,
-                        dim=color_group.size * _BODY_PARTICLE_CONTACT_BLOCK_DIM,
-                        block_dim=_BODY_PARTICLE_CONTACT_BLOCK_DIM,
-                        inputs=[
-                            color_group,
-                            chunks_per_body,
-                            dense_contact_threshold,
-                            self.body_particle_contact_buffer_pre_alloc,
-                            self.body_particle_contact_counts,
-                            self._body_particle_partial_forces,
-                            self._body_particle_partial_torques,
-                            self._body_particle_partial_hessian_ll,
-                            self._body_particle_partial_hessian_al,
-                            self._body_particle_partial_hessian_aa,
-                        ],
-                        outputs=[
                             self.body_forces,
                             self.body_torques,
                             self.body_hessian_ll,
                             self.body_hessian_al,
                             self.body_hessian_aa,
+                        ]
+                        if use_single_block
+                        else [
+                            self._body_particle_partial_forces,
+                            self._body_particle_partial_torques,
+                            self._body_particle_partial_hessian_ll,
+                            self._body_particle_partial_hessian_al,
+                            self._body_particle_partial_hessian_aa,
                         ],
                         device=self.device,
                     )
+                    if not use_single_block:
+                        launch(
+                            kernel=accumulate_body_particle_contact_dense_reduction,
+                            dim=color_group.size * _BODY_PARTICLE_CONTACT_BLOCK_DIM,
+                            block_dim=_BODY_PARTICLE_CONTACT_BLOCK_DIM,
+                            inputs=[
+                                color_group,
+                                chunks_per_body,
+                                dense_contact_threshold,
+                                self.body_particle_contact_buffer_pre_alloc,
+                                self.body_particle_contact_counts,
+                                self._body_particle_partial_forces,
+                                self._body_particle_partial_torques,
+                                self._body_particle_partial_hessian_ll,
+                                self._body_particle_partial_hessian_al,
+                                self._body_particle_partial_hessian_aa,
+                            ],
+                            outputs=[
+                                self.body_forces,
+                                self.body_torques,
+                                self.body_hessian_ll,
+                                self.body_hessian_al,
+                                self.body_hessian_aa,
+                            ],
+                            device=self.device,
+                        )
 
             # Accumulate body-body (rigid-rigid) contact forces and Hessians on bodies (per-body, per-color)
             if contacts is not None:
-                wp.launch(
+                launch(
                     kernel=accumulate_body_body_contacts_per_body,
-                    dim=color_group.size * _NUM_CONTACT_THREADS_PER_BODY,
+                    dim=color_group.size * _NUM_RIGID_CONTACT_THREADS_PER_BODY,
+                    block_dim=_NUM_RIGID_CONTACT_THREADS_PER_BODY,
                     inputs=[
                         dt,
                         color_group,
@@ -4445,6 +4518,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         state_in.body_q,
                         model.body_com,
                         self.body_inv_mass_effective,
+                        model.body_colors,
                         self.friction_epsilon,
                         self.body_body_contact_penalty_k,
                         self.body_body_contact_material_ke,
@@ -4479,7 +4553,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     device=self.device,
                 )
 
-            wp.launch(
+            launch(
                 kernel=solve_rigid_body,
                 inputs=[
                     dt,
@@ -4538,7 +4612,7 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         if contacts is not None:
             contact_launch_dim = contacts.rigid_contact_max
-            wp.launch(
+            launch(
                 kernel=update_duals_body_body_contacts,
                 dim=contact_launch_dim,
                 inputs=[
@@ -4562,7 +4636,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self.rigid_contact_hard,
                     self.body_inv_mass_effective,
                     self.body_body_contact_material_ke,
-                    self.rigid_linear_beta,
+                    self.rigid_contact_beta,
                     self.body_body_contact_penalty_k,  # input/output
                     self.body_body_contact_lambda,  # input/output
                 ],
@@ -4572,9 +4646,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                 device=self.device,
             )
 
-            if model.particle_count > 0 and contacts.soft_contact_max > 0:
+            # Fixed-k contacts are initialized at their material ceiling.
+            if self.rigid_linear_beta > 0.0 and model.particle_count > 0 and contacts.soft_contact_max > 0:
                 soft_contact_launch_dim = self._active_soft_contact_worker_dim(contacts.soft_contact_max)
-                wp.launch(
+                launch(
                     kernel=update_duals_body_particle_contacts,
                     dim=soft_contact_launch_dim,
                     block_dim=_SOFT_CONTACT_BLOCK_DIM,
@@ -4600,7 +4675,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 )
 
         if model.joint_count > 0:
-            wp.launch(
+            launch(
                 kernel=update_duals_joint,
                 dim=model.joint_count,
                 inputs=[

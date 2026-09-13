@@ -14,6 +14,7 @@ import warp as wp
 
 from ..enums import JointType
 from ..model import Model
+from .compact_lm import CompactLMSolve
 from .ik_common import IKJacobianType, compute_costs, eval_fk_batched, fk_accum
 from .ik_objectives import IKObjective
 
@@ -148,6 +149,8 @@ class IKOptimizerLM:
             integrated joints (free/ball/distance) must be masked
             all-or-nothing, which the constructor enforces. The mask array must
             not be modified after construction.
+        compact_dof_mask: Eliminate immutable masked-zero columns in the CUDA LM linear solve.
+        parallel_objectives: Evaluate objectives on separate CUDA streams instead of the caller's stream.
     """
 
     TILE_N_DOFS = None
@@ -188,6 +191,8 @@ class IKOptimizerLM:
         *,
         problem_idx: wp.array[wp.int32] | None = None,
         joint_dof_mask: wp.array[wp.bool] | None = None,
+        compact_dof_mask: bool = False,
+        parallel_objectives: bool = True,
     ) -> None:
         self.model = model
         self.device = model.device
@@ -209,6 +214,11 @@ class IKOptimizerLM:
         if joint_dof_mask is not None:
             _validate_joint_dof_mask(model, joint_dof_mask)
         self.joint_dof_mask = joint_dof_mask
+        self.parallel_objectives = parallel_objectives
+        self._compact_solve = None
+        self._compact_dof_mask = compact_dof_mask
+        if compact_dof_mask and (not self.device.is_cuda or joint_dof_mask is None):
+            raise ValueError("compact_dof_mask requires CUDA and an immutable joint_dof_mask")
 
         if self.TILE_N_DOFS is not None:
             assert self.n_dofs == self.TILE_N_DOFS
@@ -218,6 +228,8 @@ class IKOptimizerLM:
         grad = jacobian_mode in (IKJacobianType.AUTODIFF, IKJacobianType.MIXED)
 
         self._alloc_solver_buffers(grad)
+        if self._compact_dof_mask:
+            self._compact_solve = CompactLMSolve(self)
         self.problem_idx = problem_idx if problem_idx is not None else self.problem_idx_identity
         self.tape = wp.Tape() if grad else None
 
@@ -254,7 +266,7 @@ class IKOptimizerLM:
 
     def _parallel_for_objectives(self, fn: Callable[..., None], *extra: Any) -> None:
         """Run <fn(obj, offset, *extra)> across objectives on parallel CUDA streams."""
-        if self.device.is_cuda:
+        if self.device.is_cuda and self.parallel_objectives:
             main = wp.get_stream(self.device)
             init_evt = main.record_event()
             for obj, offset, obj_stream, sync_event in zip(
@@ -649,9 +661,8 @@ class IKOptimizerLM:
         wp.copy(residuals_3d_flat, residuals_flat)
 
         self.dq_dof.zero_()
-        self._solve_tiled(
-            ctx_curr.jacobian_out, self.residuals_3d, self.lambda_values, self.dq_dof, self.pred_reduction
-        )
+        solve = self._compact_solve or self._solve_tiled
+        solve(ctx_curr.jacobian_out, self.residuals_3d, self.lambda_values, self.dq_dof, self.pred_reduction)
 
         self._integrate_dq(
             joint_q,

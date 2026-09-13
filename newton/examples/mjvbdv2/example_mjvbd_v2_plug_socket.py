@@ -33,7 +33,7 @@ import newton.ik as ik
 from newton.solvers import SolverMJVBDV2
 
 FPS = 60
-DEFAULT_NUM_FRAMES = 660
+DEFAULT_NUM_FRAMES = 780
 DEFAULT_SUBSTEPS = 8
 DEFAULT_VBD_ITERATIONS = 16
 DEFAULT_IK_ITERATIONS = 32
@@ -58,7 +58,11 @@ HAND_CARRY_CORRECTION = wp.vec3(-0.00055, 0.00206, 0.00009)
 HAND_STANDBY_POSITION = wp.vec3(0.18, -0.10, 1.10)
 HAND_TOP_OFFSET = wp.vec3(0.0, 0.0, 0.14)
 HAND_TARGET_ROTATION = wp.quat(-0.000413, 0.952521, -0.304302, -0.010154)
-HAND_INSERT_ROTATION = wp.quat(-0.012441, 0.974554, -0.220568, -0.037934)
+# Compensate the carried plug's pitch before advancing along the socket axis.
+# This changes only the wrist target; the plug remains contact-driven.
+HAND_INSERT_ROTATION = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.045) * wp.quat(
+    -0.012441, 0.974554, -0.220568, -0.037934
+)
 
 TABLE_POSITION = wp.vec3(0.05, 0.13, 0.835)
 TABLE_HALF_EXTENTS = wp.vec3(0.28, 0.18, 0.01)
@@ -76,7 +80,7 @@ GRASP_SECONDS = 0.8
 POST_GRASP_HOLD_SECONDS = 0.4
 RAISE_SECONDS = 1.2
 ALIGN_SECONDS = 0.6
-INSERT_SECONDS = 1.5
+INSERT_SECONDS = 2.5
 INSERT_SETTLE_SECONDS = 0.3
 RELEASE_SECONDS = 0.8
 RETRACT_SECONDS = 1.2
