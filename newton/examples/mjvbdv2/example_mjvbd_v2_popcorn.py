@@ -441,7 +441,7 @@ class _ContinuousIK(ik.IKSolver):
             ik.IKObjectivePosition(body, wp.vec3(), target, weight=0.15)
             for body, target in zip(elbows, self._elbow_targets, strict=True)
         ]
-        super().__init__(model, objectives=[*objectives, *continuity], **kwargs)
+        super().__init__(model, objectives=[*objectives, *continuity], enable_cuda_fast_path=True, **kwargs)
 
     def step(self, joint_q_in, joint_q_out, iterations=50, step_size=1.0):
         # Freeze the reference for each IK block, not each Newton iteration.
@@ -517,6 +517,7 @@ class Example:
             contact_mode="full",
             vbd_preset="surface-fast",
             vbd_options={
+                "enable_cuda_fast_path": True,
                 "iterations": args.vbd_iterations,
                 "rigid_body_contact_buffer_size": 2048,
                 "rigid_body_particle_contact_buffer_size": 4096,
@@ -544,6 +545,7 @@ class Example:
                 "particle_multilevel_checkpoints": tuple(i for i in (2, 4) if i <= args.vbd_iterations),
             },
             collision_options={
+                "enable_cuda_fast_path": True,
                 "broad_phase": "sap",
                 "contact_matching": "latest",
                 "rigid_contact_max": 32768,

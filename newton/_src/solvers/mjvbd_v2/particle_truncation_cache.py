@@ -340,25 +340,26 @@ class ParticleTruncationCache:
         )
         solver.truncation_ts.fill_(1.0)
 
-    def apply(self, solver, particle_q_out, selected_particles):
+    def apply(self, solver, particle_q_out, selected_particles, *, empty_contact_set=False):
         """Apply ordinary DAT while resetting consumed factors for the next color."""
-        wp.launch(
-            self._truncate,
-            dim=solver.particle_self_contact_evaluation_kernel_launch_size,
-            inputs=[
-                solver.pos_prev_collision_detection,
-                solver.particle_displacements,
-                solver.model.tri_indices,
-                solver.model.edge_indices,
-                solver.trimesh_collision_info,
-                solver.trimesh_collision_detector.edge_edge_parallel_epsilon,
-                solver.particle_conservative_bound_relaxation,
-                self._active,
-                self.geometry,
-            ],
-            outputs=[solver.truncation_ts],
-            device=solver.device,
-        )
+        if not empty_contact_set:
+            wp.launch(
+                self._truncate,
+                dim=solver.particle_self_contact_evaluation_kernel_launch_size,
+                inputs=[
+                    solver.pos_prev_collision_detection,
+                    solver.particle_displacements,
+                    solver.model.tri_indices,
+                    solver.model.edge_indices,
+                    solver.trimesh_collision_info,
+                    solver.trimesh_collision_detector.edge_edge_parallel_epsilon,
+                    solver.particle_conservative_bound_relaxation,
+                    self._active,
+                    self.geometry,
+                ],
+                outputs=[solver.truncation_ts],
+                device=solver.device,
+            )
         ids = solver.model.particle_color_groups[0] if selected_particles is None else selected_particles
         wp.launch(
             _finish_truncation,

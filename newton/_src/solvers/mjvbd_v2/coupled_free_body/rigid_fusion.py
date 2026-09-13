@@ -799,7 +799,7 @@ def fused_rigid_color(soft: SoftInputs, rigid: RigidInputs, solve: SolveInputs):
 class RigidFusionAdapter:
     """Intercept one complete mixed-contact color solve using a frozen pose view."""
 
-    def __init__(self, original, model):
+    def __init__(self, original, model, *, cooperative=False):
         solved = {int(body) for group in model.body_color_groups for body in group.numpy()}
         if model.joint_count:
             for kind, parent, child in zip(
@@ -807,6 +807,7 @@ class RigidFusionAdapter:
             ):
                 if int(kind) != int(rk.JointType.FREE) and (int(parent) in solved or int(child) in solved):
                     raise ValueError("The fused prototype requires free-body solve groups")
+        self.cooperative = bool(cooperative and model.device.is_cuda and not model.requires_grad)
         self.original = original
         self.inputs = {}
         self.frozen_q = wp.clone(model.body_q)
@@ -845,10 +846,17 @@ class RigidFusionAdapter:
                     setattr(record, field, selected)
                 structures.append(record)
             self.last_structures = structures
+            kernel = fused_rigid_color
+            width = 32
+            if self.cooperative:
+                from ..fast_kernels import solve_rigid_64, solve_rigid_128  # noqa: PLC0415
+
+                width = 128 if values[1].size < self.frozen_q.device.sm_count else 64
+                kernel = solve_rigid_128 if width == 128 else solve_rigid_64
             return self.original(
-                fused_rigid_color,
-                dim=values[1].size * 32,
-                block_dim=32,
+                kernel,
+                dim=values[1].size * width,
+                block_dim=width,
                 inputs=structures,
                 device=kwargs["device"],
             )

@@ -245,6 +245,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         model: Model,
         *,
         # Common parameters
+        enable_cuda_fast_path: bool = False,
         iterations: int = 10,
         friction_epsilon: float = 1e-2,
         integrate_with_external_rigid_solver: bool = False,
@@ -325,6 +326,10 @@ class SolverVBD(SolverBase, CouplingInterface):
 
             Common parameters:
 
+            enable_cuda_fast_path: Experimental instance-local CUDA scheduling for non-differentiable,
+                non-deterministic full VBD. Preserves contact laws and iteration budgets. Eligible surface
+                tiles use certified empty-self-contact batching; unsupported cases use ordinary sweeps.
+                Recreate captured graphs after model-property changes, as for other solver caches.
             iterations: Number of VBD iterations per step.
             friction_epsilon: Threshold to smooth small relative velocities in friction computation (used for both particle
                 and rigid body contacts).
@@ -761,6 +766,21 @@ class SolverVBD(SolverBase, CouplingInterface):
             rigid_joint_angular_kd,
         )
 
+        self.enable_cuda_fast_path = bool(
+            enable_cuda_fast_path
+            and self.device.is_cuda
+            and not model.requires_grad
+            and effective_deterministic == wp.DeterministicMode.NOT_GUARANTEED
+        )
+        self._cuda_surface = None
+        self._self_contact_certificate = None
+        if self.enable_cuda_fast_path:
+            from ..fast_path import SelfContactCertificate, SurfaceFastPath  # noqa: PLC0415
+
+            self._cuda_surface = SurfaceFastPath(self)
+            if self.particle_enable_self_contact:
+                self._self_contact_certificate = SelfContactCertificate(self)
+
         # Controls whether the next step() refreshes contact state derived from
         # the Contacts buffer or reuses the current rigid/body-particle contact state.
         # Defaults to True and is reset to True when consumed by step().
@@ -786,7 +806,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 raise ValueError(
                     "Coupled translation requires CUDA Galerkin cloth with movable particles and free bodies"
                 )
-            self._coupled_fusion = RigidFusionAdapter(wp.launch, model)
+            self._coupled_fusion = RigidFusionAdapter(wp.launch, model, cooperative=self.enable_cuda_fast_path)
             ritz = RigidRitz(model, correction, particle_multilevel_cluster_size)
             correction._coupled_solver = CoupledTranslationPCG(self, correction, ritz, self._coupled_fusion)
             correction.coarse_use_split_pcg = True
@@ -1830,6 +1850,12 @@ class SolverVBD(SolverBase, CouplingInterface):
 
     @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
+        if self._self_contact_certificate is not None:
+            self._self_contact_certificate.invalidate()
+        if self._cuda_surface is not None and flags & ModelFlags.MODEL_PROPERTIES:
+            from ..fast_path import SurfaceFastPath  # noqa: PLC0415
+
+            self._cuda_surface = SurfaceFastPath(self)
         self._apply_module_options()
         if flags & (ModelFlags.BODY_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES):
             self._refresh_kinematic_state()
@@ -2847,9 +2873,12 @@ class SolverVBD(SolverBase, CouplingInterface):
         self._initialize_rigid_bodies(state_in, control, contacts, dt, update_rigid)
         self._initialize_particles(state_in, state_out, dt)
 
-        for iter_num in range(self.iterations):
-            self._solve_rigid_body_iteration(state_in, state_out, control, contacts, dt)
-            self._solve_particle_iteration(state_in, state_out, control, contacts, dt, iter_num)
+        if self._cuda_surface is not None:
+            self._cuda_surface.iterations(self, state_in, state_out, control, contacts, dt)
+        else:
+            for iter_num in range(self.iterations):
+                self._solve_rigid_body_iteration(state_in, state_out, control, contacts, dt)
+                self._solve_particle_iteration(state_in, state_out, control, contacts, dt, iter_num)
 
         correction = self.particle_multilevel
         if correction is not None:
@@ -3114,13 +3143,13 @@ class SolverVBD(SolverBase, CouplingInterface):
             device=self.device,
         )
 
-    def _penetration_free_truncation(self, particle_q_out=None):
+    def _penetration_free_truncation(self, particle_q_out=None, *, empty_contact_set=False):
         """
         Modify displacements_in in-place, also modify particle_q if its not None
 
         """
         if self._particle_truncation_cache is not None:
-            self._particle_truncation_cache.apply(self, particle_q_out, None)
+            self._particle_truncation_cache.apply(self, particle_q_out, None, empty_contact_set=empty_contact_set)
             return
         if not self.particle_enable_self_contact:
             self.truncation_ts.fill_(1.0)
@@ -3751,6 +3780,9 @@ class SolverVBD(SolverBase, CouplingInterface):
         contacts: Contacts | None,
         dt: float,
         iter_num: int,
+        *,
+        _fused: bool = False,
+        _skip_detection: bool = False,
     ):
         """Solve one VBD iteration for particles."""
         model = self.model
@@ -3780,12 +3812,20 @@ class SolverVBD(SolverBase, CouplingInterface):
             self.particle_chebyshev_previous.assign(state_in.particle_q)
 
         # Update collision detection if needed (penetration-free mode only)
-        if self.particle_enable_self_contact:
+        if self.particle_enable_self_contact and not _skip_detection:
             if (self.particle_collision_detection_interval == 0 and iter_num == 0) or (
                 self.particle_collision_detection_interval >= 1
                 and iter_num % self.particle_collision_detection_interval == 0
             ):
                 self._collision_detection_penetration_free(state_in)
+
+        if _fused:
+            from ..fast_kernels import solve_surface_fused  # noqa: PLC0415
+            from ..fast_path import surface_contact_inputs  # noqa: PLC0415
+
+            fast_inputs = surface_contact_inputs(
+                self, state_in, contacts, dt, body_q_for_particles, body_q_prev_for_particles, body_qd_for_particles
+            )
 
         # Zero out forces and hessians
         self.particle_forces.zero_()
@@ -3815,7 +3855,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         state_in.particle_q,
                         self.model.particle_color_groups[color],
                     )
-            if contacts is not None and contacts.soft_contact_max > 0:
+            if not _fused and contacts is not None and contacts.soft_contact_max > 0:
                 if use_particle_contact_gather:
                     wp.launch(
                         kernel=gather_particle_body_contact_force_and_hessian,
@@ -3905,7 +3945,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     device=self.device,
                 )
 
-            if self.particle_enable_self_contact:
+            if self.particle_enable_self_contact and not _fused:
                 wp.launch(
                     kernel=accumulate_self_contact_force_and_hessian,
                     dim=self.particle_self_contact_evaluation_kernel_launch_size,
@@ -3937,7 +3977,9 @@ class SolverVBD(SolverBase, CouplingInterface):
                 surface_group = self.surface_particle_color_groups[color]
                 if surface_group.size:
                     wp.launch(
-                        kernel=self._surface_cached_kernel or solve_surface_elasticity_tile,
+                        kernel=solve_surface_fused
+                        if _fused
+                        else self._surface_cached_kernel or solve_surface_elasticity_tile,
                         dim=surface_group.size * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
                         block_dim=TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
                         inputs=[
@@ -3963,8 +4005,22 @@ class SolverVBD(SolverBase, CouplingInterface):
                             self.surface_tile_skip_material_checks,
                             self.particle_surface_relaxation if 0 < iter_num < self.iterations - 3 else 1.0,
                             *([self.surface_anchor_angles, None] if self.surface_anchor_angles is not None else []),
+                            *(
+                                [
+                                    self.particle_displacements,
+                                    fast_inputs,
+                                    self._cuda_surface.counts,
+                                    self._cuda_surface.entries,
+                                    self.pos_prev_collision_detection,
+                                    self.particle_self_contact_margin
+                                    * self.particle_conservative_bound_relaxation
+                                    * 0.5,
+                                ]
+                                if _fused
+                                else []
+                            ),
                         ],
-                        outputs=[self.particle_displacements],
+                        outputs=[] if _fused else [self.particle_displacements],
                         device=self.device,
                     )
                 volumetric_group = self.volumetric_particle_color_groups[color]
@@ -4033,7 +4089,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     ],
                     device=self.device,
                 )
-            self._penetration_free_truncation(state_in.particle_q)
+            self._penetration_free_truncation(state_in.particle_q, empty_contact_set=_fused)
             if (
                 self._pneumatic_incremental_volume_enabled
                 and not self._pneumatic_single_cavity_force_fusion_enabled
@@ -4100,7 +4156,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     device=self.device,
                 )
             if chebyshev_iteration > 0:
-                self._penetration_free_truncation(state_in.particle_q)
+                self._penetration_free_truncation(state_in.particle_q, empty_contact_set=_fused)
         if chebyshev_history_active:
             self.particle_chebyshev_older.assign(self.particle_chebyshev_previous)
 
@@ -4932,6 +4988,14 @@ class SolverVBD(SolverBase, CouplingInterface):
             )
 
     def _collision_detection_penetration_free(self, current_state: State):
+        if self._self_contact_certificate is not None:
+            self._self_contact_certificate.detect(self, current_state)
+        else:
+            self._collision_detection_penetration_free_uncached(current_state)
+        if self._cuda_surface is not None:
+            self._cuda_surface.after_detection(self)
+
+    def _collision_detection_penetration_free_uncached(self, current_state: State):
         # particle_displacements is based on pos_prev_collision_detection
         # so reset them every time we do collision detection
         self.pos_prev_collision_detection.assign(current_state.particle_q)
@@ -4963,3 +5027,5 @@ class SolverVBD(SolverBase, CouplingInterface):
         """
         if self.particle_enable_self_contact:
             self.trimesh_collision_detector.rebuild(state.particle_q)
+            if self._self_contact_certificate is not None:
+                self._self_contact_certificate.invalidate()

@@ -13,15 +13,25 @@ PCG_BLOCK_DIM = 256
 
 
 @cache
-def _build_kernels(width: int):
+def _build_kernels(width: int, inverse_factor: bool = False):
     # Closure-specialized kernels prevent one solver's basis size from changing
     # another solver's captured graph or scratch-buffer layout.
     WIDTH = wp.constant(width)
     Vector = wp.types.vector(length=width, dtype=wp.float32)
 
+    @wp.func
+    def identity_value(index: int):
+        return float(index // WIDTH == index % WIDTH)
+
     @wp.kernel(enable_backward=False, module="unique")
     def factor_preconditioner(matrix: wp.array2d[float], factor: wp.array2d[float]):
-        wp.tile_store(factor, wp.tile_cholesky(wp.tile_load(matrix, shape=(WIDTH, WIDTH))))
+        factor_tile = wp.tile_cholesky(wp.tile_load(matrix, shape=(WIDTH, WIDTH)))
+        if wp.static(inverse_factor):
+            indices = wp.tile_arange(0, wp.static(WIDTH * WIDTH), dtype=int)
+            identity = wp.tile_reshape(wp.tile_map(identity_value, indices), shape=(WIDTH, WIDTH))
+            wp.tile_store(factor, wp.tile_lower_solve(factor_tile, identity))
+        else:
+            wp.tile_store(factor, factor_tile)
 
     @wp.kernel(enable_backward=False, module="unique")
     def update_precondition_direction(
@@ -75,9 +85,21 @@ def _build_kernels(width: int):
             value = total[lane]
         # A shared tile carries the complete coarse RHS across the CTA, without
         # a global-memory round trip or a second kernel launch.
-        rhs_tile = wp.tile_view(wp.tile(value), offset=(0,), shape=(WIDTH,))
-        factor = wp.tile_load(matrix, shape=(WIDTH, WIDTH))
-        coarse = wp.tile_cholesky_solve(factor, rhs_tile)
+        if wp.static(inverse_factor):
+            transformed_value = float(0.0)
+            if lane < WIDTH:
+                for column in range(WIDTH):
+                    transformed_value += matrix[lane, column] * total[column]
+            transformed = wp.tile_view(wp.tile(transformed_value), offset=(0,), shape=(WIDTH,))
+            coarse_value = float(0.0)
+            if lane < WIDTH:
+                for column in range(WIDTH):
+                    coarse_value += matrix[column, lane] * transformed[column]
+            coarse = wp.tile_view(wp.tile(coarse_value), offset=(0,), shape=(WIDTH,))
+        else:
+            rhs_tile = wp.tile_view(wp.tile(value), offset=(0,), shape=(WIDTH,))
+            factor = wp.tile_load(matrix, shape=(WIDTH, WIDTH))
+            coarse = wp.tile_cholesky_solve(factor, rhs_tile)
         local_rz = float(0.0)
         for row in range(lane, count, wp.block_dim()):
             group = groups[row]
@@ -104,11 +126,11 @@ def _build_kernels(width: int):
 
 
 class TwoLevelPCG:
-    def __init__(self, ritz):
+    def __init__(self, ritz, *, inverse_factor=False):
         self.ritz = ritz
         self.device = ritz.model.device
         self.width = ritz.dofs
-        self.factor_kernel, self.update_kernel = _build_kernels(self.width)
+        self.factor_kernel, self.update_kernel = _build_kernels(self.width, inverse_factor)
         self.rz = wp.zeros(1, device=self.device)
         self.factor = wp.empty((self.width, self.width), dtype=float, device=self.device)
 

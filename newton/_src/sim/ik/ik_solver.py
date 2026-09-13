@@ -230,6 +230,9 @@ class IKSolver:
             Requires at least one active and one masked DOF; preserves the iteration count and damping law.
         parallel_objectives: Evaluate LM objectives on separate CUDA streams. Disable for small batches
             where stream synchronization costs more than the objective kernels. Does not change objective weights.
+        enable_cuda_fast_path: Experimental analytic CUDA LM batching and exact fixed-point
+            elision. Requires sequential built-in position, rotation, or limit objectives.
+            Unsupported configurations retain the ordinary path; tolerances are unchanged.
         h0_scale: Initial inverse-Hessian scale for L-BFGS.
         line_search_alphas: Candidate line-search step sizes for L-BFGS.
         wolfe_c1: Armijo constant for the L-BFGS line search.
@@ -257,6 +260,7 @@ class IKSolver:
         joint_dof_mask: wp.array[wp.bool] | None = None,
         compact_dof_mask: bool = False,
         parallel_objectives: bool = True,
+        enable_cuda_fast_path: bool = False,
         # L-BFGS parameters
         history_len: int = 10,
         h0_scale: float = 1.0,
@@ -336,6 +340,7 @@ class IKSolver:
                 joint_dof_mask=joint_dof_mask,
                 compact_dof_mask=compact_dof_mask,
                 parallel_objectives=parallel_objectives,
+                enable_cuda_fast_path=enable_cuda_fast_path,
             )
         elif optimizer is IKOptimizer.LBFGS:
             self._impl = IKOptimizerLBFGS(

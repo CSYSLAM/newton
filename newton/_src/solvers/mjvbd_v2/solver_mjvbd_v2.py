@@ -163,7 +163,9 @@ class SolverMJVBDV2(_OneWayCoupledProxy):
             mujoco_joints: Joints owned by MuJoCo.
             joint_mode: Whether MuJoCo joints are dynamic or kinematic.
             contact_mode: Particle/rigid contact pipeline selection.
-            vbd_options: Options forwarded by the public MJVBDV2 dispatcher.
+            vbd_options: Options forwarded by the public MJVBDV2 dispatcher. The full VBD backend accepts
+                experimental ``enable_cuda_fast_path=True`` for instance-local CUDA scheduling. The matching
+                collision option enables cooperative SDF queries; neither option changes physical parameters.
             mujoco_options: Options forwarded to the private MuJoCo solver.
             collision_options: Options forwarded to the contact pipeline.
         """

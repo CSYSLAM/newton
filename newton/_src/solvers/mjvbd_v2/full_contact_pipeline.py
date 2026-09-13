@@ -736,6 +736,7 @@ def _launch_soft_surface_contacts(
     use_face_temporal_cache: bool,
     face_cached_barycentric: wp.array[wp.vec3],
     face_cache_state: wp.array[wp.uint8],
+    face_search=None,
 ) -> None:
     """Generate edge and face contacts after conservative AABB pruning."""
     edge_pair_count = int(edge_pairs.shape[0])
@@ -808,7 +809,7 @@ def _launch_soft_surface_contacts(
             )
     if face_pair_count > 0:
         if use_compact_pairs:
-            wp.launch(
+            (face_search.launch if face_search is not None else wp.launch)(
                 _create_compact_soft_face_contacts,
                 dim=face_worker_count,
                 block_dim=_COMPACT_SOFT_SURFACE_BLOCK_DIM,
@@ -860,10 +861,20 @@ def _launch_soft_surface_contacts(
 
 
 class MJVBDV2CollisionPipeline(CollisionPipeline):
-    """Full collision pipeline with V2-local soft-surface broad rejection."""
+    """Full collision pipeline with V2-local soft-surface broad rejection.
+
+    The experimental ``enable_cuda_fast_path`` keyword batches compatible SDF
+    face queries on non-differentiable CUDA models. Other configurations retain
+    the original search. Its scratch arrays belong exclusively to this pipeline.
+    """
 
     def __init__(self, model: Model, **kwargs: object):
         kwargs = dict(kwargs)
+        cuda_fast_path = bool(
+            kwargs.pop("enable_cuda_fast_path", False)
+            and not kwargs.get("deterministic", False)
+            and wp.config.deterministic == wp.DeterministicMode.NOT_GUARANTEED
+        )
         soft_contact_margin = kwargs.pop("soft_contact_margin", None)
         if soft_contact_margin is not None:
             if "soft_contact_gap" in kwargs:
@@ -907,6 +918,16 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
         )
         self._soft_edge_compact_worker_count = min(edge_compact_size, max_workers)
         self._soft_face_compact_worker_count = min(face_compact_size, max_workers)
+        self._fast_face_search = None
+        if (
+            cuda_fast_path
+            and self._use_soft_surface_compaction
+            and face_compact_size
+            and face_compact_size * 16 <= 256 * 1024 * 1024
+        ):
+            from .fast_path import FaceSearch  # noqa: PLC0415 - optional CUDA implementation
+
+            self._fast_face_search = FaceSearch(model, face_compact_size)
 
     def collide(
         self,
@@ -1007,4 +1028,5 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
             self._use_soft_face_temporal_cache,
             self._soft_face_cached_barycentric,
             self._soft_face_cache_state,
+            self._fast_face_search,
         )
