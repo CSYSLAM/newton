@@ -1514,7 +1514,15 @@ class Example:
             slip = float(wp.length(current_local - initial_local))
             self.cup_grip_slip = slip
             if not math.isfinite(slip) or slip > 0.030:
-                raise AssertionError(f"Cup slipped out of the grasp at {self.sim_time:.3f}s: {slip * 1000:.1f} mm")
+                displacement_mm = 1000 * np.asarray(current_local - initial_local)
+                raise AssertionError(
+                    f"Cup slipped out of the grasp at {self.sim_time:.3f}s: {slip * 1000:.1f} mm; "
+                    f"trajectory={self.trajectory_time:.3f}s, wrist_local_delta_mm={displacement_mm.tolist()}, "
+                    f"filtered_digit_force_N={self.grasp_force_filtered.tolist()}, "
+                    f"digit_offset_deg={np.degrees(self.grasp_joint_offset).tolist()}, "
+                    f"substeps={self.args.substeps}, iterations={self.args.vbd_iterations}, "
+                    f"grains={self.args.popcorn_count}"
+                )
         if self.tool_grasp is not None:
             # Keep the observed grasp frame fixed. Updating it from ongoing
             # slip makes the wrist chase the slipping shaft on every frame.
@@ -1865,6 +1873,7 @@ class Example:
                 f"inside={int(inside.sum())}, in_scoop={self.scoop_count}, rim_radius_mm={1000 * self.rim_min_radius:.1f}, "
                 f"tray={self.grains_in_machine}, grain_speed={self.max_grain_speed:.2f}, "
                 f"scoop_q={scoop[3:].round(3)}, grip_slip_mm={self.grip_slip * 1000:.1f}, "
+                f"cup_slip_mm={1000 * getattr(self, 'cup_grip_slip', 0.0):.1f}, "
                 f"finger_force_N={self.grasp_force_filtered.round(3)}, "
                 f"finger_adjust_deg={np.degrees(self.grasp_joint_offset).round(2)}, "
                 f"rim={rim.mean(axis=0).round(3)}, obstacles={sorted(set(obstacles))}",
