@@ -5521,6 +5521,9 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 mj_contact.geom,
                 mj_contact.efc_address,
                 mj_contact.worldid,
+                # MuJoCo Warp 3.12 has no adhesion array; that compiled branch
+                # does not read this argument, so reuse an existing float array.
+                getattr(mj_contact, "adhesion", mj_contact.dist),
                 mj_data.efc.force,
                 self.mjw_model.geom_bodyid,
                 mj_data.xpos,

@@ -1444,6 +1444,9 @@ def update_jnt_connect_constraint_anchors_kernel(
 def create_convert_mjw_contacts_to_newton_kernel():
     """Create contact conversion kernel; deferred so ``wp.static`` doesn't import mujoco_warp at module load."""
 
+    contact_force_fn = _import_contact_force_fn()
+    contact_force_has_adhesion = "contact_adhesion_in" in contact_force_fn.input_types
+
     @wp.kernel
     def convert_mjw_contacts_to_newton_kernel(
         # inputs
@@ -1458,6 +1461,7 @@ def create_convert_mjw_contacts_to_newton_kernel():
         mj_contact_geom: wp.array[wp.vec2i],
         mj_contact_efc_address: wp.array2d[int],
         mj_contact_worldid: wp.array[wp.int32],
+        mj_contact_adhesion: wp.array[float],
         mj_efc_force: wp.array2d[float],
         mj_geom_bodyid: wp.array[int],
         mj_xpos: wp.array2d[wp.vec3],
@@ -1519,19 +1523,35 @@ def create_convert_mjw_contacts_to_newton_kernel():
 
         if contact_force:
             # Negate: contact_force_fn returns force on geom2; Newton stores force on shape0 (geom1).
-            contact_force[contact_idx] = -wp.static(_import_contact_force_fn())(
-                mj_opt_cone,
-                mj_contact_frame,
-                mj_contact_friction,
-                mj_contact_dim,
-                mj_contact_efc_address,
-                mj_efc_force,
-                njmax,
-                mj_nacon,
-                world,
-                contact_idx,
-                True,
-            )
+            if wp.static(contact_force_has_adhesion):
+                contact_force[contact_idx] = -wp.static(contact_force_fn)(
+                    mj_opt_cone,
+                    mj_contact_frame,
+                    mj_contact_friction,
+                    mj_contact_dim,
+                    mj_contact_efc_address,
+                    mj_contact_adhesion,
+                    mj_efc_force,
+                    njmax,
+                    mj_nacon,
+                    world,
+                    contact_idx,
+                    True,
+                )
+            else:
+                contact_force[contact_idx] = -wp.static(contact_force_fn)(
+                    mj_opt_cone,
+                    mj_contact_frame,
+                    mj_contact_friction,
+                    mj_contact_dim,
+                    mj_contact_efc_address,
+                    mj_efc_force,
+                    njmax,
+                    mj_nacon,
+                    world,
+                    contact_idx,
+                    True,
+                )
 
     return convert_mjw_contacts_to_newton_kernel
 

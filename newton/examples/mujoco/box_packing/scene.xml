@@ -1,0 +1,56 @@
+<mujoco model="reference mailer packing">
+  <include file="aloha.xml"/>
+  <include file="carton.xml"/>
+  <compiler angle="radian" autolimits="true" meshdir="assets"/>
+  <option timestep="0.001" solver="Newton" iterations="80" tolerance="1e-4" cone="pyramidal" jacobian="sparse"/>
+  <size memory="128M"/>
+  <statistic center="0 -0.03 0.25" extent="0.85"/>
+  <visual>
+    <global offwidth="1920" offheight="1080" azimuth="112" elevation="-24"/>
+    <quality shadowsize="4096" offsamples="4"/>
+    <headlight ambient="0.65 0.65 0.65" diffuse="0.4 0.4 0.4" specular="0.05 0.05 0.05"/>
+  </visual>
+  <asset>
+    <material name="packing_table" rgba="0.065 0.069 0.073 1" specular="0.15" shininess="0.08"/>
+    <material name="carton_white" rgba="0.9 0.89 0.9 1" specular="0.05"/>
+    <material name="carton_kraft" rgba="0.70 0.47 0.35 1" specular="0.02"/>
+    <material name="rig" rgba="0.075 0.08 0.083 1" specular="0.35" shininess="0.2"/>
+  </asset>
+  <default>
+    <default class="carton_collision">
+      <geom type="box" material="carton_white" density="420" condim="4" friction="0.6 0.003 0.0001"
+            solref="0.004 1" solimp="0.95 0.995 0.001" group="1"/>
+    </default>
+    <default class="carton_inner">
+      <geom type="box" material="carton_kraft" mass="0" contype="0" conaffinity="0" group="1"/>
+    </default>
+    <default class="crease">
+      <joint damping="0" armature="2e-5" frictionloss="0.00015"
+             solreflimit="0.004 1" solimplimit="0.95 0.995 0.001"/>
+    </default>
+    <default class="rig_visual">
+      <geom material="rig" contype="0" conaffinity="0" group="1"/>
+    </default>
+  </default>
+  <worldbody>
+    <light pos="-0.8 -0.8 2.2" dir="0.3 0.3 -1" diffuse="0.35 0.33 0.32" castshadow="false"/>
+    <geom name="table" type="box" pos="0 -0.17 -0.021" size="0.62 0.48 0.021"
+          material="packing_table" friction="1.2 0.003 0.0001"/>
+    <geom name="backdrop" type="plane" pos="0 0.6 0" euler="1.5707963 0 0" size="5 5 0.01"
+          rgba="0.87 0.82 0.83 1" contype="0" conaffinity="0"/>
+    <!-- Intrinsics fitted to pixel landmarks in the unrescaled simulation pane. -->
+    <camera name="reference" pos="0.33383573 -0.85202841 0.60162233"
+            xyaxes="0.91947527 0.39208185 0.02893189 -0.17395667 0.33974382 0.92429065"
+            focal="0.00488422 0.004799594" sensorsize="0.0064 0.0036" resolution="960 1080"/>
+    <geom class="rig_visual" type="box" pos="-0.469 -0.17 0.004" size="0.045 0.46 0.004"/>
+    <geom class="rig_visual" type="box" pos="0.469 -0.17 0.004" size="0.045 0.46 0.004"/>
+    <geom class="rig_visual" type="box" pos="-0.515 -0.17 0.009" size="0.006 0.46 0.009"/>
+    <geom class="rig_visual" type="box" pos="-0.423 -0.17 0.009" size="0.006 0.46 0.009"/>
+    <geom class="rig_visual" type="box" pos="0.515 -0.17 0.009" size="0.006 0.46 0.009"/>
+    <geom class="rig_visual" type="box" pos="0.423 -0.17 0.009" size="0.006 0.46 0.009"/>
+    <geom name="table/back_rail" material="rig" type="box" pos="0 0.29 0.01" size="0.54 0.009 0.01"
+          friction="0.6 0.003 0.0001" condim="4" solref="0.004 1"/>
+    <geom class="rig_visual" type="box" pos="0.585 -0.48 0.48" size="0.012 0.012 0.48"/>
+    <geom class="rig_visual" type="capsule" fromto="-0.59 -0.47 0.5 -0.45 0.23 0.02" size="0.009"/>
+  </worldbody>
+</mujoco>

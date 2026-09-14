@@ -816,6 +816,14 @@ add_example_test(
     use_viewer=True,
 )
 
+add_example_test(
+    TestMuJoCoExamples,
+    name="mujoco.example_mujoco_box_packing",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 10},
+    use_viewer=True,
+)
+
 
 class TestSelectionAPIExamples(unittest.TestCase):
     pass
