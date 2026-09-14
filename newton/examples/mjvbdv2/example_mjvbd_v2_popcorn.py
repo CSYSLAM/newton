@@ -23,6 +23,7 @@ import newton
 import newton.examples
 import newton.ik as ik
 from newton.examples.mjvbdv2.support.paper_shell_material import update_paper_hinges
+from newton.examples.mjvbdv2.support.popcorn_controller_io import ControllerSnapshot, write_wrist_targets
 from newton.examples.mjvbdv2.support.table_clearance import TableClearanceGuard
 from newton.solvers import SolverMJVBDV2
 
@@ -125,7 +126,20 @@ def _scoop_floor_height_offset(vertices, pitch, *, observed_rotation=None):
 
 
 def _popcorn_spawn_position(index):
-    """Stack extra grains behind the initially held scoop, not inside its pan."""
+    """Fill the tray's side banks without spawning grains inside the scoop."""
+    if index >= 160:
+        extra = index - 160
+        column, bank_row, layer = extra % 10, (extra // 10) % 4, extra // 40
+        side_y = (-0.138, -0.115, 0.115, 0.138)[bank_row]
+        # Refill the full tray width rather than increasing the height of the
+        # original scooping pile. These are ordinary free dynamic bodies.
+        return station_point(
+            (
+                MACHINE_PLAN[0] - 0.09 + column * 0.020,
+                MACHINE_PLAN[1] + side_y,
+                MACHINE_PLAN[2] + 0.045 + layer * 0.022,
+            )
+        )
     if index < 128:
         column, row, layer = index % 8, (index // 8) % 8, index // 64
     else:
@@ -339,6 +353,13 @@ def _inside_cup(points, vertices, faces, rim_indices):
     parity replaces the inaccurate rigid best-fit cylinder containment metric.
     Points exactly on the surface are not suitable acceptance samples.
     """
+    points = np.asarray(points)
+    inside = np.zeros(len(points), dtype=bool)
+    # A point inside the capped shell must lie in its vertex bounds. Keep the
+    # original ray test for all candidates, including points on the bounds.
+    candidates = np.all((points >= vertices.min(axis=0)) & (points <= vertices.max(axis=0)), axis=1)
+    if not np.any(candidates):
+        return inside
     rim = vertices[rim_indices]
     cap = np.stack((rim, np.roll(rim, -1, axis=0), np.broadcast_to(rim.mean(axis=0), rim.shape)), axis=1)
     triangles = np.concatenate((vertices[faces], cap)).astype(np.float64)
@@ -348,13 +369,14 @@ def _inside_cup(points, vertices, faces, rim_indices):
     det = np.einsum("ij,ij->i", edge1, p)
     valid = np.abs(det) > 1e-12
     inverse = np.divide(1.0, det, out=np.zeros_like(det), where=valid)
-    s = np.asarray(points)[:, None, :] - triangles[None, :, 0]
+    s = points[candidates, None, :] - triangles[None, :, 0]
     u = np.einsum("nfi,fi->nf", s, p) * inverse
     q = np.cross(s, edge1)
     v = np.einsum("nfi,i->nf", q, direction) * inverse
     t = np.einsum("nfi,fi->nf", q, edge2) * inverse
     hits = valid & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > 1e-9)
-    return np.count_nonzero(hits, axis=1) % 2 == 1
+    inside[candidates] = np.count_nonzero(hits, axis=1) % 2 == 1
+    return inside
 
 
 @wp.kernel
@@ -468,8 +490,8 @@ class _WristTargetError(RuntimeError):
 
 class Example:
     def __init__(self, viewer, args):
-        if args.substeps < 1 or args.substeps % 2 or args.popcorn_count < 1 or args.popcorn_count > 192:
-            raise ValueError("Require positive even substeps and 1..192 popcorn bodies")
+        if args.substeps < 1 or args.substeps % 2 or args.popcorn_count < 1 or args.popcorn_count > 320:
+            raise ValueError("Require positive even substeps and 1..320 popcorn bodies")
         self.viewer, self.args = viewer, args
         if hasattr(viewer, "cache_static_appearance"):
             viewer.cache_static_appearance = True
@@ -537,7 +559,9 @@ class Example:
                 "particle_enable_multilevel_correction": True,
                 "particle_multilevel_operator": "galerkin",
                 "particle_multilevel_cluster_size": 400,
-                "particle_multilevel_coarse_iterations": 8,
+                # Spend fewer passes on collision detection, but solve the
+                # coupled shell/grain system more accurately within each step.
+                "particle_multilevel_coarse_iterations": 16,
                 "particle_enable_coupled_translation": True,
                 "particle_enable_surface_cache": False,
                 "particle_multilevel_relaxation": 1.0,
@@ -1029,6 +1053,7 @@ class Example:
             with wp.ScopedCapture() as capture:
                 self.ik_solver.step(self.ik_q, self.ik_q, iterations=32)
                 wp.launch(lock_joints, len(locked), [self.lock_indices, self.lock_values, self.ik_q])
+                newton.eval_fk(self.ik_model, self.ik_q[0], self.ik_model.joint_qd, self.ik_state)
             self.ik_graph = capture.graph
 
         def solve_search(repeats=1):
@@ -1208,9 +1233,10 @@ class Example:
             return angle + (math.radians(1.2) * float(closure) if name.endswith("PIP") else 0.0)
         return float(closure) * angle
 
-    def _check_ik(self, targets):
+    def _check_ik(self, targets, *, update_fk=True):
         """Reject unreachable wrist targets before driving a moving collider."""
-        newton.eval_fk(self.ik_model, self.ik_q[0], self.ik_model.joint_qd, self.ik_state)
+        if update_fk:
+            newton.eval_fk(self.ik_model, self.ik_q[0], self.ik_model.joint_qd, self.ik_state)
         poses = self.ik_state.body_q.numpy()
         for side, (target, rotation) in enumerate(targets):
             pose = poses[self.wrists[side]]
@@ -1413,9 +1439,24 @@ class Example:
                 wrist_pose = wp.transform_multiply(desired_tool, relative)
                 rotation = wp.transform_get_rotation(wrist_pose)
                 target = np.asarray(wp.transform_point(wrist_pose, TCP))
-            self.position_goals[side].set_target_position(0, wp.vec3(*target))
-            self.rotation_goals[side].set_target_rotation(0, wp.vec4(*rotation))
             targets.append((target, rotation))
+        for objective in (*self.position_goals, *self.rotation_goals):
+            objective._require_batch_layout()
+        wp.launch(
+            write_wrist_targets,
+            1,
+            [
+                wp.vec3(*targets[0][0]),
+                wp.vec3(*targets[1][0]),
+                wp.vec4(*targets[0][1]),
+                wp.vec4(*targets[1][1]),
+                self.position_goals[0].target_positions,
+                self.position_goals[1].target_positions,
+                self.rotation_goals[0].target_rotations,
+                self.rotation_goals[1].target_rotations,
+            ],
+            device=self.position_goals[0].device,
+        )
         return targets, closure
 
     @staticmethod
@@ -1497,9 +1538,13 @@ class Example:
         cache = getattr(self, "_controller_snapshot", None)
         if cache is None:
             return getattr(self.state_0, name).numpy()
+        if name not in cache and name in ("particle_q", "body_q", "joint_q") and self.model.device.is_cuda:
+            if not hasattr(self, "_packed_snapshot"):
+                self._packed_snapshot = ControllerSnapshot(self.state_0)
+            cache.update(self._packed_snapshot.read(self.state_0))
         if name not in cache:
             values = getattr(self.state_0, name).numpy()
-            values.flags.writeable = False
+            values.setflags(write=False)
             cache[name] = values
         return cache[name]
 
@@ -1555,7 +1600,7 @@ class Example:
         else:
             self._tool_ik_holding = False
         wp.copy(self.begin, self.state_0.joint_q)
-        end = self.state_0.joint_q.numpy()
+        end = self._read_state("joint_q").copy()
         end[: self.robot_coords] = self.ik_q.numpy().reshape(-1)
         for side in range(2):
             for index, name, angle in zip(self.fingers[side], self.finger_names[side], self.grips[side], strict=True):
@@ -1571,7 +1616,7 @@ class Example:
                     )
                     end[index] = pip if name.endswith("PIP") else mcp
         self.end.assign(end)
-        self._check_robot_table(end)
+        self._check_robot_table(self.end if self.model.device.is_cuda else end)
         self._controller_snapshot = None
         if self.graph is None:
             self._simulate()
@@ -1650,20 +1695,22 @@ class Example:
         established grasp correction. If the path remains unreachable with
         the previous correction, retain the failure.
         """
-        previous_q = self.ik_q.numpy().copy()
+        if not hasattr(self, "_ik_feedback_backup"):
+            self._ik_feedback_backup = wp.empty_like(self.ik_q)
+        wp.copy(self._ik_feedback_backup, self.ik_q)
         correction = self.tool_orientation_correction
         if previous_correction is None:
             previous_correction = wp.quat_identity()
         for fraction in (1.0, 0.5, 0.25, 0.0):
             if fraction != 1.0:
-                self.ik_q.assign(previous_q)
+                wp.copy(self.ik_q, self._ik_feedback_backup)
                 self.tool_orientation_correction = wp.quat_slerp(previous_correction, correction, fraction)
                 targets, _ = self._set_wrist_targets(update_feedback=False)
             try:
                 self._solve_wrist_ik(targets)
             except RuntimeError:
                 if fraction == 0.0:
-                    self.ik_q.assign(previous_q)
+                    wp.copy(self.ik_q, self._ik_feedback_backup)
                     self.tool_orientation_correction = previous_correction
                     raise
             else:
@@ -1678,7 +1725,7 @@ class Example:
             else:
                 wp.capture_launch(self.ik_graph)
             try:
-                self._check_ik(targets)
+                self._check_ik(targets, update_fk=self.ik_graph is None)
             except RuntimeError:
                 if attempt == 4:
                     raise
@@ -1978,6 +2025,7 @@ class Example:
             "rim_min_radius_m": self.rim_min_radius,
             "cup_upright_cosine": self.cup_upright,
             "grains_in_scoop": self.scoop_count,
+            "current_max_grain_speed_m_s": self.max_grain_speed,
             "grip_slip_m": self.grip_slip,
         }
         print(json.dumps(report), flush=True)
@@ -2008,8 +2056,8 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         parser.set_defaults(num_frames=2880)
-        parser.add_argument("--popcorn-count", type=int, default=160)
-        parser.add_argument("--substeps", type=int, default=8)
+        parser.add_argument("--popcorn-count", type=int, default=320)
+        parser.add_argument("--substeps", type=int, default=6)
         parser.add_argument("--vbd-iterations", type=int, default=8)
         return parser
 

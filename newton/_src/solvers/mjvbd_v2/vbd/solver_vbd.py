@@ -3826,10 +3826,13 @@ class SolverVBD(SolverBase, CouplingInterface):
             fast_inputs = surface_contact_inputs(
                 self, state_in, contacts, dt, body_q_for_particles, body_q_prev_for_particles, body_qd_for_particles
             )
+            fast_input_q = state_in.particle_q
+            fast_output_q = self._cuda_surface.position_scratch
 
-        # Zero out forces and hessians
-        self.particle_forces.zero_()
-        self.particle_hessians.zero_()
+        # The fused path overwrites both arrays for every surface particle.
+        if not _fused:
+            self.particle_forces.zero_()
+            self.particle_hessians.zero_()
         particle_contact_gather_ready = (
             self._should_gather_particle_contacts(contacts) and self._particle_contact_adjacency_initialized
         )
@@ -3975,18 +3978,21 @@ class SolverVBD(SolverBase, CouplingInterface):
                 )
             if self.use_particle_tile_solve:
                 surface_group = self.surface_particle_color_groups[color]
-                if surface_group.size:
+                if surface_group.size or _fused:
+                    if _fused:
+                        fast_inputs.particle_q = fast_input_q
                     wp.launch(
                         kernel=solve_surface_fused
                         if _fused
                         else self._surface_cached_kernel or solve_surface_elasticity_tile,
-                        dim=surface_group.size * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                        dim=surface_group.size * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
+                        + (self.model.particle_count if _fused else 0),
                         block_dim=TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
                         inputs=[
                             dt,
                             surface_group,
                             self.particle_q_prev,
-                            state_in.particle_q,
+                            fast_input_q if _fused else state_in.particle_q,
                             self.model.particle_mass,
                             self.inertia,
                             self.model.particle_flags,
@@ -4015,6 +4021,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                                     self.particle_self_contact_margin
                                     * self.particle_conservative_bound_relaxation
                                     * 0.5,
+                                    self._cuda_surface.anchor_angles,
+                                    fast_output_q,
+                                    self.model.particle_colors,
+                                    color,
                                 ]
                                 if _fused
                                 else []
@@ -4089,7 +4099,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                     ],
                     device=self.device,
                 )
-            self._penetration_free_truncation(state_in.particle_q, empty_contact_set=_fused)
+            if _fused:
+                fast_input_q, fast_output_q = fast_output_q, fast_input_q
+            else:
+                self._penetration_free_truncation(state_in.particle_q)
             if (
                 self._pneumatic_incremental_volume_enabled
                 and not self._pneumatic_single_cavity_force_fusion_enabled
@@ -4097,6 +4110,8 @@ class SolverVBD(SolverBase, CouplingInterface):
             ):
                 self._update_pneumatic_cavities_after_color(state_in.particle_q, control, dt, color)
 
+        if _fused and fast_input_q.ptr != state_in.particle_q.ptr:
+            wp.copy(state_in.particle_q, fast_input_q)
         chebyshev_iteration = iter_num - self.particle_chebyshev_warmup_iterations
         if self.particle_chebyshev_guarded and chebyshev_history_active:
             wp.launch(

@@ -20,6 +20,7 @@ from newton._src.solvers.mjvbd_v2.coupled_free_body.rigid_fusion import (
     SolveInputs,
     _solve_lane,
 )
+from newton._src.solvers.mjvbd_v2.particle_surface_cache import _evaluate_bending
 
 
 @wp.func
@@ -83,9 +84,7 @@ def _create_soft_face_contact_at_pair(
     shape_contact_margin = shape_margin[shape] if shape_margin.shape[0] > 0 else 0.0
     threshold = margin + shape_contact_margin + radius
     centroid = (p + q + r) / 3.0
-    phi_centroid, _phi_centroid_accurate, _grad_centroid = eval_shape_sdf(
-        geo, scale, centroid, sdf_index, texture_sdf_table
-    )
+    phi_centroid = soft.eval_shape_sdf_lower_bound(geo, scale, centroid, sdf_index, texture_sdf_table)
     reach = wp.max(wp.length(p - centroid), wp.max(wp.length(q - centroid), wp.length(r - centroid)))
     if phi_centroid > threshold + reach:
         if use_temporal_cache:
@@ -193,6 +192,7 @@ class CellCache:
     base: wp.vec3i
     coarse: bool
     corners: texture.vec8f
+    fractions: wp.vec3
 
 
 @wp.func
@@ -214,6 +214,9 @@ def cached_value(sdf: texture.TextureSDFData, position: wp.vec3, cache: CellCach
     for axis in range(3):
         lower = float(cache.index[axis])
         upper = lower + 1.0
+        if cache.coarse:
+            lower = float(cache.base[axis]) * sdf.subgrid_size_f
+            upper = lower + sdf.subgrid_size_f
         if bounded[axis] < lower or (bounded[axis] >= upper and upper != maximum[axis]):
             hit = False
     tx, ty, tz = (float(0.0), float(0.0), float(0.0))
@@ -222,10 +225,8 @@ def cached_value(sdf: texture.TextureSDFData, position: wp.vec3, cache: CellCach
         ty = bounded[1] - float(cache.index[1])
         tz = bounded[2] - float(cache.index[2])
         if cache.coarse:
-            coarse_f = (
-                wp.vec3(float(cache.index[0]) + tx, float(cache.index[1]) + ty, float(cache.index[2]) + tz)
-                * sdf.fine_to_coarse
-            )
+            # A demoted subgrid shares all eight corners across its fine cells.
+            coarse_f = bounded * sdf.fine_to_coarse
             tx = coarse_f[0] - float(cache.base[0])
             ty = coarse_f[1] - float(cache.base[1])
             tz = coarse_f[2] - float(cache.base[2])
@@ -237,10 +238,57 @@ def cached_value(sdf: texture.TextureSDFData, position: wp.vec3, cache: CellCach
         cache.coarse = loc.start_slot >= texture.SLOT_LINEAR
         cache.corners = values
         cache.valid = True
+    cache.fractions = wp.vec3(tx, ty, tz)
     value = texture._trilinear(cache.corners, tx, ty, tz)
     if diff_mag > 0.0:
         value += diff_mag
     return (value, cache)
+
+
+@wp.func
+def cached_shape_eval(
+    geo: int, scale: wp.vec3, x: wp.vec3, index: int, table: wp.array[texture.TextureSDFData], cache: CellCache
+):
+    if soft._is_analytic(geo):
+        lower, value, gradient = soft.eval_shape_sdf(geo, scale, x, index, table)
+        return lower, value, gradient, cache
+    sdf = table[index]
+    position = x
+    if not sdf.scale_baked:
+        position = wp.cw_div(x, scale)
+    value, cache = cached_value(sdf, position, cache)
+    tx, ty, tz = cache.fractions[0], cache.fractions[1], cache.fractions[2]
+    omtx, omty, omtz = 1.0 - tx, 1.0 - ty, 1.0 - tz
+    v000, v100, v010, v110 = cache.corners[0], cache.corners[1], cache.corners[2], cache.corners[3]
+    v001, v101, v011, v111 = cache.corners[4], cache.corners[5], cache.corners[6], cache.corners[7]
+    gx = omty * omtz * (v100 - v000) + ty * omtz * (v110 - v010) + omty * tz * (v101 - v001) + ty * tz * (v111 - v011)
+    gy = omtx * omtz * (v010 - v000) + tx * omtz * (v110 - v100) + omtx * tz * (v011 - v001) + tx * tz * (v111 - v101)
+    gz = omtx * omty * (v001 - v000) + tx * omty * (v101 - v100) + omtx * ty * (v011 - v010) + tx * ty * (v111 - v110)
+    gradient = wp.cw_mul(wp.vec3(gx, gy, gz), sdf.inv_sdf_dx)
+    clamped = wp.vec3(
+        wp.clamp(position[0], sdf.sdf_box_lower[0], sdf.sdf_box_upper[0]),
+        wp.clamp(position[1], sdf.sdf_box_lower[1], sdf.sdf_box_upper[1]),
+        wp.clamp(position[2], sdf.sdf_box_lower[2], sdf.sdf_box_upper[2]),
+    )
+    difference = position - clamped
+    distance = wp.length(difference)
+    if distance > 0.0:
+        gradient = difference / distance
+    if sdf.scale_baked:
+        return value, value, gradient, cache
+    inv_scale = wp.vec3(1.0 / scale[0], 1.0 / scale[1], 1.0 / scale[2])
+    gradient_length = wp.length(gradient)
+    if gradient_length > 0.0:
+        gradient = gradient / gradient_length
+    stretch = wp.length(wp.cw_mul(scale, gradient))
+    min_scale = wp.min(wp.abs(scale))
+    scaled_gradient = wp.cw_mul(gradient, inv_scale)
+    scaled_length = wp.length(scaled_gradient)
+    if scaled_length > 0.0:
+        scaled_gradient = scaled_gradient / scaled_length
+    else:
+        scaled_gradient = gradient
+    return value * min_scale, value * stretch, scaled_gradient, cache
 
 
 @wp.func
@@ -329,7 +377,7 @@ def optimize_edge_sdf(
                 step += 1
     u = 0.5 * (lo + hi)
     x = (1.0 - u) * p + u * q
-    _lower, phi, grad = soft.eval_shape_sdf(geo, scale, x, index, table)
+    _lower, phi, grad, cell_cache = cached_shape_eval(geo, scale, x, index, table, cell_cache)
     return (u, x, phi, grad, cell_cache)
 
 
@@ -349,7 +397,9 @@ def _refine_cached_face_sdf(
     "Refine a cached face point and evaluate its Frank-Wolfe stationarity gap."
     for _i in range(2):
         x = barycentric[0] * a + barycentric[1] * b + barycentric[2] * c
-        _phi_lower, _phi, grad = eval_shape_sdf(geo, scale, x, shape_sdf_index, texture_sdf_table)
+        _phi_lower, _phi, grad, cell_cache = cached_shape_eval(
+            geo, scale, x, shape_sdf_index, texture_sdf_table, cell_cache
+        )
         da = wp.dot(grad, a)
         db = wp.dot(grad, b)
         dc = wp.dot(grad, c)
@@ -388,7 +438,9 @@ def optimize_face_sdf(
     bary = wp.vec3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)
     for _i in range(n_iter):
         x = bary[0] * a + bary[1] * b + bary[2] * c
-        _phi_l, _phi_x, grad = eval_shape_sdf(geo, scale, x, shape_sdf_index, texture_sdf_table)
+        _phi_l, _phi_x, grad, cell_cache = cached_shape_eval(
+            geo, scale, x, shape_sdf_index, texture_sdf_table, cell_cache
+        )
         da = wp.dot(grad, a)
         db = wp.dot(grad, b)
         dc = wp.dot(grad, c)
@@ -471,16 +523,7 @@ def _create_soft_face_contact_at_pair_1(
     scale = shape_scale[shape]
     shape_contact_margin = shape_margin[shape] if shape_margin.shape[0] > 0 else 0.0
     threshold = margin + shape_contact_margin + radius
-    centroid = (p + q + r) / 3.0
-    phi_centroid, _phi_centroid_accurate, _grad_centroid = eval_shape_sdf(
-        geo, scale, centroid, sdf_index, texture_sdf_table
-    )
-    reach = wp.max(wp.length(p - centroid), wp.max(wp.length(q - centroid), wp.length(r - centroid)))
-    if phi_centroid > threshold + reach:
-        if use_temporal_cache:
-            if lane_id() == 0:
-                cache_state[tid] = wp.uint8(0)
-        return
+    # gather_face_pairs already applied this bound to the same frozen geometry.
     barycentric = wp.vec3(0.0)
     x = wp.vec3(0.0)
     phi = float(0.0)
@@ -913,14 +956,15 @@ def build_adjacency(
     entries: wp.array[int],
     fallback: wp.array[int],
 ):
+    capacity = entries.shape[0] // counts.shape[0]
     for row in range(wp.tid(), wp.min(count[0], maximum), wp.min(maximum, 4096)):
         ids = corners[row]
         for j in range(3):
             p = ids[j]
             if p >= 0:
                 slot = wp.atomic_add(counts, p, 1)
-                if slot < 128:
-                    entries[p * 128 + slot] = row * 3 + j
+                if slot < capacity:
+                    entries[p * capacity + slot] = row * 3 + j
                 else:
                     wp.atomic_max(fallback, 0, 1)
                 for other in range(j):
@@ -988,6 +1032,18 @@ def contact(s: SoftInputs, row: int, corner: int):
     return (f, h)
 
 
+@wp.func
+def _commit_empty_contact_step(
+    p: int, delta: wp.array[wp.vec3], anchor: wp.array[wp.vec3], limit: float, out: wp.array[wp.vec3]
+):
+    d = delta[p]
+    length = wp.length(d)
+    if length > limit:
+        d = d * limit / length
+    delta[p] = d
+    out[p] = anchor[p] + d
+
+
 @wp.kernel(enable_backward=False)
 def solve_surface_fused(
     dt: float,
@@ -1017,14 +1073,25 @@ def solve_surface_fused(
     entries: wp.array[int],
     anchor: wp.array[wp.vec3],
     limit: float,
+    anchor_angles: wp.array[wp.vec2],
+    out: wp.array[wp.vec3],
+    colors: wp.array[int],
+    color: int,
 ):
     tid = wp.tid()
+    elastic_threads = particle_ids_in_color.shape[0] * 16
+    if tid >= elastic_threads:
+        p = tid - elastic_threads
+        if p < pos.shape[0] and colors[p] != color:
+            _commit_empty_contact_step(p, particle_displacements, anchor, limit, out)
+        return
     lane = tid % 16
     p = particle_ids_in_color[tid // 16]
     cf = wp.vec3(0.0)
     ch = wp.mat33(0.0)
+    capacity = entries.shape[0] // counts.shape[0]
     for index in range(lane, counts[p], 16):
-        code = entries[p * 128 + index]
+        code = entries[p * capacity + index]
         ff, hh = contact(s, code // 3, code % 3)
         cf += ff
         ch += hh
@@ -1055,17 +1122,17 @@ def solve_surface_fused(
     for adj in range(lane, edges, 16):
         edge, order = kernels.get_vertex_adjacent_edge_id_order(particle_adjacency, p, adj)
         if skip_material_checks == 1 or edge_bending_properties[edge, 0] > 0.0:
-            ff, hh = kernels.evaluate_dihedral_angle_based_bending_force_hessian(
+            ff, hh = _evaluate_bending(
                 edge,
                 order,
                 pos,
-                pos_prev,
                 edge_indices,
                 edge_rest_angles,
                 edge_rest_length,
                 edge_bending_properties[edge, 0],
                 edge_bending_properties[edge, 1],
                 dt,
+                anchor_angles[edge],
             )
             f += ff
             h += hh
@@ -1084,6 +1151,7 @@ def solve_surface_fused(
                 step *= contact_free_relaxation
             delta += step
         particle_displacements[p] = delta
+        _commit_empty_contact_step(p, particle_displacements, anchor, limit, out)
 
 
 @wp.func

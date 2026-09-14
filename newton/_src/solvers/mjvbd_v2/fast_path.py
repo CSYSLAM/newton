@@ -8,6 +8,7 @@ import warp as wp
 
 from . import fast_kernels as k
 from .coupled_free_body.rigid_fusion import SoftInputs
+from .particle_surface_cache import _prepare_anchor_angles
 
 
 class FaceSearch:
@@ -59,11 +60,20 @@ class SurfaceFastPath:
             and solver.surface_anchor_angles is None
             and solver._particle_truncation_cache is not None
             and solver.particle_collision_detection_interval == 0
+            and sum(group.size for group in solver.surface_particle_color_groups) == m.particle_count
             and np.all(m.particle_mass.numpy() > 0)
             and np.all((m.particle_flags.numpy() & 1) != 0)
         )
         if self.eligible:
             colors = m.particle_colors.numpy()
+            covered = np.zeros(m.particle_count, dtype=bool)
+            for color, group in enumerate(solver.surface_particle_color_groups):
+                ids = group.numpy()
+                if np.any(covered[ids]) or np.any(colors[ids] != color):
+                    self.eligible = False
+                    break
+                covered[ids] = True
+            self.eligible = self.eligible and bool(np.all(covered))
             for row in m.tri_indices.numpy():
                 ids = row[row >= 0]
                 if len(np.unique(colors[ids])) != len(ids):
@@ -71,7 +81,12 @@ class SurfaceFastPath:
                     break
         self.fallback = wp.zeros(1, dtype=int, device=m.device)
         self.counts = wp.zeros(m.particle_count if self.eligible else 0, dtype=int, device=m.device)
-        self.entries = wp.empty(m.particle_count * 128 if self.eligible else 0, dtype=int, device=m.device)
+        # Dense body contacts can exceed 128 rows even without self-contact.
+        # Preserve the original memory ceiling and eligibility for large meshes.
+        capacity = 256 if m.particle_count * 256 * 4 <= 256 * 1024 * 1024 else 128
+        self.entries = wp.empty(m.particle_count * capacity if self.eligible else 0, dtype=int, device=m.device)
+        self.anchor_angles = wp.empty(m.edge_count if self.eligible else 0, dtype=wp.vec2, device=m.device)
+        self.position_scratch = wp.empty(m.particle_count if self.eligible else 0, dtype=wp.vec3, device=m.device)
 
     def after_detection(self, solver):
         if self.eligible:
@@ -85,6 +100,14 @@ class SurfaceFastPath:
 
     def iterations(self, solver, state_in, state_out, control, contacts, dt):
         def run(*, fused=False, prepared=False):
+            if fused and solver.model.edge_count:
+                # The damping anchor is immutable throughout this substep.
+                wp.launch(
+                    _prepare_anchor_angles,
+                    solver.model.edge_count,
+                    [solver.particle_q_prev, solver.model.edge_indices, self.anchor_angles],
+                    device=solver.device,
+                )
             for iteration in range(solver.iterations):
                 solver._solve_rigid_body_iteration(state_in, state_out, control, contacts, dt)
                 solver._solve_particle_iteration(
@@ -203,7 +226,8 @@ class SelfContactCertificate:
         def reuse():
             solver.pos_prev_collision_detection.assign(state.particle_q)
             solver.particle_displacements.zero_()
-            detector.refit(state.particle_q)
+            # An empty-set certificate does not query either BVH. Refit in
+            # rebuild(), before the first query after the certificate expires.
             if solver._particle_truncation_cache is not None:
                 solver.truncation_ts.fill_(1.0)
             wp.launch(k.record_reuse, 1, [self.statistics], device=solver.device)

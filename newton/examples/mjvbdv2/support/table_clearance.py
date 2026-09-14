@@ -97,16 +97,18 @@ class TableClearanceGuard:
         self.lower = wp.vec3d(*lower)
         self.upper = wp.vec3d(*upper)
         self.intersects = intersects
+        self.graph = None
 
-    def __call__(self, joint_q):
+    def _collect_candidates(self):
+        """Evaluate the unchanged FK and conservative triangle broad phase."""
         example = self.example
-        example.table_guard_q.assign(joint_q[: example.robot_coords])
         newton.eval_fk(example.ik_model, example.table_guard_q, example.ik_model.joint_qd, example.table_guard_state)
         poses_gpu = example.table_guard_state.body_q
         wp.launch(
             mesh_candidates,
             dim=self.active.size,
             inputs=[poses_gpu, self.bodies, self.centers, self.extents, self.lower, self.upper, self.active],
+            device=example.model.device,
         )
         self.count.zero_()
         wp.launch(
@@ -124,12 +126,30 @@ class TableClearanceGuard:
                 self.count,
                 self.candidates,
             ],
+            device=example.model.device,
         )
+
+    def __call__(self, joint_q):
+        example = self.example
+        if isinstance(joint_q, wp.array):
+            wp.copy(example.table_guard_q, joint_q, count=example.robot_coords)
+        else:
+            example.table_guard_q.assign(joint_q[: example.robot_coords])
+        if example.model.device.is_cuda:
+            if self.graph is None:
+                self._collect_candidates()
+                with wp.ScopedCapture(device=example.model.device) as capture:
+                    self._collect_candidates()
+                self.graph = capture.graph
+            else:
+                wp.capture_launch(self.graph)
+        else:
+            self._collect_candidates()
         count = int(self.count.numpy()[0])
         if count == 0:
             return
         ids = self.candidates[:count].numpy()
-        poses = poses_gpu.numpy()
+        poses = example.table_guard_state.body_q.numpy()
         for mesh in np.unique(self.owners[ids]):
             body = example.table_guard_bodies[mesh]
             selected = ids[self.owners[ids] == mesh]

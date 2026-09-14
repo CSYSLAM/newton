@@ -9,9 +9,62 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.mjvbd_v2 import fast_kernels
 from newton._src.solvers.mjvbd_v2.coupled_free_body.two_level import _build_kernels
 from newton._src.solvers.mjvbd_v2.full_contact_pipeline import MJVBDV2CollisionPipeline
 from newton._src.solvers.mjvbd_v2.vbd.solver_vbd import SolverVBD
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "Requires CUDA")
+class TestSurfaceContactCapacity(unittest.TestCase):
+    def test_same_color_contact_requires_fallback(self):
+        """Reject shared-color contact rows even when they fit the allocation."""
+        fallback = wp.zeros(1, dtype=int, device="cuda:0")
+        wp.launch(
+            fast_kernels.build_adjacency,
+            dim=1,
+            inputs=[
+                wp.array([1], dtype=int, device="cuda:0"),
+                1,
+                wp.array([[0, 1, 2]], dtype=wp.vec3i, device="cuda:0"),
+                wp.array([0, 0, 1], dtype=int, device="cuda:0"),
+                wp.zeros(3, dtype=int, device="cuda:0"),
+                wp.full(3 * 256, -1, dtype=int, device="cuda:0"),
+                fallback,
+            ],
+            device="cuda:0",
+        )
+        self.assertEqual(int(fallback.numpy()[0]), 1)
+
+    def test_dense_adjacency_and_overflow(self):
+        """Use allocated row capacity and preserve overflow and color guards."""
+        for capacity, records in ((256, 129), (256, 256), (256, 257), (128, 129)):
+            counts = wp.zeros(3, dtype=int, device="cuda:0")
+            entries = wp.full(3 * capacity, -1, dtype=int, device="cuda:0")
+            fallback = wp.zeros(1, dtype=int, device="cuda:0")
+            wp.launch(
+                fast_kernels.build_adjacency,
+                dim=records,
+                inputs=[
+                    wp.array([records], dtype=int, device="cuda:0"),
+                    records,
+                    wp.array(np.tile([0, 1, 2], (records, 1)), dtype=wp.vec3i, device="cuda:0"),
+                    wp.array([0, 1, 2], dtype=int, device="cuda:0"),
+                    counts,
+                    entries,
+                    fallback,
+                ],
+                device="cuda:0",
+            )
+            self.assertEqual(int(fallback.numpy()[0]), int(records > capacity))
+            np.testing.assert_array_equal(counts.numpy(), records)
+            rows = entries.numpy().reshape(3, capacity)
+            for corner, row in enumerate(rows):
+                live = row[row >= 0]
+                self.assertEqual(len(live), min(records, capacity))
+                self.assertEqual(len(np.unique(live)), len(live))
+                np.testing.assert_array_equal(live % 3, corner)
+                self.assertTrue(np.all(live // 3 < records))
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "Requires CUDA")
@@ -172,8 +225,14 @@ class TestBatchedSurface(unittest.TestCase):
                     function(solver, *states[index], control, contacts, 1 / 480)
                 graphs.append(capture.graph)
             for _ in range(8):
+                # Fast colors must overwrite every force/Hessian entry; stale
+                # scratch must never enter the subsequent coarse correction.
+                solvers[1].particle_forces.fill_(wp.vec3(float("nan")))
+                solvers[1].particle_hessians.fill_(wp.mat33(float("nan")))
                 for graph in graphs:
                     wp.capture_launch(graph)
+                self.assertTrue(np.isfinite(solvers[1].particle_forces.numpy()).all())
+                self.assertTrue(np.isfinite(solvers[1].particle_hessians.numpy()).all())
                 for name in ("particle_q", "particle_qd"):
                     np.testing.assert_allclose(
                         getattr(states[0][1], name).numpy(), getattr(states[1][1], name).numpy(), atol=2e-6, rtol=2e-5

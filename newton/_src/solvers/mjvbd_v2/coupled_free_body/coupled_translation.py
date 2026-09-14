@@ -9,6 +9,7 @@ import warp as wp
 from newton._src.solvers.mjvbd_v2.contact_projection import ContactProjection, ContactProjectionData, append_contact
 from newton._src.solvers.mjvbd_v2.vbd import rigid_vbd_kernels as rk
 
+from .component_pcg import ComponentPCG
 from .rigid_fusion import FIELDS, RigidInputs, SoftInputs, SolveInputs
 from .two_level import TwoLevelPCG
 
@@ -231,7 +232,9 @@ class CoupledTranslationPCG:
         self.contacts = ContactProjection(self.count, 1000000, self.device)
         groups = np.concatenate([ritz.groups.numpy(), np.full(len(dynamic), -1)])
         ritz.groups = wp.array(groups, dtype=int, device=self.device)
-        self.pcg = TwoLevelPCG(ritz, inverse_factor=solver.enable_cuda_fast_path)
+        self.pcg = (
+            ComponentPCG(ritz, self.count, self.particle_count) if solver.enable_cuda_fast_path else TwoLevelPCG(ritz)
+        )
         self.work = [wp.zeros(self.count, dtype=wp.vec3, device=self.device) for _ in range(5)]
         self.work.append(wp.empty(self.count, dtype=wp.mat33, device=self.device))
         self.scale = wp.ones(1, dtype=float, device=self.device)

@@ -20,15 +20,48 @@ def main():
     parser.add_argument("--frames", type=int, default=2850)
     parser.add_argument("--screenshots", type=Path)
     parser.add_argument("--local-iterations", type=int)
+    parser.add_argument("--substeps", type=int)
     parser.add_argument("--linear-iterations", type=int)
     parser.add_argument("--max-radius-fraction", type=float)
+    parser.add_argument(
+        "--cup-offset-mm", type=float, default=0.0, help="Perturb initial cup x position for grasp tests"
+    )
     args = parser.parse_args()
     viewer = ViewerGL(width=1920, height=1080, headless=True, vsync=False)
     try:
         overrides = [] if args.local_iterations is None else ["--vbd-iterations", str(args.local_iterations)]
+        if args.substeps is not None:
+            overrides.extend(["--substeps", str(args.substeps)])
         example = Example(viewer, Example.create_parser().parse_args(overrides))
+        if not np.isfinite(args.cup_offset_mm):
+            raise ValueError("Cup placement perturbation must be finite")
+        if args.cup_offset_mm:
+            positions = example.state_0.particle_q.numpy().copy()
+            positions[:, 0] += np.float32(args.cup_offset_mm * 0.001)
+            example.state_0.particle_q.assign(positions)
+            example.state_1.particle_q.assign(positions)
+        masses = example.model.body_mass.numpy()[example.popcorn_bodies]
+        if len(masses) != example.args.popcorn_count or not np.all(masses > 0):
+            raise AssertionError("Every authored popcorn grain must remain a dynamic massive body")
+        print(
+            json.dumps(
+                {
+                    "dynamic_grains": len(masses),
+                    "substeps": example.args.substeps,
+                    "local_iterations": example.args.vbd_iterations,
+                    "cup_offset_mm": args.cup_offset_mm,
+                }
+            ),
+            flush=True,
+        )
         if args.linear_iterations is not None:
-            example.solver.vbd_solver.particle_multilevel.coarse_iterations = args.linear_iterations
+            if args.linear_iterations < 1:
+                raise ValueError("Linear iterations must be positive")
+            correction = example.solver.vbd_solver.particle_multilevel
+            correction.coarse_iterations = args.linear_iterations
+            # Diagnostics store one residual per iteration. Resize before any
+            # simulation graph captures this buffer, not just the loop budget.
+            correction.runtime_metrics = wp.zeros(5 + args.linear_iterations, device=example.model.device)
         if args.max_radius_fraction is not None:
             example.solver.vbd_solver.particle_multilevel.max_radius_fraction = args.max_radius_fraction
         for _ in range(30):
@@ -47,7 +80,7 @@ def main():
                 )
                 raise
             example.render()
-        from pyglet import gl
+        from pyglet import gl  # noqa: PLC0415 -- initialize after the viewer creates its GL context
 
         gl.glFinish()
         # Same state, same camera: audit against the uncached public renderer.
@@ -79,7 +112,7 @@ def main():
             example.step()
             example.render()
             if args.screenshots and int(round(example.sim_time * 60)) in (900, 1260, 2700):
-                from PIL import Image
+                from PIL import Image  # noqa: PLC0415 -- optional screenshot dependency
 
                 args.screenshots.mkdir(parents=True, exist_ok=True)
                 Image.fromarray(viewer.get_frame().numpy()).save(args.screenshots / f"frame-{example.sim_time:.1f}.png")
@@ -91,6 +124,11 @@ def main():
                             "wall_ms": 1000 * (time.perf_counter() - start) / (frame + 1),
                             "cup_lift": example.current_cup_lift,
                             "delivered": example.delivered_inside,
+                            "cup_slip_mm": 1000 * getattr(example, "cup_grip_slip", 0.0),
+                            "cup_deformation_mm": 1000 * example.max_cup_deformation,
+                            "rim_min_radius_mm": 1000 * example.rim_min_radius,
+                            "surface_fallback": example.solver.vbd_solver._cuda_surface.fallback.numpy().tolist(),
+                            "max_surface_adjacency": int(example.solver.vbd_solver._cuda_surface.counts.numpy().max()),
                         }
                     ),
                     flush=True,
@@ -100,6 +138,7 @@ def main():
         ms = 1000 * (time.perf_counter() - start) / args.frames
         print(json.dumps({"frames": args.frames, "wall_ms_per_frame": ms, "fps": 1000 / ms}), flush=True)
         example.test_final()
+        print(json.dumps({"validation_passed": True}), flush=True)
     except (AssertionError, RuntimeError):
         if "example" in locals():
             print(
