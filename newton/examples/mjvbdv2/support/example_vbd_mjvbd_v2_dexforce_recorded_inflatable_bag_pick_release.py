@@ -250,6 +250,7 @@ class Example:
         )
 
         self.graph = None
+        self.ik_graph = None
         self.use_graph = bool(args.graph_capture) and self.device.is_cuda
         self.release_material_applied = False
         self.active_phase_index = -1
@@ -478,11 +479,21 @@ class Example:
             wp.array(upper, dtype=wp.float32, device=self.device),
             weight=25.0,
         )
+        # Lock non-arm coordinates inside the solve, not only after it. Otherwise
+        # LM can borrow waist motion which the subsequent projection removes.
+        controlled = {f"DexforceW1V021/{name}" for name in (*self.LEFT_ARM, *self.RIGHT_ARM)}
+        dof_mask = np.zeros(self.ik_model.joint_dof_count, dtype=bool)
+        dof_start = self.ik_model.joint_qd_start.numpy()
+        for joint, label in enumerate(self.ik_model.joint_label):
+            if label in controlled:
+                dof_mask[int(dof_start[joint]) : int(dof_start[joint + 1])] = True
         self.ik_solver = ik.IKSolver(
             self.ik_model,
             n_problems=1,
             objectives=[self.left_obj, self.left_rot, self.right_obj, self.right_rot, limits],
             lambda_initial=0.1,
+            joint_dof_mask=wp.array(dof_mask, dtype=wp.bool, device=self.device),
+            compact_dof_mask=self.device.is_cuda,
             jacobian_mode=ik.IKJacobianType.ANALYTIC,
         )
 
@@ -685,6 +696,19 @@ class Example:
         if phase.release:
             self._apply_release_material()
 
+    def _solve_runtime_ik(self):
+        """Replay the fixed LM work while reading freshly updated target buffers."""
+        if not self.use_graph:
+            self.ik_solver.step(self.ik_q, self.ik_q, iterations=RUNTIME_IK_ITERATIONS)
+            return
+        if self.ik_graph is None:
+            # Initial IK already warmed the kernels and allocated solver buffers.
+            # Targets and ik_q keep their addresses across display frames.
+            with wp.ScopedDevice(self.device), wp.ScopedCapture() as capture:
+                self.ik_solver.step(self.ik_q, self.ik_q, iterations=RUNTIME_IK_ITERATIONS)
+            self.ik_graph = capture.graph
+        wp.capture_launch(self.ik_graph)
+
     def _prepare_frame(self):
         """Solve the arm target sampled directly from the isolated trajectory."""
 
@@ -698,7 +722,7 @@ class Example:
         self.left_rot.set_target_rotation(0, self._v4(wp.transform_get_rotation(self.left_home)))
         self.right_obj.set_target_position(0, wp.transform_get_translation(tcp))
         self.right_rot.set_target_rotation(0, self._v4(wp.transform_get_rotation(tcp)))
-        self.ik_solver.step(self.ik_q, self.ik_q, iterations=RUNTIME_IK_ITERATIONS)
+        self._solve_runtime_ik()
         wp.launch(
             _lock_q,
             self.lock_indices.shape[0],

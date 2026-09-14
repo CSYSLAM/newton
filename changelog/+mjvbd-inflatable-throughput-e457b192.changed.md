@@ -1,0 +1,1 @@
+Accelerate MJVBD V2 small CUDA face-contact batches and single-cavity pressure synchronization, masked arm IK with a reusable CUDA graph, and position updates without self-contact without changing contact search or pneumatic parameters. No configuration changes are required.

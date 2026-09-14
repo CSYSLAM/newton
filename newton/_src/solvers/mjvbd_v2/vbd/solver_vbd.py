@@ -53,6 +53,7 @@ from .particle_vbd_kernels import (
     # Planar DAT (Divide and Truncate) kernels
     apply_planar_truncation_parallel_by_collision,
     apply_truncation_ts,
+    apply_untruncated_displacements,
     build_particle_body_contact_adjacency_active,
     build_particle_body_contact_color_masks,
     expand_particle_iteration_chebyshev_exclusions,
@@ -3152,22 +3153,11 @@ class SolverVBD(SolverBase, CouplingInterface):
             self._particle_truncation_cache.apply(self, particle_q_out, None, empty_contact_set=empty_contact_set)
             return
         if not self.particle_enable_self_contact:
-            self.truncation_ts.fill_(1.0)
             wp.launch(
-                kernel=apply_truncation_ts,
+                kernel=apply_untruncated_displacements,
                 dim=self.model.particle_count,
-                inputs=[
-                    self.pos_prev_collision_detection,  # pos: wp.array[wp.vec3],
-                    self.particle_displacements,  # displacement_in: wp.array[wp.vec3],
-                    self.truncation_ts,  # truncation_ts: wp.array[float],
-                    wp.inf,  # max_displacement: float (input threshold)
-                ],
-                outputs=[
-                    self.particle_displacements,  # displacement_out: wp.array[wp.vec3],
-                    particle_q_out,  # pos_out: wp.array[wp.vec3],
-                    self.particle_chebyshev_collided if self.particle_chebyshev_guarded else None,
-                    self.particle_chebyshev_cleanup_status,
-                ],
+                inputs=[self.pos_prev_collision_detection, self.particle_displacements],
+                outputs=[self.truncation_ts, particle_q_out],
                 device=self.device,
             )
 

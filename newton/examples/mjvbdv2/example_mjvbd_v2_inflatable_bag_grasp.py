@@ -8,8 +8,8 @@ full-W1 right-wrist TCP and solves the arm with realtime analytic-jacobian IK.
 The bag retains the source example's bending plasticity, pneumatic damping,
 contact-aware finger closing, and release material.
 
-CUDA devices capture the warmed physics substeps by default. The realtime IK
-solve remains outside that graph because its target changes every frame.
+CUDA devices capture the warmed physics substeps and realtime IK separately.
+The IK graph reads target buffers updated each display frame.
 
 Run from the repository root::
 

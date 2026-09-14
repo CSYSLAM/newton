@@ -12,6 +12,16 @@ _PNEUMATIC_CAVITY_UPDATE_BLOCK_DIM = 128
 _PNEUMATIC_SINGLE_CAVITY_FUSED_MAX_PARTICLES = 512
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+__syncthreads();
+#endif
+""")
+def _pressure_block_sync():
+    """Publish lane zero's pressure update before the block reads it."""
+    pass
+
+
 @wp.func
 def _cavity_face_volume_contribution_from_anchor(
     face: int,
@@ -505,10 +515,9 @@ def update_single_cavity_volume_pressure_and_accumulate_force(
             clamp_flags,
         )
 
-    # The reduction is a block barrier after lane zero updates pressure.
-    pressure_ready = wp.tile_sum(wp.tile(float(lane == 0)))[0]
+    _pressure_block_sync()
     particle_index = lane
-    while particle_index < particle_ids.shape[0] and pressure_ready > 0.0:
+    while particle_index < particle_ids.shape[0]:
         _accumulate_pressure_force_for_particle(
             particle_ids[particle_index],
             particle_q,

@@ -1,0 +1,49 @@
+{
+  "alternating_comparison": {
+    "mean_step_ms": [
+      22.10073915677174,
+      15.09828012020514
+    ],
+    "step_time_reduction": 0.3168427529457096,
+    "minimum_volume_ratio": [
+      0.8974097861220092,
+      0.8917573476922417
+    ],
+    "maximum_root_position_error_m": [
+      3.4652809748050293e-06,
+      3.644301292398307e-06
+    ],
+    "maximum_pressure_pa": [
+      369005.46875,
+      381765.78125
+    ],
+    "lifted_bag_center_z_m": [
+      1.2975484132766724,
+      1.2975229024887085
+    ],
+    "final_bag_center_z_m": [
+      1.1915711164474487,
+      1.1924611330032349
+    ],
+    "acceptance": "both complete sequences passed"
+  },
+  "rendered_full_sequence": {
+    "minimum_volume_ratio": 0.8974088856817914,
+    "maximum_pressure_pa": 369007.65625,
+    "maximum_root_position_error_m": 3.644301292398307e-06,
+    "maximum_root_angle_error_deg": 7.065202614577463e-05,
+    "initial_bag_center_z_m": 1.1991479396820068,
+    "lifted_bag_center_z_m": 1.2975088357925415,
+    "final_bag_center_z_m": 1.1915664672851562,
+    "failure_count": 0,
+    "step_ms": 15.049442722201091,
+    "render_ms": 2.8932158149227782,
+    "step_plus_render_fps": 55.73310097447219
+  },
+  "pre_fix_regression": [
+    [
+      20,
+      "W1 hand-root position error is 0.000605 m."
+    ]
+  ]
+}

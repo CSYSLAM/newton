@@ -1,0 +1,6 @@
+{
+  "finite_positions": true,
+  "finite_pressure": true,
+  "plastic_angle_bound": true,
+  "plastic_stiffness_bound": true
+}

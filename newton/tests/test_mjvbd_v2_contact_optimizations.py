@@ -4,13 +4,14 @@
 """Test MJVBDV2-private rigid-soft contact optimizations."""
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
 
 import newton
 from newton._src.geometry.kernels import create_soft_contacts
-from newton._src.solvers.mjvbd_v2 import collision_pipeline, soft_contact_pipeline
+from newton._src.solvers.mjvbd_v2 import collision_pipeline, full_contact_pipeline, soft_contact_pipeline
 from newton._src.solvers.mjvbd_v2.full_contact_pipeline import MJVBDV2CollisionPipeline
 from newton._src.solvers.mjvbd_v2.vbd import particle_vbd_kernels as complete_particle_kernels
 from newton._src.solvers.mjvbd_v2.vbd import rigid_vbd_kernels as complete_rigid_kernels
@@ -657,6 +658,76 @@ class TestMJVBDV2ContactOptimizations(unittest.TestCase):
         wp.capture_launch(capture.graph)
         self.assertEqual(int(private_contacts.soft_contact_count.numpy()[0]), expected_count)
         self.assertTrue(private_contacts._enable_rigid_soft_full_surface_contact)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Small face batches require CUDA")
+    def test_small_face_batches_match_reference_across_graph_count_changes(self):
+        """Dispatch every candidate exactly once as a captured graph crosses the cutoff."""
+        device = wp.get_device("cuda:0")
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        builder.add_shape_box(body=-1, hx=2.0, hy=2.0, hz=0.5)
+        builder.add_cloth_grid(
+            pos=wp.vec3(-0.65, 0.0, 0.505),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(),
+            dim_x=257,
+            dim_y=1,
+            cell_x=0.01,
+            cell_y=0.01,
+            mass=0.1,
+            particle_radius=0.01,
+        )
+        builder.color()
+        model = builder.finalize(device=device)
+        pipeline = MJVBDV2CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True)
+        contacts = pipeline.contacts()
+        saved = {}
+        launch = wp.launch
+
+        def record_launch(kernel, *args, **kwargs):
+            if kernel is full_contact_pipeline._create_compact_soft_face_contacts_small:
+                saved.update(kwargs)
+            return launch(kernel, *args, **kwargs)
+
+        with patch.object(wp, "launch", side_effect=record_launch):
+            pipeline.collide(model.state(), contacts)
+        self.assertTrue(saved)
+        inputs = list(saved["inputs"])
+        inputs[0] = wp.array(np.arange(514, dtype=np.int32), device=device)
+        counts = wp.zeros(2, dtype=int, device=device)
+        inputs[1] = counts
+        inputs[19] = False  # Compare cold searches independently of the temporal cache.
+
+        def run(kernel, workers, block):
+            args = list(inputs)
+            args[3] = workers
+            launch(kernel, dim=workers, block_dim=block, inputs=args, outputs=saved["outputs"], device=device)
+
+        def records():
+            count = int(contacts.soft_contact_count.numpy()[0])
+            indices = contacts.soft_contact_indices.numpy()[:count]
+            order = np.lexsort((indices[:, 2], indices[:, 1], indices[:, 0]))
+            return np.column_stack(
+                [
+                    indices[order],
+                    contacts.soft_contact_barycentric.numpy()[:count][order],
+                    contacts.soft_contact_body_pos.numpy()[:count][order],
+                    contacts.soft_contact_normal.numpy()[:count][order],
+                ]
+            )
+
+        with wp.ScopedCapture(device=device) as capture:
+            contacts.clear()
+            run(full_contact_pipeline._create_compact_soft_face_contacts_small, 512, 1)
+            run(full_contact_pipeline._create_compact_soft_face_contacts_large, 640, 128)
+        for count in (0, 1, 256, 257, 512, 513, 514, 0, 512):
+            with self.subTest(count=count):
+                counts.assign(np.array([0, count], dtype=np.int32))
+                contacts.clear()
+                run(full_contact_pipeline._create_compact_soft_face_contacts, 640, 128)
+                expected = records()
+                self.assertEqual(len(expected), count)
+                wp.capture_launch(capture.graph)
+                np.testing.assert_allclose(records(), expected, atol=1.0e-6, rtol=1.0e-6)
 
     @unittest.skipUnless(wp.is_cuda_available(), "Temporal face cache requires CUDA texture SDFs")
     def test_private_full_surface_face_cache_preserves_contact_keys(self):

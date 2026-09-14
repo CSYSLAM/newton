@@ -2413,6 +2413,20 @@ def apply_planar_truncation_parallel_by_collision(
 
 
 @wp.kernel
+def apply_untruncated_displacements(
+    pos: wp.array[wp.vec3],
+    displacement: wp.array[wp.vec3],
+    truncation_ts: wp.array[float],
+    pos_out: wp.array[wp.vec3],
+):
+    """Combine unit truncation factors and position updates without self-contact."""
+    i = wp.tid()
+    truncation_ts[i] = 1.0
+    if pos_out:
+        pos_out[i] = pos[i] + displacement[i]
+
+
+@wp.kernel
 def apply_truncation_ts(
     pos: wp.array[wp.vec3],
     displacement_in: wp.array[wp.vec3],

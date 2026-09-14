@@ -29,6 +29,8 @@ __all__ = ["MJVBDV2CollisionPipeline"]
 _COMPACT_SOFT_SURFACE_BLOCK_DIM = 128
 _COMPACT_SOFT_SURFACE_BLOCKS_PER_SM = 2
 _ENABLE_COMPACT_SOFT_SURFACE_PAIRS = True
+_ENABLE_SMALL_FACE_BATCH = True
+_SMALL_FACE_BATCH_LIMIT = 512
 _ENABLE_TEMPORAL_SOFT_FACE_CACHE = True
 _SOFT_SURFACE_AABB_SAFETY_MARGIN = 1.0e-6
 _SOFT_FACE_CACHE_BYTES_PER_PAIR = 13
@@ -639,82 +641,94 @@ def _create_soft_face_contacts(
     )
 
 
-@wp.kernel(grid_stride=False)
-def _create_compact_soft_face_contacts(
-    compact_pair_indices: wp.array[wp.int32],
-    compact_counts: wp.array[wp.int32],
-    compact_count_index: wp.int32,
-    worker_count: wp.int32,
-    face_pairs: wp.array[wp.vec2i],
-    particle_q: wp.array[wp.vec3],
-    particle_radius: wp.array[float],
-    tri_indices: wp.array2d[wp.int32],
-    shape_body: wp.array[wp.int32],
-    shape_type: wp.array[wp.int32],
-    shape_flags: wp.array[wp.int32],
-    shape_transform: wp.array[wp.transform],
-    shape_scale: wp.array[wp.vec3],
-    body_q: wp.array[wp.transform],
-    shape_sdf_index: wp.array[wp.int32],
-    texture_sdf_table: wp.array[TextureSDFData],
-    shape_margin: wp.array[float],
-    sdf_face_iters: wp.int32,
-    sdf_ls_iters: wp.int32,
-    use_temporal_cache: bool,
-    cached_barycentric: wp.array[wp.vec3],
-    cache_state: wp.array[wp.uint8],
-    margin: float,
-    tid_base: wp.int32,
-    soft_contact_max: wp.int32,
-    soft_contact_count: wp.array[wp.int32],
-    soft_contact_tids: wp.array[wp.int32],
-    soft_contact_particle: wp.array[wp.int32],
-    soft_contact_indices: wp.array[wp.vec3i],
-    soft_contact_barycentric: wp.array[wp.vec3],
-    soft_contact_shape: wp.array[wp.int32],
-    soft_contact_body_pos: wp.array[wp.vec3],
-    soft_contact_body_vel: wp.array[wp.vec3],
-    soft_contact_normal: wp.array[wp.vec3],
-):
-    worker = wp.tid()
-    compact_index = worker
-    compact_count = wp.min(compact_counts[compact_count_index], compact_pair_indices.shape[0])
-    while compact_index < compact_count:
-        tid = compact_pair_indices[compact_index]
-        _create_soft_face_contact_at_pair(
-            tid,
-            face_pairs,
-            particle_q,
-            particle_radius,
-            tri_indices,
-            shape_body,
-            shape_type,
-            shape_flags,
-            shape_transform,
-            shape_scale,
-            body_q,
-            shape_sdf_index,
-            texture_sdf_table,
-            shape_margin,
-            sdf_face_iters,
-            sdf_ls_iters,
-            use_temporal_cache,
-            cached_barycentric,
-            cache_state,
-            margin,
-            tid_base,
-            soft_contact_max,
-            soft_contact_count,
-            soft_contact_tids,
-            soft_contact_particle,
-            soft_contact_indices,
-            soft_contact_barycentric,
-            soft_contact_shape,
-            soft_contact_body_pos,
-            soft_contact_body_vel,
-            soft_contact_normal,
-        )
-        compact_index += worker_count
+def _make_compact_soft_face_kernel(min_pairs: int, max_pairs: int):
+    """Specialize the same face search for disjoint GPU candidate-count ranges."""
+
+    @wp.kernel(grid_stride=False)
+    def _create_compact_soft_face_contacts(
+        compact_pair_indices: wp.array[wp.int32],
+        compact_counts: wp.array[wp.int32],
+        compact_count_index: wp.int32,
+        worker_count: wp.int32,
+        face_pairs: wp.array[wp.vec2i],
+        particle_q: wp.array[wp.vec3],
+        particle_radius: wp.array[float],
+        tri_indices: wp.array2d[wp.int32],
+        shape_body: wp.array[wp.int32],
+        shape_type: wp.array[wp.int32],
+        shape_flags: wp.array[wp.int32],
+        shape_transform: wp.array[wp.transform],
+        shape_scale: wp.array[wp.vec3],
+        body_q: wp.array[wp.transform],
+        shape_sdf_index: wp.array[wp.int32],
+        texture_sdf_table: wp.array[TextureSDFData],
+        shape_margin: wp.array[float],
+        sdf_face_iters: wp.int32,
+        sdf_ls_iters: wp.int32,
+        use_temporal_cache: bool,
+        cached_barycentric: wp.array[wp.vec3],
+        cache_state: wp.array[wp.uint8],
+        margin: float,
+        tid_base: wp.int32,
+        soft_contact_max: wp.int32,
+        soft_contact_count: wp.array[wp.int32],
+        soft_contact_tids: wp.array[wp.int32],
+        soft_contact_particle: wp.array[wp.int32],
+        soft_contact_indices: wp.array[wp.vec3i],
+        soft_contact_barycentric: wp.array[wp.vec3],
+        soft_contact_shape: wp.array[wp.int32],
+        soft_contact_body_pos: wp.array[wp.vec3],
+        soft_contact_body_vel: wp.array[wp.vec3],
+        soft_contact_normal: wp.array[wp.vec3],
+    ):
+        worker = wp.tid()
+        compact_index = worker
+        compact_count = wp.min(compact_counts[compact_count_index], compact_pair_indices.shape[0])
+        if compact_count < wp.static(min_pairs) or compact_count > wp.static(max_pairs):
+            return
+        while compact_index < compact_count:
+            tid = compact_pair_indices[compact_index]
+            _create_soft_face_contact_at_pair(
+                tid,
+                face_pairs,
+                particle_q,
+                particle_radius,
+                tri_indices,
+                shape_body,
+                shape_type,
+                shape_flags,
+                shape_transform,
+                shape_scale,
+                body_q,
+                shape_sdf_index,
+                texture_sdf_table,
+                shape_margin,
+                sdf_face_iters,
+                sdf_ls_iters,
+                use_temporal_cache,
+                cached_barycentric,
+                cache_state,
+                margin,
+                tid_base,
+                soft_contact_max,
+                soft_contact_count,
+                soft_contact_tids,
+                soft_contact_particle,
+                soft_contact_indices,
+                soft_contact_barycentric,
+                soft_contact_shape,
+                soft_contact_body_pos,
+                soft_contact_body_vel,
+                soft_contact_normal,
+            )
+            compact_index += worker_count
+
+    return _create_compact_soft_face_contacts
+
+
+_create_compact_soft_face_contacts = _make_compact_soft_face_kernel(0, 2147483647)
+_create_compact_soft_face_contacts_small = _make_compact_soft_face_kernel(0, _SMALL_FACE_BATCH_LIMIT)
+_create_compact_soft_face_contacts_large = _make_compact_soft_face_kernel(_SMALL_FACE_BATCH_LIMIT + 1, 2147483647)
 
 
 def _launch_soft_surface_contacts(
@@ -809,32 +823,40 @@ def _launch_soft_surface_contacts(
             )
     if face_pair_count > 0:
         if use_compact_pairs:
-            (face_search.launch if face_search is not None else wp.launch)(
-                _create_compact_soft_face_contacts,
-                dim=face_worker_count,
-                block_dim=_COMPACT_SOFT_SURFACE_BLOCK_DIM,
-                inputs=[
-                    face_compact_pair_indices,
-                    compact_counts,
-                    1,
-                    face_worker_count,
-                    face_pairs,
-                    state.particle_q,
-                    model.particle_radius,
-                    model.tri_indices,
-                    *shape_args,
-                    SDF_FACE_ITERS,
-                    SDF_LS_ITERS,
-                    use_face_temporal_cache,
-                    face_cached_barycentric,
-                    face_cache_state,
-                    margin,
-                    particle_pair_count + edge_pair_count,
-                    contacts.soft_contact_max,
-                ],
-                outputs=outputs,
-                device=model.device,
-            )
+            launches = [(_create_compact_soft_face_contacts, face_worker_count, _COMPACT_SOFT_SURFACE_BLOCK_DIM)]
+            if _ENABLE_SMALL_FACE_BATCH and model.device.is_cuda and face_search is None:
+                # The kernels inspect the device count; no readback or graph recapture is needed.
+                launches = [
+                    (_create_compact_soft_face_contacts_small, min(face_worker_count, _SMALL_FACE_BATCH_LIMIT), 1),
+                    (_create_compact_soft_face_contacts_large, face_worker_count, _COMPACT_SOFT_SURFACE_BLOCK_DIM),
+                ]
+            for face_kernel, worker_count, block_dim in launches:
+                (face_search.launch if face_search is not None else wp.launch)(
+                    face_kernel,
+                    dim=worker_count,
+                    block_dim=block_dim,
+                    inputs=[
+                        face_compact_pair_indices,
+                        compact_counts,
+                        1,
+                        worker_count,
+                        face_pairs,
+                        state.particle_q,
+                        model.particle_radius,
+                        model.tri_indices,
+                        *shape_args,
+                        SDF_FACE_ITERS,
+                        SDF_LS_ITERS,
+                        use_face_temporal_cache,
+                        face_cached_barycentric,
+                        face_cache_state,
+                        margin,
+                        particle_pair_count + edge_pair_count,
+                        contacts.soft_contact_max,
+                    ],
+                    outputs=outputs,
+                    device=model.device,
+                )
         else:
             wp.launch(
                 _create_soft_face_contacts,
