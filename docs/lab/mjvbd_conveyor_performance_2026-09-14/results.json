@@ -1,0 +1,238 @@
+{
+  "scope": "180 initial frames, frames 30..179 timed, ViewerGL headless 1280x960, CUDA interop disabled. Optimized path is a diagnostic monkeypatch; complete sorting/physics equivalence not validated.",
+  "baseline": {
+    "step_ms": 51.10005882762683,
+    "graph_ms": 36.27328989949698,
+    "plan_ms": 14.508095891602958,
+    "render_ms": 13.629991320582727
+  },
+  "experimental": {
+    "step_ms": 38.77322990175647,
+    "graph_ms": 36.739091608906165,
+    "plan_ms": 4.3448806266921265,
+    "render_ms": 12.713015992582465
+  },
+  "gpu_kernel_profile": "Two initial-stage frames of experimental configuration, Nsight Systems node trace; percentages are instrumented kernel time, not end-to-end frame fractions.",
+  "top_kernels": [
+    {
+      "Time (%)": "13.9",
+      "Total Time (ns)": "10217597",
+      "Instances": "1280",
+      "Avg (ns)": "7982.5",
+      "Med (ns)": "5920.0",
+      "Min (ns)": "5504",
+      "Max (ns)": "632856",
+      "StdDev (ns)": "29595.9",
+      "Name": "make_surface_kernel__locals__solve_surface_cached_9c718926_cuda_kernel_forward"
+    },
+    {
+      "Time (%)": "13.1",
+      "Total Time (ns)": "9616035",
+      "Instances": "1280",
+      "Avg (ns)": "7512.5",
+      "Med (ns)": "6048.0",
+      "Min (ns)": "5823",
+      "Max (ns)": "896309",
+      "StdDev (ns)": "27598.8",
+      "Name": "accumulate_pressure_force_and_hessian_c5fcf021_cuda_kernel_forward"
+    },
+    {
+      "Time (%)": "10.6",
+      "Total Time (ns)": "7751807",
+      "Instances": "1280",
+      "Avg (ns)": "6056.1",
+      "Med (ns)": "5408.0",
+      "Min (ns)": "5247",
+      "Max (ns)": "566968",
+      "StdDev (ns)": "16626.0",
+      "Name": "solve_elasticity_tile_1819ac86_cuda_kernel_forward"
+    },
+    {
+      "Time (%)": "8.8",
+      "Total Time (ns)": "6488689",
+      "Instances": "1280",
+      "Avg (ns)": "5069.3",
+      "Med (ns)": "4992.0",
+      "Min (ns)": "3616",
+      "Max (ns)": "164830",
+      "StdDev (ns)": "4495.8",
+      "Name": "accumulate_particle_body_contact_force_and_hessian_6ad06763_cuda_kernel_forward"
+    },
+    {
+      "Time (%)": "6.8",
+      "Total Time (ns)": "5003462",
+      "Instances": "1024",
+      "Avg (ns)": "4886.2",
+      "Med (ns)": "4768.0",
+      "Min (ns)": "3456",
+      "Max (ns)": "506426",
+      "StdDev (ns)": "15700.0",
+      "Name": "update_cavity_volume_and_pressure_by_color_e3237d5d_cuda_kernel_forward"
+    },
+    {
+      "Time (%)": "4.8",
+      "Total Time (ns)": "3515796",
+      "Instances": "32",
+      "Avg (ns)": "109868.6",
+      "Med (ns)": "94719.0",
+      "Min (ns)": "93822",
+      "Max (ns)": "573849",
+      "StdDev (ns)": "84670.8",
+      "Name": "edge_colliding_edges_detection_kernel_8b309277_cuda_kernel_forward"
+    },
+    {
+      "Time (%)": "4.6",
+      "Total Time (ns)": "3354802",
+      "Instances": "1296",
+      "Avg (ns)": "2588.6",
+      "Med (ns)": "1600.0",
+      "Min (ns)": "1535",
+      "Max (ns)": "522426",
+      "StdDev (ns)": "18990.4",
+      "Name": "_finish_truncation_232ff740_cuda_kernel_forward"
+    },
+    {
+      "Time (%)": "4.3",
+      "Total Time (ns)": "3152378",
+      "Instances": "32",
+      "Avg (ns)": "98511.8",
+      "Med (ns)": "45951.5",
+      "Min (ns)": "45823",
+      "Max (ns)": "1711883",
+      "StdDev (ns)": "294410.0",
+      "Name": "vertex_triangle_collision_detection_kernel_723f98e4_cuda_kernel_forward"
+    },
+    {
+      "Time (%)": "3.8",
+      "Total Time (ns)": "2800317",
+      "Instances": "1280",
+      "Avg (ns)": "2187.7",
+      "Med (ns)": "1792.0",
+      "Min (ns)": "1728",
+      "Max (ns)": "509146",
+      "StdDev (ns)": "14181.1",
+      "Name": "accumulate_self_contact_force_and_hessian_0a39fbe4_cuda_kernel_forward"
+    },
+    {
+      "Time (%)": "3.4",
+      "Total Time (ns)": "2508576",
+      "Instances": "1296",
+      "Avg (ns)": "1935.6",
+      "Med (ns)": "1920.0",
+      "Min (ns)": "1856",
+      "Max (ns)": "2720",
+      "StdDev (ns)": "48.2",
+      "Name": "_make_kernels__locals__truncate_46a1a429_cuda_kernel_forward"
+    },
+    {
+      "Time (%)": "3.1",
+      "Total Time (ns)": "2258917",
+      "Instances": "512",
+      "Avg (ns)": "4411.9",
+      "Med (ns)": "5184.0",
+      "Min (ns)": "1312",
+      "Max (ns)": "463866",
+      "StdDev (ns)": "20462.0",
+      "Name": "accumulate_body_body_contacts_per_body_27e7f9c1_cuda_kernel_forward"
+    },
+    {
+      "Time (%)": "2.6",
+      "Total Time (ns)": "1903241",
+      "Instances": "272",
+      "Avg (ns)": "6997.2",
+      "Med (ns)": "4640.0",
+      "Min (ns)": "4576",
+      "Max (ns)": "620600",
+      "StdDev (ns)": "37345.3",
+      "Name": "initialize_cavity_volume_and_pressure_8376189d_cuda_kernel_forward"
+    },
+    {
+      "Time (%)": "2.4",
+      "Total Time (ns)": "1790213",
+      "Instances": "64",
+      "Avg (ns)": "27972.1",
+      "Med (ns)": "17696.0",
+      "Min (ns)": "16639",
+      "Max (ns)": "391131",
+      "StdDev (ns)": "58645.1",
+      "Name": "wp::bvh_refit_kernel(int, const int *, int *, const int *, wp::BVHPackedNodeHalf *, wp::BVHPackedNodeHalf *, const wp::vec_t<(unsigned int)3, float> *, const wp::vec_t<(unsigned int)3, float> *)"
+    },
+    {
+      "Time (%)": "2.2",
+      "Total Time (ns)": "1635693",
+      "Instances": "96",
+      "Avg (ns)": "17038.5",
+      "Med (ns)": "16640.0",
+      "Min (ns)": "16575",
+      "Max (ns)": "29664",
+      "StdDev (ns)": "2187.7",
+      "Name": "_lm_solve_tiled_40_52_4edd60d7_cuda_kernel_forward"
+    },
+    {
+      "Time (%)": "1.9",
+      "Total Time (ns)": "1385520",
+      "Instances": "512",
+      "Avg (ns)": "2706.1",
+      "Med (ns)": "3024.0",
+      "Min (ns)": "1567",
+      "Max (ns)": "7104",
+      "StdDev (ns)": "1155.0",
+      "Name": "solve_rigid_body_eb69b9c8_cuda_kernel_forward"
+    },
+    {
+      "Time (%)": "1.2",
+      "Total Time (ns)": "896179",
+      "Instances": "512",
+      "Avg (ns)": "1750.3",
+      "Med (ns)": "2015.5",
+      "Min (ns)": "1248",
+      "Max (ns)": "3008",
+      "StdDev (ns)": "452.5",
+      "Name": "accumulate_body_particle_contacts_per_body_c0f094d5_cuda_kernel_forward"
+    },
+    {
+      "Time (%)": "1.2",
+      "Total Time (ns)": "888341",
+      "Instances": "256",
+      "Avg (ns)": "3470.1",
+      "Med (ns)": "3424.0",
+      "Min (ns)": "3360",
+      "Max (ns)": "4416",
+      "StdDev (ns)": "168.4",
+      "Name": "update_duals_body_body_contacts_c642b361_cuda_kernel_forward"
+    },
+    {
+      "Time (%)": "1.0",
+      "Total Time (ns)": "756021",
+      "Instances": "512",
+      "Avg (ns)": "1476.6",
+      "Med (ns)": "1472.0",
+      "Min (ns)": "1408",
+      "Max (ns)": "1920",
+      "StdDev (ns)": "58.1",
+      "Name": "accumulate_body_particle_contact_dense_single_30aa1c11_cuda_kernel_forward"
+    },
+    {
+      "Time (%)": "0.9",
+      "Total Time (ns)": "635416",
+      "Instances": "96",
+      "Avg (ns)": "6618.9",
+      "Med (ns)": "6576.0",
+      "Min (ns)": "5919",
+      "Max (ns)": "7424",
+      "StdDev (ns)": "462.7",
+      "Name": "void cub::CUB_200802_SM_520_600_610_700_750_800_860_890_900_1000_1200_1210::DeviceRadixSortOnesweepKernel<cub::CUB_200802_SM_520_600_610_700_750_800_860_890_900_1000_1200_1210::detail::radix::policy_hub<long, SortPayload<(int)4>, unsigned int>::Policy1000, (bool)0, long, SortPayload<(int)4>, unsigned int, int, int, cub::CUB_200802_SM_520_600_610_700_750_800_860_890_900_1000_1200_1210::detail::identity_decomposer_t>(T7 *, T7 *, T5 *, const T5 *, T3 *, const T3 *, T4 *, const T4 *, T6, int, int, T8)"
+    },
+    {
+      "Time (%)": "0.8",
+      "Total Time (ns)": "564792",
+      "Instances": "16",
+      "Avg (ns)": "35299.5",
+      "Med (ns)": "44319.0",
+      "Min (ns)": "19712",
+      "Max (ns)": "45023",
+      "StdDev (ns)": "12323.9",
+      "Name": "create_narrow_phase_kernel_gjk_mpr__locals__narrow_phase_kernel_gjk_mpr_e25a7551_cuda_kernel_forward"
+    }
+  ]
+}

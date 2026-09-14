@@ -1249,6 +1249,15 @@ class SolverVBD(SolverBase, CouplingInterface):
         self._pneumatic_particle_face_offsets = wp.array(offsets, dtype=wp.int32, device=self.device)
         self._pneumatic_particle_faces = wp.array(particle_faces[order], dtype=wp.int32, device=self.device)
 
+        # Only cavity vertices receive pressure. Retain each model color's order
+        # and empty rows so volume updates still follow every elasticity color.
+        self._pneumatic_particle_color_groups = []
+        for group in model.particle_color_groups:
+            particles = group.numpy()
+            self._pneumatic_particle_color_groups.append(
+                wp.array(particles[counts[particles] > 0], dtype=wp.int32, device=self.device)
+            )
+
         self._pneumatic_incremental_volume_enabled = (
             enable_incremental_volume
             and model.device.is_cuda
@@ -1299,7 +1308,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             )
             self._pneumatic_face_volume_contribution = wp.zeros(face_count, dtype=float, device=self.device)
             self._pneumatic_cavity_anchor_positions = wp.zeros(cavity_count, dtype=wp.vec3, device=self.device)
-            largest_color = max((group.size for group in model.particle_color_groups), default=0)
+            largest_color = max((group.size for group in self._pneumatic_particle_color_groups), default=0)
             self._pneumatic_single_cavity_force_fusion_enabled = (
                 cavity_count == 1
                 and largest_color <= self._pneumatic_kernels._PNEUMATIC_SINGLE_CAVITY_FUSED_MAX_PARTICLES
@@ -3989,7 +3998,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 elif self._pneumatic_single_cavity_force_fusion_enabled and color > 0:
                     self._update_pneumatic_cavity_and_accumulate_forces(
                         state_in.particle_q,
-                        self.model.particle_color_groups[color],
+                        self._pneumatic_particle_color_groups[color],
                         control,
                         dt,
                         color - 1,
@@ -3997,7 +4006,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 else:
                     self._accumulate_pneumatic_forces(
                         state_in.particle_q,
-                        self.model.particle_color_groups[color],
+                        self._pneumatic_particle_color_groups[color],
                     )
             if not _fused and contacts is not None and contacts.soft_contact_max > 0:
                 if use_particle_contact_gather:

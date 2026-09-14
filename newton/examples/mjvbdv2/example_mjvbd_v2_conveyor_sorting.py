@@ -13,6 +13,7 @@ MJVBDV2, including tetrahedral elasticity, cloth bending, and sealed gas pressur
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 from collections import deque
@@ -215,6 +216,7 @@ class Example:
         self.motion_upper[self.arm_indices] -= math.radians(3.0)
         self.motion_retimer = JointMotionRetimer(self.motion_speed, self.frame_dt)
         self._build_ik()
+        self.ik_graphs = {}
         self.feed_rotation = self.grasp_rotations[0]
         self.rotation = self.grasp_rotations[0]
         self.state_0, self.state_1 = self.model.state(), self.model.state()
@@ -231,6 +233,7 @@ class Example:
             contact_mode="full",
             vbd_options={
                 "iterations": args.vbd_iterations,
+                "pneumatic_enable_incremental_volume": args.compute_cache,
                 "friction_epsilon": 1.0e-4,
                 "rigid_avbd_contact_alpha": 0.95,
                 "rigid_contact_history": False,
@@ -1027,6 +1030,23 @@ class Example:
                 self._enter(phases[phases.index(self.phase) + 1])
         return 0.0, closure
 
+    def _solve_ik(self, joint_q):
+        """Replay the same IK iterations using current device objective buffers."""
+        if not self.args.compute_cache or not self.model.device.is_cuda:
+            self.ik_solver.step(joint_q, joint_q, iterations=self.args.ik_iterations)
+            return
+        key = (joint_q.ptr, self.args.ik_iterations)
+        graph = self.ik_graphs.get(key)
+        if graph is None:
+            # Preserve the seed even on backends that execute during capture.
+            backup = wp.clone(joint_q)
+            with wp.ScopedCapture(device=self.model.device) as capture:
+                self.ik_solver.step(joint_q, joint_q, iterations=self.args.ik_iterations)
+            wp.copy(joint_q, backup)
+            graph = capture.graph
+            self.ik_graphs[key] = graph
+        wp.capture_launch(graph)
+
     def _plan_motion(self):
         speed, closure = self._controller()
         self._turn_waist()
@@ -1035,14 +1055,14 @@ class Example:
         self.rotation_objective.set_target_rotation(0, wp.vec4(*self.rotation))
         # Keep the original grasp branch independent of the temporary torso turn.
         self._set_waist_target(0.0)
-        self.ik_solver.step(self.ik_reference_q, self.ik_reference_q, iterations=self.args.ik_iterations)
+        self._solve_ik(self.ik_reference_q)
         wp.launch(_lock_coordinates, len(self.lock_indices), [self.lock_indices, self.lock_values, self.ik_reference_q])
         if self.phase in ("feed", "settle"):
             # Recover the grasp branch gradually while the hand is empty.
             self.ik_q.assign(0.95 * self.ik_q.numpy() + 0.05 * self.ik_reference_q.numpy())
         self._set_waist_target(self.waist_angle)
         wp.launch(_lock_coordinates, len(self.lock_indices), [self.lock_indices, self.lock_values, self.ik_q])
-        self.ik_solver.step(self.ik_q, self.ik_q, iterations=self.args.ik_iterations)
+        self._solve_ik(self.ik_q)
         wp.launch(_lock_coordinates, len(self.lock_indices), [self.lock_indices, self.lock_values, self.ik_q])
         end = self.state_0.joint_q.numpy()
         end[: self.robot_coord_count] = self.ik_q.numpy().reshape(-1)
@@ -1294,6 +1314,12 @@ class Example:
         parser.add_argument("--robot-urdf", default=str(ROBOT_URDF))
         parser.add_argument("--belt-speed", type=float, default=0.12, help="Indexed conveyor speed [m/s], 0.02-0.20.")
         parser.add_argument("--substeps", type=int, default=8)
+        parser.add_argument(
+            "--compute-cache",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Experiment with IK graphs and cavity-volume caching; full settling acceptance is pending.",
+        )
         parser.add_argument("--vbd-iterations", type=int, default=16)
         parser.add_argument("--ik-iterations", type=int, default=24)
         parser.add_argument(
