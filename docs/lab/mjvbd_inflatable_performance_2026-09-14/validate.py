@@ -22,6 +22,7 @@ from newton.examples.mjvbdv2.example_mjvbd_v2_inflatable_bag_grasp import Exampl
 p = argparse.ArgumentParser()
 p.add_argument("--output", default="optimized")
 p.add_argument("--trace", action="store_true")
+p.add_argument("--pneumatic-color-coupling", action="store_true")
 p.add_argument("--frames", type=int)
 p.add_argument("--baseline", action="store_true")
 p.add_argument("--reference-compute", action="store_true")
@@ -110,7 +111,9 @@ v = (
         width=1280, height=720, headless=True, enable_cuda_interop=newton.viewer.ViewerGL.CudaInterop.NONE
     )
 )
-e = Example(v, newton.examples.default_args(Example.create_parser()))
+example_args = newton.examples.default_args(Example.create_parser())
+example_args.pneumatic_color_coupling = o.pneumatic_color_coupling
+e = Example(v, example_args)
 count = o.frames or int(np.ceil(e.script_duration / e.frame_dt)) + 2
 print(
     "CONFIG",

@@ -293,6 +293,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_external_edge_contact_filtering_map: dict | None = None,
         # Pneumatic parameters
         pneumatic_enable_incremental_volume: bool = False,
+        pneumatic_enable_color_coupling: bool = False,
         # Rigid body parameters - AVBD hyperparameters
         rigid_avbd_alpha: float = 0.95,  # C0 stabilization strength (C_stab = C - alpha * C0)
         rigid_avbd_joint_alpha: float | None = None,  # Joint alpha override; None uses rigid_avbd_alpha
@@ -434,6 +435,8 @@ class SolverVBD(SolverBase, CouplingInterface):
 
             Pneumatic parameters:
 
+            pneumatic_enable_color_coupling: Experimental coupled color solve for one target-volume cavity.
+                Requires particle tile solves, independent triangle colors, and no tetrahedra.
             pneumatic_enable_incremental_volume: Cache per-face cavity-volume contributions and update only the unique
                 faces incident to the particle color that just moved. The optimized path is currently available only
                 for non-differentiable, non-deterministic CUDA models and otherwise uses full volume recomputation.
@@ -686,6 +689,7 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         # Pneumatic state is wholly opt-in. Models without cavity rows do not
         # configure its kernel module or allocate any pneumatic arrays.
+        self._pneumatic_color_coupling = False
         self._pneumatic_enabled = False
         self._pneumatic_cavity_count = 0
         self._pneumatic_face_count = 0
@@ -700,6 +704,28 @@ class SolverVBD(SolverBase, CouplingInterface):
                 effective_deterministic,
                 pneumatic_enable_incremental_volume,
             )
+
+        if pneumatic_enable_color_coupling:
+            pneumatic = getattr(model, "pneumatic", None)
+            if (
+                pneumatic_cavity_count != 1
+                or int(pneumatic.mode.numpy()[0]) != 2
+                or not self.use_particle_tile_solve
+                or not model.device.is_cuda
+                or model.tet_count
+                or model.requires_grad
+            ):
+                raise ValueError(
+                    "Pneumatic color coupling requires one target-volume surface cavity and CUDA tile solves."
+                )
+            colors = model.particle_colors.numpy()[model.tri_indices.numpy()]
+            if np.any((colors[:, 0] == colors[:, 1]) | (colors[:, 0] == colors[:, 2]) | (colors[:, 1] == colors[:, 2])):
+                raise ValueError("Pneumatic color coupling requires distinct colors within every triangle.")
+            self._pneumatic_color_coupling = True
+            self._pneumatic_single_cavity_force_fusion_enabled = False
+            self._pneumatic_color_gradient = wp.zeros(model.particle_count, dtype=wp.vec3, device=self.device)
+            self._pneumatic_color_displacement = wp.zeros(model.particle_count, dtype=wp.vec3, device=self.device)
+            self._pneumatic_color_hessian = wp.zeros(model.particle_count, dtype=wp.mat33, device=self.device)
 
         self._particle_truncation_cache = None
         if (
@@ -720,6 +746,7 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         self.surface_anchor_angles = None
         self._surface_cached_kernel = None
+        self._pneumatic_surface_kernel = None
         if (
             particle_enable_surface_cache
             and model.particle_count > 0
@@ -735,6 +762,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                 {"deterministic": effective_deterministic, "deterministic_max_records": 0},
                 module=particle_surface_cache,
             )
+            if self._pneumatic_color_coupling:
+                self._pneumatic_surface_kernel = particle_surface_cache.make_surface_kernel(
+                    particle_vbd_kernels.evaluate_neo_hookean_membrane_force_hessian, export_hessian=True
+                )
         if self.particle_multilevel is not None and self.particle_multilevel.selective_polish_iterations:
             if self._surface_cached_kernel is None or any(
                 group.size for group in self.volumetric_particle_color_groups
@@ -1209,7 +1240,8 @@ class SolverVBD(SolverBase, CouplingInterface):
         triangle_indices = np.asarray(model.tri_indices.numpy(), dtype=np.int32)
         face_particles = triangle_indices[face_triangles].reshape(-1)
         particle_faces = np.repeat(np.arange(face_count, dtype=np.int32), 3)
-        order = np.argsort(face_particles, kind="stable")
+        # Group a vertex's faces by cavity so pressure blocks include cross-face terms.
+        order = np.lexsort((particle_faces, face_cavities[particle_faces], face_particles))
         counts = np.bincount(face_particles, minlength=model.particle_count)
         offsets = np.empty(model.particle_count + 1, dtype=np.int32)
         offsets[0] = 0
@@ -1272,6 +1304,103 @@ class SolverVBD(SolverBase, CouplingInterface):
                 cavity_count == 1
                 and largest_color <= self._pneumatic_kernels._PNEUMATIC_SINGLE_CAVITY_FUSED_MAX_PARTICLES
             )
+
+    def _solve_pneumatic_color(self, state: State, control: Control, dt: float, color: int) -> None:
+        """Solve local elasticity followed by a clamped rank-one pressure correction."""
+        model = self.model
+        group = model.particle_color_groups[color]
+        if self._pneumatic_surface_kernel is not None:
+            wp.copy(self._pneumatic_color_hessian, self.particle_hessians)
+            wp.launch(
+                self._pneumatic_surface_kernel,
+                dim=group.size * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                block_dim=TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                inputs=[
+                    dt,
+                    group,
+                    self.particle_q_prev,
+                    state.particle_q,
+                    model.particle_mass,
+                    self.inertia,
+                    model.particle_flags,
+                    model.tri_indices,
+                    model.tri_poses,
+                    model.tri_materials,
+                    model.tri_areas,
+                    model.edge_indices,
+                    model.edge_rest_angle,
+                    model.edge_rest_length,
+                    model.edge_bending_properties,
+                    self.particle_adjacency,
+                    self.particle_forces,
+                    self._pneumatic_color_hessian,
+                    self.surface_tile_skip_active_checks,
+                    self.surface_tile_skip_material_checks,
+                    1.0,
+                    self.surface_anchor_angles,
+                    None,
+                ],
+                outputs=[self.particle_displacements],
+                device=self.device,
+            )
+        else:
+            wp.launch(
+                solve_elasticity_tile,
+                dim=group.size * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                block_dim=TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                inputs=[
+                    dt,
+                    group,
+                    self.particle_q_prev,
+                    state.particle_q,
+                    model.particle_mass,
+                    self.inertia,
+                    model.particle_flags,
+                    model.tri_indices,
+                    model.tri_poses,
+                    model.tri_materials,
+                    model.tri_areas,
+                    model.edge_indices,
+                    model.edge_rest_angle,
+                    model.edge_rest_length,
+                    model.edge_bending_properties,
+                    model.tet_indices,
+                    model.tet_poses,
+                    model.tet_materials,
+                    self.particle_adjacency,
+                    self.particle_forces,
+                    self.particle_hessians,
+                    True,
+                    self._pneumatic_color_hessian,
+                ],
+                outputs=[self.particle_displacements],
+                device=self.device,
+            )
+        pneumatic = model.pneumatic
+        wp.launch(
+            self._pneumatic_kernels.correct_coupled_color,
+            dim=256,
+            block_dim=256,
+            inputs=[
+                group,
+                self._pneumatic_color_gradient,
+                self._pneumatic_color_hessian,
+                self._pneumatic_color_displacement,
+                self._pneumatic_volume,
+                self._pneumatic_previous_volume,
+                self._pneumatic_gauge_pressure,
+                dt,
+                pneumatic.target_volume,
+                pneumatic.volume_stiffness,
+                pneumatic.bulk_damping,
+                pneumatic.ambient_pressure,
+                pneumatic.max_absolute_pressure,
+                control.pneumatic.pressure_scale,
+                control.pneumatic.target_volume_scale,
+            ],
+            outputs=[self.particle_displacements],
+            device=self.device,
+        )
 
     def _evaluate_pneumatic_cavities(self, particle_q: wp.array[wp.vec3], control: Control, dt: float) -> None:
         """Evaluate cavity volume and pressure at the current VBD iterate."""
@@ -3835,7 +3964,29 @@ class SolverVBD(SolverBase, CouplingInterface):
             if self._pneumatic_enabled:
                 if not self._pneumatic_incremental_volume_enabled:
                     self._evaluate_pneumatic_cavities(state_in.particle_q, control, dt)
-                if self._pneumatic_single_cavity_force_fusion_enabled and color > 0:
+                if self._pneumatic_color_coupling:
+                    wp.launch(
+                        self._pneumatic_kernels.prepare_coupled_color,
+                        dim=self.model.particle_color_groups[color].size,
+                        inputs=[
+                            self.model.particle_color_groups[color],
+                            state_in.particle_q,
+                            model.tri_indices,
+                            model.pneumatic.face_triangle,
+                            model.pneumatic.face_sign,
+                            self._pneumatic_particle_face_offsets,
+                            self._pneumatic_particle_faces,
+                            self._pneumatic_gauge_pressure,
+                            self.particle_displacements,
+                        ],
+                        outputs=[
+                            self.particle_forces,
+                            self._pneumatic_color_gradient,
+                            self._pneumatic_color_displacement,
+                        ],
+                        device=self.device,
+                    )
+                elif self._pneumatic_single_cavity_force_fusion_enabled and color > 0:
                     self._update_pneumatic_cavity_and_accumulate_forces(
                         state_in.particle_q,
                         self.model.particle_color_groups[color],
@@ -3966,7 +4117,9 @@ class SolverVBD(SolverBase, CouplingInterface):
                     device=self.device,
                     max_blocks=self.model.device.sm_count,
                 )
-            if self.use_particle_tile_solve:
+            if self._pneumatic_color_coupling:
+                self._solve_pneumatic_color(state_in, control, dt, color)
+            elif self.use_particle_tile_solve:
                 surface_group = self.surface_particle_color_groups[color]
                 if surface_group.size or _fused:
                     if _fused:

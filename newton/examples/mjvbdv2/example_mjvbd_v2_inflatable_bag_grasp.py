@@ -42,6 +42,14 @@ class Example(robot_reference.Example):
         """Enable the measured incremental cavity-volume path on CUDA."""
         options = super()._solver_vbd_options()
         options["pneumatic_enable_incremental_volume"] = True
+        if self.args.pneumatic_color_coupling:
+            options.update(
+                pneumatic_enable_color_coupling=True,
+                particle_enable_surface_cache=True,
+                particle_chebyshev_spectral_radius=0.95,
+                particle_chebyshev_warmup_iterations=2,
+                particle_chebyshev_polish_iterations=2,
+            )
         return options
 
     def __init__(self, viewer, args):
@@ -205,6 +213,11 @@ class Example(robot_reference.Example):
         """Create full-W1 realtime-IK and plastic-bag arguments."""
 
         parser = robot_reference.Example.create_parser()
+        parser.add_argument(
+            "--pneumatic-color-coupling",
+            action="store_true",
+            help="Test coupled cavity pressure with contact-aware Chebyshev acceleration (CUDA).",
+        )
         parser.add_argument(
             "--plastic",
             action=argparse.BooleanOptionalAction,

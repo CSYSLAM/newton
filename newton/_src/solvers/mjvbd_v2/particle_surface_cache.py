@@ -102,11 +102,12 @@ def _evaluate_bending(
 
 
 @lru_cache(maxsize=4)
-def make_surface_kernel(evaluate_membrane, *, jacobi_update: bool = False):
+def make_surface_kernel(evaluate_membrane, *, jacobi_update: bool = False, export_hessian: bool = False):
     """Specialize surface solves, optionally fusing the weighted Jacobi increment.
 
     Jacobi writes only cumulative displacement; positions remain frozen until
     the subsequent DAT launch. Its relaxation applies to contact rows too.
+    ``export_hessian`` overwrites the supplied Hessian scratch after the solve.
     """
 
     @wp.kernel(enable_backward=False)
@@ -145,6 +146,8 @@ def make_surface_kernel(evaluate_membrane, *, jacobi_update: bool = False):
             if wp.static(not jacobi_update):
                 if lane == 0:
                     displacement[particle] = wp.vec3(0.0)
+                    if wp.static(export_hessian):
+                        hessians[particle] = wp.mat33(0.0)
             return
         force = wp.vec3(0.0)
         hessian = wp.mat33(0.0)
@@ -170,7 +173,9 @@ def make_surface_kernel(evaluate_membrane, *, jacobi_update: bool = False):
                 hessian += h
             index += 16
         index = lane
-        count = get_vertex_num_adjacent_edges(adjacency, particle)
+        count = int(0)
+        if edge_indices.shape[0] > 0:
+            count = get_vertex_num_adjacent_edges(adjacency, particle)
         while index < count:
             edge, order = get_vertex_adjacent_edge_id_order(adjacency, particle, index)
             if skip_material == 1 or bending[edge, 0] > 0.0:
@@ -203,5 +208,7 @@ def make_surface_kernel(evaluate_membrane, *, jacobi_update: bool = False):
                     if relaxation != 1.0 and wp.ddot(hessians[particle], hessians[particle]) == 0.0:
                         delta *= relaxation
                 displacement[particle] += delta
+            if wp.static(export_hessian):
+                hessians[particle] = h_total
 
     return solve_surface_cached
