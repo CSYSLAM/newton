@@ -113,6 +113,32 @@ def _build_kernels(width: int, inverse_factor: bool = True):
                     status[0] = 16
                 return
             alpha = previous / curvature
+        if component != 0:
+            # Detached bodies have no particle Ritz basis. Their preconditioner
+            # is exactly block Jacobi; avoid the zero coarse RHS and solve.
+            local_rz = float(0.0)
+            for row in range(lane, count, PCG_BLOCK_DIM):
+                if component_ids[row] != component:
+                    continue
+                if iteration >= 0:
+                    solution[row] += alpha * direction[row]
+                    residual[row] -= alpha * product[row]
+                z = inverse[row] * residual[row]
+                preconditioned[row] = z
+                local_rz += wp.dot(residual[row], z)
+            new_rz = wp.tile_sum(wp.tile(local_rz))[0]
+            beta = float(0.0)
+            if iteration >= 0 and previous > 1e-20:
+                beta = new_rz / previous
+            for row in range(lane, count, PCG_BLOCK_DIM):
+                if component_ids[row] == component:
+                    direction[row] = preconditioned[row] + beta * direction[row]
+            if lane == 0:
+                rz[component] = new_rz
+                wp.atomic_add(metrics, 5 + iteration, new_rz)
+                if not wp.isfinite(new_rz) or new_rz < 0.0:
+                    status[0] = 16
+            return
         local = Vector(0.0)
         for row in range(lane, count, PCG_BLOCK_DIM):
             if component_ids[row] != component:

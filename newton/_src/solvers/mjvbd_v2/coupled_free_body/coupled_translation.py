@@ -9,7 +9,7 @@ import warp as wp
 from newton._src.solvers.mjvbd_v2.contact_projection import ContactProjection, ContactProjectionData, append_contact
 from newton._src.solvers.mjvbd_v2.vbd import rigid_vbd_kernels as rk
 
-from .component_pcg import ComponentPCG
+from .component_pcg import ComponentPCG, _root
 from .rigid_fusion import FIELDS, RigidInputs, SoftInputs, SolveInputs
 from .two_level import TwoLevelPCG
 
@@ -26,6 +26,10 @@ def initialize_bodies(
     index = wp.tid()
     body = body_ids[index]
     row = particle_count + index
+    if data.body_inv_mass[body] <= 0.0:
+        rhs[row] = wp.vec3(0.0)
+        blocks[diagonal_slots[row]] = wp.identity(n=3, dtype=float)
+        return
     mass_term = data.body_mass[body] / (data.dt * data.dt)
     current = wp.transform_point(data.body_q_new[body], data.body_com[body])
     target = wp.transform_point(data.body_inertia_q[body], data.body_com[body])
@@ -78,6 +82,8 @@ def assemble_soft(
         row = int(-1)
         if body >= 0:
             row = body_rows[body]
+            if data.body_inv_mass[body] <= 0.0:
+                row = -1
         if row >= 0:
             wp.atomic_add(rhs, row, -force)
             wp.atomic_add(blocks, slots[row], hessian)
@@ -106,6 +112,10 @@ def assemble_rigid(
         b1 = data.shape_body[s1] if s1 >= 0 else -1
         row0 = body_rows[b0] if b0 >= 0 else -1
         row1 = body_rows[b1] if b1 >= 0 else -1
+        if b0 >= 0 and data.body_inv_mass[b0] <= 0.0:
+            row0 = -1
+        if b1 >= 0 and data.body_inv_mass[b1] <= 0.0:
+            row1 = -1
         if row0 < 0 and row1 < 0:
             continue
         p0, p1 = data.rigid_contact_point0[record], data.rigid_contact_point1[record]
@@ -155,23 +165,31 @@ def bound_step(
     radius: wp.array[float],
     radius_fraction: float,
     delta: wp.array[wp.vec3],
+    parent: wp.array[int],
     scale: wp.array[float],
 ):
     row = wp.tid()
+    component = _root(row, parent)
     limit = float(0.001)
     if row < particle_count:
         limit = radius_fraction * radius[row]
     length = wp.length(delta[row])
     if not wp.isfinite(length):
-        wp.atomic_min(scale, 0, 0.0)
+        wp.atomic_min(scale, component, 0.0)
     elif length > limit:
-        wp.atomic_min(scale, 0, limit / length)
+        wp.atomic_min(scale, component, limit / length)
 
 
 @wp.kernel(enable_backward=False)
-def copy_fine(particle_count: int, scale: wp.array[float], delta: wp.array[wp.vec3], fine: wp.array[wp.vec3]):
+def copy_fine(
+    particle_count: int,
+    parent: wp.array[int],
+    scale: wp.array[float],
+    delta: wp.array[wp.vec3],
+    fine: wp.array[wp.vec3],
+):
     row = wp.tid()
-    delta[row] *= scale[0]
+    delta[row] *= scale[_root(row, parent)]
     if row < particle_count:
         fine[row] = delta[row]
 
@@ -194,7 +212,7 @@ def commit_bodies(
 
 
 class CoupledTranslationPCG:
-    def __init__(self, solver, correction, ritz, fusion):
+    def __init__(self, solver, correction, ritz, fusion, *, component_step_limits=False):
         if solver.rigid_contact_hard:
             raise ValueError("Coupled translation supports soft contacts only")
         self.solver, self.correction, self.ritz, self.fusion = solver, correction, ritz, fusion
@@ -237,7 +255,14 @@ class CoupledTranslationPCG:
         )
         self.work = [wp.zeros(self.count, dtype=wp.vec3, device=self.device) for _ in range(5)]
         self.work.append(wp.empty(self.count, dtype=wp.mat33, device=self.device))
-        self.scale = wp.ones(1, dtype=float, device=self.device)
+        # Opt-in island sleeping needs independent step limits. Preserve the
+        # established global limit for existing scenes until separately validated.
+        self.step_parent = (
+            self.pcg.parent
+            if component_step_limits and isinstance(self.pcg, ComponentPCG)
+            else wp.zeros(self.count, dtype=int, device=self.device)
+        )
+        self.scale = wp.ones(self.count, dtype=float, device=self.device)
         self.status = None
         self.body_q = None
 
@@ -300,6 +325,7 @@ class CoupledTranslationPCG:
                 self.solver.model.particle_radius,
                 self.correction.max_radius_fraction,
                 self.work[0],
+                self.step_parent,
                 self.scale,
             ],
             device=self.device,
@@ -307,7 +333,7 @@ class CoupledTranslationPCG:
         wp.launch(
             copy_fine,
             dim=self.count,
-            inputs=[self.particle_count, self.scale, self.work[0], outputs[0]],
+            inputs=[self.particle_count, self.step_parent, self.scale, self.work[0], outputs[0]],
             device=self.device,
         )
 

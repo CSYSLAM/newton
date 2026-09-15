@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+from functools import cache
 from itertools import pairwise
 from pathlib import Path
 
@@ -125,17 +126,36 @@ def _scoop_floor_height_offset(vertices, pitch, *, observed_rotation=None):
     return float(points[:, 2].min() - rotated_z.min())
 
 
-def _popcorn_spawn_position(index):
+@cache
+def _large_popcorn_positions():
+    """Build an experimental deeper pile clear of the initial blade envelope."""
+    points = []
+    for layer, first in enumerate((0, 2, 3, 4, 6)):
+        for row in range(16):
+            for column in range(first, 12):
+                offset = np.array((-0.123 + 0.019 * column, -0.1425 + 0.019 * row, 0.0378 + 0.018 * layer))
+                if offset[0] < -0.019 and -0.030 < offset[1] < 0.110 and offset[2] > 0.070:
+                    continue
+                points.append(station_point(MACHINE_PLAN + offset))
+    positions = np.asarray(points, dtype=np.float32)
+    positions.setflags(write=False)
+    return positions
+
+
+def _popcorn_spawn_position(index, population=320):
     """Fill the tray's side banks without spawning grains inside the scoop."""
+    if population > 320:
+        return _large_popcorn_positions()[index]
     if index >= 160:
         extra = index - 160
         column, bank_row, layer = extra % 10, (extra // 10) % 4, extra // 40
         side_y = (-0.138, -0.115, 0.115, 0.138)[bank_row]
         # Refill the full tray width rather than increasing the height of the
-        # original scooping pile. These are ordinary free dynamic bodies.
+        # original scooping pile. Keep the last column's full rotated hull,
+        # including both contact margins, in front of the rear baffle.
         return station_point(
             (
-                MACHINE_PLAN[0] - 0.09 + column * 0.020,
+                MACHINE_PLAN[0] - 0.10 + column * 0.020,
                 MACHINE_PLAN[1] + side_y,
                 MACHINE_PLAN[2] + 0.045 + layer * 0.022,
             )
@@ -206,7 +226,7 @@ def _all_grasp_digits_in_contact(forces):
     return bool(np.isfinite(forces).all() and np.all(np.asarray(forces) >= 0.02))
 
 
-def _grasp_offset_update(offset, forces, ready):
+def _grasp_offset_update(offset, forces, ready, *, max_offset=None):
     """Integrate bounded pressure feedback for the robot's five grasp joints."""
     target = _grasp_force_targets(forces, ready)
     # Hold the joint pose within a load band instead of opening the grip as
@@ -223,7 +243,9 @@ def _grasp_offset_update(offset, forces, ready):
     velocity = np.clip(0.05 * error, -0.06, 0.06)
     # The opposed thumb needs more closing travel than the wrapped fingers.
     # Original URDF limits are additionally enforced on the final commands.
-    return np.clip(offset + velocity / 60.0, math.radians(-8), CUP_GRIP_MAX_OFFSET)
+    return np.clip(
+        offset + velocity / 60.0, math.radians(-8), CUP_GRIP_MAX_OFFSET if max_offset is None else max_offset
+    )
 
 
 def _grasp_finger_commands(mcp, pip, offset):
@@ -488,11 +510,27 @@ class _WristTargetError(RuntimeError):
         self.side = side
 
 
+@wp.kernel
+def record_contact_peaks(rigid: wp.array[int], soft: wp.array[int], peaks: wp.array[int]):
+    wp.atomic_max(peaks, 0, rigid[0])
+    wp.atomic_max(peaks, 1, soft[0])
+
+
 class Example:
     def __init__(self, viewer, args):
-        if args.substeps < 1 or args.substeps % 2 or args.popcorn_count < 1 or args.popcorn_count > 320:
-            raise ValueError("Require positive even substeps and 1..320 popcorn bodies")
+        if args.substeps < 1 or args.substeps % 2 or args.popcorn_count < 1 or args.popcorn_count > 640:
+            raise ValueError("Require positive even substeps and 1..640 popcorn bodies")
+        if args.vbd_iterations is None:
+            args.vbd_iterations = 6 if args.popcorn_count > 320 else 8
+        if args.vbd_iterations < 1:
+            raise ValueError("Require positive VBD iterations")
         self.viewer, self.args = viewer, args
+        self.grasp_max_offset = CUP_GRIP_MAX_OFFSET.copy()
+        if args.popcorn_count > 320:
+            # The loaded shell can indent beyond the old pinky travel limit.
+            # Preserve pressure feedback and the final URDF joint limits.
+            self.grasp_max_offset[4] = math.radians(26)
+        self.drain_wait = 0.0
         if hasattr(viewer, "cache_static_appearance"):
             viewer.cache_static_appearance = True
         self.sim_time, self.dt = 0.0, 1 / (60 * args.substeps)
@@ -544,6 +582,8 @@ class Example:
                 "rigid_body_contact_buffer_size": 2048,
                 "rigid_body_particle_contact_buffer_size": 4096,
                 "rigid_contact_history": True,
+                "rigid_enable_sleep": args.popcorn_count > 320,
+                "rigid_contact_grouping": args.popcorn_count > 320,
                 "rigid_contact_hard": False,
                 "rigid_avbd_contact_beta": RIGID_CONTACT_BETA,
                 "friction_epsilon": 1.0e-4,
@@ -561,25 +601,31 @@ class Example:
                 "particle_multilevel_cluster_size": 400,
                 # Spend fewer passes on collision detection, but solve the
                 # coupled shell/grain system more accurately within each step.
-                "particle_multilevel_coarse_iterations": 16,
+                "particle_multilevel_coarse_iterations": 14 if args.popcorn_count > 320 else 16,
                 "particle_enable_coupled_translation": True,
                 "particle_enable_surface_cache": False,
                 "particle_multilevel_relaxation": 1.0,
-                "particle_multilevel_max_radius_fraction": 0.25,
+                # Independent island steps must stay inside the local contact
+                # linearization region of the thin shell.
+                "particle_multilevel_max_radius_fraction": 0.1 if args.popcorn_count > 320 else 0.25,
                 "particle_multilevel_checkpoints": tuple(i for i in (2, 4) if i <= args.vbd_iterations),
             },
             collision_options={
                 "enable_cuda_fast_path": True,
                 "broad_phase": "sap",
                 "contact_matching": "latest",
-                "rigid_contact_max": 32768,
-                "soft_contact_max": 65536,
+                "stationary_rigid_contact_cache": args.popcorn_count > 320,
+                # Measured 640-grain peaks: <31k rigid and <3.2k soft rows.
+                # Keep headroom and audit every substep rather than truncate.
+                "rigid_contact_max": 40960 if args.popcorn_count > 320 else 32768,
+                "soft_contact_max": 8192 if args.popcorn_count > 320 else 65536,
                 "soft_contact_margin": 0.003,
                 "include_static_kinematic_pairs": False,
                 "enable_rigid_soft_full_surface_contact": True,
                 "rigid_soft_full_surface_shape_indices": self.hand_shapes + self.popcorn_shapes,
             },
         )
+        self.contact_peaks = wp.zeros(2, dtype=int, device=self.model.device)
         digits = np.full(self.model.shape_count, -1, dtype=np.int32)
         shape_bodies = self.model.shape_body.numpy()
         for shape in self.hand_shapes:
@@ -855,7 +901,7 @@ class Example:
         corn_cfg.configure_sdf(force_sdf=True)
         grain_mesh = popcorn_mesh()
         for i in range(self.args.popcorn_count):
-            center = wp.vec3(*_popcorn_spawn_position(i))
+            center = wp.vec3(*_popcorn_spawn_position(i, self.args.popcorn_count))
             body = builder.add_body(
                 xform=wp.transform(
                     center,
@@ -1255,7 +1301,12 @@ class Example:
     @property
     def trajectory_time(self):
         """Pause robot transport, not physical simulation, until the grip settles."""
-        return self.sim_time - getattr(self, "grasp_wait", 0.0) - getattr(self, "tool_wait", 0.0)
+        return (
+            self.sim_time
+            - getattr(self, "grasp_wait", 0.0)
+            - getattr(self, "tool_wait", 0.0)
+            - getattr(self, "drain_wait", 0.0)
+        )
 
     def _targets(self):
         # Positions describe the desired grasped-object frame, never set its state.
@@ -1265,6 +1316,7 @@ class Example:
         MACHINE = MACHINE_PLAN
         lifted_cup = CUP + np.array((0, 0, CUP_LIFT))
         receiving_cup = RECEIVING_CUP
+        scoop_end_x = MACHINE[0] - (0.275 if self.args.popcorn_count > 320 else 0.21)
         keyframes = [
             (0.0, CUP + APPROACH[0], HANDLE + APPROACH[1], 0.0, 0.0, "approach"),
             (1.0, CUP, HANDLE, 0.0, 0.0, "close"),
@@ -1288,12 +1340,12 @@ class Example:
             (
                 10.5,
                 lifted_cup,
-                np.array((MACHINE[0] - 0.21, MACHINE[1], MACHINE[2] + 0.0315 - SCOOP_FLOOR_Z)),
+                np.array((scoop_end_x, MACHINE[1], MACHINE[2] + 0.0315 - SCOOP_FLOOR_Z)),
                 1.0,
                 0.0,
                 "raise_scoop",
             ),
-            (11.25, lifted_cup, np.array((MACHINE[0] - 0.21, MACHINE[1], TABLE + 0.20)), 1.0, 0.0, "retract_scoop"),
+            (11.25, lifted_cup, np.array((scoop_end_x, MACHINE[1], TABLE + 0.20)), 1.0, 0.0, "retract_scoop"),
             # Pull the whole bowl past the front glass edge before yawing.
             (12.5, lifted_cup, np.array((MACHINE[0] - 0.445, MACHINE[1], TABLE + 0.21)), 1.0, 0.0, "transfer"),
             (13.5, lifted_cup, np.array((MACHINE[0] - 0.445, MACHINE[1], TABLE + 0.25)), 1.0, 0.0, "cross_above_cup"),
@@ -1367,11 +1419,16 @@ class Example:
                 rim = (1 - tracking) * rim + tracking * observed_rim
             u = np.clip((t - 13.5) / 3.0, 0, 1)
             u = u * u * (3 - 2 * u)
-            pour_position = self._pour_tool_position(rim, float(pitch), float(yaw))
+            aim_distance = 0.027 if self.args.popcorn_count > 320 else 0.02
+            pour_position = self._pour_tool_position(rim, float(pitch), float(yaw), aim_distance=aim_distance)
             if hasattr(self, "state_0"):
                 observed_rotation = wp.quat(*self._read_state("body_q")[self.scoop_body, 3:])
                 measured_position = self._pour_tool_position(
-                    rim, float(pitch), float(yaw), observed_rotation=observed_rotation
+                    rim,
+                    float(pitch),
+                    float(yaw),
+                    observed_rotation=observed_rotation,
+                    aim_distance=aim_distance,
                 )
                 correction = getattr(self, "outlet_correction", np.zeros(3))
                 if update_feedback:
@@ -1388,7 +1445,12 @@ class Example:
             if t >= 21.0:
                 if hasattr(self, "state_0") and not hasattr(self, "withdraw_origin"):
                     self.withdraw_origin = self._read_state("body_q")[self.scoop_body, :3].copy()
-                right, pitch, yaw = self._withdraw_tool_pose(rim, t, start=getattr(self, "withdraw_origin", None))
+                right, pitch, yaw = self._withdraw_tool_pose(
+                    rim,
+                    t,
+                    start=getattr(self, "withdraw_origin", None),
+                    aim_distance=aim_distance,
+                )
         targets = []
         for side, center in enumerate((left, right)):
             rotation_delta = wp.quat_identity()
@@ -1460,10 +1522,10 @@ class Example:
         return targets, closure
 
     @staticmethod
-    def _withdraw_tool_pose(rim, time, *, start=None):
+    def _withdraw_tool_pose(rim, time, *, start=None, aim_distance=0.02):
         """Clear the cup before returning the empty scoop to the right-hand bay."""
         if start is None:
-            start = Example._pour_tool_position(rim, POUR_PITCH, POUR_YAW)
+            start = Example._pour_tool_position(rim, POUR_PITCH, POUR_YAW, aim_distance=aim_distance)
         # Withdraw laterally before leveling the bowl; a large upward arc
         # drives the pronated wrist into its high-workspace joint limits.
         clear = start + np.array((0.0, -0.12, 0.02))
@@ -1479,7 +1541,7 @@ class Example:
         return (1 - u) * clear + u * end, (1 - u) * POUR_PITCH, (1 - u) * POUR_YAW + u * SCOOP_YAW
 
     @staticmethod
-    def _pour_tool_position(rim, pitch, yaw=0.0, *, observed_rotation=None):
+    def _pour_tool_position(rim, pitch, yaw=0.0, *, observed_rotation=None, aim_distance=0.02):
         """Keep the open front lip above the cup while pitching the handle up."""
         rotation = wp.quat_from_axis_angle(wp.vec3(0, 0, 1), yaw) * wp.quat_from_axis_angle(wp.vec3(0, 1, 0), pitch)
         if observed_rotation is not None:
@@ -1492,7 +1554,9 @@ class Example:
         height = (1 - fraction) * 0.077 + fraction * 0.025
         # Aim upstream: grains retain forward velocity after leaving the lip.
         # Only the robot target is adjusted; no grain position/velocity is set.
-        aim = np.asarray(rim) + np.array((-0.02 * fraction * math.cos(yaw), -0.02 * fraction * math.sin(yaw), height))
+        aim = np.asarray(rim) + np.array(
+            (-aim_distance * fraction * math.cos(yaw), -aim_distance * fraction * math.sin(yaw), height)
+        )
         return aim - np.asarray(wp.quat_rotate(rotation, outlet))
 
     def _calibrate_tool_grasp(self, require_lift=True):
@@ -1589,6 +1653,15 @@ class Example:
         _, _, closure, _ = self._targets()
         self._update_grasp_pressure(closure)
         self._wait_for_grasp()
+        if (
+            self.args.popcorn_count > 320
+            and 21.0 <= self.trajectory_time < 21.0 + 1 / 60 + 1e-8
+            and getattr(self, "scoop_count", 0) > 0
+            and self.drain_wait < 6.0
+        ):
+            # Hold only the robot target while material is still discharging.
+            # No grain state or contact parameter is changed by this wait.
+            self.drain_wait += 1 / 60
         previous_correction = self.tool_orientation_correction
         targets, closure = self._set_wrist_targets(update_feedback=not getattr(self, "_tool_ik_holding", False))
         try:
@@ -1767,7 +1840,7 @@ class Example:
             self.grasp_contact_samples += 1
             self.five_finger_contact_samples += int(_all_grasp_digits_in_contact(self.grasp_force_filtered))
         self.grasp_joint_offset = _grasp_offset_update(
-            self.grasp_joint_offset, self.grasp_force_filtered, self.grasp_ready
+            self.grasp_joint_offset, self.grasp_force_filtered, self.grasp_ready, max_offset=self.grasp_max_offset
         )
 
     def _wait_for_grasp(self):
@@ -1819,6 +1892,13 @@ class Example:
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
             self.solver.step(self.state_0, self.state_1, self.control, None, self.dt)
+            contacts = self.solver.contacts
+            wp.launch(
+                record_contact_peaks,
+                1,
+                [contacts.rigid_contact_count, contacts.soft_contact_count, self.contact_peaks],
+                device=self.model.device,
+            )
             self.state_0, self.state_1 = self.state_1, self.state_0
             wp.launch(
                 update_paper_hinges,
@@ -1836,6 +1916,10 @@ class Example:
             )
 
     def _measure(self):
+        peaks = self.contact_peaks.numpy()
+        contacts = self.solver.contacts
+        if peaks[0] > contacts.rigid_contact_max or peaks[1] > contacts.soft_contact_max:
+            raise AssertionError(f"Popcorn contact capacity exceeded: rigid={peaks[0]}, soft={peaks[1]}")
         q = self._read_state("particle_q")
         bodies = self._read_state("body_q")
         if not np.isfinite(q).all() or not np.isfinite(bodies).all():
@@ -2006,6 +2090,8 @@ class Example:
             "time": self.sim_time,
             "trajectory_time": self.trajectory_time,
             "grasp_wait_s": self.grasp_wait,
+            "drain_wait_s": self.drain_wait,
+            "contact_peaks": self.contact_peaks.numpy().tolist(),
             "tool_recovery_wait_s": getattr(self, "tool_wait", 0.0),
             "five_finger_contact_fraction": self.five_finger_contact_samples / max(self.grasp_contact_samples, 1),
             "finger_contact_force_N": self.grasp_force_filtered.tolist(),
@@ -2056,9 +2142,9 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         parser.set_defaults(num_frames=2880)
-        parser.add_argument("--popcorn-count", type=int, default=320)
+        parser.add_argument("--popcorn-count", type=int, default=640)
         parser.add_argument("--substeps", type=int, default=6)
-        parser.add_argument("--vbd-iterations", type=int, default=8)
+        parser.add_argument("--vbd-iterations", type=int, default=None, help="Default: 6 for >320 grains, otherwise 8")
         return parser
 
 

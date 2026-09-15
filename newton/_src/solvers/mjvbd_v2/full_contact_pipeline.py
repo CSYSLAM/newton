@@ -888,10 +888,17 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
     The experimental ``enable_cuda_fast_path`` keyword batches compatible SDF
     face queries on non-differentiable CUDA models. Other configurations retain
     the original search. Its scratch arrays belong exclusively to this pipeline.
+
+    ``stationary_rigid_contact_cache`` is an experimental, opt-in cache for
+    unchanged rigid geometry. Call ``reset_contact_matching()`` after editing
+    mesh/SDF contents or shape/collision properties, and warm up before CUDA
+    graph capture. Moving pairs always run ordinary narrow phase.
     """
 
     def __init__(self, model: Model, **kwargs: object):
         kwargs = dict(kwargs)
+        self._stationary_contact_cache = None
+        stationary_cache = bool(kwargs.pop("stationary_rigid_contact_cache", False))
         cuda_fast_path = bool(
             kwargs.pop("enable_cuda_fast_path", False)
             and not kwargs.get("deterministic", False)
@@ -903,6 +910,13 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
                 raise ValueError("soft_contact_margin is an alias of soft_contact_gap; pass only one")
             kwargs["soft_contact_gap"] = soft_contact_margin
         super().__init__(model, **kwargs)
+        if stationary_cache:
+            if model.requires_grad:
+                raise ValueError("Stationary rigid contact caching does not support differentiable models")
+            from .stationary_contact_cache import StationaryContactCache  # noqa: PLC0415
+
+            self._stationary_contact_cache = StationaryContactCache(self)
+            self.narrow_phase = self._stationary_contact_cache
         self._use_soft_surface_aabb = bool(
             model.device.is_cuda
             and self.enable_rigid_soft_full_surface_contact
@@ -950,6 +964,12 @@ class MJVBDV2CollisionPipeline(CollisionPipeline):
             from .fast_path import FaceSearch  # noqa: PLC0415 - optional CUDA implementation
 
             self._fast_face_search = FaceSearch(model, face_compact_size)
+
+    def reset_contact_matching(self, world_mask: wp.array[wp.bool] | None = None) -> None:
+        """Invalidate contact reuse as well as the selected matching history."""
+        if self._stationary_contact_cache is not None:
+            self._stationary_contact_cache.reset()
+        super().reset_contact_matching(world_mask)
 
     def collide(
         self,

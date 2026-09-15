@@ -10,6 +10,7 @@ import numpy as np
 import warp as wp
 
 from newton.examples.mjvbdv2.example_mjvbd_v2_popcorn import (
+    MACHINE,
     MACHINE_PLAN,
     Example,
     _cup_rim_indices,
@@ -17,6 +18,7 @@ from newton.examples.mjvbdv2.example_mjvbd_v2_popcorn import (
     _inside_cup,
     _popcorn_spawn_position,
     cup_mesh,
+    popcorn_mesh,
     station_point,
 )
 
@@ -43,7 +45,7 @@ class TestPopcornDiagnostics(unittest.TestCase):
         np.testing.assert_array_equal(updated[[0, 4]], offsets[[0, 4]])
 
     def test_double_population_layout(self):
-        """Keep the original pile and add 160 distinct, spaced grain centers."""
+        """Keep all 320 authored hulls clear of the rear baffle and side walls."""
         centers = np.array([_popcorn_spawn_position(i) for i in range(320)])
         self.assertEqual(len(np.unique(centers, axis=0)), 320)
         self.assertTrue(np.isfinite(centers).all())
@@ -64,6 +66,19 @@ class TestPopcornDiagnostics(unittest.TestCase):
                 )
             )
             np.testing.assert_array_equal(centers[i], reference)
+        vertices = np.asarray(popcorn_mesh().vertices)
+        rng = np.random.default_rng(37)
+        for center in centers - MACHINE:
+            angle = rng.uniform(-np.pi, np.pi)
+            rng.uniform(0.80, 0.94)
+            rng.uniform(0.43, 0.65)
+            rotation = np.asarray(wp.quat_to_matrix(wp.quat_from_axis_angle(wp.vec3(0, 0, 1), angle))).reshape(3, 3)
+            hull = vertices @ rotation.T + center
+            # Include the actual grain and tray collision margins.
+            self.assertGreater(float(hull[:, 0].min()) - 0.0008, -0.15)
+            self.assertLess(float(hull[:, 0].max()) + 0.0008, 0.0975)
+            self.assertLess(float(np.abs(hull[:, 1]).max()) + 0.0008, 0.163)
+            self.assertGreater(float(hull[:, 2].min()) - 0.0008, 0.029)
 
     def test_cup_bounds_preserve_ray_parity(self):
         """Reject outside bounds without changing the deformed-shell ray test."""

@@ -4,20 +4,72 @@
 """Check equal/opposite reactions and the augmented contact Hessian."""
 
 import unittest
+from itertools import product
 
 import numpy as np
 import warp as wp
 
 import newton
 from newton._src.solvers.mjvbd_v2.contact_projection import ContactProjection
-from newton._src.solvers.mjvbd_v2.coupled_free_body.coupled_translation import assemble_soft
-from newton._src.solvers.mjvbd_v2.coupled_free_body.rigid_fusion import SoftInputs
+from newton._src.solvers.mjvbd_v2.coupled_free_body.coupled_translation import (
+    assemble_soft,
+    bound_step,
+    copy_fine,
+    initialize_bodies,
+)
+from newton._src.solvers.mjvbd_v2.coupled_free_body.rigid_fusion import SoftInputs, SolveInputs
 from newton._src.solvers.mjvbd_v2.coupled_free_body.two_level import _build_kernels
 from newton._src.solvers.mjvbd_v2.full_contact_pipeline import MJVBDV2CollisionPipeline
 from newton._src.solvers.mjvbd_v2.vbd.solver_vbd import SolverVBD
 
 
 class TestCoupledTranslation(unittest.TestCase):
+    def test_inactive_body_has_zero_correction_rhs(self):
+        """Keep inactive rows nonsingular without moving prescribed bodies."""
+        for device in ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else []):
+            with self.subTest(device=device):
+                data = SolveInputs()
+                data.dt = 0.1
+                data.body_inv_mass = wp.array([0.0, 1.0], dtype=float, device=device)
+                data.body_mass = wp.ones(2, device=device)
+                data.body_com = wp.zeros(2, dtype=wp.vec3, device=device)
+                data.body_q_new = wp.array([wp.transform_identity()] * 2, dtype=wp.transform, device=device)
+                target = wp.transform(wp.vec3(1, 0, 0), wp.quat_identity())
+                data.body_inertia_q = wp.array([target] * 2, dtype=wp.transform, device=device)
+                ids = wp.array([0, 1], dtype=int, device=device)
+                blocks = wp.zeros(2, dtype=wp.mat33, device=device)
+                rhs = wp.zeros(2, dtype=wp.vec3, device=device)
+                wp.launch(initialize_bodies, 2, [data, ids, 0, ids, blocks, rhs], device=device)
+                np.testing.assert_allclose(rhs.numpy(), [[0, 0, 0], [100, 0, 0]], rtol=1e-6)
+                np.testing.assert_array_equal(blocks.numpy()[0], np.eye(3))
+
+    def test_detached_body_does_not_limit_cloth_step(self):
+        """Limit disconnected rigid motion independently of the cloth domain."""
+        devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        for device in devices:
+            with self.subTest(device=device):
+                delta = wp.array([[0.0002, 0, 0], [0.0001, 0, 0], [0.01, 0, 0]], dtype=wp.vec3, device=device)
+                components = wp.array([0, 0, 2], dtype=int, device=device)
+                scale = wp.ones(3, device=device)
+                radius = wp.array([0.001], dtype=float, device=device)
+                fine = wp.zeros(1, dtype=wp.vec3, device=device)
+                wp.launch(bound_step, 3, [1, radius, 0.25, delta, components, scale], device=device)
+                wp.launch(copy_fine, 3, [1, components, scale, delta, fine], device=device)
+                np.testing.assert_allclose(scale.numpy(), [1, 1, 0.1], atol=1e-7)
+                np.testing.assert_allclose(fine.numpy(), [[0.0002, 0, 0]], atol=1e-9)
+                np.testing.assert_allclose(delta.numpy()[:, 0], [0.0002, 0.0001, 0.001], atol=1e-9)
+
+    def test_connected_body_keeps_shared_step_limit(self):
+        """Keep the same clamp for all rows in a coupled contact domain."""
+        delta = wp.array([[0.0002, 0, 0], [0.01, 0, 0]], dtype=wp.vec3, device="cpu")
+        components = wp.zeros(2, dtype=int, device="cpu")
+        scale = wp.ones(2, device="cpu")
+        radius = wp.array([0.001], dtype=float, device="cpu")
+        fine = wp.zeros(1, dtype=wp.vec3, device="cpu")
+        wp.launch(bound_step, 2, [1, radius, 0.25, delta, components, scale], device="cpu")
+        wp.launch(copy_fine, 2, [1, components, scale, delta, fine], device="cpu")
+        np.testing.assert_allclose(delta.numpy()[:, 0], [0.00002, 0.001], atol=1e-9)
+
     @unittest.skipUnless(wp.is_cuda_available(), "Requires CUDA tiles")
     def test_full_size_fused_pcg_and_independent_widths(self):
         """Match a dense NumPy preconditioner across all CTA lanes and independent basis sizes."""
@@ -146,8 +198,8 @@ class TestCoupledTranslation(unittest.TestCase):
     def test_point_edge_face_augmented_operator(self):
         """Match k*w*w^T including the negative body weight for all contact kinds."""
         device = "cuda:0"
-        for weights in ([1.0, 0, 0], [0.25, 0.75, 0], [0.2, 0.3, 0.5]):
-            with self.subTest(weights=weights):
+        for weights, active in product(([1.0, 0, 0], [0.25, 0.75, 0], [0.2, 0.3, 0.5]), (True, False)):
+            with self.subTest(weights=weights, active=active):
                 data = SoftInputs()
                 data.dt = 1 / 960
                 data.particle_q = wp.zeros(3, dtype=wp.vec3, device=device)
@@ -156,6 +208,7 @@ class TestCoupledTranslation(unittest.TestCase):
                 data.body_q = wp.array([wp.transform_identity()], dtype=wp.transform, device=device)
                 data.body_q_prev = wp.clone(data.body_q)
                 data.body_com = wp.zeros(1, dtype=wp.vec3, device=device)
+                data.body_inv_mass = wp.full(1, float(active), device=device)
                 data.body_qd = wp.zeros(1, dtype=wp.spatial_vector, device=device)
                 data.shape_body = wp.array([0], dtype=int, device=device)
                 data.body_particle_contact_penalty_k = wp.full(1, 1000.0, device=device)
@@ -198,12 +251,12 @@ class TestCoupledTranslation(unittest.TestCase):
                     row, col = pairs[slot]
                     actual[3 * row : 3 * row + 3, 3 * col : 3 * col + 3] = cross[slot]
                     actual[3 * col : 3 * col + 3, 3 * row : 3 * row + 3] = cross[slot].T
-                all_weights = np.array([*weights, -1.0])
+                all_weights = np.array([*weights, -float(active)])
                 expected = 2 * np.eye(12) + np.kron(np.outer(all_weights, all_weights), hessian)
                 np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-4)
-                force[3, 2] = -1.0
+                force[3, 2] = -float(active)
                 np.testing.assert_allclose(rhs.numpy(), force, rtol=1e-6, atol=1e-6)
-                np.testing.assert_allclose(rhs.numpy().sum(axis=0), 0.0, atol=1e-6)
+                np.testing.assert_allclose(rhs.numpy().sum(axis=0), [0, 0, float(not active)], atol=1e-6)
 
 
 if __name__ == "__main__":

@@ -306,6 +306,8 @@ class SolverVBD(SolverBase, CouplingInterface):
         # Rigid body - contacts
         rigid_contact_hard: bool = True,  # Body-body contacts: hard=AL duals+C0, soft=penalty only
         rigid_contact_history: bool = False,  # Body-body contact warm-start (hard: k+duals+anchors; soft: k)
+        rigid_enable_sleep: bool = False,
+        rigid_contact_grouping: bool = False,
         rigid_contact_stick_motion_eps: float = 1.0e-4,  # Sticky contact residual threshold; 0 disables point replay
         rigid_contact_stick_freeze_translation_eps: float = 1.0e-4,  # Deadzone snap translation threshold; 0 disables snap
         rigid_contact_stick_freeze_angular_eps: float = 1.0e-4,  # Deadzone snap angular threshold; 0 disables snap
@@ -332,6 +334,13 @@ class SolverVBD(SolverBase, CouplingInterface):
                 non-deterministic full VBD. Preserves contact laws and iteration budgets. Eligible surface
                 tiles use certified empty-self-contact batching; unsupported cases use ordinary sweeps.
                 Recreate captured graphs after model-property changes, as for other solver caches.
+            rigid_contact_grouping: Experimental five-group contact-aware scheduling for 5--704 free bodies.
+                Requires CUDA SM80+ and internal, non-differentiable integration. Same-group contacts
+                retain the existing majorizer; this is not guaranteed proper graph coloring.
+            rigid_enable_sleep: Experimental supported free-body island sleeping. Non-free joints remain active.
+                Uses a mass-normalized energy threshold of 0.005 m^2/s^2 and a 0.4 s wake counter, without
+                stabilization damping. Call reset after manual pose/shape edits; moving kinematic supports
+                must provide consistent velocities. Dense adjacency is limited to 32 MiB. Default False.
             iterations: Number of VBD iterations per step.
             friction_epsilon: Threshold to smooth small relative velocities in friction computation (used for both particle
                 and rigid body contacts).
@@ -840,9 +849,29 @@ class SolverVBD(SolverBase, CouplingInterface):
                 )
             self._coupled_fusion = RigidFusionAdapter(wp.launch, model, cooperative=self.enable_cuda_fast_path)
             ritz = RigidRitz(model, correction, particle_multilevel_cluster_size)
-            correction._coupled_solver = CoupledTranslationPCG(self, correction, ritz, self._coupled_fusion)
+            correction._coupled_solver = CoupledTranslationPCG(
+                self, correction, ritz, self._coupled_fusion, component_step_limits=rigid_enable_sleep
+            )
             correction.coarse_use_split_pcg = True
             correction._split_coarse_pcg = correction._coupled_solver
+
+        self._rigid_sleep = None
+        self._rigid_sleep_contacts = None
+        if rigid_enable_sleep:
+            if self.integrate_with_external_rigid_solver or model.requires_grad:
+                raise ValueError("Rigid sleeping requires internally integrated, non-differentiable bodies")
+            if model.body_count:
+                from ..rigid_sleep import RigidBodySleep  # noqa: PLC0415
+
+                self._rigid_sleep = RigidBodySleep(self)
+
+        self._rigid_contact_groups = None
+        if rigid_contact_grouping:
+            if self.integrate_with_external_rigid_solver or model.requires_grad:
+                raise ValueError("Rigid contact grouping requires internal, non-differentiable integration")
+            from ..rigid_contact_groups import BalancedRigidContactGroups  # noqa: PLC0415
+
+            self._rigid_contact_groups = BalancedRigidContactGroups(self)
 
     def _init_particle_system(
         self,
@@ -1989,6 +2018,8 @@ class SolverVBD(SolverBase, CouplingInterface):
 
     @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
+        if self._rigid_sleep is not None:
+            self._rigid_sleep.reset()
         if self._self_contact_certificate is not None:
             self._self_contact_certificate.invalidate()
         if self._cuda_surface is not None and flags & ModelFlags.MODEL_PROPERTIES:
@@ -2004,6 +2035,8 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self.surface_tile_skip_active_checks,
                     self.surface_tile_skip_material_checks,
                 ) = self._compute_surface_tile_fast_path_flags()
+        if self._rigid_sleep is not None:
+            self._rigid_sleep.refresh_eligibility()
 
     @override
     def coupling_supports_inertial_property_refresh(self) -> bool:
@@ -3237,6 +3270,11 @@ class SolverVBD(SolverBase, CouplingInterface):
             device=self.device,
         )
 
+        if self._rigid_sleep is not None:
+            self._rigid_sleep.reset(world_mask)
+        if self._rigid_contact_groups is not None:
+            self._rigid_contact_groups.reset()
+
     def _snapshot_rigid_contact_history(self, contacts: Contacts | None):
         """Write solved contact state for next frame's match-index warm-start."""
         if not self.rigid_contact_history or contacts is None:
@@ -3412,6 +3450,9 @@ class SolverVBD(SolverBase, CouplingInterface):
         first-time allocation or resizing.
         """
         model = self.model
+        if self._rigid_sleep is not None:
+            self._rigid_sleep_contacts = contacts
+            self._rigid_sleep.update(state_in, state_in, contacts, dt, before=True)
         internal_rigid = model.body_count > 0 and not self.integrate_with_external_rigid_solver
         rigid_capacity = contacts.rigid_contact_max if contacts is not None else 0
 
@@ -3850,6 +3891,9 @@ class SolverVBD(SolverBase, CouplingInterface):
                 dim=soft_contact_launch_dim,
                 device=self.device,
             )
+
+        if self._rigid_contact_groups is not None:
+            self._rigid_contact_groups.update(state_in, contacts)
 
     def _solve_particle_selective_polish(self, state_in: State, dt: float) -> None:
         """Apply one frozen-contact multiplicative Schwarz sweep to the active surface set."""
@@ -4586,6 +4630,10 @@ class SolverVBD(SolverBase, CouplingInterface):
             self.body_hessian_ll.zero_()
 
         body_color_groups = model.body_color_groups
+        body_colors = model.body_colors
+        if self._rigid_contact_groups is not None:
+            body_color_groups = self._rigid_contact_groups.groups
+            body_colors = self._rigid_contact_groups.colors
 
         # Gauss-Seidel-style per-color updates
         for color in range(len(body_color_groups)):
@@ -4741,7 +4789,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         state_in.body_q,
                         model.body_com,
                         self.body_inv_mass_effective,
-                        model.body_colors,
+                        body_colors,
                         self.friction_epsilon,
                         self.body_body_contact_penalty_k,
                         self.body_body_contact_material_ke,
@@ -5128,6 +5176,9 @@ class SolverVBD(SolverBase, CouplingInterface):
             dim=model.body_count,
             device=self.device,
         )
+
+        if self._rigid_sleep is not None:
+            self._rigid_sleep.update(state_out, state_in, self._rigid_sleep_contacts, dt, before=False)
 
         if self.enable_dahl_friction and model.joint_count > 0:
             wp.launch(

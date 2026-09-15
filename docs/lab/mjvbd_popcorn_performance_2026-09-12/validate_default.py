@@ -21,6 +21,7 @@ def main():
     parser.add_argument("--screenshots", type=Path)
     parser.add_argument("--local-iterations", type=int)
     parser.add_argument("--substeps", type=int)
+    parser.add_argument("--popcorn-count", type=int)
     parser.add_argument("--linear-iterations", type=int)
     parser.add_argument("--max-radius-fraction", type=float)
     parser.add_argument(
@@ -32,6 +33,8 @@ def main():
         overrides = [] if args.local_iterations is None else ["--vbd-iterations", str(args.local_iterations)]
         if args.substeps is not None:
             overrides.extend(["--substeps", str(args.substeps)])
+        if args.popcorn_count is not None:
+            overrides.extend(["--popcorn-count", str(args.popcorn_count)])
         example = Example(viewer, Example.create_parser().parse_args(overrides))
         if not np.isfinite(args.cup_offset_mm):
             raise ValueError("Cup placement perturbation must be finite")
@@ -124,6 +127,8 @@ def main():
                             "wall_ms": 1000 * (time.perf_counter() - start) / (frame + 1),
                             "cup_lift": example.current_cup_lift,
                             "delivered": example.delivered_inside,
+                            "grains_in_machine": example.grains_in_machine,
+                            "grain_max_speed_m_s": example.max_grain_speed,
                             "cup_slip_mm": 1000 * getattr(example, "cup_grip_slip", 0.0),
                             "cup_deformation_mm": 1000 * example.max_cup_deformation,
                             "rim_min_radius_mm": 1000 * example.rim_min_radius,
