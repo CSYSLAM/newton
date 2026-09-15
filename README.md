@@ -1097,6 +1097,22 @@ has not passed full delivery validation: grasp loss and contact instability rema
 See the [experiment log](docs/lab/mjvbd_popcorn_2026-09-10/README.md)
 for validation results and limitations.
 
+### MJVBD_V2 Supermarket Packing
+
+<img src="docs/images/examples/example_mjvbd_v2_supermarket_packing.jpg" width="320" height="320" alt="Piper parallel gripper placing a deformable grocery in a supported shopping bag">
+
+```bash
+python -m newton.examples mjvbd_v2_supermarket_packing
+```
+
+A Piper with its native two-finger gripper and visible silicone pads packs a tetrahedral bread loaf
+and a milk-labelled soft pouch into a Blender-authored hanging thin-film shopping bag.
+The robot follows prescribed IK motion; groceries move only through contact,
+friction and gravity. Visible round rails support the slotted bag handles by contact outside the
+checkout counter. Blender-authored fixtures include a POS terminal, scanner,
+receipt printer, and labelled grocery shelves. See the
+[asset and physics notes](newton/examples/mjvbdv2/assets/supermarket/README.md).
+
 ### Example Options
 
 All examples share a common set of command-line options. The most commonly used ones are:
