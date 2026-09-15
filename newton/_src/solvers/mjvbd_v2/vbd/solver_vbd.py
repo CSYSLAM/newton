@@ -873,6 +873,9 @@ class SolverVBD(SolverBase, CouplingInterface):
 
             self._rigid_contact_groups = BalancedRigidContactGroups(self)
 
+    # Set by the MJVBDV2 adapter, which owns detection-time contact snapshots.
+    _rigid_soft_dat = None
+
     def _init_particle_system(
         self,
         model: Model,
@@ -3042,7 +3045,11 @@ class SolverVBD(SolverBase, CouplingInterface):
             if state_in.body_qd is not None and state_out.body_qd is not None:
                 wp.copy(state_out.body_qd, state_in.body_qd)
 
+        if self._rigid_soft_dat is not None:
+            self._rigid_soft_dat.begin(state_in, contacts)
         self._initialize_rigid_bodies(state_in, control, contacts, dt, update_rigid)
+        if self._rigid_soft_dat is not None:
+            self._rigid_soft_dat.apply(self)
         self._initialize_particles(state_in, state_out, dt)
 
         if self._cuda_surface is not None:
@@ -3321,6 +3328,11 @@ class SolverVBD(SolverBase, CouplingInterface):
         )
 
     def _penetration_free_truncation(self, particle_q_out=None, *, empty_contact_set=False):
+        self._penetration_free_truncation_impl(particle_q_out, empty_contact_set=empty_contact_set)
+        if self._rigid_soft_dat is not None:
+            self._rigid_soft_dat.apply(self)
+
+    def _penetration_free_truncation_impl(self, particle_q_out=None, *, empty_contact_set=False):
         """
         Modify displacements_in in-place, also modify particle_q if its not None
 
@@ -4880,6 +4892,8 @@ class SolverVBD(SolverBase, CouplingInterface):
                 dim=color_group.size,
                 device=self.device,
             )
+            if self._rigid_soft_dat is not None:
+                self._rigid_soft_dat.apply(self)
 
         if contacts is not None:
             contact_launch_dim = contacts.rigid_contact_max

@@ -1,0 +1,512 @@
+[
+  {
+    "path": "FBD_03.usd",
+    "source": "style3d_probe/bag/canvas_bag/FBD_03.usd",
+    "sha256": "a4898a4ecbab592532fed81a581cf53a6f2181f3ed4e93e273fa08ab9322eaf1"
+  },
+  {
+    "path": "desk.usd",
+    "source": "desk.usd",
+    "sha256": "cc4fb440baa2fbe123dee9a1d988e570c28d20af07b7651ebd35bc3fbbfd6151"
+  },
+  {
+    "path": "piper/piper.xml",
+    "source": "piper/piper_with_texture.xml",
+    "sha256": "5a9a442a55ae6cc9c37b5eaa4a822b0ba656f6f7d168f3433395270efde80384"
+  },
+  {
+    "path": "piper/piper_meshes/base_link_convex.STL",
+    "source": "piper/piper_meshes/base_link_convex.STL",
+    "sha256": "80680e9a44b775b2dab27c956f0df13477124cabdc4eadec654448962d28c985"
+  },
+  {
+    "path": "piper/piper_meshes/gripper_base.STL",
+    "source": "piper/piper_meshes/gripper_base.STL",
+    "sha256": "2895bfa6f1eef2d0ad2cb9dfdedd5f6c760ec07388bcde2b4d1e412e1189c9cb"
+  },
+  {
+    "path": "piper/piper_meshes/gripper_base_convex_remesh.stl",
+    "source": "piper/piper_meshes/gripper_base_convex_remesh.stl",
+    "sha256": "b79932c0f6ce00e60b671cfad151659139318c002ed3f35cca506bad3803e8ce"
+  },
+  {
+    "path": "piper/piper_meshes/link1_convex.STL",
+    "source": "piper/piper_meshes/link1_convex.STL",
+    "sha256": "347f3eb54ccef2d40c8c87169a239d59b8a83aecb73edbf5e2a24ff4da5cdc72"
+  },
+  {
+    "path": "piper/piper_meshes/link2_convex.STL",
+    "source": "piper/piper_meshes/link2_convex.STL",
+    "sha256": "7755e36c36ae320eeb1e922e56e3cbe5ebfead520d173ace4208b9ef71e10437"
+  },
+  {
+    "path": "piper/piper_meshes/link3_convex.STL",
+    "source": "piper/piper_meshes/link3_convex.STL",
+    "sha256": "a0872ee372e36ec42fcd738da9d9e87da94e4b34f1cc2082745ea418a8e6351c"
+  },
+  {
+    "path": "piper/piper_meshes/link4_convex.STL",
+    "source": "piper/piper_meshes/link4_convex.STL",
+    "sha256": "cbe928e838833a87cad616af2dc511c255d5f694836d71c6574500f71ef7b75b"
+  },
+  {
+    "path": "piper/piper_meshes/link5_convex.STL",
+    "source": "piper/piper_meshes/link5_convex.STL",
+    "sha256": "29c68ad1aac0743ddf3a43cd9e2bffcb0fbcde3616fc8dc45d3cad3c59c6267b"
+  },
+  {
+    "path": "piper/piper_meshes/link6_convex.STL",
+    "source": "piper/piper_meshes/link6_convex.STL",
+    "sha256": "71911fa0be47793c5e6669f7847a6ad7ec3316eb97d635dd01fd713545b61f77"
+  },
+  {
+    "path": "piper/piper_meshes/link7.STL",
+    "source": "piper/piper_meshes/link7.STL",
+    "sha256": "475a7d8db056524d7659fadf5a2c307d62791047b6214d733dfc7846ed1c613d"
+  },
+  {
+    "path": "piper/piper_meshes/link7_remesh_2_convex.stl",
+    "source": "piper/piper_meshes/link7_remesh_2_convex.stl",
+    "sha256": "c49ed5da21c27770cfef2b1168a778e252965a045de39c73796052c17f36878a"
+  },
+  {
+    "path": "piper/piper_meshes/link8.STL",
+    "source": "piper/piper_meshes/link8.STL",
+    "sha256": "3f88d534a85e28a33ef7d2061adacbd1d25214aa9325f9e464aad0f9e4b74606"
+  },
+  {
+    "path": "piper/piper_textured_meshes/base_link_2.obj",
+    "source": "piper/piper_textured_meshes/base_link_2.obj",
+    "sha256": "f92df5ffbd749202dfb66fb47b9a6f9cc1621a2778c4b18743e3a8f9e6d9e098"
+  },
+  {
+    "path": "piper/piper_textured_meshes/base_link_3.obj",
+    "source": "piper/piper_textured_meshes/base_link_3.obj",
+    "sha256": "b6970e3bb28516b07a895ed5441ab33aa85f97478d78956beefc5049c1eb8ef7"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link1_rot_0.obj",
+    "source": "piper/piper_textured_meshes/link1_rot_0.obj",
+    "sha256": "59bf5abf978971d4e2be3c8627347d5534fe02be0ca3adef2e2107a59c4f58c3"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_0.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_0.obj",
+    "sha256": "ad95ec3c978ea95f2abd86d25afe69ebebf79974e78b39ee3c781ac35195fd97"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_1.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_1.obj",
+    "sha256": "122c924d70667ea1813af791e38b8827b6be6c3946e6ddc5f1def1d536fadf2c"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_10.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_10.obj",
+    "sha256": "8e6bed422f397931d77f2101aa0ce8eb83f22b5e680b5ec14517a21f97890616"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_11.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_11.obj",
+    "sha256": "b1b9482f48e9b615b8296d0d6d140d93701011d9f52be880fe19e7920fa8ebe0"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_12.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_12.obj",
+    "sha256": "7cec17461fe6dc84dcec3bea6df10e76b3d82914956b4950c63442070d492490"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_13.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_13.obj",
+    "sha256": "0dc270076aafc011c48be63787d6402422bc38d73f57dea1c4d22922b014a380"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_14.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_14.obj",
+    "sha256": "5c7b5f0981bbf2ac0049c16381d8e7f09b83aa93be809732ccecaa5a60ab481f"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_15.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_15.obj",
+    "sha256": "62bd663a0fa580201fc9dbc3450326f15c1972f3adf044f3d2c9e89fa5317b52"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_16.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_16.obj",
+    "sha256": "ee7182aac88d95642c1804c94cdb3c144119eb5f7045273352892a3097acc363"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_17.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_17.obj",
+    "sha256": "5d606767431c532cf936c78a4a2e5fb44ae376db28a3135ff48c226b7d12744e"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_18.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_18.obj",
+    "sha256": "e59866d7226f5437e3489470ea9aaf819e662821cd0616b78f95626bd2e40b2a"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_19.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_19.obj",
+    "sha256": "b98a52b21d02a68512af98603fe5a82bdd3fc44a76bfca992aacb8f6f308557c"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_2.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_2.obj",
+    "sha256": "772fd55a9b5d564a9ee5c0aad683abe4431a5bd5e71a1c220248940c9be29495"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_20.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_20.obj",
+    "sha256": "503ed380167655f090741f294da19efa5eb59ee21264a541e228206b5c0b3eb1"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_21.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_21.obj",
+    "sha256": "6fe0e1e3e3be0e144827ea4e74e6ce675d0de8c4edaa079afb1f1320f0fca7ae"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_22.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_22.obj",
+    "sha256": "93da833e97a3907deaebd7aa3e40aaa337a9b4925ccd85682602329293bb0610"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_23.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_23.obj",
+    "sha256": "5fbc9a5887ab74da6f0e4f6d4c149b8333ca4b5acb71a608e8288d3ffa80af47"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_24.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_24.obj",
+    "sha256": "450767ff96c44f22907231f4babf7b7ddd6d9ce0cef22bfe22100427fc22e850"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_25.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_25.obj",
+    "sha256": "6653bfba0b280b57502b12d70788633058bb63a247848afb21315e300f91fe6a"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_26.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_26.obj",
+    "sha256": "c9ad78c6afab48f224d2d46ae62bb23e60d6e2714f3c0c25980a3dd05d80e24b"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_27.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_27.obj",
+    "sha256": "6d9e1059f4bf207452229f242fdd6e0abbe734bef453048637060cfc37324a79"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_28.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_28.obj",
+    "sha256": "2f9ee1a69ab4bfefb02ea61830c29d549876e20dc2973ad9e1d0374267b0f885"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_29.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_29.obj",
+    "sha256": "52ea9e6091493732eea211fbde58ff120b6e4e26926c5fc16e8ea68b6f886504"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_3.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_3.obj",
+    "sha256": "4ccf3e198601e58ddbdf5bfd85c867b2ed3698f4e352e32ebf97a1b724a42ee2"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_30.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_30.obj",
+    "sha256": "ee7f726a1c122c665e908c2f7c592e9987a0047278deee7d60dee9a760bfb6d8"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_31.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_31.obj",
+    "sha256": "35c3c98da953411bb11d4913eec489b4d68648e8c725fa22e50585a663d2b539"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_4.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_4.obj",
+    "sha256": "3eda833058897724da357f5af2a5cba79393277b3e0e42d0710472beeb6cd9e4"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_5.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_5.obj",
+    "sha256": "16d55593e0b7bfba8fc573bcde341a56a04b90a72e0a017739ee076bdee9f574"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_6.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_6.obj",
+    "sha256": "7c1b32de5198b3b2415d4b78a0108f95c217ed4d70e3a9aa6f36685c43992405"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_7.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_7.obj",
+    "sha256": "4a8aa9a133ddc30d563c7ec54320c35e39b4c6968e816b349354ebef66d10051"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_8.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_8.obj",
+    "sha256": "176ff62bd69e4ef3044aa524b42ca13dbd932174eda0a418394d97a266862501"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link2_rot_9.obj",
+    "source": "piper/piper_textured_meshes/link2_rot_9.obj",
+    "sha256": "0aa8ed2785380471894aa832f13e7084cdec28289566d4507ed2934b25cefdd7"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_0.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_0.obj",
+    "sha256": "6a6c25e7ceb33cca69947a0888c2d9285c2d6eb2462e549d3087109994fdba75"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_1.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_1.obj",
+    "sha256": "6992c10ae8e2c36a5880522d69572513bc84c6c7372fd8d036eafa862c9a520f"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_10.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_10.obj",
+    "sha256": "8e9d8465211eabe0b3cf4502892e918f307dc22f672b2ddd3ebb0f390f4ce327"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_11.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_11.obj",
+    "sha256": "2c603c3509695aa21ae66242a09a7546bd488fe8be1158b2e5fc4d6b7f2608ce"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_12.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_12.obj",
+    "sha256": "597b2ec0da8bb5cd8a47644fa5265aec0e43d0a81f67b4cbdbfb0c6d6e8f876d"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_13.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_13.obj",
+    "sha256": "624f85287e98bbc71d137063359e7380668fb1c26aea1d59640613ab34dcb945"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_14.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_14.obj",
+    "sha256": "8772a1d14ab8348ba3baee3decd78632a911c4c0296f5570b38090044f9d8421"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_15.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_15.obj",
+    "sha256": "b702c8b00c59aa075bc10a3723bb0970b976220163e54821091fbf4c1e721ace"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_16.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_16.obj",
+    "sha256": "090d61eaed5979637b3648d914bfffe5c689338325e9e409aaf4d828b9bf038f"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_17.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_17.obj",
+    "sha256": "1d8c49be87f7cedc4b88a7b0e1de5735f5ddefa106b4aa1a8044108dbb751e7d"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_18.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_18.obj",
+    "sha256": "d401bb0bbc0ff0f18fca8f21d83cf6fa383e45c8955cfb44aada6db3629e6165"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_19.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_19.obj",
+    "sha256": "aef448d61f412e931dd1dcecefab722c075f40b227b32f025a395b434fb45c6a"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_2.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_2.obj",
+    "sha256": "88f2a3aad35c64ebcf011239a033f610ad9f67fa17e13ac4916173ea00c5f2a6"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_20.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_20.obj",
+    "sha256": "9e3547c20a93dfbfd44f4876b5d07ee7b98ad11d89b48d22757a318b676a69c0"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_21.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_21.obj",
+    "sha256": "41b64709068daf2fe5964cb203cb5c5e91d05ffe6c84c2ece99a3ad501a481d9"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_22.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_22.obj",
+    "sha256": "81cad675a6e28286d7665ae5b5576dd8d0df8321227858cc0d3a86938eaa67b6"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_23.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_23.obj",
+    "sha256": "e191ee0c06c21d4dfefe385ecd217733dbb5c559d35d43762bf2aaa48b462735"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_24.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_24.obj",
+    "sha256": "2b8401a7bade67dc9736cd3388e5df1a668248e40836cbd16e90b553c937f3f3"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_25.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_25.obj",
+    "sha256": "33c66403272cf19528054e3670fc057e09be255b5b27a32a7cf301ac6b0196d0"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_26.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_26.obj",
+    "sha256": "89bb1142a5135d1af9884f02efd5c901f8b20e0df604f223e0a12e770d1e63b1"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_27.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_27.obj",
+    "sha256": "b918382f3b605cbe8745a642bb6eda530833f532d14df5afa90caa0f7c903fc1"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_28.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_28.obj",
+    "sha256": "b6ceb725f40133753572a93dd942828c42b86854a714f8cbf8f8ed97565b7abb"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_3.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_3.obj",
+    "sha256": "e0fe609136e37fa62330a0c0e5f67f320d98a085fd4a199083dc9c425115e161"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_4.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_4.obj",
+    "sha256": "1af6fe4daf8faf0ae4e103c94c2fd26381716462ab4e0af69fb203810f194fce"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_5.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_5.obj",
+    "sha256": "b4fbd4fd54e674dea796555f08ff332963538b39316e34e391ff6226891d3a80"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_6.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_6.obj",
+    "sha256": "a4bf81c7fca226eee009ffe584275da0f0608150f81dc2181abd6bf91bd49a99"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_7.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_7.obj",
+    "sha256": "b557785574573b181fb55c94f93cee59aaf6b5716f0132496b710fff9a59ee71"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_8.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_8.obj",
+    "sha256": "6d156ba9dfdf78e9ad68bf91fb4930420371aca45e8c5bcfe9cc6f33d2e948d7"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link3_rot_9.obj",
+    "source": "piper/piper_textured_meshes/link3_rot_9.obj",
+    "sha256": "5685e0e7dea80ae42aa838d37f6eea600ea1c8794fecc4f26509fa2be386ff8a"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link4_rot_0.obj",
+    "source": "piper/piper_textured_meshes/link4_rot_0.obj",
+    "sha256": "8308f96262cf99a1e59b8d27e5f3766e2e7db6f7e1b066930aa9b738ca3567f0"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link4_rot_1.obj",
+    "source": "piper/piper_textured_meshes/link4_rot_1.obj",
+    "sha256": "67c71b17d8582a003c6899fe10f9d454e29915bfcde352a347c745c098d0fb0d"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link4_rot_2.obj",
+    "source": "piper/piper_textured_meshes/link4_rot_2.obj",
+    "sha256": "db15f5a8ba8d912bdd4b3813919e1654a3faaf9077346b0b104f1448c83237ad"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link4_rot_3.obj",
+    "source": "piper/piper_textured_meshes/link4_rot_3.obj",
+    "sha256": "193511bc4308be3f69f9acc577a1bbb7bb3f33848e3451a60e601af6a0a66a8f"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link4_rot_4.obj",
+    "source": "piper/piper_textured_meshes/link4_rot_4.obj",
+    "sha256": "ab46dfa58323943b1830b4c18ec58b5d4ce8fa78caaf840ff0dc2371a0f34da2"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link5_rot_0.obj",
+    "source": "piper/piper_textured_meshes/link5_rot_0.obj",
+    "sha256": "87288fe6c237b1d48c302e02c390a600853464156fda342781ee6d3e7c9b6746"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link5_rot_1.obj",
+    "source": "piper/piper_textured_meshes/link5_rot_1.obj",
+    "sha256": "971f1ffbcf5dfd6ae2319a9e9f0409d2189390e9a3f48434d4f2dd0a2e691053"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link5_rot_2.obj",
+    "source": "piper/piper_textured_meshes/link5_rot_2.obj",
+    "sha256": "4ae20ffea2e60e645113c712eb3b337c8dceeeca8176172a60362104a46fcb6e"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link5_rot_3.obj",
+    "source": "piper/piper_textured_meshes/link5_rot_3.obj",
+    "sha256": "0eca977508b1a1f2ac9c9d7c905f483f30b5d52242e5e94391d5395a54276909"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link5_rot_4.obj",
+    "source": "piper/piper_textured_meshes/link5_rot_4.obj",
+    "sha256": "a28052831c2fcdffbc5bbe97f82699d31f5643f001d1ea13d38cca590aa2688a"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link5_rot_5.obj",
+    "source": "piper/piper_textured_meshes/link5_rot_5.obj",
+    "sha256": "8ea088e8ab03f3aefb45021938ea3b2ed26fa10903750d92ef3ffed3fa5e6ab3"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link5_rot_6.obj",
+    "source": "piper/piper_textured_meshes/link5_rot_6.obj",
+    "sha256": "7b14c1cdce13b4b5e5e3f64b73059f560c95ddbfa7f30cd4f4e23366c57298a7"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link6_rot_0.obj",
+    "source": "piper/piper_textured_meshes/link6_rot_0.obj",
+    "sha256": "296059a44da1099067543dc464dc102038890fc77066931963d9d27782a48f11"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link6_rot_1.obj",
+    "source": "piper/piper_textured_meshes/link6_rot_1.obj",
+    "sha256": "1c98ea5cc7e9fdcca229a91da12a9b1ef8ee6bc87f729bb22187d66f573f15a8"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link6_rot_2.obj",
+    "source": "piper/piper_textured_meshes/link6_rot_2.obj",
+    "sha256": "2ded30e529e417a247d94cbf5ea8ee09a83afbbc9761888a8a3dc1ed3c307734"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link6_rot_3.obj",
+    "source": "piper/piper_textured_meshes/link6_rot_3.obj",
+    "sha256": "16e36031f2d7f9bb16bd716adc49d6733e711d4f726c684fdda25920881ffea7"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link6_rot_4.obj",
+    "source": "piper/piper_textured_meshes/link6_rot_4.obj",
+    "sha256": "482f6f9c3099d264aff4486771ce35ee586ec47bbf761a192b0fd431b61bb0ad"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link6_rot_5.obj",
+    "source": "piper/piper_textured_meshes/link6_rot_5.obj",
+    "sha256": "0047eefa5cf852663fe105e8b9abe7f40a1e652acedfb4229cbb14cf90c2d1e2"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link6_rot_6.obj",
+    "source": "piper/piper_textured_meshes/link6_rot_6.obj",
+    "sha256": "d1c53ae5e5d92ce4cd5db26f30c0da583c5350570870a546c5c41d5a6016fe9b"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link6_rot_7.obj",
+    "source": "piper/piper_textured_meshes/link6_rot_7.obj",
+    "sha256": "ebe178ff039732be75c449e34f1e702333e49b22134749c1408f6e0eadfe5562"
+  },
+  {
+    "path": "piper/piper_textured_meshes/link6_rot_8.obj",
+    "source": "piper/piper_textured_meshes/link6_rot_8.obj",
+    "sha256": "a110bb4c24fc0fe17833623c80a1192953c2cf10b3505639e6591cff898f5125"
+  },
+  {
+    "path": "rack.usd",
+    "source": "rack.usd",
+    "sha256": "5c275bcf37cf5433735cac4f8ad14da747aeeeea5c6d242d4ce061a07c6bd5de"
+  },
+  {
+    "path": "wangqiu.usd",
+    "source": "wangqiu.usd",
+    "sha256": "49f687f7a717b43f9950b210a3f2f9e19f8005e1913821d5d1a0f17a1173420f"
+  }
+]

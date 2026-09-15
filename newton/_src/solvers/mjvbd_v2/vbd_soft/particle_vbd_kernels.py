@@ -1121,6 +1121,25 @@ def evaluate_edge_edge_contact_2_vertices(
 
 
 @wp.func
+def _vertex_triangle_contact_normal(diff: wp.vec3, previous_diff: wp.vec3, a: wp.vec3, b: wp.vec3, c: wp.vec3):
+    distance = wp.length(diff)
+    if distance > 0.0:
+        return diff / distance
+    # At coincidence the distance gradient is undefined. Keep the contact on
+    # its previous side using the face normal instead of dividing by zero.
+    normal = wp.cross(b - a, c - a)
+    normal_length = wp.length(normal)
+    if normal_length > 0.0:
+        if wp.dot(normal, previous_diff) < 0.0:
+            normal = -normal
+        return normal / normal_length
+    previous_length = wp.length(previous_diff)
+    if previous_length > 0.0:
+        return previous_diff / previous_length
+    return wp.vec3(0.0)
+
+
+@wp.func
 def evaluate_vertex_triangle_collision_force_hessian(
     v: int,
     v_order: int,
@@ -1145,9 +1164,14 @@ def evaluate_vertex_triangle_collision_force_hessian(
 
     diff = p - closest_p
     dis = wp.length(diff)
-    collision_normal = diff / dis
+    previous_diff = pos_anchor[v] - (
+        bary[0] * pos_anchor[tri_indices[tri, 0]]
+        + bary[1] * pos_anchor[tri_indices[tri, 1]]
+        + bary[2] * pos_anchor[tri_indices[tri, 2]]
+    )
+    collision_normal = _vertex_triangle_contact_normal(diff, previous_diff, a, b, c)
 
-    if dis < collision_radius:
+    if dis < collision_radius and wp.length_sq(collision_normal) > 0.0:
         bs = wp.vec4(-bary[0], -bary[1], -bary[2], 1.0)
         v_bary = bs[v_order]
 
@@ -1224,9 +1248,14 @@ def evaluate_vertex_triangle_collision_force_hessian_4_vertices(
 
     diff = p - closest_p
     dis = wp.length(diff)
-    collision_normal = diff / dis
+    previous_diff = pos_anchor[v] - (
+        bary[0] * pos_anchor[tri_indices[tri, 0]]
+        + bary[1] * pos_anchor[tri_indices[tri, 1]]
+        + bary[2] * pos_anchor[tri_indices[tri, 2]]
+    )
+    collision_normal = _vertex_triangle_contact_normal(diff, previous_diff, a, b, c)
 
-    if 0.0 < dis < collision_radius:
+    if dis < collision_radius and wp.length_sq(collision_normal) > 0.0:
         bs = wp.vec4(-bary[0], -bary[1], -bary[2], 1.0)
 
         dEdD, d2E_dDdD = evaluate_self_contact_force_norm(dis, collision_radius, collision_stiffness)

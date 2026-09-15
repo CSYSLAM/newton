@@ -1142,6 +1142,18 @@ For questions, please consult the [Newton documentation](https://newton-physics.
 
 By participating in this community, you agree to abide by the Linux Foundation [Code of Conduct](https://lfprojects.org/policies/code-of-conduct/).
 
+### PiPER steel ball into a hanging bag (MJVBDV2)
+
+<img src="docs/images/examples/example_mjvbd_v2_piper_ball_into_bag.jpg" width="320" height="320" alt="PiPER placing a steel sphere into a hanging bag">
+
+```bash
+uv run --extra examples -m newton.examples mjvbd_v2_piper_ball_into_bag
+```
+
+The WAIC robot, rack and reference FBD_03 bag run with MJVBDV2. The steel sphere
+is grasped through contact and released into the bag on the original rack. See the
+[scene and asset notes](assets/piper_bag/README.md) for boundary conditions.
+
 ## Project Governance, Legal, and Members
 
 Please see the [newton-governance repository](https://github.com/newton-physics/newton-governance) for more information about project governance.

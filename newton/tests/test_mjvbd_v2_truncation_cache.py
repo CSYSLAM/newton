@@ -5,6 +5,7 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
@@ -216,6 +217,14 @@ class TestMJVBDV2TruncationCache(unittest.TestCase):
     def test_cuda_reference_and_replay(self):
         """Match ordinary DAT and refresh cached geometry during CUDA replay."""
         self._check("cuda:0")
+
+    def test_compact_geometry_budget(self):
+        """Cache all 192 fixture candidates within a six-KiB geometry budget."""
+        solver = _fixture(complete, "cpu")
+        with patch.object(ParticleTruncationCache, "_MAX_BYTES", 6 * 1024):
+            cache = ParticleTruncationCache(solver, complete)
+            self.assertLessEqual(cache.allocated_bytes, 6 * 1024)
+            cache.rebuild(solver)
 
     def test_capacity_guards(self):
         """Reject oversized caches and capture-time buffer growth."""

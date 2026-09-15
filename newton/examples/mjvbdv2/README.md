@@ -1,6 +1,6 @@
 # MJVBDV2 demos
 
-The 14 modules in this directory are the scene entry points. Shared scene
+The modules in this directory are the scene entry points. Shared scene
 implementations, pose/trajectory recorders, replay tools, and older variants
 live in [`support/`](support/). Solver settings and scene trajectories are
 unchanged by this directory reorganization.
@@ -28,6 +28,7 @@ uv run --extra examples -m newton.examples mjvbd_v2_conveyor_sorting --help
 | W1 plastic inflatable bag grasp and release | `mjvbd_v2_inflatable_bag_grasp` | [example_mjvbd_v2_inflatable_bag_grasp.py](example_mjvbd_v2_inflatable_bag_grasp.py) |
 | W1 soft-then-rigid cube placement into a bag | `mjvbd_v2_cubes_into_bag` | [example_mjvbd_v2_cubes_into_bag.py](example_mjvbd_v2_cubes_into_bag.py) |
 | Right-hand Armadillo transfer into a gear crusher | `mjvbd_v2_armadillo_crusher` | [example_mjvbd_v2_armadillo_crusher.py](example_mjvbd_v2_armadillo_crusher.py) |
+| PiPER steel ball into a hanging bag | `mjvbd_v2_piper_ball_into_bag` | [example_mjvbd_v2_piper_ball_into_bag.py](example_mjvbd_v2_piper_ball_into_bag.py) |
 
 The T-shirt fold and cloth twist inherit the surface-fast displacement
 deadband; use `--particle-displacement-threshold 0` to disable it.
@@ -164,3 +165,31 @@ filename with `example_` and append `.py` to obtain its source filename.
 
 Other previous `mjvbdv2` modules retain their filenames under `support/`,
 except the non-importable `..._v0.1.py` variant, now named `..._v0_1.py`.
+
+### PiPER steel ball into a hanging bag
+
+```bash
+uv run --extra examples -m newton.examples mjvbd_v2_piper_ball_into_bag
+uv run --extra examples -m newton.examples mjvbd_v2_piper_ball_into_bag --viewer null --num-frames 600 --test
+```
+
+This ports the WAIC desk, rack and PiPER assets, using the reference FBD_03
+bag with 2,588 vertices and 4,999 triangles. The arm
+approaches the original 0.058 kg ball, closes its jaws, lifts and transfers it,
+then opens above the bag. MJVBDV2 solves the sphere and cloth dynamically;
+there is no sphere attachment. The original base height and rack are preserved, with no pinned bag vertices.
+See [asset provenance and physical assumptions](../../../assets/piper_bag/README.md).
+
+The default uses 10 substeps and 15 local VBD sweeps with rigid-soft DAT and
+contact-aware Chebyshev acceleration. DAT constrains extrapolated updates and
+marks clipped particles so subsequent acceleration excludes them. Use
+`--cloth-acceleration none` for the ordinary DAT baseline, or
+`--no-rigid-soft-dat --cloth-acceleration none` to disable both. The release target
+stays above the bag even when the pickup point moves.
+The coarse bag uses edge/face contacts against SDFs of the original rack and ball
+meshes so rods and the ball cannot simply pass between cloth vertices. These
+SDFs require CUDA. Test mode also checks that both handles stay on the rack.
+
+The bag's bending recovery can be adjusted with `--bending-stiffness` (default
+`5e-5`; use `5e-7` to compare the earlier softer response). The membrane
+stiffness remains independently controlled by `--membrane-stiffness`.
