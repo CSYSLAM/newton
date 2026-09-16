@@ -43,3 +43,7 @@ newton/examples/mjvbdv2/assets/supermarket/polyhaven/long_life_food/textures/lon
 newton/examples/mjvbdv2/assets/supermarket/polyhaven/long_life_food/textures/long_life_food_diff_1k.jpg filter=lfs diff=lfs merge=lfs -text
 newton/examples/mjvbdv2/assets/supermarket/usd/textures/long_life_food_arm_1k.jpg filter=lfs diff=lfs merge=lfs -text
 newton/examples/mjvbdv2/assets/supermarket/usd/textures/long_life_food_diff_1k.jpg filter=lfs diff=lfs merge=lfs -text
+assets/piper_paper_bag/kraft_shopping_bag.blend filter=lfs diff=lfs merge=lfs -text
+assets/piper_paper_bag/render_binding.npz filter=lfs diff=lfs merge=lfs -text
+assets/piper_paper_bag/preview.png filter=lfs diff=lfs merge=lfs -text
+assets/piper_paper_bag/preview_top.png filter=lfs diff=lfs merge=lfs -text

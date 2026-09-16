@@ -1,0 +1,80 @@
+[
+  {
+    "name": "Braided handle -1 strand 0",
+    "start": 0,
+    "end": 5120,
+    "material": "cord"
+  },
+  {
+    "name": "Braided handle -1 strand 1",
+    "start": 5120,
+    "end": 10240,
+    "material": "cord"
+  },
+  {
+    "name": "Braided handle -1 strand 2",
+    "start": 10240,
+    "end": 15360,
+    "material": "cord"
+  },
+  {
+    "name": "Braided handle 1 strand 0",
+    "start": 15360,
+    "end": 20480,
+    "material": "cord"
+  },
+  {
+    "name": "Braided handle 1 strand 1",
+    "start": 20480,
+    "end": 25600,
+    "material": "cord"
+  },
+  {
+    "name": "Braided handle 1 strand 2",
+    "start": 25600,
+    "end": 30720,
+    "material": "cord"
+  },
+  {
+    "name": "Glued cord reinforcement",
+    "start": 30720,
+    "end": 31872,
+    "material": "paper"
+  },
+  {
+    "name": "Glued cord reinforcement.001",
+    "start": 31872,
+    "end": 33024,
+    "material": "paper"
+  },
+  {
+    "name": "Glued cord reinforcement.002",
+    "start": 33024,
+    "end": 34176,
+    "material": "paper"
+  },
+  {
+    "name": "Glued cord reinforcement.003",
+    "start": 34176,
+    "end": 35328,
+    "material": "paper"
+  },
+  {
+    "name": "Glued folded bottom -1",
+    "start": 35328,
+    "end": 36480,
+    "material": "paper"
+  },
+  {
+    "name": "Glued folded bottom 1",
+    "start": 36480,
+    "end": 37632,
+    "material": "paper"
+  },
+  {
+    "name": "Kraft shell - gussets and welded bottom",
+    "start": 37632,
+    "end": 64160,
+    "material": "paper"
+  }
+]

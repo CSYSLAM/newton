@@ -4,10 +4,12 @@
 """Regression checks for the PR #4180 rigid-soft DAT port."""
 
 import unittest
+from itertools import product
 
 import numpy as np
 import warp as wp
 
+import newton
 from newton._src.solvers.mjvbd_v2.rigid_soft_dat import _apply_particles
 from newton._src.solvers.mjvbd_v2.rigid_soft_dat_kernels import (
     apply_body_truncation_ts,
@@ -15,6 +17,7 @@ from newton._src.solvers.mjvbd_v2.rigid_soft_dat_kernels import (
     planar_truncation_t,
 )
 from newton._src.solvers.mjvbd_v2.vbd.particle_vbd_kernels import accelerate_particle_iteration_chebyshev_guarded
+from newton.solvers import SolverMJVBDV2
 
 
 @wp.kernel
@@ -26,6 +29,138 @@ def _plane_probe(out: wp.array[float]):
 
 
 class TestRigidSoftDAT(unittest.TestCase):
+    @unittest.skipUnless(wp.is_cuda_available(), "Coupled translation requires CUDA")
+    def test_dat_rejects_coupled_translation(self):
+        """Keep coupled body-particle corrections available only without DAT."""
+        with wp.ScopedDevice("cuda:0"):
+            builder = newton.ModelBuilder()
+            link = builder.add_link(is_kinematic=True)
+            joint = builder.add_joint_revolute(parent=-1, child=link, axis=wp.vec3(0, 1, 0))
+            builder.add_articulation([joint])
+            body = builder.add_body()
+            builder.add_shape_box(body, hx=0.01, hy=0.01, hz=0.01)
+            builder.add_cloth_grid(
+                pos=wp.vec3(0, 0, 0.1),
+                rot=wp.quat_identity(),
+                vel=wp.vec3(),
+                dim_x=4,
+                dim_y=4,
+                cell_x=0.01,
+                cell_y=0.01,
+                mass=0.001,
+            )
+            builder.color(include_bending=True)
+            # Only the free body participates in the coupled rigid solve.
+            builder.body_color_groups = [np.array([body], dtype=np.int32)]
+            model = builder.finalize()
+            options = {
+                "rigid_contact_hard": False,
+                "particle_enable_multilevel_correction": True,
+                "particle_multilevel_operator": "galerkin",
+                "particle_enable_coupled_translation": True,
+            }
+
+            def construct(dat):
+                return SolverMJVBDV2(
+                    model,
+                    mujoco_articulations=(0,),
+                    joint_mode="kinematic",
+                    contact_mode="full",
+                    vbd_options={**options, "rigid_soft_enable_dat": dat},
+                    collision_options={"soft_contact_margin": 0.004},
+                )
+
+            self.assertTrue(construct(False).vbd_solver.particle_enable_coupled_translation)
+            with self.assertRaisesRegex(ValueError, "Rigid-soft DAT.*coupled translation"):
+                construct(True)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Multilevel correction requires CUDA")
+    def test_multilevel_contact_preserves_support_plane(self):
+        """Keep coarse corrections above a support in eager and captured steps."""
+        for mixed, operator, capture in product((False, True), ("graph", "galerkin"), (False, True)):
+            with self.subTest(mixed=mixed, operator=operator, capture=capture), wp.ScopedDevice("cuda:0"):
+                builder = newton.ModelBuilder()
+                link = builder.add_link(is_kinematic=True)
+                joint = builder.add_joint_revolute(parent=-1, child=link, axis=wp.vec3(0, 1, 0))
+                builder.add_articulation([joint])
+                builder.add_shape_box(
+                    -1,
+                    xform=wp.transform(wp.vec3(0, 0, -0.025), wp.quat_identity()),
+                    hx=0.2,
+                    hy=0.2,
+                    hz=0.025,
+                )
+                builder.add_cloth_grid(
+                    pos=wp.vec3(-0.02, -0.02, 0.006),
+                    rot=wp.quat_identity(),
+                    vel=wp.vec3(0, 0, -0.2),
+                    dim_x=4,
+                    dim_y=4,
+                    cell_x=0.01,
+                    cell_y=0.01,
+                    mass=0.001,
+                    tri_ke=5e4,
+                    tri_ka=5e4,
+                    edge_ke=1.0,
+                    particle_radius=0.001,
+                )
+                if mixed:
+                    builder.add_soft_grid(
+                        pos=wp.vec3(0.05, 0, 0.006),
+                        rot=wp.quat_identity(),
+                        vel=wp.vec3(0, 0, -0.2),
+                        dim_x=2,
+                        dim_y=2,
+                        dim_z=2,
+                        cell_x=0.01,
+                        cell_y=0.01,
+                        cell_z=0.01,
+                        density=100,
+                        k_mu=1e4,
+                        k_lambda=1e4,
+                        k_damp=0.1,
+                        particle_radius=0.001,
+                    )
+                builder.color(include_bending=True)
+                model = builder.finalize()
+                solver = SolverMJVBDV2(
+                    model,
+                    mujoco_articulations=(0,),
+                    joint_mode="kinematic",
+                    contact_mode="full",
+                    vbd_options={
+                        "iterations": 6,
+                        "rigid_soft_enable_dat": True,
+                        "particle_enable_multilevel_correction": True,
+                        "particle_multilevel_operator": operator,
+                        "particle_multilevel_cluster_size": 4,
+                        "particle_multilevel_coarse_iterations": 12,
+                        "particle_multilevel_checkpoints": (3, 5),
+                        "particle_multilevel_relaxation": 0.8,
+                        "particle_multilevel_max_radius_fraction": 2.0,
+                    },
+                    collision_options={"soft_contact_margin": 0.004, "soft_contact_max": 2048},
+                )
+                state, output, control = model.state(), model.state(), model.control()
+                self.assertIsNotNone(solver.vbd_solver.particle_multilevel)
+                # Warm both state buffers before capturing the two-step cycle.
+                solver.step(state, output, control, None, 1 / 600)
+                solver.step(output, state, control, None, 1 / 600)
+                if capture:
+                    with wp.ScopedCapture() as captured:
+                        solver.step(state, output, control, None, 1 / 600)
+                        solver.step(output, state, control, None, 1 / 600)
+                for _ in range(45):
+                    if capture:
+                        wp.capture_launch(captured.graph)
+                    else:
+                        solver.step(state, output, control, None, 1 / 600)
+                        solver.step(output, state, control, None, 1 / 600)
+                    q = state.particle_q.numpy()
+                    self.assertTrue(np.isfinite(q).all())
+                    self.assertGreaterEqual(float(q[:, 2].min()), -1e-6)
+                self.assertLess(float(q[:25, 2].mean()), 0.003)
+
     def test_dat_clipping_excludes_further_chebyshev_extrapolation(self):
         for device in wp.get_devices():
             with self.subTest(device=str(device)), wp.ScopedDevice(device):

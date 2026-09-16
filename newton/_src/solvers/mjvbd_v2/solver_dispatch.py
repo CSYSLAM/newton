@@ -349,11 +349,14 @@ class _KinematicFullVBDBackend(SolverBase):
             solver = self.vbd_solver
             if (
                 solver.enable_cuda_fast_path
-                or solver.particle_multilevel is not None
+                or solver.particle_enable_coupled_translation
                 or view.requires_grad
                 or view.particle_count == 0
             ):
-                raise ValueError("Rigid-soft DAT requires VBD without CUDA fusion, multilevel correction, or autodiff")
+                raise ValueError("Rigid-soft DAT requires VBD without CUDA fusion, coupled translation, or autodiff")
+            # Particle-only coarse corrections use _penetration_free_truncation,
+            # which applies DAT against the same detection-time references as
+            # the fine sweeps. Coupled body/particle corrections remain excluded.
             if solver.particle_chebyshev_enabled and (
                 solver.particle_chebyshev_warmup_iterations < 1
                 or solver.particle_chebyshev_polish_iterations < 1
@@ -447,7 +450,8 @@ class SolverMJVBDV2(SolverBase):
             Experimental ``rigid_soft_enable_dat`` enables PR #4180 rigid-soft
             division-plane truncation in the kinematic full-VBD backend only.
             It requires a positive ``soft_contact_margin`` and is incompatible
-            with CUDA fusion, multilevel correction, and autodiff. Chebyshev requires
+            with CUDA fusion, coupled body-particle translation, and autodiff.
+            Particle-only multilevel correction is supported. Chebyshev requires
             positive warmup, polishing, and contact-neighbor exclusion settings;
             DAT-truncated particles are excluded from subsequent extrapolation.
             ``rigid_soft_dat_relaxation`` defaults to 0.85; optional trajectory interval

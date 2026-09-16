@@ -1170,6 +1170,20 @@ The WAIC robot, rack and reference FBD_03 bag run with MJVBDV2. The steel sphere
 is grasped through contact and released into the bag on the original rack. See the
 [scene and asset notes](assets/piper_bag/README.md) for boundary conditions.
 
+### PiPER paper bag packing (MJVBDV2, experimental)
+
+<img src="docs/images/examples/example_mjvbd_v2_piper_paper_bag.jpg" width="320" height="320" alt="Two PiPER arms packing a deformable paper shopping bag">
+
+```bash
+uv run --extra examples -m newton.examples mjvbd_v2_piper_paper_bag
+```
+
+Two PiPER arms support a paper shopping bag, pack one volumetric soft parcel,
+then lift the bag by its handles. The parcel and all bag vertices remain dynamic.
+Validation checks physical pickup, whole-parcel containment, bag-bottom clearance
+and retention of both handles between the jaws.
+See the [asset and material notes](assets/piper_paper_bag/README.md).
+
 ## Project Governance, Legal, and Members
 
 Please see the [newton-governance repository](https://github.com/newton-physics/newton-governance) for more information about project governance.
