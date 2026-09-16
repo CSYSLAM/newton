@@ -209,6 +209,7 @@ class MeshGL:
         self.indices = None
         self.normals = None  # scratch buffer used during normal recomputation
         self.texture_id = None
+        self._texture_file_key = None
         self.opacity = 1.0
 
         # Set up vertex attributes in the packed format the shaders expect
@@ -391,6 +392,21 @@ class MeshGL:
 
     def update_texture(self, texture=None):
         gl = RendererGL.gl
+        # Mesh vertices can change every frame while their file texture stays fixed.
+        # Retain its GL allocation until the source changes. Arrays are deliberately
+        # not cached: callers may edit their pixels in place between updates.
+        file_key = None
+        if isinstance(texture, (str, os.PathLike)):
+            try:
+                path = os.path.abspath(os.fspath(texture))
+                stat = os.stat(path)
+                file_key = (path, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            except (OSError, ValueError):
+                # URLs and USD package assets still use the regular texture loader.
+                pass
+        if file_key is not None and file_key == self._texture_file_key and self.texture_id is not None:
+            return
+        self._texture_file_key = None
         texture_image = None
         if texture is not None:
             from ...utils.texture import load_texture  # noqa: PLC0415
@@ -417,6 +433,7 @@ class MeshGL:
         if not texture_id:
             return
         self.texture_id = texture_id
+        self._texture_file_key = file_key
 
     def render(self):
         if not self.hidden:

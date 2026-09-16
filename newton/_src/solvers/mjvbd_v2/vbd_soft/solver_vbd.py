@@ -1016,15 +1016,17 @@ class SolverVBD(SolverBase, CouplingInterface):
         if model.device.is_cpu and particle_enable_tile_solve and wp.config.log_level <= wp.LOG_DEBUG:
             print("Info: Tiled solve requires model.device='cuda'. Tiled solve is disabled.")
 
-        elasticity_groups = [
-            group
-            for group in (*self.surface_particle_color_groups, *self.volumetric_particle_color_groups)
-            if group.size > 0
-        ]
+        # Each particle owns a complete tile (launch size = group.size * tile size).
+        # Even a singleton group is valid; a small tet group must not disable the
+        # tiled surface solve for all the other particles in a mixed model. Keep
+        # the scalar path for tiny models where every group is undersubscribed.
         self.use_particle_tile_solve = (
             particle_enable_tile_solve
             and model.device.is_cuda
-            and all(group.size >= TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE for group in elasticity_groups)
+            and any(
+                group.size >= TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
+                for group in (*self.surface_particle_color_groups, *self.volumetric_particle_color_groups)
+            )
         )
         multilevel_supported = (
             multilevel_mode != "off"

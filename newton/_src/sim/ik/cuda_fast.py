@@ -3,6 +3,7 @@
 
 """Analytic LM batching and exact fixed-point elision with instance-owned state."""
 
+import hashlib
 from functools import cache
 
 import warp as wp
@@ -61,10 +62,13 @@ def _build_batch(layout):
     source = f"def {name}({', '.join(parameters)}):\n    batch, task = wp.tid()\n" + "\n".join(branches) + "\n"
     exec(compile(source, "<analytic_batch>", "exec"), namespace)
     signature = "_".join(f"{original.key}_{width}" for original, width in layout)
+    # Warp includes the module name in cache filenames. Bound its length even
+    # when a robot has many objectives, keeping distinct layouts in separate modules.
+    signature_digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()
     kernel = Kernel(
         namespace[name],
         key=name,
-        module=wp.get_module(f"{__name__}.{signature}"),
+        module=wp.get_module(f"{__name__}.batch_{signature_digest}"),
         source=source,
         options={"enable_backward": False},
     )

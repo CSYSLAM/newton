@@ -295,6 +295,7 @@ class Example:
         self.ik_solver = ik.IKSolver(
             self.model, 1, objectives, jacobian_mode=ik.IKJacobianType.MIXED, lambda_initial=0.04
         )
+        self.ik_graph = None
         self.lower, self.upper = self.model.joint_limit_lower.numpy(), self.model.joint_limit_upper.numpy()
 
     def _prepare_left_approach(self):
@@ -482,7 +483,7 @@ class Example:
             elif approach and side < 0:
                 rotation = wp.quat(*approach_pose[3:])
             arm["rotation"].set_target_rotation(0, wp.vec4(*rotation))
-        self.ik_solver.step(self.ik_q, self.ik_q, iterations=24)
+        self._solve_runtime_ik()
         end = self.state_0.joint_q.numpy()
         end[: self.robot_coords] = self.ik_q.numpy()[0, : self.robot_coords]
         if approach:
@@ -496,6 +497,23 @@ class Example:
         self.frame_start.assign(self.state_0.joint_q)
         self.frame_end.assign(end)
         return targets
+
+    def _solve_runtime_ik(self):
+        """Replay fixed IK work while reading the current target and joint buffers."""
+        if not self.model.device.is_cuda or getattr(self.args, "no_cuda_graph", False):
+            self.ik_solver.step(self.ik_q, self.ik_q, iterations=24)
+            return
+        if self.ik_graph is None:
+            # Warm up before capture (also needed for --settle-only), preserving
+            # the seed so the first frame still performs exactly one IK solve.
+            seed = wp.clone(self.ik_q)
+            self.ik_solver.step(self.ik_q, self.ik_q, iterations=24)
+            self.ik_q.assign(seed)
+            with wp.ScopedCapture(device=self.model.device) as capture:
+                self.ik_solver.step(self.ik_q, self.ik_q, iterations=24)
+            self.ik_q.assign(seed)
+            self.ik_graph = capture.graph
+        wp.capture_launch(self.ik_graph)
 
     def step(self):
         targets = self._set_commands()

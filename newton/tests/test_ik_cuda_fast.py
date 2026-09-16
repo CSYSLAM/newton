@@ -45,6 +45,35 @@ class TestIKCudaFastFallback(unittest.TestCase):
 
 @unittest.skipUnless(wp.is_cuda_available(), "Requires CUDA")
 class TestIKCudaFast(unittest.TestCase):
+    def test_many_objectives_compile_and_replay(self):
+        """Compile large batches without exceeding filesystem filename limits."""
+        model = _build_two_link_planar("cuda:0", requires_grad=False)
+        targets = [wp.array([[1.3, 0.5 + i * 0.001, 0]], dtype=wp.vec3, device=model.device) for i in range(12)]
+        solvers, coordinates, graphs = [], [], []
+        for fast in (False, True):
+            objectives = [ik.IKObjectivePosition(1, wp.vec3(0.5, 0, 0), target) for target in targets]
+            solver = ik.IKSolver(
+                model,
+                n_problems=1,
+                objectives=objectives,
+                jacobian_mode=ik.IKJacobianType.ANALYTIC,
+                parallel_objectives=False,
+                enable_cuda_fast_path=fast,
+            )
+            q = wp.zeros((1, model.joint_coord_count), device=model.device)
+            solver.step(q, q, iterations=1)
+            with wp.ScopedCapture(device=model.device) as capture:
+                solver.step(q, q, iterations=8)
+            solvers.append(solver)
+            coordinates.append(q)
+            graphs.append(capture.graph)
+        for target in targets:
+            target.assign([[1.2, 0.6, 0]])
+        for q, graph in zip(coordinates, graphs, strict=True):
+            q.zero_()
+            wp.capture_launch(graph)
+        np.testing.assert_array_equal(coordinates[0].numpy(), coordinates[1].numpy())
+
     def test_exact_state_and_instance_isolation(self):
         """Preserve all LM state for reachable/unreachable targets and odd iteration tails."""
         model = _build_two_link_planar("cuda:0", requires_grad=False)

@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton.examples.mjvbdv2.example_mjvbd_v2_piper_paper_bag import Example
 from newton.examples.mjvbdv2.support.paper_bag_asset import (
     ASSET_DIR,
     add_paper_bag,
@@ -17,9 +18,31 @@ from newton.examples.mjvbdv2.support.paper_bag_asset import (
     measure_paper_shape,
     parcel_is_contained,
 )
+from newton.viewer import ViewerNull
 
 
 class TestPaperBagAsset(unittest.TestCase):
+    @unittest.skipUnless(wp.is_cuda_available(), "IK graph replay requires CUDA")
+    def test_ik_graph_reads_changed_targets(self):
+        """Match eager commands across phases, including the first captured solve."""
+        with wp.ScopedDevice("cuda:0"):
+            args = Example.create_parser().parse_args([])
+            viewer = ViewerNull()
+            self.addCleanup(viewer.close)
+            example = Example(viewer, args)
+            seed = wp.clone(example.ik_q)
+            for time in (0.0, 4.0, 12.0, 16.0):
+                example.sim_time = time
+                args.no_cuda_graph = True
+                example.ik_q.assign(seed)
+                example._set_commands()
+                eager = example.frame_end.numpy()
+                args.no_cuda_graph = False
+                example.ik_q.assign(seed)
+                example._set_commands()
+                self.assertIsNotNone(example.ik_graph)
+                np.testing.assert_allclose(example.frame_end.numpy(), eager, rtol=1e-6, atol=1e-7)
+
     def test_dimensions_and_connected_handles(self):
         """Preserve the agreed dimensions and connected load-bearing handles."""
         bag = make_paper_bag()
