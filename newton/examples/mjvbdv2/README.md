@@ -15,6 +15,7 @@ uv run --extra examples -m newton.examples mjvbd_v2_conveyor_sorting --help
 | Scene | Command name | Module |
 | --- | --- | --- |
 | W1 V030 two-gripper pick and place | `mjvbd_v2_w1_pick_place` | [example_mjvbd_v2_w1_pick_place.py](example_mjvbd_v2_w1_pick_place.py) |
+| W1 V030 paper bag and snack packing | `mjvbd_v2_w1_bag_packing` | [example_mjvbd_v2_w1_bag_packing.py](example_mjvbd_v2_w1_bag_packing.py) |
 | W1 T-shirt folding | `mjvbd_v2_tshirt_fold` | [example_mjvbd_v2_tshirt_fold.py](example_mjvbd_v2_tshirt_fold.py) |
 | W1 tablecloth placement | `mjvbd_v2_tablecloth_place` | [example_mjvbd_v2_tablecloth_place.py](example_mjvbd_v2_tablecloth_place.py) |
 | Dynamic W1 T-shirt folding | `mjvbd_v2_tshirt_fold_dynamic` | [example_mjvbd_v2_tshirt_fold_dynamic.py](example_mjvbd_v2_tshirt_fold_dynamic.py) |

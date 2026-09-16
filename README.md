@@ -1184,6 +1184,20 @@ Validation checks physical pickup, whole-parcel containment, bag-bottom clearanc
 and retention of both handles between the jaws.
 See the [asset and material notes](assets/piper_paper_bag/README.md).
 
+### W1 paper bag and snack packing (MJVBDV2, experimental)
+
+<img src="docs/images/examples/example_mjvbd_v2_w1_bag_packing.jpg" width="320" height="320" alt="A yellow W1 robot standing up a kraft paper bag and packing snacks">
+
+```bash
+uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing
+```
+
+The W1 V030 uses its left hand to turn up a paper bag, then regrips the rim
+from the side while the right hand packs snacks. Its head follows the operating
+hand. The Blender-authored
+paper bag and snacks remain dynamic throughout. See the
+[reference, asset, and validation notes](assets/w1_paper_bag/README.md).
+
 ## Project Governance, Legal, and Members
 
 Please see the [newton-governance repository](https://github.com/newton-physics/newton-governance) for more information about project governance.
