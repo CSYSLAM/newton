@@ -14,6 +14,7 @@ uv run --extra examples -m newton.examples mjvbd_v2_conveyor_sorting --help
 
 | Scene | Command name | Module |
 | --- | --- | --- |
+| W1 V030 two-gripper pick and place | `mjvbd_v2_w1_pick_place` | [example_mjvbd_v2_w1_pick_place.py](example_mjvbd_v2_w1_pick_place.py) |
 | W1 T-shirt folding | `mjvbd_v2_tshirt_fold` | [example_mjvbd_v2_tshirt_fold.py](example_mjvbd_v2_tshirt_fold.py) |
 | W1 tablecloth placement | `mjvbd_v2_tablecloth_place` | [example_mjvbd_v2_tablecloth_place.py](example_mjvbd_v2_tablecloth_place.py) |
 | Dynamic W1 T-shirt folding | `mjvbd_v2_tshirt_fold_dynamic` | [example_mjvbd_v2_tshirt_fold_dynamic.py](example_mjvbd_v2_tshirt_fold_dynamic.py) |
@@ -32,6 +33,29 @@ uv run --extra examples -m newton.examples mjvbd_v2_conveyor_sorting --help
 
 The T-shirt fold and cloth twist inherit the surface-fast displacement
 deadband; use `--particle-displacement-threshold 0` to disable it.
+
+### W1 V030 two-gripper pick and place
+
+```bash
+uv run --extra examples -m newton.examples mjvbd_v2_w1_pick_place
+uv run --extra examples -m newton.examples mjvbd_v2_w1_pick_place --robot-only
+uv run --extra examples -m newton.examples mjvbd_v2_w1_pick_place --viewer null --num-frames 900 --test
+```
+
+![W1 V030 pick and place](assets/w1_v030/preview.jpg)
+
+The `AssembleW1-030/DexforceW1V030/w1-030` robot simultaneously picks up two
+blocks by approaching horizontally with its original parallel fingers. The
+wrists point forward, cameras stay above the grippers, and elbows hang beside
+the torso. It lifts the blocks 25 cm, moves outward to the two adjacent bins,
+releases above the rims, then withdraws upward and backward.
+`--robot-only` loads the original URDF zero pose (arms extended sideways) with
+no task, table or IK, for inspecting the assembly and camera mounts.
+The full 15-second run includes settling time. Blocks remain dynamic throughout.
+Test mode checks both lifts, finite states, TCP tracking, joint velocity,
+and each released block's full bounds and resting height inside its bin.
+Use `--no-cuda-graph` to run without graph capture.
+See [asset provenance and physical assumptions](assets/w1_v030/README.md).
 
 ### Conveyor sorting
 
