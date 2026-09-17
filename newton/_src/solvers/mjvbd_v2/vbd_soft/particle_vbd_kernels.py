@@ -939,10 +939,12 @@ def evaluate_edge_edge_contact(
         collision_hessian = d2E_dDdD * v_bary * v_bary * wp.outer(collision_normal, collision_normal)
 
         # friction
-        c1_prev = pos_anchor[e1_v1] + (pos_anchor[e1_v2] - pos_anchor[e1_v1]) * s
-        c2_prev = pos_anchor[e2_v1] + (pos_anchor[e2_v2] - pos_anchor[e2_v1]) * t
-
-        dx = (c1 - c1_prev) - (c2 - c2_prev)
+        # Interpolate vertex increments, avoiding cancellation of world-space points.
+        d1 = pos[e1_v1] - pos_anchor[e1_v1]
+        d2 = pos[e1_v2] - pos_anchor[e1_v2]
+        d3 = pos[e2_v1] - pos_anchor[e2_v1]
+        d4 = pos[e2_v2] - pos_anchor[e2_v2]
+        dx = (d1 - d3) + s * (d2 - d1) - t * (d4 - d3)
         axis_1, axis_2 = orthonormal_basis(collision_normal)
 
         T = mat32(
@@ -1055,10 +1057,12 @@ def evaluate_edge_edge_contact_2_vertices(
         collision_hessian = d2E_dDdD * wp.outer(collision_normal, collision_normal)
 
         # friction
-        c1_prev = pos_anchor[e1_v1] + (pos_anchor[e1_v2] - pos_anchor[e1_v1]) * s
-        c2_prev = pos_anchor[e2_v1] + (pos_anchor[e2_v2] - pos_anchor[e2_v1]) * t
-
-        dx = (c1 - c1_prev) - (c2 - c2_prev)
+        # Interpolate vertex increments, avoiding cancellation of world-space points.
+        d1 = pos[e1_v1] - pos_anchor[e1_v1]
+        d2 = pos[e1_v2] - pos_anchor[e1_v2]
+        d3 = pos[e2_v1] - pos_anchor[e2_v1]
+        d4 = pos[e2_v2] - pos_anchor[e2_v2]
+        dx = (d1 - d3) + s * (d2 - d1) - t * (d4 - d3)
         axis_1, axis_2 = orthonormal_basis(collision_normal)
 
         T = mat32(
@@ -1117,6 +1121,25 @@ def evaluate_edge_edge_contact_2_vertices(
 
 
 @wp.func
+def _vertex_triangle_contact_normal(diff: wp.vec3, previous_diff: wp.vec3, a: wp.vec3, b: wp.vec3, c: wp.vec3):
+    distance = wp.length(diff)
+    if distance > 0.0:
+        return diff / distance
+    # At coincidence the distance gradient is undefined. Keep the contact on
+    # its previous side using the face normal instead of dividing by zero.
+    normal = wp.cross(b - a, c - a)
+    normal_length = wp.length(normal)
+    if normal_length > 0.0:
+        if wp.dot(normal, previous_diff) < 0.0:
+            normal = -normal
+        return normal / normal_length
+    previous_length = wp.length(previous_diff)
+    if previous_length > 0.0:
+        return previous_diff / previous_length
+    return wp.vec3(0.0)
+
+
+@wp.func
 def evaluate_vertex_triangle_collision_force_hessian(
     v: int,
     v_order: int,
@@ -1141,9 +1164,14 @@ def evaluate_vertex_triangle_collision_force_hessian(
 
     diff = p - closest_p
     dis = wp.length(diff)
-    collision_normal = diff / dis
+    previous_diff = pos_anchor[v] - (
+        bary[0] * pos_anchor[tri_indices[tri, 0]]
+        + bary[1] * pos_anchor[tri_indices[tri, 1]]
+        + bary[2] * pos_anchor[tri_indices[tri, 2]]
+    )
+    collision_normal = _vertex_triangle_contact_normal(diff, previous_diff, a, b, c)
 
-    if dis < collision_radius:
+    if dis < collision_radius and wp.length_sq(collision_normal) > 0.0:
         bs = wp.vec4(-bary[0], -bary[1], -bary[2], 1.0)
         v_bary = bs[v_order]
 
@@ -1155,13 +1183,12 @@ def evaluate_vertex_triangle_collision_force_hessian(
         # friction force
         dx_v = p - pos_anchor[v]
 
-        closest_p_prev = (
-            bary[0] * pos_anchor[tri_indices[tri, 0]]
-            + bary[1] * pos_anchor[tri_indices[tri, 1]]
-            + bary[2] * pos_anchor[tri_indices[tri, 2]]
+        # Form relative increments before interpolation so common motion cancels.
+        dx = (
+            bary[0] * (dx_v - (a - pos_anchor[tri_indices[tri, 0]]))
+            + bary[1] * (dx_v - (b - pos_anchor[tri_indices[tri, 1]]))
+            + bary[2] * (dx_v - (c - pos_anchor[tri_indices[tri, 2]]))
         )
-
-        dx = dx_v - (closest_p - closest_p_prev)
 
         e0, e1 = orthonormal_basis(collision_normal)
 
@@ -1221,9 +1248,14 @@ def evaluate_vertex_triangle_collision_force_hessian_4_vertices(
 
     diff = p - closest_p
     dis = wp.length(diff)
-    collision_normal = diff / dis
+    previous_diff = pos_anchor[v] - (
+        bary[0] * pos_anchor[tri_indices[tri, 0]]
+        + bary[1] * pos_anchor[tri_indices[tri, 1]]
+        + bary[2] * pos_anchor[tri_indices[tri, 2]]
+    )
+    collision_normal = _vertex_triangle_contact_normal(diff, previous_diff, a, b, c)
 
-    if 0.0 < dis < collision_radius:
+    if dis < collision_radius and wp.length_sq(collision_normal) > 0.0:
         bs = wp.vec4(-bary[0], -bary[1], -bary[2], 1.0)
 
         dEdD, d2E_dDdD = evaluate_self_contact_force_norm(dis, collision_radius, collision_stiffness)
@@ -1234,13 +1266,12 @@ def evaluate_vertex_triangle_collision_force_hessian_4_vertices(
         # friction force
         dx_v = p - pos_anchor[v]
 
-        closest_p_prev = (
-            bary[0] * pos_anchor[tri_indices[tri, 0]]
-            + bary[1] * pos_anchor[tri_indices[tri, 1]]
-            + bary[2] * pos_anchor[tri_indices[tri, 2]]
+        # Form relative increments before interpolation so common motion cancels.
+        dx = (
+            bary[0] * (dx_v - (a - pos_anchor[tri_indices[tri, 0]]))
+            + bary[1] * (dx_v - (b - pos_anchor[tri_indices[tri, 1]]))
+            + bary[2] * (dx_v - (c - pos_anchor[tri_indices[tri, 2]]))
         )
-
-        dx = dx_v - (closest_p - closest_p_prev)
 
         e0, e1 = orthonormal_basis(collision_normal)
 
@@ -1347,7 +1378,10 @@ def compute_friction(mu: float, normal_contact_force: float, T: mat32, u: wp.vec
         hessian = mu * normal_contact_force * T * (f1_SF_over_x * wp.identity(2, float)) * wp.transpose(T)
     else:
         force = wp.vec3(0.0, 0.0, 0.0)
-        hessian = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        # The smooth friction force has a finite tangent at zero slip.
+        hessian = wp.mat33(0.0)
+        if eps_u > 0.0:
+            hessian = (2.0 * mu * normal_contact_force / eps_u) * (T * wp.transpose(T))
 
     return force, hessian
 
@@ -1593,6 +1627,24 @@ def apply_conservative_bound_truncation(
         return particle_pos_prev_collision_detection + accumulated_displacement
     else:
         return pos_new
+
+
+@wp.kernel
+def apply_particle_displacement_deadband(
+    threshold: float,
+    pos_prev: wp.array[wp.vec3],
+    flags: wp.array[wp.int32],
+    inv_mass: wp.array[float],
+    collision_anchor: wp.array[wp.vec3],
+    pos: wp.array[wp.vec3],
+    displacements: wp.array[wp.vec3],
+):
+    """Discard small free-particle steps before velocity reconstruction."""
+    i = wp.tid()
+    if flags[i] & ParticleFlags.ACTIVE and not flags[i] & ParticleFlags.PROXY and inv_mass[i] > 0.0:
+        if wp.length(pos[i] - pos_prev[i]) < threshold:
+            pos[i] = pos_prev[i]
+            displacements[i] = pos[i] - collision_anchor[i]
 
 
 @wp.kernel

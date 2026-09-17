@@ -7,6 +7,10 @@ This intentionally matches ``cloth_twist`` so the two examples can be
 compared directly. Run with::
 
     python -m newton.examples mjvbd_v2_cloth_twist
+
+The CUDA surface-fast preset discards displacements below 5 micrometers per
+substep by default. Add ``--particle-displacement-threshold 0`` to disable
+this filter, or specify another distance in meters.
 """
 
 import math
@@ -98,6 +102,9 @@ class Example:
             "particle_self_contact_radius": 0.002,
             "particle_self_contact_margin": 0.0035,
         }
+        displacement_threshold = getattr(args, "particle_displacement_threshold", None)
+        if displacement_threshold is not None:
+            vbd_options["particle_displacement_threshold"] = displacement_threshold
         if self.use_surface_fast:
             # This regular grid has only three original colors. Two batched
             # sweeps plus one final batched sweep are sufficient. Keep the
@@ -223,9 +230,20 @@ class Example:
                 f"fixed-boundary corner formed a transverse spike: ratios={corner_transverse_ratios}"
             )
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        parser.set_defaults(num_frames=300)
+        parser.add_argument(
+            "--particle-displacement-threshold",
+            type=float,
+            default=None,
+            help="Override the substep displacement threshold [m]; surface-fast defaults to 5e-6, zero disables",
+        )
+        return parser
+
 
 if __name__ == "__main__":
-    parser = newton.examples.create_parser()
-    parser.set_defaults(num_frames=300)
+    parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
     newton.examples.run(Example(viewer, args), args)

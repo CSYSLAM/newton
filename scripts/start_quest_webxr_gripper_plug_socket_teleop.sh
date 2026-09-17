@@ -12,7 +12,7 @@ export NEWTON_WEBXR_PEERS="newton-quest-webxr.service:8765 newton-quest-webxr-ch
 export NEWTON_WEBXR_RUNTIME_NAME="newton-webxr-gripper-plug-teleop"
 export NEWTON_WEBXR_STATE_NAME="newton-webxr-gripper-plug-teleop"
 export NEWTON_WEBXR_RELOAD_COMMAND="./scripts/reload_quest_webxr_gripper_plug_socket_teleop.sh"
-export NEWTON_WEBXR_RELOAD_SOURCES="${repo_root}/newton/examples/mjvbdv2/_webxr_teleop.py:${repo_root}/newton/examples/mjvbdv2/_webxr_w1_head.py:${repo_root}/newton/examples/mjvbdv2/_webxr_w1_single_hand.py:${repo_root}/newton/examples/mjvbdv2/_webxr_parallel_gripper.py:${repo_root}/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_realtime_plug_socket.py:${repo_root}/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_webxr_plug_socket.py:${repo_root}/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_webxr_gripper_plug_socket.py"
+export NEWTON_WEBXR_RELOAD_SOURCES="${repo_root}/newton/examples/mjvbdv2/_webxr_teleop.py:${repo_root}/newton/examples/mjvbdv2/_webxr_w1_head.py:${repo_root}/newton/examples/mjvbdv2/_webxr_w1_single_hand.py:${repo_root}/newton/examples/mjvbdv2/_webxr_parallel_gripper.py:${repo_root}/newton/examples/mjvbdv2/example_mjvbd_v2_plug_socket.py:${repo_root}/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_webxr_plug_socket.py:${repo_root}/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_webxr_gripper_plug_socket.py"
 if [[ ! -f "${repo_root}/assets/w1-pikka-gripper/DexforceW1V021_pikka_gripper_simple_visual_collision.urdf" ]]; then
   echo "请先下载模型：uv run scripts/download_quest_w1_gripper.py" >&2
   exit 1

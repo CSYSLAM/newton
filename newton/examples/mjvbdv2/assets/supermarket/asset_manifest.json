@@ -1,0 +1,55 @@
+{
+  "schema": "newton.example_asset_bundle.v1",
+  "units": "meters",
+  "up_axis": "Z",
+  "official_simready_validation": "not_run",
+  "assets": [
+    {
+      "id": "piper",
+      "source": "piper/piper_with_texture.xml",
+      "source_url": "https://github.com/SynReal/newton/tree/e1176d518f831b17392fb1bf6b90de8b97f200a9/style3d/examples/assets/piper",
+      "role": "prescribed_articulation_with_contact_gripper",
+      "source_license": "piper/LICENSE.md",
+      "adaptations": "task TCP, mounting pedestal, visible silicone pads; native joint limits unchanged"
+    },
+    {
+      "id": "shopping_bag",
+      "geometry": "shopping_bag.json",
+      "source": "shopping_bag.blend",
+      "role": "dynamic_deformable_shell",
+      "collision": "same_surface_as_visual_geometry",
+      "fixed_vertices": 0,
+      "material": "simulation_material field in shopping_bag.json",
+      "material_calibration": "illustrative_not_measured",
+      "support": "round_rails_through_handle_slots_contact_only",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "rack",
+      "role": "static_contact_support",
+      "collision": "visible_capsules",
+      "rail_radius_m": 0.005,
+      "material": {"ke": 200000, "kd": 30, "mu": 0.35},
+      "placement": "rack_rail_centers_local field in shopping_bag.json"
+    },
+    {
+      "id": "pantry_stock",
+      "geometry": "pantry_meshes.json",
+      "source": "polyhaven/long_life_food/long_life_food_1k.gltf",
+      "usd_directory": "usd",
+      "role": "static_background_noncolliding",
+      "collision_enabled": false,
+      "dynamic_mass": null,
+      "license": "CC0-1.0",
+      "source_url": "https://polyhaven.com/a/long_life_food"
+    },
+    {
+      "id": "floor_tiles",
+      "albedo": "polyhaven/floor_tiles_08_diff_1k.jpg",
+      "repeat_width_m": 1.5,
+      "collision": "ground_plane",
+      "license": "CC0-1.0",
+      "source_url": "https://polyhaven.com/a/floor_tiles_08"
+    }
+  ]
+}

@@ -26,6 +26,7 @@ _PNEUMATIC_STATE_FIELDS = ("volume", "absolute_pressure", "volume_rate", "clamp_
 
 _SURFACE_FAST_VBD_OPTIONS: dict[str, object] = {
     "iterations": 8,
+    "particle_displacement_threshold": 5e-6,
     "particle_chebyshev_spectral_radius": 0.8,
     "particle_enable_batched_jacobi": True,
     "particle_jacobi_batch_count": 2,
@@ -162,7 +163,9 @@ class SolverMJVBDV2(_OneWayCoupledProxy):
             mujoco_joints: Joints owned by MuJoCo.
             joint_mode: Whether MuJoCo joints are dynamic or kinematic.
             contact_mode: Particle/rigid contact pipeline selection.
-            vbd_options: Options forwarded by the public MJVBDV2 dispatcher.
+            vbd_options: Options forwarded by the public MJVBDV2 dispatcher. The full VBD backend accepts
+                experimental ``enable_cuda_fast_path=True`` for instance-local CUDA scheduling. The matching
+                collision option enables cooperative SDF queries; neither option changes physical parameters.
             mujoco_options: Options forwarded to the private MuJoCo solver.
             collision_options: Options forwarded to the contact pipeline.
         """
@@ -219,6 +222,10 @@ class SolverMJVBDV2(_OneWayCoupledProxy):
         vbd_kwargs["one_way_proxy_bodies"] = True
         pneumatic_cavity_count, _ = _get_pneumatic_counts(model)
         vbd_solver_type = SolverVBDSoft if external_rigid and pneumatic_cavity_count == 0 else SolverVBD
+        if vbd_solver_type is not SolverVBDSoft and vbd_kwargs.pop("particle_displacement_threshold", 0.0) != 0.0:
+            raise ValueError(
+                "particle_displacement_threshold requires the particle solver with external rigid colliders"
+            )
 
         collision_kwargs = dict(collision_options or {})
         soft_contact_margin = float(collision_kwargs.get("soft_contact_margin", 0.0))

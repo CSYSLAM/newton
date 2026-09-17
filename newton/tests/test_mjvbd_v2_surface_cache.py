@@ -209,6 +209,36 @@ class TestMJVBDV2SurfaceCache(unittest.TestCase):
                 self.assertIsNone(solver.surface_anchor_angles)
                 self.assertIsNone(solver._particle_truncation_cache)
 
+    @unittest.skipUnless(wp.is_cuda_available(), "Surface tiles require CUDA")
+    def test_graph_reads_updated_plastic_rest_angles(self):
+        """Read changed rest angles on replay instead of freezing material state."""
+        model = _cloth("cuda:0")
+        model.edge_bending_properties.assign(np.tile([1.0, 0.001], (model.edge_count, 1)))
+        reference = SolverVBDComplete(model, iterations=6)
+        cached = SolverVBDComplete(model, iterations=6, particle_enable_surface_cache=True)
+        state_in, state_out = model.state(), model.state()
+        initial = model.particle_q.numpy().copy()
+        initial[-1, 2] += 0.005
+        control = model.control()
+        state_in.particle_q.assign(initial)
+        cached.step(state_in, state_out, control, None, 1.0 / 60.0)
+        with wp.ScopedCapture(device=model.device) as capture:
+            cached.step(state_in, state_out, control, None, 1.0 / 60.0)
+        original_rest = model.edge_rest_angle.numpy().copy()
+        outputs = []
+        for offset in (0.0, 0.12, -0.08):
+            model.edge_rest_angle.assign(original_rest + offset)
+            state_in.particle_q.assign(initial)
+            state_in.particle_qd.zero_()
+            wp.capture_launch(capture.graph)
+            actual = state_out.particle_q.numpy().copy()
+            ref_in, ref_out = model.state(), model.state()
+            ref_in.particle_q.assign(initial)
+            reference.step(ref_in, ref_out, control, None, 1.0 / 60.0)
+            np.testing.assert_allclose(actual, ref_out.particle_q.numpy(), rtol=2e-5, atol=2e-6)
+            outputs.append(actual)
+        self.assertGreater(float(np.max(np.abs(outputs[1] - outputs[0]))), 1e-6)
+
 
 if __name__ == "__main__":
     unittest.main()

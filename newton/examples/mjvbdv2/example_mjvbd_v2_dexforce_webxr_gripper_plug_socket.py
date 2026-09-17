@@ -24,8 +24,8 @@ import newton
 import newton.examples
 from newton import ik
 
-from . import example_mjvbd_v2_dexforce_realtime_plug_socket as scene
 from . import example_mjvbd_v2_dexforce_webxr_plug_socket as teleop
+from . import example_mjvbd_v2_plug_socket as scene
 from ._webxr_parallel_gripper import DEFAULT_GRIPPER_URDF, ParallelGripperRetargeter
 from ._webxr_w1_single_hand import _limit_finger_targets
 

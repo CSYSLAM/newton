@@ -327,6 +327,9 @@ class _KinematicFullVBDBackend(SolverBase):
         self.view = view
 
         vbd_kwargs = dict(vbd_options or {})
+        dat_enabled = bool(vbd_kwargs.pop("rigid_soft_enable_dat", False))
+        dat_relaxation = float(vbd_kwargs.pop("rigid_soft_dat_relaxation", 0.85))
+        dat_interval = bool(vbd_kwargs.pop("rigid_soft_dat_use_interval_arithmetic", False))
         requested_external = vbd_kwargs.pop("integrate_with_external_rigid_solver", False)
         if requested_external is not False:
             raise ValueError("The kinematic full-VBD backend requires internal VBD rigid integration")
@@ -340,6 +343,29 @@ class _KinematicFullVBDBackend(SolverBase):
         options.setdefault("include_static_kinematic_pairs", False)
         self.pipeline = MJVBDV2CollisionPipeline(view, **options)
         self.contacts = self.pipeline.contacts()
+        if dat_enabled:
+            from .rigid_soft_dat import RigidSoftDAT  # noqa: PLC0415
+
+            solver = self.vbd_solver
+            if (
+                solver.enable_cuda_fast_path
+                or solver.particle_enable_coupled_translation
+                or view.requires_grad
+                or view.particle_count == 0
+            ):
+                raise ValueError("Rigid-soft DAT requires VBD without CUDA fusion, coupled translation, or autodiff")
+            # Particle-only coarse corrections use _penetration_free_truncation,
+            # which applies DAT against the same detection-time references as
+            # the fine sweeps. Coupled body/particle corrections remain excluded.
+            if solver.particle_chebyshev_enabled and (
+                solver.particle_chebyshev_warmup_iterations < 1
+                or solver.particle_chebyshev_polish_iterations < 1
+                or solver.particle_chebyshev_contact_rings < 1
+            ):
+                raise ValueError("DAT with Chebyshev requires warmup, polishing, and contact-neighbor exclusion")
+            solver._rigid_soft_dat = RigidSoftDAT(
+                view, float(options.get("soft_contact_margin", 0.0)), dat_relaxation, dat_interval
+            )
 
     @override
     def step(
@@ -414,11 +440,31 @@ class SolverMJVBDV2(SolverBase):
             ``"full"`` for the complete collision pipeline, or ``"auto"`` to
             choose full contact only when VBD owns dynamic rigid bodies.
         vbd_preset: Optional high-level VBD policy. ``"surface-fast"`` selects
-            the validated CUDA surface schedule and falls back to 20 ordinary
+            the CUDA surface schedule with an experimental 5e-6 m displacement
+            deadband per substep, and falls back to 20 ordinary
             sweeps outside externally driven, triangle-only surface solves,
             including volumetric, pneumatic, spring, differentiable,
-            deterministic, and VBD-dynamic-rigid scenes.
+            deterministic, and VBD-dynamic-rigid scenes. The fallback does not
+            enable the deadband.
         vbd_options: Expert VBD overrides applied after ``vbd_preset``.
+            Experimental ``rigid_soft_enable_dat`` enables PR #4180 rigid-soft
+            division-plane truncation in the kinematic full-VBD backend only.
+            It requires a positive ``soft_contact_margin`` and is incompatible
+            with CUDA fusion, coupled body-particle translation, and autodiff.
+            Particle-only multilevel correction is supported. Chebyshev requires
+            positive warmup, polishing, and contact-neighbor exclusion settings;
+            DAT-truncated particles are excluded from subsequent extrapolation.
+            ``rigid_soft_dat_relaxation`` defaults to 0.85; optional trajectory interval
+            certification uses ``rigid_soft_dat_use_interval_arithmetic``. Kinematic
+            links are not truncated. Reconstruct the solver after changing geometry,
+            particle radii, or query margins because motion budgets are cached.
+            Experimental ``particle_displacement_threshold`` sets a displacement
+            deadband [m] per solver substep for the particle solver with external
+            rigid colliders; zero disables it, including under ``"surface-fast"``.
+            Small free-particle displacements
+            are discarded before reconstructing velocity. This also suppresses
+            slow motion and can undo small contact corrections. It does not
+            change the iteration budget or skip force/contact evaluation.
         mujoco_options: Keyword arguments forwarded to the private MuJoCo
             implementation when the selected backend uses MuJoCo.
         collision_options: Keyword arguments forwarded to the selected contact
@@ -514,6 +560,13 @@ class SolverMJVBDV2(SolverBase):
             ),
         )
         self.vbd_preset = vbd_preset
+        if resolved_vbd_options.get("rigid_soft_enable_dat", False) and not (
+            joint_mode == "kinematic"
+            and bool(self.ownership.mujoco_joints)
+            and model.particle_count > 0
+            and (contact_mode == "full" or self.ownership.has_vbd_dynamic_bodies)
+        ):
+            raise ValueError("Rigid-soft DAT is currently supported only by the kinematic full-VBD backend")
 
         has_vbd_dynamics = self.ownership.has_vbd_dynamic_bodies or model.particle_count > 0
 

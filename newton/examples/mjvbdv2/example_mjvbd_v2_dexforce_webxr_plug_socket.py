@@ -38,7 +38,7 @@ import warp as wp
 import newton
 import newton.examples
 
-from . import example_mjvbd_v2_dexforce_realtime_plug_socket as plug_socket
+from . import example_mjvbd_v2_plug_socket as plug_socket
 from ._webxr_teleop import (
     JsonlTrajectoryRecorder,
     LatestXRFrame,

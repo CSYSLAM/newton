@@ -1,0 +1,1 @@
+Fix spurious MJVBDV2 contact friction and damping under common motion, preserve the regularized friction tangent at zero slip, and route full-backend particle contacts through the private contact helpers.

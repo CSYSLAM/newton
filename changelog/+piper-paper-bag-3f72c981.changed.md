@@ -1,0 +1,1 @@
+Allow particle-only multilevel correction with rigid-soft DAT in the experimental MJVBDV2 kinematic full-contact backend. Existing configurations need no migration; coupled body-particle translation remains unsupported with DAT.

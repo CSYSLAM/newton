@@ -10,12 +10,10 @@ import warp as wp
 
 @wp.struct
 class _TruncationGeometry:
-    ee_base: wp.array[wp.vec3]
+    ee_base: wp.array[wp.vec4]
     ee_hat: wp.array[wp.vec3]
-    ee_normal: wp.array[wp.vec4]
-    vt_base: wp.array[wp.vec3]
+    vt_base: wp.array[wp.vec4]
     vt_hat: wp.array[wp.vec3]
-    vt_normal: wp.array[wp.vec4]
 
 
 @lru_cache(maxsize=2)
@@ -59,11 +57,10 @@ def _make_kernels(k):
                         n = k.robust_edge_pair_normal(p0, p1, p2, p3)
                         c2 = c1 * 0.5 + c2 * 0.5
                         flag = 0.0
-                    else:
-                        n = wp.normalize(nhat)
-                    cache.ee_base[slot] = c2
+                    cache.ee_base[slot] = wp.vec4(c2[0], c2[1], c2[2], flag)
                     cache.ee_hat[slot] = nhat
-                    cache.ee_normal[slot] = wp.vec4(n[0], n[1], n[2], flag)
+                    if flag == 0.0:
+                        cache.ee_hat[slot] = n
                 index += 4
         if prim < info.vertex_colliding_triangles_buffer_sizes.shape[0]:
             count = k.get_vertex_colliding_triangles_count(info, prim)
@@ -84,11 +81,10 @@ def _make_kernels(k):
                     if wp.length(nhat) < 1.0e-12:
                         c = p
                         flag = 0.0
-                    else:
-                        n = wp.normalize(nhat)
-                    cache.vt_base[slot] = c
+                    cache.vt_base[slot] = wp.vec4(c[0], c[1], c[2], flag)
                     cache.vt_hat[slot] = nhat
-                    cache.vt_normal[slot] = wp.vec4(n[0], n[1], n[2], flag)
+                    if flag == 0.0:
+                        cache.vt_hat[slot] = n
                 index += 4
 
     @wp.func
@@ -101,14 +97,16 @@ def _make_kernels(k):
         d2: wp.vec3,
         p3: wp.vec3,
         d3: wp.vec3,
-        base: wp.vec3,
+        packed_base: wp.vec4,
         hat: wp.vec3,
-        normal: wp.vec4,
         ee: bool,
     ):
-        n = wp.vec3(normal[0], normal[1], normal[2])
-        if normal[3] == 0.0:
-            return wp.vector(False, False, False, False, length=4, dtype=wp.bool), n, base
+        base = wp.vec3(packed_base[0], packed_base[1], packed_base[2])
+        # A regular normal is completely determined by the cached separation.
+        # Coincident pairs instead store their original robust normal in hat.
+        if packed_base[3] == 0.0:
+            return wp.vector(False, False, False, False, length=4, dtype=wp.bool), hat, base
+        n = wp.normalize(hat)
         a = float(0.0)
         b = float(0.0)
         if ee:
@@ -185,7 +183,6 @@ def _make_kernels(k):
                         d3,
                         cache.ee_base[slot],
                         cache.ee_hat[slot],
-                        cache.ee_normal[slot],
                         True,
                     )
                     if not dummy[0]:
@@ -228,7 +225,6 @@ def _make_kernels(k):
                         d3,
                         cache.vt_base[slot],
                         cache.vt_hat[slot],
-                        cache.vt_normal[slot],
                         False,
                     )
                     if not dummy[0]:
@@ -312,13 +308,12 @@ class ParticleTruncationCache:
             return
         if solver.device.is_capturing:
             raise RuntimeError("Grow the particle truncation cache outside CUDA capture before replaying the scene")
-        allocated_bytes = 40 * sum(capacities)
+        allocated_bytes = 28 * sum(capacities)
         if allocated_bytes > self._MAX_BYTES:
             raise ValueError("The experimental particle truncation cache exceeds its 256 MiB memory limit")
         for prefix, count in zip(("ee", "vt"), capacities, strict=True):
-            setattr(self.geometry, prefix + "_base", wp.empty(count, dtype=wp.vec3, device=solver.device))
+            setattr(self.geometry, prefix + "_base", wp.empty(count, dtype=wp.vec4, device=solver.device))
             setattr(self.geometry, prefix + "_hat", wp.empty(count, dtype=wp.vec3, device=solver.device))
-            setattr(self.geometry, prefix + "_normal", wp.empty(count, dtype=wp.vec4, device=solver.device))
         self._capacities = capacities
         self.allocated_bytes = allocated_bytes
 
@@ -340,25 +335,26 @@ class ParticleTruncationCache:
         )
         solver.truncation_ts.fill_(1.0)
 
-    def apply(self, solver, particle_q_out, selected_particles):
+    def apply(self, solver, particle_q_out, selected_particles, *, empty_contact_set=False):
         """Apply ordinary DAT while resetting consumed factors for the next color."""
-        wp.launch(
-            self._truncate,
-            dim=solver.particle_self_contact_evaluation_kernel_launch_size,
-            inputs=[
-                solver.pos_prev_collision_detection,
-                solver.particle_displacements,
-                solver.model.tri_indices,
-                solver.model.edge_indices,
-                solver.trimesh_collision_info,
-                solver.trimesh_collision_detector.edge_edge_parallel_epsilon,
-                solver.particle_conservative_bound_relaxation,
-                self._active,
-                self.geometry,
-            ],
-            outputs=[solver.truncation_ts],
-            device=solver.device,
-        )
+        if not empty_contact_set:
+            wp.launch(
+                self._truncate,
+                dim=solver.particle_self_contact_evaluation_kernel_launch_size,
+                inputs=[
+                    solver.pos_prev_collision_detection,
+                    solver.particle_displacements,
+                    solver.model.tri_indices,
+                    solver.model.edge_indices,
+                    solver.trimesh_collision_info,
+                    solver.trimesh_collision_detector.edge_edge_parallel_epsilon,
+                    solver.particle_conservative_bound_relaxation,
+                    self._active,
+                    self.geometry,
+                ],
+                outputs=[solver.truncation_ts],
+                device=solver.device,
+            )
         ids = solver.model.particle_color_groups[0] if selected_particles is None else selected_particles
         wp.launch(
             _finish_truncation,

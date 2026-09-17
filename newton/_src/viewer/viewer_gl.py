@@ -20,8 +20,10 @@ import newton as nt
 from ..core.types import Axis, override
 from ..utils.render import copy_rgb_frame_uint8
 from .camera import Camera
+from .gl.appearance_cache import detect_appearance_changes
 from .gl.image_logger import ImageLogger
 from .gl.opengl import LinesGL, MeshGL, MeshInstancerGL, RendererGL
+from .gl.shared_mesh_upload import SharedMeshUpload
 from .picking import Picking
 from .utils import OPAQUE_OPACITY_THRESHOLD
 from .viewer import _DEFAULT_LAYER_ID, ViewerBase
@@ -286,6 +288,9 @@ class ViewerGL(ViewerBase):
         if int(enable_cuda_interop) & ~int(ViewerGL.CudaInterop.ALL):
             raise ValueError("enable_cuda_interop contains unsupported flags")
         self._enable_cuda_interop = enable_cuda_interop
+        # Experimental opt-in exact dirty detection and hidden-triangle caching.
+        # Leave other applications on the established rendering schedule.
+        self.cache_static_appearance = False
 
         # Rolling buffers for log_scalar() time-series plots.
         self._scalar_buffers: dict[str, collections.deque] = {}
@@ -980,6 +985,27 @@ class ViewerGL(ViewerBase):
         self.camera.yaw = (yaw + 180.0) % 360.0 - 180.0
         self.camera.sync_pivot_to_view()
 
+    def log_mesh_group(self, name, points, parts):
+        """Log fixed-topology opaque material parts sharing one position array.
+
+        Experimental API. Each part is ``(path, indices, color, roughness, metallic)``.
+        Topology must remain immutable until the model is replaced. Normals are
+        computed separately per part; winding, colors and geometry are preserved.
+        """
+        key = self._qualify(name)
+        if not hasattr(self, "_shared_mesh_uploads"):
+            self._shared_mesh_uploads = {}
+        paths = tuple(part[0] for part in parts)
+        if key not in self._shared_mesh_uploads:
+            self._shared_mesh_uploads[key] = SharedMeshUpload(self, paths)
+        upload = self._shared_mesh_uploads[key]
+        if upload.names != paths:
+            raise ValueError("Shared mesh material paths must remain unchanged")
+        for path, indices, color, roughness, metallic in parts:
+            upload.log_mesh(
+                path, points, indices, color=color, roughness=roughness, metallic=metallic, backface_culling=True
+            )
+
     @override
     def log_mesh(
         self,
@@ -1551,6 +1577,9 @@ class ViewerGL(ViewerBase):
 
     def _destroy_render_geometry(self):
         """Destroy all render geometry while the OpenGL context is current."""
+        for upload in getattr(self, "_shared_mesh_uploads", {}).values():
+            upload.close()
+        self._shared_mesh_uploads = {}
         objects = getattr(self, "objects", {})
         destroyed_ids: set[int] = set()
 
@@ -1920,6 +1949,45 @@ class ViewerGL(ViewerBase):
 
         self._scalar_arrays[name] = None
 
+    def _sync_shape_colors_if_changed(self):
+        if not self.cache_static_appearance:
+            self._appearance_cache = None
+            return self._sync_shape_colors_from_model()
+        model = self.model
+        if model.shape_color is None or model.shape_opacity is None:
+            self._appearance_cache = None
+            return self._sync_shape_colors_from_model()
+        key = (id(model), model.shape_color.shape, model.shape_opacity.shape, str(self.device))
+        cache = getattr(self, "_appearance_cache", None)
+        if cache is None or cache[0] != key:
+            self._appearance_cache = (
+                key,
+                wp.clone(model.shape_color),
+                wp.clone(model.shape_opacity),
+                wp.zeros(2, dtype=int, device=self.device),
+            )
+            return self._sync_shape_colors_from_model()
+        _, colors, opacity, changed = cache
+        changed.zero_()
+        wp.launch(
+            detect_appearance_changes,
+            dim=colors.size,
+            inputs=[model.shape_color, model.shape_opacity, colors, opacity, changed],
+            device=self.device,
+        )
+        if self.model_changed or changed.numpy()[0]:
+            self._sync_shape_colors_from_model()
+
+    def _log_triangles(self, state):
+        if not self.cache_static_appearance:
+            self._hidden_triangle_key = None
+            return super()._log_triangles(state)
+        hidden = not self.show_triangles or self._layer_force_hidden()
+        key = (id(self.model), self._qualify("/model/triangles"))
+        if not hidden or self.model_changed or getattr(self, "_hidden_triangle_key", None) != key:
+            super()._log_triangles(state)
+        self._hidden_triangle_key = key if hidden else None
+
     @override
     def log_state(self, state: nt.State):
         """
@@ -1938,7 +2006,7 @@ class ViewerGL(ViewerBase):
         if self.model is None:
             return
 
-        self._sync_shape_colors_from_model()
+        self._sync_shape_colors_if_changed()
 
         use_packed_cuda = (
             self._packed_vbo_xforms is not None

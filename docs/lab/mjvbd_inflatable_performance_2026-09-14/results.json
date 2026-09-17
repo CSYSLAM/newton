@@ -1,0 +1,306 @@
+{
+  "baseline": {
+    "frames": 608,
+    "excluded_warmup_frames": 30,
+    "mean_step_ms": 26.16102690264666,
+    "mean_render_ms": 3.700416178138811,
+    "step_plus_render_fps": 33.48799980277765,
+    "max_center_z_m": 1.3035951852798462,
+    "final_center_z_m": 1.1925268173217773,
+    "failures": [
+      [
+        20,
+        "W1 hand-root position error is 0.000605 m."
+      ],
+      [
+        318,
+        "W1 hand-root position error is 0.000535 m."
+      ],
+      [
+        319,
+        "W1 hand-root position error is 0.000681 m."
+      ],
+      [
+        328,
+        "W1 hand-root position error is 0.000558 m."
+      ],
+      [
+        347,
+        "W1 hand-root position error is 0.000575 m."
+      ],
+      [
+        350,
+        "W1 hand-root position error is 0.000639 m."
+      ],
+      [
+        351,
+        "W1 hand-root position error is 0.000599 m."
+      ],
+      [
+        354,
+        "W1 hand-root position error is 0.000526 m."
+      ],
+      [
+        357,
+        "W1 hand-root position error is 0.000531 m."
+      ],
+      [
+        358,
+        "W1 hand-root position error is 0.000650 m."
+      ],
+      [
+        359,
+        "W1 hand-root position error is 0.000738 m."
+      ],
+      [
+        360,
+        "W1 hand-root position error is 0.001002 m."
+      ],
+      [
+        361,
+        "W1 hand-root position error is 0.001243 m."
+      ],
+      [
+        "final",
+        "The grasp compressed the target-volume bag excessively: minimum ratio=0.791972."
+      ]
+    ],
+    "phases": {
+      "approach": 25.742133136373013,
+      "close": 29.185106552627293,
+      "grasp_settle": 28.42951975892194,
+      "lift": 28.847105565687848,
+      "lifted_hold": 29.35638584312983,
+      "release": 22.767622919664497,
+      "drop_settle": 21.573436492290654
+    }
+  },
+  "baseline2": {
+    "frames": 608,
+    "excluded_warmup_frames": 30,
+    "mean_step_ms": 26.601975579878193,
+    "mean_render_ms": 4.1158628148698675,
+    "step_plus_render_fps": 32.554374013862045,
+    "max_center_z_m": 1.3035216331481934,
+    "final_center_z_m": 1.1924611330032349,
+    "failures": [
+      [
+        20,
+        "W1 hand-root position error is 0.000605 m."
+      ],
+      [
+        318,
+        "W1 hand-root position error is 0.000535 m."
+      ],
+      [
+        319,
+        "W1 hand-root position error is 0.000681 m."
+      ],
+      [
+        328,
+        "W1 hand-root position error is 0.000558 m."
+      ],
+      [
+        347,
+        "W1 hand-root position error is 0.000575 m."
+      ],
+      [
+        350,
+        "W1 hand-root position error is 0.000639 m."
+      ],
+      [
+        351,
+        "W1 hand-root position error is 0.000599 m."
+      ],
+      [
+        354,
+        "W1 hand-root position error is 0.000526 m."
+      ],
+      [
+        357,
+        "W1 hand-root position error is 0.000531 m."
+      ],
+      [
+        358,
+        "W1 hand-root position error is 0.000650 m."
+      ],
+      [
+        359,
+        "W1 hand-root position error is 0.000738 m."
+      ],
+      [
+        360,
+        "W1 hand-root position error is 0.001002 m."
+      ],
+      [
+        361,
+        "W1 hand-root position error is 0.001243 m."
+      ],
+      [
+        "final",
+        "The grasp compressed the target-volume bag excessively: minimum ratio=0.792058."
+      ]
+    ],
+    "phases": {
+      "approach": 25.070706196129322,
+      "close": 28.6978932019944,
+      "grasp_settle": 28.40920631489199,
+      "lift": 28.59557656694152,
+      "lifted_hold": 29.288809329348926,
+      "release": 22.43579708959996,
+      "drop_settle": 24.83190892962739
+    }
+  },
+  "optimized": {
+    "frames": 608,
+    "excluded_warmup_frames": 30,
+    "mean_step_ms": 24.18140395112242,
+    "mean_render_ms": 3.733742375299012,
+    "step_plus_render_fps": 35.8228464327808,
+    "max_center_z_m": 1.3035720586776733,
+    "final_center_z_m": 1.1924630403518677,
+    "failures": [
+      [
+        20,
+        "W1 hand-root position error is 0.000605 m."
+      ],
+      [
+        318,
+        "W1 hand-root position error is 0.000535 m."
+      ],
+      [
+        319,
+        "W1 hand-root position error is 0.000681 m."
+      ],
+      [
+        328,
+        "W1 hand-root position error is 0.000558 m."
+      ],
+      [
+        347,
+        "W1 hand-root position error is 0.000575 m."
+      ],
+      [
+        350,
+        "W1 hand-root position error is 0.000639 m."
+      ],
+      [
+        351,
+        "W1 hand-root position error is 0.000599 m."
+      ],
+      [
+        354,
+        "W1 hand-root position error is 0.000526 m."
+      ],
+      [
+        357,
+        "W1 hand-root position error is 0.000531 m."
+      ],
+      [
+        358,
+        "W1 hand-root position error is 0.000650 m."
+      ],
+      [
+        359,
+        "W1 hand-root position error is 0.000738 m."
+      ],
+      [
+        360,
+        "W1 hand-root position error is 0.001002 m."
+      ],
+      [
+        361,
+        "W1 hand-root position error is 0.001243 m."
+      ],
+      [
+        "final",
+        "The grasp compressed the target-volume bag excessively: minimum ratio=0.792057."
+      ]
+    ],
+    "phases": {
+      "approach": 23.198900069110096,
+      "close": 28.542411177685217,
+      "grasp_settle": 29.423735892244927,
+      "lift": 24.275172483370017,
+      "lifted_hold": 23.364305670838803,
+      "release": 21.373200532425905,
+      "drop_settle": 20.9339652210474
+    }
+  },
+  "optimized2": {
+    "frames": 608,
+    "excluded_warmup_frames": 30,
+    "mean_step_ms": 23.25444104813384,
+    "mean_render_ms": 5.614379839508417,
+    "step_plus_render_fps": 34.639447308638275,
+    "max_center_z_m": 1.3036669492721558,
+    "final_center_z_m": 1.192526936531067,
+    "failures": [
+      [
+        20,
+        "W1 hand-root position error is 0.000605 m."
+      ],
+      [
+        318,
+        "W1 hand-root position error is 0.000535 m."
+      ],
+      [
+        319,
+        "W1 hand-root position error is 0.000681 m."
+      ],
+      [
+        328,
+        "W1 hand-root position error is 0.000558 m."
+      ],
+      [
+        347,
+        "W1 hand-root position error is 0.000575 m."
+      ],
+      [
+        350,
+        "W1 hand-root position error is 0.000639 m."
+      ],
+      [
+        351,
+        "W1 hand-root position error is 0.000599 m."
+      ],
+      [
+        354,
+        "W1 hand-root position error is 0.000526 m."
+      ],
+      [
+        357,
+        "W1 hand-root position error is 0.000531 m."
+      ],
+      [
+        358,
+        "W1 hand-root position error is 0.000650 m."
+      ],
+      [
+        359,
+        "W1 hand-root position error is 0.000738 m."
+      ],
+      [
+        360,
+        "W1 hand-root position error is 0.001002 m."
+      ],
+      [
+        361,
+        "W1 hand-root position error is 0.001243 m."
+      ],
+      [
+        "final",
+        "The grasp compressed the target-volume bag excessively: minimum ratio=0.791988."
+      ]
+    ],
+    "phases": {
+      "approach": 23.755047520777833,
+      "close": 26.851288933262584,
+      "grasp_settle": 27.29679097731908,
+      "lift": 23.51711349555343,
+      "lifted_hold": 23.33699950637917,
+      "release": 20.478311066316174,
+      "drop_settle": 20.60389502325141
+    }
+  }
+}

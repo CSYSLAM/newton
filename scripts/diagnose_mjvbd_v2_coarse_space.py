@@ -20,10 +20,8 @@ import newton.viewer
 from newton._src.solvers.mjvbd_v2 import contact_projection
 from newton._src.solvers.mjvbd_v2 import particle_multilevel as multilevel
 from newton._src.solvers.mjvbd_v2.particle_multilevel import ParticleMultilevelCorrection
-from newton.examples.mjvbdv2 import (
-    example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00 as tshirt,
-)
 from newton.examples.mjvbdv2 import example_mjvbd_v2_cloth_twist as twist
+from newton.examples.mjvbdv2 import example_mjvbd_v2_tshirt_fold as tshirt
 from scripts.benchmark_mjvbd_v2_coarse_rows import benchmark_rows
 from scripts.diagnose_mjvbd_v2_convergence import ProbeComplete, rms
 

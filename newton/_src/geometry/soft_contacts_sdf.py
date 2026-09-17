@@ -31,7 +31,7 @@ from .kernels import (
     sdf_sphere,
     sdf_sphere_grad,
 )
-from .sdf_texture import TextureSDFData, texture_sample_sdf_grad
+from .sdf_texture import TextureSDFData, _texture_sample_sdf_value_exact, texture_sample_sdf_grad
 from .types import Axis, GeoType
 
 # Fixed iteration counts -> data-independent loops -> CUDA-graph-capturable. Passed as kernel args
@@ -134,6 +134,29 @@ def eval_shape_sdf(
 
 
 @wp.func
+def eval_shape_sdf_lower_bound(
+    geo: wp.int32,
+    scale: wp.vec3,
+    x_local: wp.vec3,
+    shape_sdf_index: wp.int32,
+    texture_sdf_table: wp.array[TextureSDFData],
+):
+    """Evaluate the search distance without unused texture gradients.
+
+    Preserve the smallest-absolute-scale lower bound used by the existing
+    optimizer. Final projection and Frank-Wolfe directions still use the
+    accurate distance and gradient from ``eval_shape_sdf``.
+    """
+    if _is_analytic(geo):
+        lower, _distance, _gradient = eval_shape_sdf(geo, scale, x_local, shape_sdf_index, texture_sdf_table)
+        return lower
+    tex = texture_sdf_table[shape_sdf_index]
+    if tex.scale_baked:
+        return _texture_sample_sdf_value_exact(tex, x_local)
+    return _texture_sample_sdf_value_exact(tex, wp.cw_div(x_local, scale)) * wp.min(wp.abs(scale))
+
+
+@wp.func
 def optimize_edge_sdf(
     geo: wp.int32,
     scale: wp.vec3,
@@ -153,21 +176,21 @@ def optimize_edge_sdf(
     hi = float(1.0)
     c = hi - (hi - lo) * inv_phi
     d = lo + (hi - lo) * inv_phi
-    fc, _fc_a, _gc = eval_shape_sdf(geo, scale, (1.0 - c) * p + c * q, shape_sdf_index, texture_sdf_table)
-    fd, _fd_a, _gd = eval_shape_sdf(geo, scale, (1.0 - d) * p + d * q, shape_sdf_index, texture_sdf_table)
+    fc = eval_shape_sdf_lower_bound(geo, scale, (1.0 - c) * p + c * q, shape_sdf_index, texture_sdf_table)
+    fd = eval_shape_sdf_lower_bound(geo, scale, (1.0 - d) * p + d * q, shape_sdf_index, texture_sdf_table)
     for _i in range(n_iter):
         if fc < fd:
             hi = d
             d = c
             fd = fc
             c = hi - (hi - lo) * inv_phi
-            fc, _fc_a, _gc = eval_shape_sdf(geo, scale, (1.0 - c) * p + c * q, shape_sdf_index, texture_sdf_table)
+            fc = eval_shape_sdf_lower_bound(geo, scale, (1.0 - c) * p + c * q, shape_sdf_index, texture_sdf_table)
         else:
             lo = c
             c = d
             fc = fd
             d = lo + (hi - lo) * inv_phi
-            fd, _fd_a, _gd = eval_shape_sdf(geo, scale, (1.0 - d) * p + d * q, shape_sdf_index, texture_sdf_table)
+            fd = eval_shape_sdf_lower_bound(geo, scale, (1.0 - d) * p + d * q, shape_sdf_index, texture_sdf_table)
     u = 0.5 * (lo + hi)
     x = (1.0 - u) * p + u * q
     _phi_l, phi, grad = eval_shape_sdf(geo, scale, x, shape_sdf_index, texture_sdf_table)
@@ -213,7 +236,13 @@ def optimize_face_sdf(
         gamma, _lx, _lphi, _lgrad = optimize_edge_sdf(
             geo, scale, x, target, shape_sdf_index, texture_sdf_table, ls_iter
         )
-        bary = (1.0 - gamma) * bary + gamma * s
+        updated = (1.0 - gamma) * bary + gamma * s
+        # An exact fixed point repeats the identical query and line search.
+        # Do not use a tolerance: nearby but distinct iterates must continue.
+        fixed = updated[0] == bary[0] and updated[1] == bary[1] and updated[2] == bary[2]
+        bary = updated
+        if fixed:
+            break
 
     x = bary[0] * a + bary[1] * b + bary[2] * c
     _phi_l, phi, grad = eval_shape_sdf(geo, scale, x, shape_sdf_index, texture_sdf_table)
@@ -345,7 +374,7 @@ def create_soft_face_contacts(
     threshold = margin + s_margin + radius
 
     centroid_s = (a_s + b_s + c_s) / 3.0
-    phi_c, _phi_c_a, _grad_c = eval_shape_sdf(geo, scale, centroid_s, sdf_idx, texture_sdf_table)
+    phi_c = eval_shape_sdf_lower_bound(geo, scale, centroid_s, sdf_idx, texture_sdf_table)
     # Conservative cull: the SDF is ~1-Lipschitz, so the triangle's minimum is >= phi_c minus the
     # farthest centroid-to-point distance, which is always a vertex. circumradius can be smaller than
     # that for non-equilateral triangles (e.g. 3-4-5: R=2.5 vs 2.85) and would drop valid contacts.
@@ -441,7 +470,7 @@ def create_soft_edge_contacts(
     threshold = margin + s_margin + radius
 
     mid_s = 0.5 * (p_s + q_s)
-    phi_m, _phi_m_a, _grad_m = eval_shape_sdf(geo, scale, mid_s, sdf_idx, texture_sdf_table)
+    phi_m = eval_shape_sdf_lower_bound(geo, scale, mid_s, sdf_idx, texture_sdf_table)
     if phi_m > threshold + 0.5 * wp.length(q_s - p_s):
         return
 

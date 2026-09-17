@@ -12,6 +12,16 @@ _PNEUMATIC_CAVITY_UPDATE_BLOCK_DIM = 128
 _PNEUMATIC_SINGLE_CAVITY_FUSED_MAX_PARTICLES = 512
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+__syncthreads();
+#endif
+""")
+def _pressure_block_sync():
+    """Publish lane zero's pressure update before the block reads it."""
+    pass
+
+
 @wp.func
 def _cavity_face_volume_contribution_from_anchor(
     face: int,
@@ -400,16 +410,26 @@ def _accumulate_pressure_force_for_particle(
 ):
     force = wp.vec3(0.0)
     hessian = wp.mat33(0.0)
+    cavity_gradient = wp.vec3(0.0)
+    previous_cavity = int(-1)
+    # Solver adjacency groups incident faces by cavity, including shared vertices.
     for adjacent_index in range(particle_face_offsets[particle], particle_face_offsets[particle + 1]):
         face = particle_faces[adjacent_index]
         cavity = face_cavity[face]
+        if cavity != previous_cavity:
+            if previous_cavity >= 0:
+                hessian += curvature[previous_cavity] * wp.outer(cavity_gradient, cavity_gradient)
+            cavity_gradient = wp.vec3(0.0)
+            previous_cavity = cavity
         triangle = face_triangle[face]
         p0 = particle_q[tri_indices[triangle, 0]]
         p1 = particle_q[tri_indices[triangle, 1]]
         p2 = particle_q[tri_indices[triangle, 2]]
         gradient = face_sign[face] * wp.cross(p1 - p0, p2 - p0) / 6.0
         force += gauge_pressure[cavity] * gradient
-        hessian += curvature[cavity] * wp.outer(gradient, gradient)
+        cavity_gradient += gradient
+    if previous_cavity >= 0:
+        hessian += curvature[previous_cavity] * wp.outer(cavity_gradient, cavity_gradient)
 
     particle_forces[particle] += force
     particle_hessians[particle] += hessian
@@ -505,10 +525,9 @@ def update_single_cavity_volume_pressure_and_accumulate_force(
             clamp_flags,
         )
 
-    # The reduction is a block barrier after lane zero updates pressure.
-    pressure_ready = wp.tile_sum(wp.tile(float(lane == 0)))[0]
+    _pressure_block_sync()
     particle_index = lane
-    while particle_index < particle_ids.shape[0] and pressure_ready > 0.0:
+    while particle_index < particle_ids.shape[0]:
         _accumulate_pressure_force_for_particle(
             particle_ids[particle_index],
             particle_q,
@@ -590,3 +609,114 @@ def reset_pneumatic_state(
         absolute_pressure[cavity] = reference_absolute_pressure[cavity]
         volume_rate[cavity] = 0.0
         clamp_flags[cavity] = 0
+
+
+@wp.kernel
+def prepare_coupled_color(
+    particles: wp.array[wp.int32],
+    pos: wp.array[wp.vec3],
+    triangles: wp.array2d[wp.int32],
+    face_triangle: wp.array[wp.int32],
+    face_sign: wp.array[float],
+    offsets: wp.array[wp.int32],
+    faces: wp.array[wp.int32],
+    pressure: wp.array[float],
+    displacement: wp.array[wp.vec3],
+    forces: wp.array[wp.vec3],
+    gradients: wp.array[wp.vec3],
+    previous_displacement: wp.array[wp.vec3],
+):
+    """Accumulate the pressure force without its globally coupled curvature."""
+    particle = particles[wp.tid()]
+    gradient = wp.vec3(0.0)
+    for adjacent in range(offsets[particle], offsets[particle + 1]):
+        face = faces[adjacent]
+        tri = face_triangle[face]
+        a = pos[triangles[tri, 0]]
+        b = pos[triangles[tri, 1]]
+        c = pos[triangles[tri, 2]]
+        gradient += face_sign[face] * wp.cross(b - a, c - a) / 6.0
+    gradients[particle] = gradient
+    forces[particle] += pressure[0] * gradient
+    previous_displacement[particle] = displacement[particle]
+
+
+@wp.func
+def coupled_target_pressure(
+    volume: float,
+    previous_volume: float,
+    pressure: float,
+    dt: float,
+    target: float,
+    stiffness: float,
+    damping: float,
+    ambient: float,
+    maximum: float,
+    gradient_delta: float,
+    compliance: float,
+):
+    """Solve the scalar pressure equation, including both pressure bounds."""
+    curvature = stiffness + damping / dt
+    raw_pressure = stiffness * (target - volume) - damping * (volume - previous_volume) / dt
+    pressure_new = (raw_pressure - curvature * (gradient_delta - pressure * compliance)) / (
+        1.0 + curvature * compliance
+    )
+    return wp.clamp(pressure_new, -ambient, maximum - ambient)
+
+
+@wp.kernel
+def correct_coupled_color(
+    particles: wp.array[wp.int32],
+    gradients: wp.array[wp.vec3],
+    hessians: wp.array[wp.mat33],
+    previous_displacement: wp.array[wp.vec3],
+    volume: wp.array[float],
+    previous_volume: wp.array[float],
+    pressure: wp.array[float],
+    dt: float,
+    target: wp.array[float],
+    stiffness: wp.array[float],
+    damping: wp.array[float],
+    ambient: wp.array[float],
+    maximum: wp.array[float],
+    pressure_scale: wp.array[float],
+    target_scale: wp.array[float],
+    displacement: wp.array[wp.vec3],
+):
+    """Apply a single-cavity Sherman-Morrison solve with exact pressure clipping.
+
+    Triangle-independent colors make volume affine in this block of positions.
+    Local elasticity/contact Hessians remain the existing VBD approximation.
+    Launch exactly one block of 256 threads, including for an empty color.
+    """
+    lane = wp.tid()
+    gd = float(0.0)
+    gu = float(0.0)
+    for index in range(lane, particles.shape[0], 256):
+        particle = particles[index]
+        h = hessians[particle]
+        if wp.abs(wp.determinant(h)) > 1.0e-8:
+            g = gradients[particle]
+            u = wp.inverse(h) * g
+            gd += wp.dot(g, displacement[particle] - previous_displacement[particle])
+            gu += wp.dot(g, u)
+    gd_total = wp.tile_sum(wp.tile(gd))[0]
+    gu_total = wp.tile_sum(wp.tile(gu))[0]
+    updated_pressure = coupled_target_pressure(
+        volume[0],
+        previous_volume[0],
+        pressure[0],
+        dt,
+        target[0] * target_scale[0],
+        stiffness[0] * pressure_scale[0],
+        damping[0],
+        ambient[0],
+        maximum[0],
+        gd_total,
+        wp.max(gu_total, 0.0),
+    )
+    for index in range(lane, particles.shape[0], 256):
+        particle = particles[index]
+        h = hessians[particle]
+        if wp.abs(wp.determinant(h)) > 1.0e-8:
+            displacement[particle] += (updated_pressure - pressure[0]) * (wp.inverse(h) * gradients[particle])

@@ -314,6 +314,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         one_way_proxy_bodies: bool = False,
         # Particle parameters
         particle_enable_self_contact: bool = False,
+        particle_displacement_threshold: float = 0.0,
         particle_self_contact_radius: float = 0.2,
         particle_self_contact_margin: float = 0.2,
         particle_conservative_bound_relaxation: float = 0.85,
@@ -360,6 +361,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         rigid_avbd_contact_alpha: float | None = None,  # Body-body contact alpha; None selects default
         rigid_avbd_beta: float = 0.0,  # Penalty ramp rate per iteration (0 = fixed-k)
         rigid_avbd_linear_beta: float | None = None,  # Linear beta override; None uses rigid_avbd_beta
+        rigid_avbd_contact_beta: float | None = None,  # Body-body override; None uses linear beta
         rigid_avbd_angular_beta: float | None = None,  # Angular beta override; None uses rigid_avbd_beta
         rigid_avbd_gamma: float = 0.999,  # Per-step decay for penalty k and persisted hard-mode lambda
         # Rigid body - contacts
@@ -399,6 +401,12 @@ class SolverVBD(SolverBase, CouplingInterface):
             Particle parameters:
 
             particle_enable_self_contact: Whether to enable self-contact detection for particles.
+            particle_displacement_threshold: Experimental displacement deadband [m] per solver substep.
+                Zero disables it. Restore free particles whose final displacement is strictly below
+                this threshold to their substep starting position before reconstructing velocity.
+                Exclude prescribed, zero-mass and proxy particles. This suppresses slow motion as
+                well as jitter, depends on the timestep, and can undo small contact corrections.
+                Positive thresholds are not supported for differentiable models.
             particle_self_contact_radius: The radius used for self-contact detection. This is the distance at which
                 vertex-triangle pairs and edge-edge pairs will start to interact with each other.
             particle_self_contact_margin: The margin used for self-contact detection. This is the distance at which
@@ -512,6 +520,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                 for production tuning.
             rigid_avbd_linear_beta: Linear beta override for linear constraints (meters).
                 ``None`` (default) uses ``rigid_avbd_beta``.
+            rigid_avbd_contact_beta: Experimental body-body penalty growth override [N/m^2].
+                ``None`` preserves the linear beta. Zero selects fixed material stiffness.
+                Does not change joint or body-particle penalties; this allows ramped
+                small-rigid contacts alongside fixed-stiffness deformable contacts.
             rigid_avbd_angular_beta: Angular beta override for angular constraints (radians).
                 ``None`` (default) uses ``rigid_avbd_beta``.
             rigid_avbd_gamma: Per-step decay factor for penalty k and persisted hard-mode lambda. Hard joint/contact
@@ -540,9 +552,10 @@ class SolverVBD(SolverBase, CouplingInterface):
             rigid_contact_stick_freeze_angular_eps: Angular threshold [rad] for the body-level
                 deadzone snap on dynamic-dynamic sticking contacts. Set to ``0.0`` to disable
                 angular snapping.
-            rigid_contact_k_start: Body-body and body-particle contact penalty seed for AVBD ramping. Used when
-                ``rigid_avbd_linear_beta`` (or ``rigid_avbd_beta`` fallback) is greater than zero.
-                When the linear beta is 0, k is fixed at the contact stiffness regardless of this value.
+            rigid_contact_k_start: Contact penalty seed [N/m] when AVBD ramping is enabled.
+                Body-body contacts use the resolved ``rigid_avbd_contact_beta``; body-particle contacts
+                use ``rigid_avbd_linear_beta`` (or ``rigid_avbd_beta`` fallback). A zero growth rate
+                fixes the corresponding penalty at material stiffness, ignoring this seed.
             rigid_body_contact_buffer_size: Max body-body contacts per rigid body for per-body contact lists.
             rigid_body_particle_contact_buffer_size: Max body-particle soft contacts tracked per rigid
                 body, covering both particle-vs-surface and full-surface edge/face contacts.
@@ -579,6 +592,11 @@ class SolverVBD(SolverBase, CouplingInterface):
               enabled only when positive Dahl parameters are authored.
 
         """
+        if not math.isfinite(particle_displacement_threshold) or particle_displacement_threshold < 0.0:
+            raise ValueError("particle_displacement_threshold must be finite and nonnegative")
+        if particle_displacement_threshold > 0.0 and model.requires_grad:
+            raise ValueError("Particle displacement deadband is not supported for differentiable models")
+        self.particle_displacement_threshold = float(particle_displacement_threshold)
         if rigid_avbd_beta < 0:
             raise ValueError(f"rigid_avbd_beta must be >= 0, got {rigid_avbd_beta}")
         rigid_avbd_linear_beta = rigid_avbd_linear_beta if rigid_avbd_linear_beta is not None else rigid_avbd_beta
@@ -845,6 +863,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             rigid_avbd_gamma,
             rigid_avbd_joint_alpha,
             rigid_avbd_contact_alpha,
+            rigid_avbd_contact_beta,
             rigid_contact_hard,
             rigid_contact_history,
             rigid_contact_stick_motion_eps,
@@ -997,15 +1016,17 @@ class SolverVBD(SolverBase, CouplingInterface):
         if model.device.is_cpu and particle_enable_tile_solve and wp.config.log_level <= wp.LOG_DEBUG:
             print("Info: Tiled solve requires model.device='cuda'. Tiled solve is disabled.")
 
-        elasticity_groups = [
-            group
-            for group in (*self.surface_particle_color_groups, *self.volumetric_particle_color_groups)
-            if group.size > 0
-        ]
+        # Each particle owns a complete tile (launch size = group.size * tile size).
+        # Even a singleton group is valid; a small tet group must not disable the
+        # tiled surface solve for all the other particles in a mixed model. Keep
+        # the scalar path for tiny models where every group is undersubscribed.
         self.use_particle_tile_solve = (
             particle_enable_tile_solve
             and model.device.is_cuda
-            and all(group.size >= TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE for group in elasticity_groups)
+            and any(
+                group.size >= TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
+                for group in (*self.surface_particle_color_groups, *self.volumetric_particle_color_groups)
+            )
         )
         multilevel_supported = (
             multilevel_mode != "off"
@@ -1215,6 +1236,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         rigid_avbd_gamma: float,
         rigid_avbd_joint_alpha: float | None,
         rigid_avbd_contact_alpha: float | None,
+        rigid_avbd_contact_beta: float | None,
         rigid_contact_hard: bool,
         rigid_contact_history: bool,
         rigid_contact_stick_motion_eps: float,
@@ -1271,6 +1293,11 @@ class SolverVBD(SolverBase, CouplingInterface):
         if rigid_joint_angular_ke < 0:
             raise ValueError(f"rigid_joint_angular_ke must be >= 0, got {rigid_joint_angular_ke}")
         self.rigid_avbd_gamma = rigid_avbd_gamma
+        contact_beta = rigid_avbd_linear_beta if rigid_avbd_contact_beta is None else rigid_avbd_contact_beta
+        if not np.isfinite(contact_beta) or contact_beta < 0:
+            raise ValueError(f"rigid_avbd_contact_beta must be finite and >= 0, got {contact_beta}")
+        self.rigid_contact_beta = float(contact_beta)
+        self.rigid_body_contact_k_start_value = -1.0 if contact_beta == 0.0 else float(rigid_contact_k_start)
         self.rigid_contact_k_start_value = -1.0 if rigid_avbd_linear_beta == 0.0 else float(rigid_contact_k_start)
         self.rigid_joint_linear_k_start = rigid_joint_linear_k_start if rigid_avbd_linear_beta > 0.0 else None
         self.rigid_joint_angular_k_start = rigid_joint_angular_k_start if rigid_avbd_angular_beta > 0.0 else None
@@ -2547,6 +2574,8 @@ class SolverVBD(SolverBase, CouplingInterface):
                     run_selective_polish()
 
         if self.model.particle_count:
+            if self.particle_displacement_threshold > 0.0:
+                self._apply_particle_displacement_deadband(state_in)
             wp.copy(state_out.particle_q, state_in.particle_q)
 
         # Snapshot solved rigid contact state for next-frame warm-start.
@@ -3056,7 +3085,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                                 model.shape_world,
                                 model.shape_body,
                                 model.body_world,
-                                self.rigid_contact_k_start_value,
+                                self.rigid_body_contact_k_start_value,
                             ],
                             outputs=[
                                 contacts.rigid_contact_point0,
@@ -3081,7 +3110,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                                 model.shape_material_ke,
                                 model.shape_material_kd,
                                 model.shape_material_mu,
-                                self.rigid_contact_k_start_value,
+                                self.rigid_body_contact_k_start_value,
                             ],
                             outputs=[
                                 self.body_body_contact_penalty_k,
@@ -3128,7 +3157,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         contact_lambda_decay,
                         self.rigid_avbd_gamma,
                         self.body_body_contact_material_ke,
-                        self.rigid_contact_k_start_value,
+                        self.rigid_body_contact_k_start_value,
                     ],
                     outputs=[
                         self.body_body_contact_penalty_k,
@@ -4456,7 +4485,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self.rigid_contact_hard,
                     self.body_inv_mass_effective,
                     self.body_body_contact_material_ke,
-                    self.rigid_linear_beta,
+                    self.rigid_contact_beta,
                     self.body_body_contact_penalty_k,  # input/output
                     self.body_body_contact_lambda,  # input/output
                 ],
@@ -4680,6 +4709,23 @@ class SolverVBD(SolverBase, CouplingInterface):
             self._rigid_contact_point1_world,
             contacts.rigid_contact_force,
             contacts.rigid_contact_count,
+        )
+
+    def _apply_particle_displacement_deadband(self, state: State):
+        """Filter accepted positions while keeping the DAT displacement cache consistent."""
+        wp.launch(
+            kernel=particle_vbd_kernels.apply_particle_displacement_deadband,
+            dim=self.model.particle_count,
+            inputs=[
+                self.particle_displacement_threshold,
+                self.particle_q_prev,
+                self.model.particle_flags,
+                self.model.particle_inv_mass,
+                self.pos_prev_collision_detection,
+                state.particle_q,
+                self.particle_displacements,
+            ],
+            device=self.device,
         )
 
     def _finalize_particles(self, state_out: State, dt: float):

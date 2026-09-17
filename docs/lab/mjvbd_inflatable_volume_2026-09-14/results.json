@@ -1,0 +1,277 @@
+{
+  "baseline_commit": "e9bee362f8e380e6367543b9669cbfa690a1720c",
+  "fixed_original_motion_runs": {
+    "iterations_12": {
+      "iterations": 12,
+      "frames": 608,
+      "fixed_motion": false,
+      "config": {
+        "rest_volume": [
+          0.00038786136428825557
+        ],
+        "target_volume": [
+          0.00039174011908471584
+        ],
+        "volume_stiffness": [
+          6103983104.0
+        ],
+        "bulk_damping": [
+          2000000.0
+        ],
+        "max_absolute_pressure": [
+          500000.0
+        ],
+        "ambient_pressure": [
+          101325.0
+        ]
+      },
+      "min_volume_ratio": 0.7918612815460496,
+      "max_volume_reporting_error_ratio": 1.9924547267624604e-07,
+      "max_pressure": 500000.0,
+      "mean_step_ms": 14.943401385815719,
+      "failures": [],
+      "first_200_minimum_volume_ratio": 0.7918612815460496,
+      "first_200_mean_step_ms_excluding_first_30": 15.690986285506584
+    },
+    "iterations_16_legacy": {
+      "iterations": 16,
+      "frames": 200,
+      "fixed_motion": true,
+      "config": {
+        "rest_volume": [
+          0.00038786136428825557
+        ],
+        "target_volume": [
+          0.00039174011908471584
+        ],
+        "volume_stiffness": [
+          6103983104.0
+        ],
+        "bulk_damping": [
+          2000000.0
+        ],
+        "max_absolute_pressure": [
+          500000.0
+        ],
+        "ambient_pressure": [
+          101325.0
+        ]
+      },
+      "min_volume_ratio": 0.8044320849304565,
+      "max_volume_reporting_error_ratio": 1.4634889200504375e-07,
+      "max_pressure": 500000.0,
+      "mean_step_ms": 21.769362447701177,
+      "failures": [],
+      "first_200_minimum_volume_ratio": 0.8044320849304565,
+      "first_200_mean_step_ms_excluding_first_30": 21.769362447701177
+    },
+    "iterations_48": {
+      "iterations": 48,
+      "frames": 200,
+      "fixed_motion": true,
+      "config": {
+        "rest_volume": [
+          0.00038786136428825557
+        ],
+        "target_volume": [
+          0.00039174011908471584
+        ],
+        "volume_stiffness": [
+          6103983104.0
+        ],
+        "bulk_damping": [
+          2000000.0
+        ],
+        "max_absolute_pressure": [
+          500000.0
+        ],
+        "ambient_pressure": [
+          101325.0
+        ]
+      },
+      "min_volume_ratio": 0.8235474027930414,
+      "max_volume_reporting_error_ratio": 2.0647910081716958e-07,
+      "max_pressure": 500000.0,
+      "mean_step_ms": 52.17306889860672,
+      "failures": [],
+      "first_200_minimum_volume_ratio": 0.8235474027930414,
+      "first_200_mean_step_ms_excluding_first_30": 52.17306889860672
+    },
+    "iterations_96": {
+      "iterations": 96,
+      "frames": 200,
+      "fixed_motion": true,
+      "config": {
+        "rest_volume": [
+          0.00038786136428825557
+        ],
+        "target_volume": [
+          0.00039174011908471584
+        ],
+        "volume_stiffness": [
+          6103983104.0
+        ],
+        "bulk_damping": [
+          2000000.0
+        ],
+        "max_absolute_pressure": [
+          500000.0
+        ],
+        "ambient_pressure": [
+          101325.0
+        ]
+      },
+      "min_volume_ratio": 0.8375590769729494,
+      "max_volume_reporting_error_ratio": 1.3701267354004898e-07,
+      "max_pressure": 500000.0,
+      "mean_step_ms": 100.87677003671963,
+      "failures": [],
+      "first_200_minimum_volume_ratio": 0.8375590769729494,
+      "first_200_mean_step_ms_excluding_first_30": 100.87677003671963
+    },
+    "iterations_12_corrected": {
+      "iterations": 12,
+      "frames": 200,
+      "fixed_motion": true,
+      "config": {
+        "rest_volume": [
+          0.00038786136428825557
+        ],
+        "target_volume": [
+          0.00039174011908471584
+        ],
+        "volume_stiffness": [
+          6103983104.0
+        ],
+        "bulk_damping": [
+          2000000.0
+        ],
+        "max_absolute_pressure": [
+          500000.0
+        ],
+        "ambient_pressure": [
+          101325.0
+        ]
+      },
+      "min_volume_ratio": 0.7915980839800418,
+      "max_volume_reporting_error_ratio": 1.3094989359530018e-07,
+      "max_pressure": 500000.0,
+      "mean_step_ms": 17.285145172397332,
+      "failures": [],
+      "first_200_minimum_volume_ratio": 0.7915980839800418,
+      "first_200_mean_step_ms_excluding_first_30": 17.285145172397332
+    },
+    "iterations_12_coupled": {
+      "iterations": 12,
+      "frames": 200,
+      "fixed_motion": true,
+      "config": {
+        "rest_volume": [
+          0.00038786136428825557
+        ],
+        "target_volume": [
+          0.00039174011908471584
+        ],
+        "volume_stiffness": [
+          6103983104.0
+        ],
+        "bulk_damping": [
+          2000000.0
+        ],
+        "max_absolute_pressure": [
+          500000.0
+        ],
+        "ambient_pressure": [
+          101325.0
+        ]
+      },
+      "min_volume_ratio": 0.7918632211636554,
+      "max_volume_reporting_error_ratio": 1.4762030142723148e-07,
+      "max_pressure": 500000.0,
+      "mean_step_ms": 19.34318560798762,
+      "failures": [],
+      "first_200_minimum_volume_ratio": 0.7918632211636554,
+      "first_200_mean_step_ms_excluding_first_30": 19.34318560798762
+    },
+    "iterations_12_cheb0.95": {
+      "iterations": 12,
+      "frames": 200,
+      "fixed_motion": true,
+      "config": {
+        "rest_volume": [
+          0.00038786136428825557
+        ],
+        "target_volume": [
+          0.00039174011908471584
+        ],
+        "volume_stiffness": [
+          6103983104.0
+        ],
+        "bulk_damping": [
+          2000000.0
+        ],
+        "max_absolute_pressure": [
+          500000.0
+        ],
+        "ambient_pressure": [
+          101325.0
+        ]
+      },
+      "min_volume_ratio": 0.8022608019486629,
+      "max_volume_reporting_error_ratio": 1.4831931482994776e-07,
+      "max_pressure": 500000.0,
+      "mean_step_ms": 16.996869699248823,
+      "failures": [],
+      "first_200_minimum_volume_ratio": 0.8022608019486629,
+      "first_200_mean_step_ms_excluding_first_30": 16.996869699248823
+    },
+    "iterations_12_coupled_cheb0.95_cache": {
+      "iterations": 12,
+      "frames": 608,
+      "fixed_motion": true,
+      "config": {
+        "rest_volume": [
+          0.00038786136428825557
+        ],
+        "target_volume": [
+          0.00039174011908471584
+        ],
+        "volume_stiffness": [
+          6103983104.0
+        ],
+        "bulk_damping": [
+          2000000.0
+        ],
+        "max_absolute_pressure": [
+          500000.0
+        ],
+        "ambient_pressure": [
+          101325.0
+        ]
+      },
+      "min_volume_ratio": 0.8177767758271512,
+      "max_volume_reporting_error_ratio": 2.06861800244873e-07,
+      "max_pressure": 500000.0,
+      "mean_step_ms": 18.505204602299344,
+      "failures": [],
+      "first_200_minimum_volume_ratio": 0.8177767758271512,
+      "first_200_mean_step_ms_excluding_first_30": 19.344472623882158
+    }
+  },
+  "original_controller_full_run": {
+    "minimum_volume_ratio": 0.8153116240187345,
+    "maximum_pressure_pa": 500000.0,
+    "maximum_root_position_error_m": 3.644301292398307e-06,
+    "maximum_root_angle_error_deg": 7.065202614577463e-05,
+    "initial_bag_center_z_m": 1.1991479396820068,
+    "lifted_bag_center_z_m": 1.3158142566680908,
+    "final_bag_center_z_m": 1.1961630582809448,
+    "failure_count": 1
+  },
+  "original_controller_failures": [
+    [
+      "final",
+      "The grasp compressed the target-volume bag excessively: minimum ratio=0.815312."
+    ]
+  ]
+}

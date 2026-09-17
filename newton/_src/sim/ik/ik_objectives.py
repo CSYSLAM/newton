@@ -372,6 +372,8 @@ class IKObjectivePosition(IKObjective):
         residuals: wp.array2d[wp.float32],
         start_idx: int,
         problem_idx: wp.array[wp.int32],
+        *,
+        _launch=None,
     ) -> None:
         """Write weighted position errors into the global residual buffer.
 
@@ -390,7 +392,7 @@ class IKObjectivePosition(IKObjective):
                 indices, shape [n_batch], used to fetch ``target_positions``.
         """
         count = body_q.shape[0]
-        wp.launch(
+        (_launch if _launch is not None else wp.launch)(
             _pos_residuals,
             dim=count,
             inputs=[
@@ -459,6 +461,8 @@ class IKObjectivePosition(IKObjective):
         jacobian: wp.array3d[wp.float32],
         joint_S_s: wp.array2d[wp.spatial_vector],
         start_idx: int,
+        *,
+        _launch=None,
     ) -> None:
         """Fill the position Jacobian block from the analytic motion subspace.
 
@@ -477,7 +481,7 @@ class IKObjectivePosition(IKObjective):
         """
         n_dofs = model.joint_dof_count
 
-        wp.launch(
+        (_launch if _launch is not None else wp.launch)(
             _pos_jac_analytic,
             dim=[body_q.shape[0], n_dofs],
             inputs=[
@@ -647,6 +651,8 @@ class IKObjectiveJointLimit(IKObjective):
         residuals: wp.array2d[wp.float32],
         start_idx: int,
         problem_idx: wp.array[wp.int32],
+        *,
+        _launch=None,
     ) -> None:
         """Write weighted joint-limit violations into the global residual buffer.
 
@@ -666,7 +672,7 @@ class IKObjectiveJointLimit(IKObjective):
                 problems.
         """
         count = joint_q.shape[0]
-        wp.launch(
+        (_launch if _launch is not None else wp.launch)(
             _limit_residuals,
             dim=[count, self.n_dofs],
             inputs=[
@@ -727,6 +733,8 @@ class IKObjectiveJointLimit(IKObjective):
         jacobian: wp.array3d[wp.float32],
         joint_S_s: wp.array2d[wp.spatial_vector],
         start_idx: int,
+        *,
+        _launch=None,
     ) -> None:
         """Fill the limit Jacobian block with the piecewise-linear derivative.
 
@@ -745,7 +753,7 @@ class IKObjectiveJointLimit(IKObjective):
             start_idx: First residual row reserved for this objective.
         """
         count = joint_q.shape[0]
-        wp.launch(
+        (_launch if _launch is not None else wp.launch)(
             _limit_jac_analytic,
             dim=[count, self.n_dofs],
             inputs=[
@@ -997,6 +1005,8 @@ class IKObjectiveRotation(IKObjective):
         residuals: wp.array2d[wp.float32],
         start_idx: int,
         problem_idx: wp.array[wp.int32],
+        *,
+        _launch=None,
     ) -> None:
         """Write weighted orientation errors into the global residual buffer.
 
@@ -1015,7 +1025,7 @@ class IKObjectiveRotation(IKObjective):
                 indices, shape [n_batch], used to fetch ``target_rotations``.
         """
         count = body_q.shape[0]
-        wp.launch(
+        (_launch if _launch is not None else wp.launch)(
             _rot_residuals,
             dim=count,
             inputs=[
@@ -1085,6 +1095,8 @@ class IKObjectiveRotation(IKObjective):
         jacobian: wp.array3d[wp.float32],
         joint_S_s: wp.array2d[wp.spatial_vector],
         start_idx: int,
+        *,
+        _launch=None,
     ) -> None:
         """Fill the rotation Jacobian block from the analytic motion subspace.
 
@@ -1103,7 +1115,7 @@ class IKObjectiveRotation(IKObjective):
         """
         n_dofs = model.joint_dof_count
 
-        wp.launch(
+        (_launch if _launch is not None else wp.launch)(
             _rot_jac_analytic,
             dim=[body_q.shape[0], n_dofs],
             inputs=[

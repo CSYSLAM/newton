@@ -3,7 +3,7 @@
 ## Scope and method
 
 Investigated `example_mjvbd_v2_cloth_twist.py` and
-`example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00.py`
+`example_mjvbd_v2_tshirt_fold.py`
 on RTX 5090 D v2, Warp 1.17.0. No production solver or example settings
 were changed for this investigation. Existing uncommitted changes remain.
 

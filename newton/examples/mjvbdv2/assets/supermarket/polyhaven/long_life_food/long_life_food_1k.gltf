@@ -1,0 +1,410 @@
+{
+  "asset": {
+    "generator": "Khronos glTF Blender I/O v5.1.20",
+    "version": "2.0"
+  },
+  "scene": 0,
+  "scenes": [
+    {
+      "name": "Scene",
+      "nodes": [
+        0,
+        1,
+        2,
+        3
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "mesh": 0,
+      "name": "long_life_food_milk",
+      "translation": [
+        0.1900000423192978,
+        0,
+        0
+      ]
+    },
+    {
+      "mesh": 1,
+      "name": "long_life_food_tomatoes",
+      "translation": [
+        -0.06999997794628143,
+        0,
+        0
+      ]
+    },
+    {
+      "mesh": 2,
+      "name": "long_life_food_beans",
+      "translation": [
+        0.060000017285346985,
+        0,
+        0
+      ]
+    },
+    {
+      "mesh": 3,
+      "name": "long_life_food_sardines",
+      "translation": [
+        -0.2199999839067459,
+        0,
+        0
+      ]
+    }
+  ],
+  "materials": [
+    {
+      "doubleSided": true,
+      "name": "long_life_food",
+      "normalTexture": {
+        "index": 0
+      },
+      "pbrMetallicRoughness": {
+        "baseColorTexture": {
+          "index": 1
+        },
+        "metallicRoughnessTexture": {
+          "index": 2
+        }
+      }
+    }
+  ],
+  "meshes": [
+    {
+      "name": "Cube.003",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 0,
+            "NORMAL": 1,
+            "TEXCOORD_0": 2
+          },
+          "indices": 3,
+          "material": 0
+        }
+      ]
+    },
+    {
+      "name": "Cylinder.002",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 4,
+            "NORMAL": 5,
+            "TEXCOORD_0": 6
+          },
+          "indices": 7,
+          "material": 0
+        }
+      ]
+    },
+    {
+      "name": "Cylinder.004",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 8,
+            "NORMAL": 9,
+            "TEXCOORD_0": 10
+          },
+          "indices": 11,
+          "material": 0
+        }
+      ]
+    },
+    {
+      "name": "Cube.006",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 12,
+            "NORMAL": 13,
+            "TEXCOORD_0": 14
+          },
+          "indices": 15,
+          "material": 0
+        }
+      ]
+    }
+  ],
+  "textures": [
+    {
+      "sampler": 0,
+      "source": 0
+    },
+    {
+      "sampler": 0,
+      "source": 1
+    },
+    {
+      "sampler": 0,
+      "source": 2
+    }
+  ],
+  "images": [
+    {
+      "mimeType": "image/jpeg",
+      "name": "long_life_food_nor_gl",
+      "uri": "textures/long_life_food_nor_gl_1k.jpg"
+    },
+    {
+      "mimeType": "image/jpeg",
+      "name": "long_life_food_diff",
+      "uri": "textures/long_life_food_diff_1k.jpg"
+    },
+    {
+      "mimeType": "image/jpeg",
+      "name": "long_life_food_metal-long_life_food_rough",
+      "uri": "textures/long_life_food_arm_1k.jpg"
+    }
+  ],
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 154,
+      "max": [
+        0.04812280088663101,
+        0.2359233796596527,
+        0.035357486456632614
+      ],
+      "min": [
+        -0.051941849291324615,
+        -0.0016512051224708557,
+        -0.03621158003807068
+      ],
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 154,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 2,
+      "componentType": 5126,
+      "count": 154,
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 3,
+      "componentType": 5123,
+      "count": 348,
+      "type": "SCALAR"
+    },
+    {
+      "bufferView": 4,
+      "componentType": 5126,
+      "count": 1348,
+      "max": [
+        0.05680276080965996,
+        0.11859986931085587,
+        0.056778278201818466
+      ],
+      "min": [
+        -0.05680270120501518,
+        -7.450580596923828e-9,
+        -0.056778281927108765
+      ],
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 5,
+      "componentType": 5126,
+      "count": 1348,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 6,
+      "componentType": 5126,
+      "count": 1348,
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 7,
+      "componentType": 5123,
+      "count": 4536,
+      "type": "SCALAR"
+    },
+    {
+      "bufferView": 8,
+      "componentType": 5126,
+      "count": 1348,
+      "max": [
+        0.04412711039185524,
+        0.1475292444229126,
+        0.04406784847378731
+      ],
+      "min": [
+        -0.044127099215984344,
+        -9.2784704364135e-9,
+        -0.04406784847378731
+      ],
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 9,
+      "componentType": 5126,
+      "count": 1348,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 10,
+      "componentType": 5126,
+      "count": 1348,
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 11,
+      "componentType": 5123,
+      "count": 4536,
+      "type": "SCALAR"
+    },
+    {
+      "bufferView": 12,
+      "componentType": 5126,
+      "count": 1224,
+      "max": [
+        0.0656469315290451,
+        0.027514873072504997,
+        0.039799273014068604
+      ],
+      "min": [
+        -0.06564059108495712,
+        -5.840239403198666e-9,
+        -0.03979293256998062
+      ],
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 13,
+      "componentType": 5126,
+      "count": 1224,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 14,
+      "componentType": 5126,
+      "count": 1224,
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 15,
+      "componentType": 5123,
+      "count": 4716,
+      "type": "SCALAR"
+    }
+  ],
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteLength": 1848,
+      "byteOffset": 0,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 1848,
+      "byteOffset": 1848,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 1232,
+      "byteOffset": 3696,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 696,
+      "byteOffset": 4928,
+      "target": 34963
+    },
+    {
+      "buffer": 0,
+      "byteLength": 16176,
+      "byteOffset": 5624,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 16176,
+      "byteOffset": 21800,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 10784,
+      "byteOffset": 37976,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 9072,
+      "byteOffset": 48760,
+      "target": 34963
+    },
+    {
+      "buffer": 0,
+      "byteLength": 16176,
+      "byteOffset": 57832,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 16176,
+      "byteOffset": 74008,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 10784,
+      "byteOffset": 90184,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 9072,
+      "byteOffset": 100968,
+      "target": 34963
+    },
+    {
+      "buffer": 0,
+      "byteLength": 14688,
+      "byteOffset": 110040,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 14688,
+      "byteOffset": 124728,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 9792,
+      "byteOffset": 139416,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 9432,
+      "byteOffset": 149208,
+      "target": 34963
+    }
+  ],
+  "samplers": [
+    {
+      "magFilter": 9729,
+      "minFilter": 9987
+    }
+  ],
+  "buffers": [
+    {
+      "byteLength": 158640,
+      "uri": "long_life_food.bin"
+    }
+  ]
+}

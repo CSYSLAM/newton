@@ -1722,6 +1722,23 @@ def _texture_sample_sdf_hw_scalar(
 
 
 @wp.func
+def _texture_sample_sdf_value_exact(sdf: TextureSDFData, local_pos: wp.vec3) -> float:
+    """Match the gradient sampler's value arithmetic for sensitive line searches."""
+    clamped = wp.vec3(
+        wp.clamp(local_pos[0], sdf.sdf_box_lower[0], sdf.sdf_box_upper[0]),
+        wp.clamp(local_pos[1], sdf.sdf_box_lower[1], sdf.sdf_box_upper[1]),
+        wp.clamp(local_pos[2], sdf.sdf_box_lower[2], sdf.sdf_box_upper[2]),
+    )
+    diff_mag = wp.length(local_pos - clamped)
+    f = wp.cw_mul(clamped - sdf.sdf_box_lower, sdf.inv_sdf_dx)
+    corners, tx, ty, tz = _read_cell_corners(sdf, f)
+    value = _trilinear(corners, tx, ty, tz)
+    if diff_mag > 0.0:
+        value += diff_mag
+    return value
+
+
+@wp.func
 def texture_sample_sdf_grad(
     sdf: TextureSDFData,
     local_pos: wp.vec3,

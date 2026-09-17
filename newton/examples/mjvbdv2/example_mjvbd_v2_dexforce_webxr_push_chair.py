@@ -33,7 +33,7 @@ import warp as wp
 import newton
 import newton.examples
 
-from . import example_mjvbd_v2_dexforce_realtime_push_chair as push_chair
+from . import example_mjvbd_v2_push_chair as push_chair
 from ._webxr_teleop import (
     JsonlTrajectoryRecorder,
     LatestXRFrame,

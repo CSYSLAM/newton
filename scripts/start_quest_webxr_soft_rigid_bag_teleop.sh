@@ -13,5 +13,5 @@ export NEWTON_WEBXR_RUNTIME_NAME="newton-webxr-soft-rigid-bag-teleop"
 export NEWTON_WEBXR_STATE_NAME="newton-webxr-soft-rigid-bag-teleop"
 export NEWTON_WEBXR_SDF_CACHE=0
 export NEWTON_WEBXR_RELOAD_COMMAND="./scripts/reload_quest_webxr_soft_rigid_bag_teleop.sh"
-export NEWTON_WEBXR_RELOAD_SOURCES="${repo_root}/newton/examples/mjvbdv2/_webxr_teleop.py:${repo_root}/newton/examples/mjvbdv2/_webxr_w1_head.py:${repo_root}/newton/examples/mjvbdv2/example_vbd_mjvbd_v2_dexforce_recorded_soft_then_rigid_cube_into_bag_final00.py:${repo_root}/newton/examples/mjvbdv2/example_vbd_mjvbd_v2_dexforce_webxr_soft_then_rigid_cube_into_bag_final00.py"
+export NEWTON_WEBXR_RELOAD_SOURCES="${repo_root}/newton/examples/mjvbdv2/_webxr_teleop.py:${repo_root}/newton/examples/mjvbdv2/_webxr_w1_head.py:${repo_root}/newton/examples/mjvbdv2/example_mjvbd_v2_cubes_into_bag.py:${repo_root}/newton/examples/mjvbdv2/example_vbd_mjvbd_v2_dexforce_webxr_soft_then_rigid_cube_into_bag_final00.py"
 exec "${script_dir}/start_quest_webxr_teleop.sh" "$@"

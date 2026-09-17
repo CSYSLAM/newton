@@ -24,7 +24,7 @@ from newton.tests.unittest_utils import (
 # ----------------------------------------------------------------------------
 
 
-def _build_two_link_planar(device) -> newton.Model:
+def _build_two_link_planar(device, *, requires_grad=True) -> newton.Model:
     """Returns a singleton model with one 2-DOF planar arm."""
     builder = newton.ModelBuilder()
 
@@ -55,7 +55,7 @@ def _build_two_link_planar(device) -> newton.Model:
     # Create articulation from joints
     builder.add_articulation([joint1, joint2])
 
-    model = builder.finalize(device=device, requires_grad=True)
+    model = builder.finalize(device=device, requires_grad=requires_grad)
     return model
 
 

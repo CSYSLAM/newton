@@ -28,7 +28,7 @@ import newton
 import newton.examples
 import newton.ik as ik
 
-from . import example_mjvbd_v2_nonwoven_bag_table_drop as bag_scene
+from . import example_mjvbd_v2_bag_drop as bag_scene
 from ._webxr_teleop import (
     JsonlTrajectoryRecorder,
     LatestXRFrame,

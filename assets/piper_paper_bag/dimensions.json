@@ -1,0 +1,10 @@
+{
+  "body_width_m": 0.2,
+  "body_depth_m": 0.09,
+  "body_height_m": 0.26,
+  "handle_apex_m": 0.36,
+  "paper_thickness_m": 0.00032,
+  "cord_diameter_m": 0.004,
+  "authoring": "Blender 5.2 via MCP",
+  "reference": "User supplied two kraft shopping bag images"
+}

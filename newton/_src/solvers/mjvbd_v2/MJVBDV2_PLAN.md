@@ -497,15 +497,15 @@ The historical reference hashes are recorded in `BASELINES.md`.
 
 - `newton/examples/mjvbdv2/example_mjvbd_v2_cloth_twist.py`:
   joint-free pure VBD.
-- `newton/examples/mjvbdv2/example_vbd_inflatable_bag_v0.py` and
+- `newton/examples/mjvbdv2/support/example_vbd_inflatable_bag_v0.py` and
   `example_vbd_inflatable_bag_v1.py`: pneumatic shells.
-- `newton/examples/mjvbdv2/example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00.py`:
+- `newton/examples/mjvbdv2/example_mjvbd_v2_tshirt_fold.py`:
   prescribed bimanual kinematic cloth interaction.
-- `newton/examples/mjvbdv2/example_cloth_mjvbd_v2_dynamic_dexforce_bimanual_fold_tshirt_waic_house.py`:
+- `newton/examples/mjvbdv2/example_mjvbd_v2_tshirt_fold_dynamic.py`:
   dynamic MuJoCo articulation with one-way VBD cloth coupling.
-- `newton/examples/mjvbdv2/example_mjvbd_v2_supermarket_plastic_bag.py`:
+- `newton/examples/mjvbdv2/support/example_mjvbd_v2_supermarket_plastic_bag.py`:
   joint-free cloth and VBD rigid bodies.
-- `newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_bimanual_plastic_bag_rod_handoff.py`:
+- `newton/examples/mjvbdv2/support/example_mjvbd_v2_dexforce_bimanual_plastic_bag_rod_handoff.py`:
   kinematic hands, bag contacts, and staged support handoff.
 
 ## 14. Maintenance rules and extension boundary

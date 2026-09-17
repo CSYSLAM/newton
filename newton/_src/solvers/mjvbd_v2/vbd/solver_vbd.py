@@ -40,6 +40,7 @@ from ..particle_multilevel import (
 )
 from . import particle_vbd_kernels, rigid_vbd_kernels, vbd_coupling_kernels
 from .particle_vbd_kernels import (
+    _PARTICLE_CONTACT_WORKER_COUNT,
     NUM_THREADS_PER_COLLISION_PRIMITIVE,
     TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
     # Solver kernels (particle VBD)
@@ -52,6 +53,7 @@ from .particle_vbd_kernels import (
     # Planar DAT (Divide and Truncate) kernels
     apply_planar_truncation_parallel_by_collision,
     apply_truncation_ts,
+    apply_untruncated_displacements,
     build_particle_body_contact_adjacency_active,
     build_particle_body_contact_color_masks,
     expand_particle_iteration_chebyshev_exclusions,
@@ -66,6 +68,7 @@ from .particle_vbd_kernels import (
 from .rigid_vbd_kernels import (
     _BODY_PARTICLE_CONTACT_BLOCK_DIM,
     _NUM_CONTACT_THREADS_PER_BODY,
+    _NUM_RIGID_CONTACT_THREADS_PER_BODY,
     RigidContactHistory,
     RigidForceElementAdjacencyInfo,
     _count_num_adjacent_joints,
@@ -73,6 +76,7 @@ from .rigid_vbd_kernels import (
     accumulate_body_body_contacts_per_body,
     accumulate_body_particle_contact_dense_partials,
     accumulate_body_particle_contact_dense_reduction,
+    accumulate_body_particle_contact_dense_single,
     accumulate_body_particle_contacts_per_body,
     build_body_body_contact_lists,
     build_body_particle_contact_lists,
@@ -242,6 +246,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         model: Model,
         *,
         # Common parameters
+        enable_cuda_fast_path: bool = False,
         iterations: int = 10,
         friction_epsilon: float = 1e-2,
         integrate_with_external_rigid_solver: bool = False,
@@ -281,23 +286,28 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_multilevel_max_clamp_fraction: float | None = None,
         particle_multilevel_fallback_iterations: int | None = None,
         particle_multilevel_checkpoints: tuple[int, ...] | None = None,
+        particle_enable_coupled_translation: bool = False,
         particle_topological_contact_filter_threshold: int = 2,
         particle_rest_shape_contact_exclusion_radius: float = 0.0,
         particle_external_vertex_contact_filtering_map: dict | None = None,
         particle_external_edge_contact_filtering_map: dict | None = None,
         # Pneumatic parameters
         pneumatic_enable_incremental_volume: bool = False,
+        pneumatic_enable_color_coupling: bool = False,
         # Rigid body parameters - AVBD hyperparameters
         rigid_avbd_alpha: float = 0.95,  # C0 stabilization strength (C_stab = C - alpha * C0)
         rigid_avbd_joint_alpha: float | None = None,  # Joint alpha override; None uses rigid_avbd_alpha
         rigid_avbd_contact_alpha: float | None = None,  # Body-body contact alpha; None selects default
         rigid_avbd_beta: float = 0.0,  # Penalty ramp rate per iteration (0 = fixed-k)
         rigid_avbd_linear_beta: float | None = None,  # Linear beta override; None uses rigid_avbd_beta
+        rigid_avbd_contact_beta: float | None = None,  # Body-body override; None uses linear beta
         rigid_avbd_angular_beta: float | None = None,  # Angular beta override; None uses rigid_avbd_beta
         rigid_avbd_gamma: float = 0.999,  # Per-step decay for penalty k and persisted hard-mode lambda
         # Rigid body - contacts
         rigid_contact_hard: bool = True,  # Body-body contacts: hard=AL duals+C0, soft=penalty only
         rigid_contact_history: bool = False,  # Body-body contact warm-start (hard: k+duals+anchors; soft: k)
+        rigid_enable_sleep: bool = False,
+        rigid_contact_grouping: bool = False,
         rigid_contact_stick_motion_eps: float = 1.0e-4,  # Sticky contact residual threshold; 0 disables point replay
         rigid_contact_stick_freeze_translation_eps: float = 1.0e-4,  # Deadzone snap translation threshold; 0 disables snap
         rigid_contact_stick_freeze_angular_eps: float = 1.0e-4,  # Deadzone snap angular threshold; 0 disables snap
@@ -320,6 +330,17 @@ class SolverVBD(SolverBase, CouplingInterface):
 
             Common parameters:
 
+            enable_cuda_fast_path: Experimental instance-local CUDA scheduling for non-differentiable,
+                non-deterministic full VBD. Preserves contact laws and iteration budgets. Eligible surface
+                tiles use certified empty-self-contact batching; unsupported cases use ordinary sweeps.
+                Recreate captured graphs after model-property changes, as for other solver caches.
+            rigid_contact_grouping: Experimental five-group contact-aware scheduling for 5--704 free bodies.
+                Requires CUDA SM80+ and internal, non-differentiable integration. Same-group contacts
+                retain the existing majorizer; this is not guaranteed proper graph coloring.
+            rigid_enable_sleep: Experimental supported free-body island sleeping. Non-free joints remain active.
+                Uses a mass-normalized energy threshold of 0.005 m^2/s^2 and a 0.4 s wake counter, without
+                stabilization damping. Call reset after manual pose/shape edits; moving kinematic supports
+                must provide consistent velocities. Dense adjacency is limited to 32 MiB. Default False.
             iterations: Number of VBD iterations per step.
             friction_epsilon: Threshold to smooth small relative velocities in friction computation (used for both particle
                 and rigid body contacts).
@@ -383,6 +404,9 @@ class SolverVBD(SolverBase, CouplingInterface):
                 elastic anisotropy but rebuilds a block-sparse operator for each correction. Models with movable
                 tetrahedral clusters retain the six-DOF mixed/tet operator regardless of this surface-only option.
             particle_multilevel_cluster_size: Target number of topologically adjacent particles per coarse cluster.
+            particle_enable_coupled_translation: Experimental full-space cloth/free-body translation PCG correction.
+                Requires explicit Galerkin multilevel, CUDA, movable particles, soft contacts and free solved bodies.
+                Body rotations retain the ordinary local solve. Disabled by default; not an articulation/tet solver.
             particle_multilevel_coarse_iterations: Number of fixed PCG iterations on the coarse graph.
             particle_multilevel_selective_polish_iterations: Additional fine sweeps restricted to unresolved surface
                 particles selected by the coarse residual probe. Zero disables selective polishing.
@@ -420,6 +444,8 @@ class SolverVBD(SolverBase, CouplingInterface):
 
             Pneumatic parameters:
 
+            pneumatic_enable_color_coupling: Experimental coupled color solve for one target-volume cavity.
+                Requires particle tile solves, independent triangle colors, and no tetrahedra.
             pneumatic_enable_incremental_volume: Cache per-face cavity-volume contributions and update only the unique
                 faces incident to the particle color that just moved. The optimized path is currently available only
                 for non-differentiable, non-deterministic CUDA models and otherwise uses full volume recomputation.
@@ -443,6 +469,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                 for production tuning.
             rigid_avbd_linear_beta: Linear beta override for linear constraints (meters).
                 ``None`` (default) uses ``rigid_avbd_beta``.
+            rigid_avbd_contact_beta: Experimental body-body penalty growth override [N/m^2].
+                ``None`` preserves the linear beta. Zero selects fixed material stiffness.
+                Does not change joint or body-particle penalties; this allows ramped
+                small-rigid contacts alongside fixed-stiffness deformable contacts.
             rigid_avbd_angular_beta: Angular beta override for angular constraints (radians).
                 ``None`` (default) uses ``rigid_avbd_beta``.
             rigid_avbd_gamma: Per-step decay factor for penalty k and persisted hard-mode lambda. Hard joint/contact
@@ -471,9 +501,10 @@ class SolverVBD(SolverBase, CouplingInterface):
             rigid_contact_stick_freeze_angular_eps: Angular threshold [rad] for the body-level
                 deadzone snap on dynamic-dynamic sticking contacts. Set to ``0.0`` to disable
                 angular snapping.
-            rigid_contact_k_start: Body-body and body-particle contact penalty seed for AVBD ramping. Used when
-                ``rigid_avbd_linear_beta`` (or ``rigid_avbd_beta`` fallback) is greater than zero.
-                When the linear beta is 0, k is fixed at the contact stiffness regardless of this value.
+            rigid_contact_k_start: Contact penalty seed [N/m] when AVBD ramping is enabled.
+                Body-body contacts use the resolved ``rigid_avbd_contact_beta``; body-particle contacts
+                use ``rigid_avbd_linear_beta`` (or ``rigid_avbd_beta`` fallback). A zero growth rate
+                fixes the corresponding penalty at material stiffness, ignoring this seed.
             rigid_body_contact_buffer_size: Max body-body contacts per rigid body for per-body contact lists.
             rigid_body_particle_contact_buffer_size: Max body-particle soft contacts tracked per rigid
                 body, covering both particle-vs-surface and full-surface edge/face contacts.
@@ -534,6 +565,8 @@ class SolverVBD(SolverBase, CouplingInterface):
         gather_head_size = model.particle_count if self._particle_contact_gather_supported else 0
         self._particle_contact_head = wp.full(gather_head_size, -1, dtype=wp.int32, device=self.device)
         self._particle_contact_next = wp.empty(0, dtype=wp.int32, device=self.device)
+        self.particle_enable_coupled_translation = bool(particle_enable_coupled_translation)
+        self._coupled_fusion = None
         self._particle_contact_adjacency_initialized = False
         particle_deterministic_max_records = 0
         coupling_deterministic_max_records = 0
@@ -665,6 +698,7 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         # Pneumatic state is wholly opt-in. Models without cavity rows do not
         # configure its kernel module or allocate any pneumatic arrays.
+        self._pneumatic_color_coupling = False
         self._pneumatic_enabled = False
         self._pneumatic_cavity_count = 0
         self._pneumatic_face_count = 0
@@ -679,6 +713,28 @@ class SolverVBD(SolverBase, CouplingInterface):
                 effective_deterministic,
                 pneumatic_enable_incremental_volume,
             )
+
+        if pneumatic_enable_color_coupling:
+            pneumatic = getattr(model, "pneumatic", None)
+            if (
+                pneumatic_cavity_count != 1
+                or int(pneumatic.mode.numpy()[0]) != 2
+                or not self.use_particle_tile_solve
+                or not model.device.is_cuda
+                or model.tet_count
+                or model.requires_grad
+            ):
+                raise ValueError(
+                    "Pneumatic color coupling requires one target-volume surface cavity and CUDA tile solves."
+                )
+            colors = model.particle_colors.numpy()[model.tri_indices.numpy()]
+            if np.any((colors[:, 0] == colors[:, 1]) | (colors[:, 0] == colors[:, 2]) | (colors[:, 1] == colors[:, 2])):
+                raise ValueError("Pneumatic color coupling requires distinct colors within every triangle.")
+            self._pneumatic_color_coupling = True
+            self._pneumatic_single_cavity_force_fusion_enabled = False
+            self._pneumatic_color_gradient = wp.zeros(model.particle_count, dtype=wp.vec3, device=self.device)
+            self._pneumatic_color_displacement = wp.zeros(model.particle_count, dtype=wp.vec3, device=self.device)
+            self._pneumatic_color_hessian = wp.zeros(model.particle_count, dtype=wp.mat33, device=self.device)
 
         self._particle_truncation_cache = None
         if (
@@ -699,6 +755,7 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         self.surface_anchor_angles = None
         self._surface_cached_kernel = None
+        self._pneumatic_surface_kernel = None
         if (
             particle_enable_surface_cache
             and model.particle_count > 0
@@ -714,6 +771,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                 {"deterministic": effective_deterministic, "deterministic_max_records": 0},
                 module=particle_surface_cache,
             )
+            if self._pneumatic_color_coupling:
+                self._pneumatic_surface_kernel = particle_surface_cache.make_surface_kernel(
+                    particle_vbd_kernels.evaluate_neo_hookean_membrane_force_hessian, export_hessian=True
+                )
         if self.particle_multilevel is not None and self.particle_multilevel.selective_polish_iterations:
             if self._surface_cached_kernel is None or any(
                 group.size for group in self.volumetric_particle_color_groups
@@ -729,6 +790,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             rigid_avbd_gamma,
             rigid_avbd_joint_alpha,
             rigid_avbd_contact_alpha,
+            rigid_avbd_contact_beta,
             rigid_contact_hard,
             rigid_contact_history,
             rigid_contact_stick_motion_eps,
@@ -745,12 +807,74 @@ class SolverVBD(SolverBase, CouplingInterface):
             rigid_joint_angular_kd,
         )
 
+        self.enable_cuda_fast_path = bool(
+            enable_cuda_fast_path
+            and self.device.is_cuda
+            and not model.requires_grad
+            and effective_deterministic == wp.DeterministicMode.NOT_GUARANTEED
+        )
+        self._cuda_surface = None
+        self._self_contact_certificate = None
+        if self.enable_cuda_fast_path:
+            from ..fast_path import SelfContactCertificate, SurfaceFastPath  # noqa: PLC0415
+
+            self._cuda_surface = SurfaceFastPath(self)
+            if self.particle_enable_self_contact:
+                self._self_contact_certificate = SelfContactCertificate(self)
+
         # Controls whether the next step() refreshes contact state derived from
         # the Contacts buffer or reuses the current rigid/body-particle contact state.
         # Defaults to True and is reset to True when consumed by step().
         self._update_rigid_history = True
 
         self._coupling_has_rigid_avbd_state = not self.integrate_with_external_rigid_solver and model.body_count > 0
+        if self.particle_enable_coupled_translation:
+            from ..coupled_free_body.coupled_translation import CoupledTranslationPCG  # noqa: PLC0415
+            from ..coupled_free_body.rigid_fusion import RigidFusionAdapter  # noqa: PLC0415
+            from ..coupled_free_body.rigid_ritz import RigidRitz  # noqa: PLC0415
+
+            correction = self.particle_multilevel
+            if (
+                correction is None
+                or correction.operator != "galerkin"
+                or model.tet_count
+                or _get_pneumatic_counts(model)[0]
+                or self.integrate_with_external_rigid_solver
+                or not model.body_count
+                or not model.tri_count
+                or correction.active_particle_count != model.particle_count
+            ):
+                raise ValueError(
+                    "Coupled translation requires CUDA Galerkin cloth with movable particles and free bodies"
+                )
+            self._coupled_fusion = RigidFusionAdapter(wp.launch, model, cooperative=self.enable_cuda_fast_path)
+            ritz = RigidRitz(model, correction, particle_multilevel_cluster_size)
+            correction._coupled_solver = CoupledTranslationPCG(
+                self, correction, ritz, self._coupled_fusion, component_step_limits=rigid_enable_sleep
+            )
+            correction.coarse_use_split_pcg = True
+            correction._split_coarse_pcg = correction._coupled_solver
+
+        self._rigid_sleep = None
+        self._rigid_sleep_contacts = None
+        if rigid_enable_sleep:
+            if self.integrate_with_external_rigid_solver or model.requires_grad:
+                raise ValueError("Rigid sleeping requires internally integrated, non-differentiable bodies")
+            if model.body_count:
+                from ..rigid_sleep import RigidBodySleep  # noqa: PLC0415
+
+                self._rigid_sleep = RigidBodySleep(self)
+
+        self._rigid_contact_groups = None
+        if rigid_contact_grouping:
+            if self.integrate_with_external_rigid_solver or model.requires_grad:
+                raise ValueError("Rigid contact grouping requires internal, non-differentiable integration")
+            from ..rigid_contact_groups import BalancedRigidContactGroups  # noqa: PLC0415
+
+            self._rigid_contact_groups = BalancedRigidContactGroups(self)
+
+    # Set by the MJVBDV2 adapter, which owns detection-time contact snapshots.
+    _rigid_soft_dat = None
 
     def _init_particle_system(
         self,
@@ -879,15 +1003,17 @@ class SolverVBD(SolverBase, CouplingInterface):
         if model.device.is_cpu and particle_enable_tile_solve and wp.config.log_level <= wp.LOG_DEBUG:
             print("Info: Tiled solve requires model.device='cuda'. Tiled solve is disabled.")
 
-        elasticity_groups = [
-            group
-            for group in (*self.surface_particle_color_groups, *self.volumetric_particle_color_groups)
-            if group.size > 0
-        ]
+        # Each particle owns a complete tile (launch size = group.size * tile size).
+        # Even a singleton group is valid; a small tet group must not disable the
+        # tiled surface solve for all the other particles in a mixed model. Keep
+        # the scalar path for tiny models where every group is undersubscribed.
         self.use_particle_tile_solve = (
             particle_enable_tile_solve
             and model.device.is_cuda
-            and all(group.size >= TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE for group in elasticity_groups)
+            and any(
+                group.size >= TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
+                for group in (*self.surface_particle_color_groups, *self.volumetric_particle_color_groups)
+            )
         )
         multilevel_supported = (
             multilevel_mode != "off"
@@ -916,6 +1042,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 max_radius_fraction=particle_multilevel_max_radius_fraction,
                 minimum_residual_reduction=minimum_residual_reduction,
                 max_clamp_fraction=max_clamp_fraction,
+                full_space=self.particle_enable_coupled_translation,
             )
             if multilevel_mode == "auto":
                 self.particle_multilevel_auto_rejection_reason = _automatic_rejection_reason(model, correction)
@@ -1147,13 +1274,23 @@ class SolverVBD(SolverBase, CouplingInterface):
         triangle_indices = np.asarray(model.tri_indices.numpy(), dtype=np.int32)
         face_particles = triangle_indices[face_triangles].reshape(-1)
         particle_faces = np.repeat(np.arange(face_count, dtype=np.int32), 3)
-        order = np.argsort(face_particles, kind="stable")
+        # Group a vertex's faces by cavity so pressure blocks include cross-face terms.
+        order = np.lexsort((particle_faces, face_cavities[particle_faces], face_particles))
         counts = np.bincount(face_particles, minlength=model.particle_count)
         offsets = np.empty(model.particle_count + 1, dtype=np.int32)
         offsets[0] = 0
         np.cumsum(counts, dtype=np.int32, out=offsets[1:])
         self._pneumatic_particle_face_offsets = wp.array(offsets, dtype=wp.int32, device=self.device)
         self._pneumatic_particle_faces = wp.array(particle_faces[order], dtype=wp.int32, device=self.device)
+
+        # Only cavity vertices receive pressure. Retain each model color's order
+        # and empty rows so volume updates still follow every elasticity color.
+        self._pneumatic_particle_color_groups = []
+        for group in model.particle_color_groups:
+            particles = group.numpy()
+            self._pneumatic_particle_color_groups.append(
+                wp.array(particles[counts[particles] > 0], dtype=wp.int32, device=self.device)
+            )
 
         self._pneumatic_incremental_volume_enabled = (
             enable_incremental_volume
@@ -1205,11 +1342,108 @@ class SolverVBD(SolverBase, CouplingInterface):
             )
             self._pneumatic_face_volume_contribution = wp.zeros(face_count, dtype=float, device=self.device)
             self._pneumatic_cavity_anchor_positions = wp.zeros(cavity_count, dtype=wp.vec3, device=self.device)
-            largest_color = max((group.size for group in model.particle_color_groups), default=0)
+            largest_color = max((group.size for group in self._pneumatic_particle_color_groups), default=0)
             self._pneumatic_single_cavity_force_fusion_enabled = (
                 cavity_count == 1
                 and largest_color <= self._pneumatic_kernels._PNEUMATIC_SINGLE_CAVITY_FUSED_MAX_PARTICLES
             )
+
+    def _solve_pneumatic_color(self, state: State, control: Control, dt: float, color: int) -> None:
+        """Solve local elasticity followed by a clamped rank-one pressure correction."""
+        model = self.model
+        group = model.particle_color_groups[color]
+        if self._pneumatic_surface_kernel is not None:
+            wp.copy(self._pneumatic_color_hessian, self.particle_hessians)
+            wp.launch(
+                self._pneumatic_surface_kernel,
+                dim=group.size * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                block_dim=TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                inputs=[
+                    dt,
+                    group,
+                    self.particle_q_prev,
+                    state.particle_q,
+                    model.particle_mass,
+                    self.inertia,
+                    model.particle_flags,
+                    model.tri_indices,
+                    model.tri_poses,
+                    model.tri_materials,
+                    model.tri_areas,
+                    model.edge_indices,
+                    model.edge_rest_angle,
+                    model.edge_rest_length,
+                    model.edge_bending_properties,
+                    self.particle_adjacency,
+                    self.particle_forces,
+                    self._pneumatic_color_hessian,
+                    self.surface_tile_skip_active_checks,
+                    self.surface_tile_skip_material_checks,
+                    1.0,
+                    self.surface_anchor_angles,
+                    None,
+                ],
+                outputs=[self.particle_displacements],
+                device=self.device,
+            )
+        else:
+            wp.launch(
+                solve_elasticity_tile,
+                dim=group.size * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                block_dim=TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                inputs=[
+                    dt,
+                    group,
+                    self.particle_q_prev,
+                    state.particle_q,
+                    model.particle_mass,
+                    self.inertia,
+                    model.particle_flags,
+                    model.tri_indices,
+                    model.tri_poses,
+                    model.tri_materials,
+                    model.tri_areas,
+                    model.edge_indices,
+                    model.edge_rest_angle,
+                    model.edge_rest_length,
+                    model.edge_bending_properties,
+                    model.tet_indices,
+                    model.tet_poses,
+                    model.tet_materials,
+                    self.particle_adjacency,
+                    self.particle_forces,
+                    self.particle_hessians,
+                    True,
+                    self._pneumatic_color_hessian,
+                ],
+                outputs=[self.particle_displacements],
+                device=self.device,
+            )
+        pneumatic = model.pneumatic
+        wp.launch(
+            self._pneumatic_kernels.correct_coupled_color,
+            dim=256,
+            block_dim=256,
+            inputs=[
+                group,
+                self._pneumatic_color_gradient,
+                self._pneumatic_color_hessian,
+                self._pneumatic_color_displacement,
+                self._pneumatic_volume,
+                self._pneumatic_previous_volume,
+                self._pneumatic_gauge_pressure,
+                dt,
+                pneumatic.target_volume,
+                pneumatic.volume_stiffness,
+                pneumatic.bulk_damping,
+                pneumatic.ambient_pressure,
+                pneumatic.max_absolute_pressure,
+                control.pneumatic.pressure_scale,
+                control.pneumatic.target_volume_scale,
+            ],
+            outputs=[self.particle_displacements],
+            device=self.device,
+        )
 
     def _evaluate_pneumatic_cavities(self, particle_q: wp.array[wp.vec3], control: Control, dt: float) -> None:
         """Evaluate cavity volume and pressure at the current VBD iterate."""
@@ -1515,6 +1749,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         rigid_avbd_gamma: float,
         rigid_avbd_joint_alpha: float | None,
         rigid_avbd_contact_alpha: float | None,
+        rigid_avbd_contact_beta: float | None,
         rigid_contact_hard: bool,
         rigid_contact_history: bool,
         rigid_contact_stick_motion_eps: float,
@@ -1571,6 +1806,11 @@ class SolverVBD(SolverBase, CouplingInterface):
         if rigid_joint_angular_ke < 0:
             raise ValueError(f"rigid_joint_angular_ke must be >= 0, got {rigid_joint_angular_ke}")
         self.rigid_avbd_gamma = rigid_avbd_gamma
+        contact_beta = rigid_avbd_linear_beta if rigid_avbd_contact_beta is None else rigid_avbd_contact_beta
+        if not np.isfinite(contact_beta) or contact_beta < 0:
+            raise ValueError(f"rigid_avbd_contact_beta must be finite and >= 0, got {contact_beta}")
+        self.rigid_contact_beta = float(contact_beta)
+        self.rigid_body_contact_k_start_value = -1.0 if contact_beta == 0.0 else float(rigid_contact_k_start)
         self.rigid_contact_k_start_value = -1.0 if rigid_avbd_linear_beta == 0.0 else float(rigid_contact_k_start)
         self.rigid_joint_linear_k_start = rigid_joint_linear_k_start if rigid_avbd_linear_beta > 0.0 else None
         self.rigid_joint_angular_k_start = rigid_joint_angular_k_start if rigid_avbd_angular_beta > 0.0 else None
@@ -1783,6 +2023,14 @@ class SolverVBD(SolverBase, CouplingInterface):
 
     @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
+        if self._rigid_sleep is not None:
+            self._rigid_sleep.reset()
+        if self._self_contact_certificate is not None:
+            self._self_contact_certificate.invalidate()
+        if self._cuda_surface is not None and flags & ModelFlags.MODEL_PROPERTIES:
+            from ..fast_path import SurfaceFastPath  # noqa: PLC0415
+
+            self._cuda_surface = SurfaceFastPath(self)
         self._apply_module_options()
         if flags & (ModelFlags.BODY_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES):
             self._refresh_kinematic_state()
@@ -1792,6 +2040,8 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self.surface_tile_skip_active_checks,
                     self.surface_tile_skip_material_checks,
                 ) = self._compute_surface_tile_fast_path_flags()
+        if self._rigid_sleep is not None:
+            self._rigid_sleep.refresh_eligibility()
 
     @override
     def coupling_supports_inertial_property_refresh(self) -> bool:
@@ -2779,6 +3029,8 @@ class SolverVBD(SolverBase, CouplingInterface):
             RuntimeError: If required rigid contact-matching data is unavailable, or contact-history storage would
                 need to be allocated or grown during CUDA graph capture.
         """
+        if self._coupled_fusion is not None and contacts is None:
+            raise ValueError("Coupled translation requires a Contacts buffer (an empty active contact set is valid)")
         self._apply_module_options()
         update_rigid = self._update_rigid_history
         self._update_rigid_history = True
@@ -2795,12 +3047,19 @@ class SolverVBD(SolverBase, CouplingInterface):
             if state_in.body_qd is not None and state_out.body_qd is not None:
                 wp.copy(state_out.body_qd, state_in.body_qd)
 
+        if self._rigid_soft_dat is not None:
+            self._rigid_soft_dat.begin(state_in, contacts)
         self._initialize_rigid_bodies(state_in, control, contacts, dt, update_rigid)
+        if self._rigid_soft_dat is not None:
+            self._rigid_soft_dat.apply(self)
         self._initialize_particles(state_in, state_out, dt)
 
-        for iter_num in range(self.iterations):
-            self._solve_rigid_body_iteration(state_in, state_out, control, contacts, dt)
-            self._solve_particle_iteration(state_in, state_out, control, contacts, dt, iter_num)
+        if self._cuda_surface is not None:
+            self._cuda_surface.iterations(self, state_in, state_out, control, contacts, dt)
+        else:
+            for iter_num in range(self.iterations):
+                self._solve_rigid_body_iteration(state_in, state_out, control, contacts, dt)
+                self._solve_particle_iteration(state_in, state_out, control, contacts, dt, iter_num)
 
         correction = self.particle_multilevel
         if correction is not None:
@@ -3020,6 +3279,11 @@ class SolverVBD(SolverBase, CouplingInterface):
             device=self.device,
         )
 
+        if self._rigid_sleep is not None:
+            self._rigid_sleep.reset(world_mask)
+        if self._rigid_contact_groups is not None:
+            self._rigid_contact_groups.reset()
+
     def _snapshot_rigid_contact_history(self, contacts: Contacts | None):
         """Write solved contact state for next frame's match-index warm-start."""
         if not self.rigid_contact_history or contacts is None:
@@ -3065,31 +3329,25 @@ class SolverVBD(SolverBase, CouplingInterface):
             device=self.device,
         )
 
-    def _penetration_free_truncation(self, particle_q_out=None):
+    def _penetration_free_truncation(self, particle_q_out=None, *, empty_contact_set=False):
+        self._penetration_free_truncation_impl(particle_q_out, empty_contact_set=empty_contact_set)
+        if self._rigid_soft_dat is not None:
+            self._rigid_soft_dat.apply(self)
+
+    def _penetration_free_truncation_impl(self, particle_q_out=None, *, empty_contact_set=False):
         """
         Modify displacements_in in-place, also modify particle_q if its not None
 
         """
         if self._particle_truncation_cache is not None:
-            self._particle_truncation_cache.apply(self, particle_q_out, None)
+            self._particle_truncation_cache.apply(self, particle_q_out, None, empty_contact_set=empty_contact_set)
             return
         if not self.particle_enable_self_contact:
-            self.truncation_ts.fill_(1.0)
             wp.launch(
-                kernel=apply_truncation_ts,
+                kernel=apply_untruncated_displacements,
                 dim=self.model.particle_count,
-                inputs=[
-                    self.pos_prev_collision_detection,  # pos: wp.array[wp.vec3],
-                    self.particle_displacements,  # displacement_in: wp.array[wp.vec3],
-                    self.truncation_ts,  # truncation_ts: wp.array[float],
-                    wp.inf,  # max_displacement: float (input threshold)
-                ],
-                outputs=[
-                    self.particle_displacements,  # displacement_out: wp.array[wp.vec3],
-                    particle_q_out,  # pos_out: wp.array[wp.vec3],
-                    self.particle_chebyshev_collided if self.particle_chebyshev_guarded else None,
-                    self.particle_chebyshev_cleanup_status,
-                ],
+                inputs=[self.pos_prev_collision_detection, self.particle_displacements],
+                outputs=[self.truncation_ts, particle_q_out],
                 device=self.device,
             )
 
@@ -3206,6 +3464,9 @@ class SolverVBD(SolverBase, CouplingInterface):
         first-time allocation or resizing.
         """
         model = self.model
+        if self._rigid_sleep is not None:
+            self._rigid_sleep_contacts = contacts
+            self._rigid_sleep.update(state_in, state_in, contacts, dt, before=True)
         internal_rigid = model.body_count > 0 and not self.integrate_with_external_rigid_solver
         rigid_capacity = contacts.rigid_contact_max if contacts is not None else 0
 
@@ -3319,7 +3580,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                                 model.shape_world,
                                 model.shape_body,
                                 model.body_world,
-                                self.rigid_contact_k_start_value,
+                                self.rigid_body_contact_k_start_value,
                             ],
                             outputs=[
                                 contacts.rigid_contact_point0,
@@ -3344,7 +3605,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                                 model.shape_material_ke,
                                 model.shape_material_kd,
                                 model.shape_material_mu,
-                                self.rigid_contact_k_start_value,
+                                self.rigid_body_contact_k_start_value,
                             ],
                             outputs=[
                                 self.body_body_contact_penalty_k,
@@ -3391,7 +3652,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         contact_lambda_decay,
                         self.rigid_avbd_gamma,
                         self.body_body_contact_material_ke,
-                        self.rigid_contact_k_start_value,
+                        self.rigid_body_contact_k_start_value,
                     ],
                     outputs=[
                         self.body_body_contact_penalty_k,
@@ -3645,6 +3906,9 @@ class SolverVBD(SolverBase, CouplingInterface):
                 device=self.device,
             )
 
+        if self._rigid_contact_groups is not None:
+            self._rigid_contact_groups.update(state_in, contacts)
+
     def _solve_particle_selective_polish(self, state_in: State, dt: float) -> None:
         """Apply one frozen-contact multiplicative Schwarz sweep to the active surface set."""
         correction = self.particle_multilevel
@@ -3702,6 +3966,9 @@ class SolverVBD(SolverBase, CouplingInterface):
         contacts: Contacts | None,
         dt: float,
         iter_num: int,
+        *,
+        _fused: bool = False,
+        _skip_detection: bool = False,
     ):
         """Solve one VBD iteration for particles."""
         model = self.model
@@ -3731,16 +3998,27 @@ class SolverVBD(SolverBase, CouplingInterface):
             self.particle_chebyshev_previous.assign(state_in.particle_q)
 
         # Update collision detection if needed (penetration-free mode only)
-        if self.particle_enable_self_contact:
+        if self.particle_enable_self_contact and not _skip_detection:
             if (self.particle_collision_detection_interval == 0 and iter_num == 0) or (
                 self.particle_collision_detection_interval >= 1
                 and iter_num % self.particle_collision_detection_interval == 0
             ):
                 self._collision_detection_penetration_free(state_in)
 
-        # Zero out forces and hessians
-        self.particle_forces.zero_()
-        self.particle_hessians.zero_()
+        if _fused:
+            from ..fast_kernels import solve_surface_fused  # noqa: PLC0415
+            from ..fast_path import surface_contact_inputs  # noqa: PLC0415
+
+            fast_inputs = surface_contact_inputs(
+                self, state_in, contacts, dt, body_q_for_particles, body_q_prev_for_particles, body_qd_for_particles
+            )
+            fast_input_q = state_in.particle_q
+            fast_output_q = self._cuda_surface.position_scratch
+
+        # The fused path overwrites both arrays for every surface particle.
+        if not _fused:
+            self.particle_forces.zero_()
+            self.particle_hessians.zero_()
         particle_contact_gather_ready = (
             self._should_gather_particle_contacts(contacts) and self._particle_contact_adjacency_initialized
         )
@@ -3753,10 +4031,32 @@ class SolverVBD(SolverBase, CouplingInterface):
             if self._pneumatic_enabled:
                 if not self._pneumatic_incremental_volume_enabled:
                     self._evaluate_pneumatic_cavities(state_in.particle_q, control, dt)
-                if self._pneumatic_single_cavity_force_fusion_enabled and color > 0:
+                if self._pneumatic_color_coupling:
+                    wp.launch(
+                        self._pneumatic_kernels.prepare_coupled_color,
+                        dim=self.model.particle_color_groups[color].size,
+                        inputs=[
+                            self.model.particle_color_groups[color],
+                            state_in.particle_q,
+                            model.tri_indices,
+                            model.pneumatic.face_triangle,
+                            model.pneumatic.face_sign,
+                            self._pneumatic_particle_face_offsets,
+                            self._pneumatic_particle_faces,
+                            self._pneumatic_gauge_pressure,
+                            self.particle_displacements,
+                        ],
+                        outputs=[
+                            self.particle_forces,
+                            self._pneumatic_color_gradient,
+                            self._pneumatic_color_displacement,
+                        ],
+                        device=self.device,
+                    )
+                elif self._pneumatic_single_cavity_force_fusion_enabled and color > 0:
                     self._update_pneumatic_cavity_and_accumulate_forces(
                         state_in.particle_q,
-                        self.model.particle_color_groups[color],
+                        self._pneumatic_particle_color_groups[color],
                         control,
                         dt,
                         color - 1,
@@ -3764,9 +4064,9 @@ class SolverVBD(SolverBase, CouplingInterface):
                 else:
                     self._accumulate_pneumatic_forces(
                         state_in.particle_q,
-                        self.model.particle_color_groups[color],
+                        self._pneumatic_particle_color_groups[color],
                     )
-            if contacts is not None and contacts.soft_contact_max > 0:
+            if not _fused and contacts is not None and contacts.soft_contact_max > 0:
                 if use_particle_contact_gather:
                     wp.launch(
                         kernel=gather_particle_body_contact_force_and_hessian,
@@ -3802,7 +4102,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 else:
                     wp.launch(
                         kernel=accumulate_particle_body_contact_force_and_hessian,
-                        dim=contacts.soft_contact_max,
+                        dim=min(contacts.soft_contact_max, _PARTICLE_CONTACT_WORKER_COUNT),
                         inputs=[
                             dt,
                             color,
@@ -3856,7 +4156,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     device=self.device,
                 )
 
-            if self.particle_enable_self_contact:
+            if self.particle_enable_self_contact and not _fused:
                 wp.launch(
                     kernel=accumulate_self_contact_force_and_hessian,
                     dim=self.particle_self_contact_evaluation_kernel_launch_size,
@@ -3884,18 +4184,25 @@ class SolverVBD(SolverBase, CouplingInterface):
                     device=self.device,
                     max_blocks=self.model.device.sm_count,
                 )
-            if self.use_particle_tile_solve:
+            if self._pneumatic_color_coupling:
+                self._solve_pneumatic_color(state_in, control, dt, color)
+            elif self.use_particle_tile_solve:
                 surface_group = self.surface_particle_color_groups[color]
-                if surface_group.size:
+                if surface_group.size or _fused:
+                    if _fused:
+                        fast_inputs.particle_q = fast_input_q
                     wp.launch(
-                        kernel=self._surface_cached_kernel or solve_surface_elasticity_tile,
-                        dim=surface_group.size * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+                        kernel=solve_surface_fused
+                        if _fused
+                        else self._surface_cached_kernel or solve_surface_elasticity_tile,
+                        dim=surface_group.size * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
+                        + (self.model.particle_count if _fused else 0),
                         block_dim=TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
                         inputs=[
                             dt,
                             surface_group,
                             self.particle_q_prev,
-                            state_in.particle_q,
+                            fast_input_q if _fused else state_in.particle_q,
                             self.model.particle_mass,
                             self.inertia,
                             self.model.particle_flags,
@@ -3914,8 +4221,26 @@ class SolverVBD(SolverBase, CouplingInterface):
                             self.surface_tile_skip_material_checks,
                             self.particle_surface_relaxation if 0 < iter_num < self.iterations - 3 else 1.0,
                             *([self.surface_anchor_angles, None] if self.surface_anchor_angles is not None else []),
+                            *(
+                                [
+                                    self.particle_displacements,
+                                    fast_inputs,
+                                    self._cuda_surface.counts,
+                                    self._cuda_surface.entries,
+                                    self.pos_prev_collision_detection,
+                                    self.particle_self_contact_margin
+                                    * self.particle_conservative_bound_relaxation
+                                    * 0.5,
+                                    self._cuda_surface.anchor_angles,
+                                    fast_output_q,
+                                    self.model.particle_colors,
+                                    color,
+                                ]
+                                if _fused
+                                else []
+                            ),
                         ],
-                        outputs=[self.particle_displacements],
+                        outputs=[] if _fused else [self.particle_displacements],
                         device=self.device,
                     )
                 volumetric_group = self.volumetric_particle_color_groups[color]
@@ -3984,7 +4309,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                     ],
                     device=self.device,
                 )
-            self._penetration_free_truncation(state_in.particle_q)
+            if _fused:
+                fast_input_q, fast_output_q = fast_output_q, fast_input_q
+            else:
+                self._penetration_free_truncation(state_in.particle_q)
             if (
                 self._pneumatic_incremental_volume_enabled
                 and not self._pneumatic_single_cavity_force_fusion_enabled
@@ -3992,6 +4320,8 @@ class SolverVBD(SolverBase, CouplingInterface):
             ):
                 self._update_pneumatic_cavities_after_color(state_in.particle_q, control, dt, color)
 
+        if _fused and fast_input_q.ptr != state_in.particle_q.ptr:
+            wp.copy(state_in.particle_q, fast_input_q)
         chebyshev_iteration = iter_num - self.particle_chebyshev_warmup_iterations
         if self.particle_chebyshev_guarded and chebyshev_history_active:
             wp.launch(
@@ -4051,7 +4381,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     device=self.device,
                 )
             if chebyshev_iteration > 0:
-                self._penetration_free_truncation(state_in.particle_q)
+                self._penetration_free_truncation(state_in.particle_q, empty_contact_set=_fused)
         if chebyshev_history_active:
             self.particle_chebyshev_older.assign(self.particle_chebyshev_previous)
 
@@ -4138,7 +4468,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         if contacts is not None and contacts.soft_contact_max > 0:
             wp.launch(
                 kernel=accumulate_particle_body_contact_force_and_hessian,
-                dim=contacts.soft_contact_max,
+                dim=min(contacts.soft_contact_max, _PARTICLE_CONTACT_WORKER_COUNT),
                 inputs=[
                     dt,
                     -1,
@@ -4261,19 +4591,25 @@ class SolverVBD(SolverBase, CouplingInterface):
         Accumulates contact and joint forces/hessians, solves 6x6 rigid body systems per color,
         and updates AVBD penalty parameters (dual update).
         """
+        launch = self._coupled_fusion or wp.launch
         model = self.model
 
         # Body-particle soft contacts still need penalty updates when VBD skips rigid solves:
         # external rigid mode uses state_out.body_q, while static-shape contacts use _empty_body_q.
         skip_rigid_solve = self.integrate_with_external_rigid_solver or model.body_count == 0
         if skip_rigid_solve:
-            if model.particle_count > 0 and contacts is not None and contacts.soft_contact_max > 0:
+            if (
+                self.rigid_linear_beta > 0.0
+                and model.particle_count > 0
+                and contacts is not None
+                and contacts.soft_contact_max > 0
+            ):
                 body_q = state_out.body_q if self.integrate_with_external_rigid_solver else state_in.body_q
                 if body_q is None:
                     body_q = self._empty_body_q
 
                 soft_contact_launch_dim = self._active_soft_contact_worker_dim(contacts.soft_contact_max)
-                wp.launch(
+                launch(
                     kernel=update_duals_body_particle_contacts,
                     dim=soft_contact_launch_dim,
                     block_dim=_SOFT_CONTACT_BLOCK_DIM,
@@ -4299,14 +4635,19 @@ class SolverVBD(SolverBase, CouplingInterface):
                 )
             return
 
-        # Zero out forces and hessians
-        self.body_torques.zero_()
-        self.body_forces.zero_()
-        self.body_hessian_aa.zero_()
-        self.body_hessian_al.zero_()
-        self.body_hessian_ll.zero_()
+        # The fused kernel overwrites all five accumulators for each solved body.
+        if self._coupled_fusion is None:
+            self.body_torques.zero_()
+            self.body_forces.zero_()
+            self.body_hessian_aa.zero_()
+            self.body_hessian_al.zero_()
+            self.body_hessian_ll.zero_()
 
         body_color_groups = model.body_color_groups
+        body_colors = model.body_colors
+        if self._rigid_contact_groups is not None:
+            body_color_groups = self._rigid_contact_groups.groups
+            body_colors = self._rigid_contact_groups.colors
 
         # Gauss-Seidel-style per-color updates
         for color in range(len(body_color_groups)):
@@ -4321,7 +4662,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 dense_contact_threshold = (
                     _BODY_PARTICLE_DENSE_CONTACT_THRESHOLD if use_dense_body_particle_contacts else 0
                 )
-                wp.launch(
+                launch(
                     kernel=accumulate_body_particle_contacts_per_body,
                     dim=color_group.size * _NUM_CONTACT_THREADS_PER_BODY,
                     inputs=[
@@ -4365,9 +4706,16 @@ class SolverVBD(SolverBase, CouplingInterface):
                 )
                 if use_dense_body_particle_contacts:
                     chunks_per_body = self._body_particle_dense_chunks_per_body
-                    wp.launch(
-                        kernel=accumulate_body_particle_contact_dense_partials,
-                        dim=color_group.size * chunks_per_body * _BODY_PARTICLE_CONTACT_BLOCK_DIM,
+                    use_single_block = self.body_particle_contact_buffer_pre_alloc <= 4096
+                    launch(
+                        kernel=(
+                            accumulate_body_particle_contact_dense_single
+                            if use_single_block
+                            else accumulate_body_particle_contact_dense_partials
+                        ),
+                        dim=color_group.size
+                        * (1 if use_single_block else chunks_per_body)
+                        * _BODY_PARTICLE_CONTACT_BLOCK_DIM,
                         block_dim=_BODY_PARTICLE_CONTACT_BLOCK_DIM,
                         inputs=[
                             dt,
@@ -4399,45 +4747,55 @@ class SolverVBD(SolverBase, CouplingInterface):
                             self.body_particle_contact_indices,
                         ],
                         outputs=[
-                            self._body_particle_partial_forces,
-                            self._body_particle_partial_torques,
-                            self._body_particle_partial_hessian_ll,
-                            self._body_particle_partial_hessian_al,
-                            self._body_particle_partial_hessian_aa,
-                        ],
-                        device=self.device,
-                    )
-                    wp.launch(
-                        kernel=accumulate_body_particle_contact_dense_reduction,
-                        dim=color_group.size * _BODY_PARTICLE_CONTACT_BLOCK_DIM,
-                        block_dim=_BODY_PARTICLE_CONTACT_BLOCK_DIM,
-                        inputs=[
-                            color_group,
-                            chunks_per_body,
-                            dense_contact_threshold,
-                            self.body_particle_contact_buffer_pre_alloc,
-                            self.body_particle_contact_counts,
-                            self._body_particle_partial_forces,
-                            self._body_particle_partial_torques,
-                            self._body_particle_partial_hessian_ll,
-                            self._body_particle_partial_hessian_al,
-                            self._body_particle_partial_hessian_aa,
-                        ],
-                        outputs=[
                             self.body_forces,
                             self.body_torques,
                             self.body_hessian_ll,
                             self.body_hessian_al,
                             self.body_hessian_aa,
+                        ]
+                        if use_single_block
+                        else [
+                            self._body_particle_partial_forces,
+                            self._body_particle_partial_torques,
+                            self._body_particle_partial_hessian_ll,
+                            self._body_particle_partial_hessian_al,
+                            self._body_particle_partial_hessian_aa,
                         ],
                         device=self.device,
                     )
+                    if not use_single_block:
+                        launch(
+                            kernel=accumulate_body_particle_contact_dense_reduction,
+                            dim=color_group.size * _BODY_PARTICLE_CONTACT_BLOCK_DIM,
+                            block_dim=_BODY_PARTICLE_CONTACT_BLOCK_DIM,
+                            inputs=[
+                                color_group,
+                                chunks_per_body,
+                                dense_contact_threshold,
+                                self.body_particle_contact_buffer_pre_alloc,
+                                self.body_particle_contact_counts,
+                                self._body_particle_partial_forces,
+                                self._body_particle_partial_torques,
+                                self._body_particle_partial_hessian_ll,
+                                self._body_particle_partial_hessian_al,
+                                self._body_particle_partial_hessian_aa,
+                            ],
+                            outputs=[
+                                self.body_forces,
+                                self.body_torques,
+                                self.body_hessian_ll,
+                                self.body_hessian_al,
+                                self.body_hessian_aa,
+                            ],
+                            device=self.device,
+                        )
 
             # Accumulate body-body (rigid-rigid) contact forces and Hessians on bodies (per-body, per-color)
             if contacts is not None:
-                wp.launch(
+                launch(
                     kernel=accumulate_body_body_contacts_per_body,
-                    dim=color_group.size * _NUM_CONTACT_THREADS_PER_BODY,
+                    dim=color_group.size * _NUM_RIGID_CONTACT_THREADS_PER_BODY,
+                    block_dim=_NUM_RIGID_CONTACT_THREADS_PER_BODY,
                     inputs=[
                         dt,
                         color_group,
@@ -4445,6 +4803,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         state_in.body_q,
                         model.body_com,
                         self.body_inv_mass_effective,
+                        body_colors,
                         self.friction_epsilon,
                         self.body_body_contact_penalty_k,
                         self.body_body_contact_material_ke,
@@ -4479,7 +4838,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     device=self.device,
                 )
 
-            wp.launch(
+            launch(
                 kernel=solve_rigid_body,
                 inputs=[
                     dt,
@@ -4535,10 +4894,12 @@ class SolverVBD(SolverBase, CouplingInterface):
                 dim=color_group.size,
                 device=self.device,
             )
+            if self._rigid_soft_dat is not None:
+                self._rigid_soft_dat.apply(self)
 
         if contacts is not None:
             contact_launch_dim = contacts.rigid_contact_max
-            wp.launch(
+            launch(
                 kernel=update_duals_body_body_contacts,
                 dim=contact_launch_dim,
                 inputs=[
@@ -4562,7 +4923,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self.rigid_contact_hard,
                     self.body_inv_mass_effective,
                     self.body_body_contact_material_ke,
-                    self.rigid_linear_beta,
+                    self.rigid_contact_beta,
                     self.body_body_contact_penalty_k,  # input/output
                     self.body_body_contact_lambda,  # input/output
                 ],
@@ -4572,9 +4933,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                 device=self.device,
             )
 
-            if model.particle_count > 0 and contacts.soft_contact_max > 0:
+            # Fixed-k contacts are initialized at their material ceiling.
+            if self.rigid_linear_beta > 0.0 and model.particle_count > 0 and contacts.soft_contact_max > 0:
                 soft_contact_launch_dim = self._active_soft_contact_worker_dim(contacts.soft_contact_max)
-                wp.launch(
+                launch(
                     kernel=update_duals_body_particle_contacts,
                     dim=soft_contact_launch_dim,
                     block_dim=_SOFT_CONTACT_BLOCK_DIM,
@@ -4600,7 +4962,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 )
 
         if model.joint_count > 0:
-            wp.launch(
+            launch(
                 kernel=update_duals_joint,
                 dim=model.joint_count,
                 inputs=[
@@ -4831,6 +5193,9 @@ class SolverVBD(SolverBase, CouplingInterface):
             device=self.device,
         )
 
+        if self._rigid_sleep is not None:
+            self._rigid_sleep.update(state_out, state_in, self._rigid_sleep_contacts, dt, before=False)
+
         if self.enable_dahl_friction and model.joint_count > 0:
             wp.launch(
                 kernel=update_cable_dahl_state,
@@ -4857,6 +5222,14 @@ class SolverVBD(SolverBase, CouplingInterface):
             )
 
     def _collision_detection_penetration_free(self, current_state: State):
+        if self._self_contact_certificate is not None:
+            self._self_contact_certificate.detect(self, current_state)
+        else:
+            self._collision_detection_penetration_free_uncached(current_state)
+        if self._cuda_surface is not None:
+            self._cuda_surface.after_detection(self)
+
+    def _collision_detection_penetration_free_uncached(self, current_state: State):
         # particle_displacements is based on pos_prev_collision_detection
         # so reset them every time we do collision detection
         self.pos_prev_collision_detection.assign(current_state.particle_q)
@@ -4888,3 +5261,5 @@ class SolverVBD(SolverBase, CouplingInterface):
         """
         if self.particle_enable_self_contact:
             self.trimesh_collision_detector.rebuild(state.particle_q)
+            if self._self_contact_certificate is not None:
+                self._self_contact_certificate.invalidate()

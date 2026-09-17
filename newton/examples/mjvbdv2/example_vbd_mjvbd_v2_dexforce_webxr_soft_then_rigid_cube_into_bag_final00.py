@@ -29,7 +29,7 @@ import warp as wp
 import newton
 import newton.examples
 
-from . import example_vbd_mjvbd_v2_dexforce_recorded_soft_then_rigid_cube_into_bag_final00 as cube_scene
+from . import example_mjvbd_v2_cubes_into_bag as cube_scene
 from ._webxr_teleop import (
     JsonlTrajectoryRecorder,
     LatestXRFrame,

@@ -28,7 +28,7 @@ import warp as wp
 import newton
 import newton.examples
 
-from . import example_cloth_mjvbd_v2_dexforce_bimanual_fold_tshirt_waic_house_final00 as shirt_scene
+from . import example_mjvbd_v2_tshirt_fold as shirt_scene
 from ._webxr_teleop import (
     JsonlTrajectoryRecorder,
     LatestXRFrame,

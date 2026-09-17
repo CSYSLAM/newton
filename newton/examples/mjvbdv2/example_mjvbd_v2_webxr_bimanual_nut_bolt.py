@@ -28,7 +28,7 @@ import warp as wp
 import newton
 import newton.examples
 
-from . import example_mjvbd_v2_bimanual_nut_bolt as nut_bolt
+from . import example_mjvbd_v2_nut_bolt as nut_bolt
 from ._webxr_teleop import (
     JsonlTrajectoryRecorder,
     LatestXRFrame,

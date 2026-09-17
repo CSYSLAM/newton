@@ -13,5 +13,5 @@ export NEWTON_WEBXR_RUNTIME_NAME="newton-webxr-nut-bolt-teleop"
 export NEWTON_WEBXR_STATE_NAME="newton-webxr-nut-bolt-teleop"
 export NEWTON_WEBXR_SDF_CACHE=1
 export NEWTON_WEBXR_RELOAD_COMMAND="./scripts/reload_quest_webxr_nut_bolt_teleop.sh"
-export NEWTON_WEBXR_RELOAD_SOURCES="${repo_root}/newton/examples/mjvbdv2/_webxr_teleop.py:${repo_root}/newton/examples/mjvbdv2/example_mjvbd_v2_bimanual_nut_bolt.py:${repo_root}/newton/examples/mjvbdv2/example_mjvbd_v2_webxr_bimanual_nut_bolt.py"
+export NEWTON_WEBXR_RELOAD_SOURCES="${repo_root}/newton/examples/mjvbdv2/_webxr_teleop.py:${repo_root}/newton/examples/mjvbdv2/example_mjvbd_v2_nut_bolt.py:${repo_root}/newton/examples/mjvbdv2/example_mjvbd_v2_webxr_bimanual_nut_bolt.py"
 exec "${script_dir}/start_quest_webxr_teleop.sh" "$@"

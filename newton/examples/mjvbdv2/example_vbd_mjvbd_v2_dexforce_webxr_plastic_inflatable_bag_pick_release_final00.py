@@ -33,7 +33,7 @@ import warp as wp
 import newton
 import newton.examples
 
-from . import example_vbd_mjvbd_v2_dexforce_recorded_plastic_inflatable_bag_pick_release_final00 as bag_scene
+from . import example_mjvbd_v2_inflatable_bag_grasp as bag_scene
 from ._webxr_teleop import (
     JsonlTrajectoryRecorder,
     LatestXRFrame,

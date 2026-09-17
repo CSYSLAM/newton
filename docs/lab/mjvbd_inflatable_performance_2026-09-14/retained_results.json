@@ -1,0 +1,22 @@
+{
+  "minimum_volume_ratio": 0.7916842978170076,
+  "maximum_pressure_pa": 500000.0,
+  "maximum_root_position_error_m": 3.644301292398307e-06,
+  "maximum_root_angle_error_deg": 7.065202614577463e-05,
+  "initial_bag_center_z_m": 1.1991479396820068,
+  "lifted_bag_center_z_m": 1.3032701015472412,
+  "final_bag_center_z_m": 1.1924635171890259,
+  "failure_count": 1,
+  "failures": [
+    [
+      "final",
+      "The grasp compressed the target-volume bag excessively: minimum ratio=0.791684."
+    ]
+  ],
+  "independent_checks": {
+    "finite_positions": true,
+    "finite_pressure": true,
+    "plastic_angle_bound": true,
+    "plastic_stiffness_bound": true
+  }
+}

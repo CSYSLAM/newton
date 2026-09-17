@@ -1,0 +1,195 @@
+{
+  "full_sequence_protocol": "All four parcels, then 120 further frames; test_post_step every frame and test_final at the end. This is not a 9000-frame default-duration run.",
+  "full_sequence_runs": {
+    "before": {
+      "frames": 5493,
+      "completion_frame": 5372,
+      "mean_step_ms": 80.85432510504259,
+      "failures": [
+        [
+          "final",
+          "The released cloth has not settled below 2 mm/s RMS over the last second"
+        ]
+      ],
+      "volume_ratio": 0.980820024828136,
+      "cloth_speed": 0.005061215579432125,
+      "parcels": [
+        {
+          "kind": "rigid",
+          "center": [
+            0.5900933742523193,
+            -0.5617511868476868,
+            0.7119991779327393
+          ],
+          "lift": 0.23527610301971436,
+          "sorted": true
+        },
+        {
+          "kind": "soft",
+          "center": [
+            0.3245454430580139,
+            -0.37810829281806946,
+            0.7166223526000977
+          ],
+          "lift": 0.25148606300354004,
+          "sorted": true
+        },
+        {
+          "kind": "cloth",
+          "center": [
+            0.11395744979381561,
+            -0.41667440533638,
+            0.7035934329032898
+          ],
+          "lift": 0.28272682428359985,
+          "sorted": true
+        },
+        {
+          "kind": "inflatable",
+          "center": [
+            0.3339778184890747,
+            -0.5505201816558838,
+            0.7131423354148865
+          ],
+          "lift": 0.23128056526184082,
+          "sorted": true
+        }
+      ],
+      "peak_speed_ratio": 0.8995768948256994,
+      "min_arm_margin": 0.05235977570084131,
+      "minimum_robot_separation": -0.0005982518196105957
+    },
+    "after": {
+      "frames": 5490,
+      "completion_frame": 5369,
+      "mean_step_ms": 55.036541845403434,
+      "failures": [
+        [
+          "final",
+          "The released cloth has not settled below 2 mm/s RMS over the last second"
+        ]
+      ],
+      "volume_ratio": 0.9813013100803673,
+      "cloth_speed": 0.009899620300469298,
+      "parcels": [
+        {
+          "kind": "rigid",
+          "center": [
+            0.5847136974334717,
+            -0.5684625506401062,
+            0.7119998931884766
+          ],
+          "lift": 0.2352449893951416,
+          "sorted": true
+        },
+        {
+          "kind": "soft",
+          "center": [
+            0.3251768946647644,
+            -0.37860366702079773,
+            0.7169840931892395
+          ],
+          "lift": 0.25150609016418457,
+          "sorted": true
+        },
+        {
+          "kind": "cloth",
+          "center": [
+            0.0879143550992012,
+            -0.4275985360145569,
+            0.6962381601333618
+          ],
+          "lift": 0.2808728814125061,
+          "sorted": true
+        },
+        {
+          "kind": "inflatable",
+          "center": [
+            0.33460843563079834,
+            -0.5512716174125671,
+            0.713135838508606
+          ],
+          "lift": 0.23099732398986816,
+          "sorted": true
+        }
+      ],
+      "peak_speed_ratio": 0.8996096797337154,
+      "min_arm_margin": 0.05235981344979128,
+      "minimum_robot_separation": -0.0006303191184997559
+    },
+    "retained": {
+      "frames": 5506,
+      "completion_frame": 5385,
+      "mean_step_ms": 63.392766385573985,
+      "failures": [
+        [
+          "final",
+          "The released cloth has not settled below 2 mm/s RMS over the last second"
+        ]
+      ],
+      "volume_ratio": 0.9812598898341509,
+      "cloth_speed": 0.014408651716075837,
+      "parcels": [
+        {
+          "kind": "rigid",
+          "center": [
+            0.625074028968811,
+            -0.56343013048172,
+            0.6969985961914062
+          ],
+          "lift": 0.23516589403152466,
+          "sorted": true
+        },
+        {
+          "kind": "soft",
+          "center": [
+            0.32495370507240295,
+            -0.3790642321109772,
+            0.7169002890586853
+          ],
+          "lift": 0.25121068954467773,
+          "sorted": true
+        },
+        {
+          "kind": "cloth",
+          "center": [
+            0.056351788341999054,
+            -0.43605849146842957,
+            0.6923257112503052
+          ],
+          "lift": 0.28098899126052856,
+          "sorted": true
+        },
+        {
+          "kind": "inflatable",
+          "center": [
+            0.33376413583755493,
+            -0.5512692332267761,
+            0.7131373882293701
+          ],
+          "lift": 0.2310957908630371,
+          "sorted": true
+        }
+      ],
+      "peak_speed_ratio": 0.8995686985986954,
+      "min_arm_margin": 0.05235981344979128,
+      "minimum_robot_separation": -0.0005984902381896973
+    }
+  },
+  "paired_initial_stage": {
+    "renderer": "NVIDIA GeForce RTX 5090 D v2/PCIe/SSE2",
+    "summary": {
+      "before": {
+        "step_ms": 51.22455208639925,
+        "render_ms": 15.484411046296978,
+        "total_ms": 66.70896313269623
+      },
+      "after": {
+        "step_ms": 37.27535541091735,
+        "render_ms": 15.323980145622045,
+        "total_ms": 52.599335556539394
+      }
+    }
+  },
+  "status": "Cache combination retained as opt-in only; full settling acceptance not met. Broader surface/truncation cache candidate rejected."
+}
