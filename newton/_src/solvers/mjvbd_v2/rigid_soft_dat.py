@@ -26,7 +26,7 @@ def _prepare_updates(
 
 
 @wp.kernel
-def _apply_particles(
+def _apply_updates(
     reference: wp.array[wp.vec3],
     displacement: wp.array[wp.vec3],
     factors: wp.array[float],
@@ -35,19 +35,31 @@ def _apply_particles(
     chebyshev_excluded: wp.array[wp.int32],
     self_contact_reference: wp.array[wp.vec3],
     self_contact_displacements: wp.array[wp.vec3],
+    body_reference: wp.array[wp.transform],
+    body_flags: wp.array[wp.int32],
+    body_com: wp.array[wp.vec3],
+    body_factors: wp.array[float],
+    body_radius: wp.array[float],
+    body_budget: wp.array[float],
+    body_q: wp.array[wp.transform],
 ):
     i = wp.tid()
-    dx = displacement[i]
-    length = wp.length(dx)
-    t = factors[i]
-    if length > max_displacement:
-        t = wp.min(t, max_displacement / length)
-    if chebyshev_excluded and t < 1.0 - 1.0e-6:
-        chebyshev_excluded[i] = 1
-    position = reference[i] + t * dx
-    q[i] = position
-    # The next self-contact sweep uses a different detection-time reference.
-    self_contact_displacements[i] = position - self_contact_reference[i]
+    if i < q.shape[0]:
+        dx = displacement[i]
+        length = wp.length(dx)
+        t = factors[i]
+        if length > max_displacement:
+            t = wp.min(t, max_displacement / length)
+        if chebyshev_excluded and t < 1.0 - 1.0e-6:
+            chebyshev_excluded[i] = 1
+        position = reference[i] + t * dx
+        q[i] = position
+        # The next self-contact sweep uses a different detection-time reference.
+        self_contact_displacements[i] = position - self_contact_reference[i]
+    if i < body_q.shape[0] and (body_flags[i] & 2) == 0:
+        body_q[i] = kernels.truncate_body_pose(
+            body_reference[i], body_q[i], body_com[i], body_factors[i], body_radius[i], body_budget[i]
+        )
 
 
 class RigidSoftDAT:
@@ -136,8 +148,8 @@ class RigidSoftDAT:
             device=model.device,
         )
         wp.launch(
-            _apply_particles,
-            model.particle_count,
+            _apply_updates,
+            max(model.particle_count, model.body_count),
             [
                 self.particle_reference,
                 self.displacements,
@@ -147,13 +159,6 @@ class RigidSoftDAT:
                 solver.particle_chebyshev_collided if solver.particle_chebyshev_guarded else None,
                 solver.pos_prev_collision_detection,
                 solver.particle_displacements,
-            ],
-            device=model.device,
-        )
-        wp.launch(
-            kernels.apply_body_truncation_ts,
-            model.body_count,
-            [
                 self.body_reference,
                 model.body_flags,
                 model.body_com,

@@ -1,0 +1,1 @@
+Reduce W1 bag packing overhead by fusing particle and body DAT pose updates and batching analytic IK objectives on one CUDA stream. Keep the existing substep and iteration budgets; no scene option changes are required.

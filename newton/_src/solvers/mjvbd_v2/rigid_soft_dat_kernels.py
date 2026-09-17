@@ -464,39 +464,18 @@ def apply_rigid_soft_truncation(
         )
 
 
-@wp.kernel
-def apply_body_truncation_ts(
-    # inputs
-    body_q_ref: wp.array[wp.transform],
-    body_flags: wp.array[wp.int32],
-    body_com: wp.array[wp.vec3],
-    body_truncation_ts: wp.array[float],
-    rigid_dat_body_bounding_radius: wp.array[float],
-    rigid_dat_body_max_displacement: wp.array[float],
-    # input/output
-    body_q: wp.array[wp.transform],
-):
-    """Scale each body's accumulated pose update (reference -> candidate) by its truncation
-    scalar, interpolating translation and rotation about the COM.
-
-    Also applies the conservative isotropic bound: no point of the body may move farther
-    than its rigid-soft budget (0.5 * gamma * soft-contact query gap) since the
-    last collision detection, using
-    |dx| + |angle| * bounding_radius as an upper bound of the largest point motion.
-    """
-    b = wp.tid()
-    if (body_flags[b] & 2) != 0:
-        return
-
-    q_cur = body_q[b]
-    q_ref = body_q_ref[b]
-    com = body_com[b]
+@wp.func
+def truncate_body_pose(
+    q_ref: wp.transform,
+    q_cur: wp.transform,
+    com: wp.vec3,
+    t: float,
+    bounding_radius: float,
+    max_point_displacement: float,
+) -> wp.transform:
+    """Apply the contact factor and isotropic motion bound about the body COM."""
     c0, dx, axis, angle = rigid_pose_delta(q_ref, q_cur, com)
-
-    t = body_truncation_ts[b]
-
-    motion_bound = wp.length(dx) + wp.abs(angle) * rigid_dat_body_bounding_radius[b]
-    max_point_displacement = rigid_dat_body_max_displacement[b]
+    motion_bound = wp.length(dx) + wp.abs(angle) * bounding_radius
     if motion_bound > max_point_displacement:
         # For any represented collision point,
         # ||x(t) - x(0)|| <= t * (||dx|| + |angle| * bounding_radius)
@@ -514,4 +493,28 @@ def apply_body_truncation_ts(
         else:
             half_w = axis * (ta * 0.5)
             q_new = wp.normalize(wp.quat(half_w[0], half_w[1], half_w[2], 1.0) * q_rot)
-        body_q[b] = wp.transform(c_new - wp.quat_rotate(q_new, com), q_new)
+        return wp.transform(c_new - wp.quat_rotate(q_new, com), q_new)
+    return q_cur
+
+
+@wp.kernel
+def apply_body_truncation_ts(
+    body_q_ref: wp.array[wp.transform],
+    body_flags: wp.array[wp.int32],
+    body_com: wp.array[wp.vec3],
+    body_truncation_ts: wp.array[float],
+    rigid_dat_body_bounding_radius: wp.array[float],
+    rigid_dat_body_max_displacement: wp.array[float],
+    body_q: wp.array[wp.transform],
+):
+    """Truncate dynamic body poses while preserving prescribed kinematic poses."""
+    b = wp.tid()
+    if (body_flags[b] & 2) == 0:
+        body_q[b] = truncate_body_pose(
+            body_q_ref[b],
+            body_q[b],
+            body_com[b],
+            body_truncation_ts[b],
+            rigid_dat_body_bounding_radius[b],
+            rigid_dat_body_max_displacement[b],
+        )

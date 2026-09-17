@@ -442,6 +442,8 @@ class Example:
             objectives,
             joint_dof_mask=wp.array(mask, dtype=wp.bool),
             jacobian_mode=ik.IKJacobianType.ANALYTIC,
+            parallel_objectives=False,
+            enable_cuda_fast_path=True,
             lambda_initial=0.1,
             lambda_min=0.01,
         )
