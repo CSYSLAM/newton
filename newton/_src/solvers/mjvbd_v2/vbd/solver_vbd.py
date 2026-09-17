@@ -1103,7 +1103,7 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         self.pos_prev_collision_detection = wp.zeros_like(model.particle_q, device=self.device)
         self.particle_displacements = wp.zeros(self.model.particle_count, dtype=wp.vec3, device=self.device)
-        self.truncation_ts = wp.zeros(self.model.particle_count, dtype=float, device=self.device)
+        self.truncation_ts = wp.ones(self.model.particle_count, dtype=float, device=self.device)
         if self.particle_chebyshev_enabled:
             self.particle_chebyshev_older = wp.zeros_like(model.particle_q, device=self.device)
             self.particle_chebyshev_previous = wp.zeros_like(model.particle_q, device=self.device)
@@ -3330,11 +3330,24 @@ class SolverVBD(SolverBase, CouplingInterface):
         )
 
     def _penetration_free_truncation(self, particle_q_out=None, *, empty_contact_set=False):
-        self._penetration_free_truncation_impl(particle_q_out, empty_contact_set=empty_contact_set)
+        # Fuse the final self-contact update with DAT preparation only when both
+        # operate on the same particle state and the ordinary truncation path.
+        fuse_dat = (
+            self._rigid_soft_dat is not None
+            and self._particle_truncation_cache is None
+            and self.particle_enable_self_contact
+            and particle_q_out is not None
+            and particle_q_out.ptr == self._rigid_soft_dat.state.particle_q.ptr
+        )
+        self._penetration_free_truncation_impl(
+            particle_q_out, empty_contact_set=empty_contact_set, defer_self_contact_update=fuse_dat
+        )
         if self._rigid_soft_dat is not None:
-            self._rigid_soft_dat.apply(self)
+            self._rigid_soft_dat.apply(self, self_contact_truncation=fuse_dat)
 
-    def _penetration_free_truncation_impl(self, particle_q_out=None, *, empty_contact_set=False):
+    def _penetration_free_truncation_impl(
+        self, particle_q_out=None, *, empty_contact_set=False, defer_self_contact_update=False
+    ):
         """
         Modify displacements_in in-place, also modify particle_q if its not None
 
@@ -3353,7 +3366,7 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         else:
             ##  parallel by collision and atomic operation
-            self.truncation_ts.fill_(1.0)
+            # Every completed truncation resets its consumed factors to one.
             wp.launch(
                 kernel=apply_planar_truncation_parallel_by_collision,
                 inputs=[
@@ -3372,6 +3385,8 @@ class SolverVBD(SolverBase, CouplingInterface):
                 device=self.device,
             )
 
+            if defer_self_contact_update:
+                return
             wp.launch(
                 kernel=apply_truncation_ts,
                 dim=self.model.particle_count,

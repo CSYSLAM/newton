@@ -7,6 +7,7 @@ import numpy as np
 import warp as wp
 
 from . import rigid_soft_dat_kernels as kernels
+from .vbd.particle_vbd_kernels import truncate_particle_displacement
 
 
 @wp.kernel
@@ -20,6 +21,38 @@ def _prepare_updates(
     i = wp.tid()
     if i < q.shape[0]:
         out[i] = q[i] - reference[i]
+        particle_factors[i] = 1.0
+    if i < body_factors.shape[0]:
+        body_factors[i] = 1.0
+
+
+@wp.kernel
+def _prepare_truncated_updates(
+    self_reference: wp.array[wp.vec3],
+    self_displacements: wp.array[wp.vec3],
+    self_factors: wp.array[float],
+    self_budget: float,
+    chebyshev_excluded: wp.array[wp.int32],
+    chebyshev_cleanup_status: wp.array[wp.int32],
+    q: wp.array[wp.vec3],
+    reference: wp.array[wp.vec3],
+    out: wp.array[wp.vec3],
+    particle_factors: wp.array[float],
+    body_factors: wp.array[float],
+):
+    i = wp.tid()
+    if i < q.shape[0]:
+        dx, truncated = truncate_particle_displacement(self_displacements[i], self_factors[i], self_budget)
+        if truncated:
+            if chebyshev_excluded:
+                chebyshev_excluded[i] = 1
+            if chebyshev_cleanup_status:
+                wp.atomic_max(chebyshev_cleanup_status, 0, 1)
+        self_displacements[i] = dx
+        self_factors[i] = 1.0
+        position = self_reference[i] + dx
+        q[i] = position
+        out[i] = position - reference[i]
         particle_factors[i] = 1.0
     if i < body_factors.shape[0]:
         body_factors[i] = 1.0
@@ -116,12 +149,29 @@ class RigidSoftDAT:
         self.particle_reference.assign(state.particle_q)
         self.body_reference.assign(state.body_q)
 
-    def apply(self, solver):
+    def apply(self, solver, *, self_contact_truncation=False):
         state, contacts, model = self.state, self.contacts, self.model
+        prepare_inputs = []
+        if self_contact_truncation:
+            prepare_inputs = [
+                solver.pos_prev_collision_detection,
+                solver.particle_displacements,
+                solver.truncation_ts,
+                solver.particle_self_contact_margin * solver.particle_conservative_bound_relaxation * 0.5,
+                solver.particle_chebyshev_collided if solver.particle_chebyshev_guarded else None,
+                solver.particle_chebyshev_cleanup_status,
+            ]
         wp.launch(
-            _prepare_updates,
+            _prepare_truncated_updates if self_contact_truncation else _prepare_updates,
             max(model.particle_count, model.body_count),
-            [state.particle_q, self.particle_reference, self.displacements, self.particle_factors, self.body_factors],
+            [
+                *prepare_inputs,
+                state.particle_q,
+                self.particle_reference,
+                self.displacements,
+                self.particle_factors,
+                self.body_factors,
+            ],
             device=model.device,
         )
         wp.launch(

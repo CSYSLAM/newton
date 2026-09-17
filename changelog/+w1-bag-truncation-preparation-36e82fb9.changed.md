@@ -1,0 +1,1 @@
+Reduce MJVBDV2 contact overhead by combining self-contact displacement updates with rigid-soft DAT preparation and resetting consumed truncation factors in place. Preserve contact limits, substeps, and iteration counts; existing scenes use the optimization automatically.
