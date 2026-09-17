@@ -16,6 +16,46 @@ _ROOT = Path(__file__).resolve().parents[2]
 
 
 class TestWebXRHandClient(unittest.TestCase):
+    def test_controller_mode_hides_and_disables_hand_panel(self):
+        """Hide the hand-only panel and reject its ray clicks while using controllers."""
+        script = r"""
+const fs = require("fs"), vm = require("vm"), assert = require("assert");
+const context = {document:{querySelector:()=>({addEventListener(){},setAttribute(){},classList:{toggle(){}}})},
+  console, assert, Date, Math, Float32Array, WeakMap};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync(process.argv[1],"utf8").replace(/initialize\(\);\s*$/,""),context);
+vm.runInContext(`
+  let updates = 0, draws = 0;
+  latestScene = {handTrackingEnabled:true};
+  handPanel = {update(){updates++;},draw(){draws++;}};
+  const identity = modelMatrix([0,0,0],[0,0,0,1],[1,1,1]);
+  const pose = {transform:{matrix:identity},views:[{projectionMatrix:identity,transform:{inverse:{matrix:identity}}}]};
+  const frame = {getViewerPose:()=>pose};
+  session = {visibilityState:"visible",inputSources:[],requestAnimationFrame(){},
+    renderState:{baseLayer:{framebuffer:{},getViewport:()=>({x:0,y:0,width:100,height:100})}}};
+  gl = {bindFramebuffer(){},clearColor(){},clear(){},viewport(){}};
+  renderer = {begin(){}};
+  updateScenePlacement = updateViewRotation = updateOpticalHands = sendControllerFrame = drawSimulationScene = ()=>{};
+  buildSceneDrawList = ()=>[];
+  const click = {inputSource:{},frame:{getPose(){throw new Error("Invisible panel accepted a ray");}}};
+  inputMode = "controllers";
+  handPanelMatrix = identity;
+  handGazePaused = true;
+  onXRFrame(0,frame);
+  assert.equal(draws,0); assert.equal(updates,0);
+  assert.equal(handPanelMatrix,null); assert.equal(handGazePaused,false);
+  selectHandPanel(click);
+  inputMode = "hands";
+  onXRFrame(16,frame);
+  assert.equal(draws,1); assert.equal(updates,1); assert.notEqual(handPanelMatrix,null);
+  inputMode = "controllers";
+  onXRFrame(32,frame);
+  assert.equal(draws,1); assert.equal(handPanelMatrix,null);
+  selectHandPanel(click);
+`,context);
+"""
+        subprocess.run(["node", "-e", script, str(_ROOT / "newton/examples/assets/webxr_teleop/app.js")], check=True)
+
     def test_explicit_hand_entry_requires_tracking_and_resumes_simulation(self):
         """Require hand tracking and surface failures instead of silent fallback."""
         script = r"""

@@ -56,6 +56,7 @@ class Example(scene.Example):
 
     reset_in_place = True
     _initial_bag_yaw = np.pi / 2
+    _initial_bag_offset = (0.0, 0.08, 0.0)
     _initial_gripper_openings = (scene.OPEN, scene.SNACK_OPENINGS["can"])
 
     def __init__(self, viewer, args):
@@ -90,7 +91,7 @@ class Example(scene.Example):
             eye_position=(0.10, 0, 0),
         )
         self.inputs = {}
-        self._right_grasp_body = None
+        self._right_grasp_target = None
         bodies, q = self.state_0.body_q.numpy(), self.state_0.joint_q.numpy()
         for hand, body in zip(HANDS, self.ee, strict=True):
             mapper = ParallelGripperRetargeter(scene.ASSET, side=hand)
@@ -213,19 +214,37 @@ class Example(scene.Example):
         return frame
 
     def _update_right_grasp_limit(self, bodies) -> None:
-        """Latch the nearby snack's grasp opening until the right hand releases it."""
+        """Latch a nearby bag or snack opening until the right hand releases it."""
         control = self.inputs["right"]
         closure = control.mapper.closure(control.jaws)
         if closure <= 0.05:
-            self._right_grasp_body = None
-        elif self._right_grasp_body is None:
+            self._right_grasp_target = None
+        elif self._right_grasp_target is None:
             tcp = self._tcp_pose(bodies[self.ee[1]]).position
-            distances = np.linalg.norm(bodies[self.objects, :3] - tcp, axis=1)
+            snacks = bodies[self.objects]
+            local = np.array(
+                [np.asarray(wp.quat_rotate_inv(wp.quat(*body[3:]), wp.vec3(*(tcp - body[:3])))) for body in snacks]
+            )
+            # Use snack bounds rather than centers so a bag wall beside a held
+            # snack cannot select the much smaller paper-grasp opening.
+            distances = np.linalg.norm(np.maximum(np.abs(local) - self.half, 0), axis=1)
+            distances[np.linalg.norm(local, axis=1) > 0.12] = np.inf
             nearest = int(np.argmin(distances))
-            if distances[nearest] <= 0.12:
-                self._right_grasp_body = self.objects[nearest]
-        kind = "can" if self._right_grasp_body is None else self.kinds[self.objects.index(self._right_grasp_body)]
-        control.mapper.lower[:] = scene.SNACK_OPENINGS[kind]
+            bag_distance = float(np.linalg.norm(self.state_0.particle_q.numpy() - tcp, axis=1).min())
+            if np.isfinite(distances[nearest]) and distances[nearest] <= bag_distance:
+                self._right_grasp_target = self.objects[nearest]
+            elif bag_distance <= 0.06:
+                self._right_grasp_target = "bag"
+            elif np.isfinite(distances[nearest]):
+                self._right_grasp_target = self.objects[nearest]
+        if self._right_grasp_target == "bag":
+            minimum = scene.SUPPORT_OPENING
+        else:
+            kind = (
+                "can" if self._right_grasp_target is None else self.kinds[self.objects.index(self._right_grasp_target)]
+            )
+            minimum = scene.SNACK_OPENINGS[kind]
+        control.mapper.lower[:] = minimum
         control.jaws = control.mapper.coordinates(closure)
 
     def _solve_teleop_ik(self) -> None:
@@ -322,7 +341,7 @@ class Example(scene.Example):
         wp.copy(self.frame_start, self._initial_ik.flatten())
         wp.copy(self.frame_end, self.frame_start)
         self._hold_inputs()
-        self._right_grasp_body = None
+        self._right_grasp_target = None
         self.inputs["right"].mapper.lower[:] = scene.SNACK_OPENINGS["can"]
         self.head_control.reset()
         self.episode_index += 1

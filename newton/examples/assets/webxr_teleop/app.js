@@ -1275,7 +1275,7 @@ function handPanelRayHit(rayMatrix) {
 }
 
 function selectHandPanel(event) {
-  if (!latestScene?.handTrackingEnabled || session?.visibilityState !== "visible") return;
+  if (inputMode !== "hands" || !latestScene?.handTrackingEnabled || session?.visibilityState !== "visible") return;
   // Optical pinches select UI only while head pointing has clutched the arms.
   if (event.inputSource.hand && inputMode === "hands" && !handGazePaused) return;
   const pose = event.frame.getPose(event.inputSource.targetRaySpace, referenceSpace);
@@ -1286,7 +1286,11 @@ function selectHandPanel(event) {
 }
 
 function updateHandPanel(viewerPose, timeMs, frame = null) {
-  if (!latestScene?.handTrackingEnabled || !handPanel) return;
+  if (inputMode !== "hands" || !latestScene?.handTrackingEnabled || !handPanel) {
+    handPanelMatrix = null;
+    updateHandGazeClutch(false, timeMs);
+    return;
+  }
   if (!handPanelMatrix) {
     handPanelMatrix = multiplyMat4(viewerPose.transform.matrix, modelMatrix([-.65, .10, -1.05], [0, 0, 0, 1], [.55, .64, 1]));
   }
@@ -1428,7 +1432,7 @@ function onXRFrame(timeMs, frame) {
     gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
     renderer.begin(multiplyMat4(view.projectionMatrix, view.transform.inverse.matrix));
     drawSimulationScene();
-    if (latestScene?.handTrackingEnabled && handPanelMatrix) {
+    if (inputMode === "hands" && latestScene?.handTrackingEnabled && handPanelMatrix) {
       handPanel.draw(multiplyMat4(view.projectionMatrix, view.transform.inverse.matrix), handPanelMatrix);
     }
   }

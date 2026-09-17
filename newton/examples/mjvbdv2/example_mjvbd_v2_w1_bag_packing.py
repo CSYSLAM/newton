@@ -130,6 +130,7 @@ def count_handle_crossings(positions, triangles, edges):
 
 class Example:
     _initial_bag_yaw = 0.0
+    _initial_bag_offset = (0.0, 0.0, 0.0)
     _initial_gripper_openings = (OPEN, IDLE_OPENING)
 
     def __init__(self, viewer, args, *, render_only=False):
@@ -334,6 +335,7 @@ class Example:
     def _initial_bag_transform(self):
         """Place the same physical bag at the scene's yaw, keeping it on the worktable."""
         position, matrix = bag_frame(0)
+        position += np.asarray(self._initial_bag_offset)
         rotation = wp.quat_from_axis_angle(wp.vec3(0, 1, 0), -math.pi / 2)
         if self._initial_bag_yaw:
             yaw = wp.quat_from_axis_angle(wp.vec3(0, 0, 1), self._initial_bag_yaw)

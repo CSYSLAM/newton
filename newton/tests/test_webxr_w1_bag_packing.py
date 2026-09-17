@@ -8,6 +8,7 @@ import struct
 import time
 import unittest
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -57,6 +58,7 @@ class TestPackingPhysics(unittest.TestCase):
             # Compare motion separately with matching initial geometry.
             with (
                 patch.object(packing.Example, "_initial_bag_yaw", np.pi / 2),
+                patch.object(packing.Example, "_initial_bag_offset", (0, 0.08, 0), create=True),
                 patch.object(packing.Example, "_initial_gripper_openings", Example._initial_gripper_openings),
             ):
                 cls.aligned = packing.Example(ViewerNull(), packing.Example.create_parser().parse_args([]))
@@ -70,6 +72,7 @@ class TestPackingPhysics(unittest.TestCase):
         mouth = position + rotation @ np.array((0, 0, packing.HEIGHT))
         self.assertGreater(float((b.pick.mean(axis=0) - mouth) @ rotation[:, 2]), 0.05)
         self.assertLess(error, 1e-5)
+        self.assertAlmostEqual(float((points[:, 1].min() + points[:, 1].max()) / 2), 0.08, places=5)
         np.testing.assert_allclose(
             b._initial_state.joint_q.numpy()[b.finger_indices["right"]], packing.SNACK_OPENINGS["can"]
         )
@@ -196,7 +199,9 @@ class TestRightGraspLimit(unittest.TestCase):
         self.example.ee = (-1, 0)
         self.example.objects = [1, 2]
         self.example.kinds = ("can", "carton")
-        self.example._right_grasp_body = None
+        self.example._right_grasp_target = None
+        self.example.half = np.array(((0.0325, 0.0325, 0.059), (0.024, 0.030, 0.059)))
+        self.example.state_0 = SimpleNamespace(particle_q=wp.array([(10, 0, 0)], dtype=wp.vec3, device="cpu"))
         pose = Pose(np.array((0, 0, 0.125)), np.array((0, 0, 0, 1)))
         mapper = ParallelGripperRetargeter(ASSET, side="right")
         self.control = GripperInput("right", mapper, pose, np.array((0.045, 0.045)))
@@ -209,6 +214,7 @@ class TestRightGraspLimit(unittest.TestCase):
         self.example._update_right_grasp_limit(self.bodies)
         np.testing.assert_allclose(self.control.jaws, 0.030)
         self.bodies[[1, 2], :3] = self.bodies[[2, 1], :3]
+        self.example.state_0.particle_q.assign(np.array(((0.002, 0, 0.125),), dtype=np.float32))
         self.example._update_right_grasp_limit(self.bodies)
         np.testing.assert_allclose(self.control.jaws, 0.030)
         self.control.jaws = self.control.mapper.coordinates(0)
@@ -223,7 +229,30 @@ class TestRightGraspLimit(unittest.TestCase):
         self.control.jaws = self.control.mapper.coordinates(1)
         self.example._update_right_grasp_limit(self.bodies)
         np.testing.assert_allclose(self.control.jaws, 0.030)
-        self.assertIsNone(self.example._right_grasp_body)
+        self.assertIsNone(self.example._right_grasp_target)
+
+    def test_bag_grasp_uses_left_hand_limit_until_release(self):
+        """Allow a nearby bag grasp to close fully and keep its limit until release."""
+        self.bodies[1:, 0] += 1
+        self.example.state_0.particle_q.assign(np.array(((0.01, 0, 0.125),), dtype=np.float32))
+        self.control.jaws = self.control.mapper.coordinates(1)
+        self.example._update_right_grasp_limit(self.bodies)
+        np.testing.assert_allclose(self.control.jaws, packing.SUPPORT_OPENING)
+        self.bodies[1, 0] = 0.01
+        self.example._update_right_grasp_limit(self.bodies)
+        np.testing.assert_allclose(self.control.jaws, packing.SUPPORT_OPENING)
+        self.control.jaws = self.control.mapper.coordinates(0)
+        self.example._update_right_grasp_limit(self.bodies)
+        self.control.jaws = self.control.mapper.solve(skeleton(0.015))
+        self.example._update_right_grasp_limit(self.bodies)
+        np.testing.assert_allclose(self.control.jaws, 0.030)
+
+    def test_snack_in_gripper_takes_priority_over_adjacent_bag(self):
+        """Keep snack protection when its volume contains the TCP beside a bag wall."""
+        self.example.state_0.particle_q.assign(np.array(((0.002, 0, 0.125),), dtype=np.float32))
+        self.control.jaws = self.control.mapper.coordinates(1)
+        self.example._update_right_grasp_limit(self.bodies)
+        np.testing.assert_allclose(self.control.jaws, 0.030)
 
 
 class TestPackingGeometry(unittest.TestCase):
