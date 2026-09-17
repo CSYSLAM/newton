@@ -1,0 +1,1 @@
+Accelerate W1 bag packing with cached IK CUDA graphs and fused rigid-soft contact updates. Default to six substeps and twelve solver iterations, validated on the scripted packing sequence; pass `--substeps 10 --iterations 18` to restore the previous solver budget.

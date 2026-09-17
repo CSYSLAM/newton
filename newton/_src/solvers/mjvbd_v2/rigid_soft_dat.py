@@ -10,9 +10,19 @@ from . import rigid_soft_dat_kernels as kernels
 
 
 @wp.kernel
-def _difference(q: wp.array[wp.vec3], reference: wp.array[wp.vec3], out: wp.array[wp.vec3]):
+def _prepare_updates(
+    q: wp.array[wp.vec3],
+    reference: wp.array[wp.vec3],
+    out: wp.array[wp.vec3],
+    particle_factors: wp.array[float],
+    body_factors: wp.array[float],
+):
     i = wp.tid()
-    out[i] = q[i] - reference[i]
+    if i < q.shape[0]:
+        out[i] = q[i] - reference[i]
+        particle_factors[i] = 1.0
+    if i < body_factors.shape[0]:
+        body_factors[i] = 1.0
 
 
 @wp.kernel
@@ -23,6 +33,8 @@ def _apply_particles(
     max_displacement: float,
     q: wp.array[wp.vec3],
     chebyshev_excluded: wp.array[wp.int32],
+    self_contact_reference: wp.array[wp.vec3],
+    self_contact_displacements: wp.array[wp.vec3],
 ):
     i = wp.tid()
     dx = displacement[i]
@@ -32,7 +44,10 @@ def _apply_particles(
         t = wp.min(t, max_displacement / length)
     if chebyshev_excluded and t < 1.0 - 1.0e-6:
         chebyshev_excluded[i] = 1
-    q[i] = reference[i] + t * dx
+    position = reference[i] + t * dx
+    q[i] = position
+    # The next self-contact sweep uses a different detection-time reference.
+    self_contact_displacements[i] = position - self_contact_reference[i]
 
 
 class RigidSoftDAT:
@@ -91,12 +106,10 @@ class RigidSoftDAT:
 
     def apply(self, solver):
         state, contacts, model = self.state, self.contacts, self.model
-        self.particle_factors.fill_(1.0)
-        self.body_factors.fill_(1.0)
         wp.launch(
-            _difference,
-            model.particle_count,
-            [state.particle_q, self.particle_reference, self.displacements],
+            _prepare_updates,
+            max(model.particle_count, model.body_count),
+            [state.particle_q, self.particle_reference, self.displacements, self.particle_factors, self.body_factors],
             device=model.device,
         )
         wp.launch(
@@ -132,6 +145,8 @@ class RigidSoftDAT:
                 self.budget,
                 state.particle_q,
                 solver.particle_chebyshev_collided if solver.particle_chebyshev_guarded else None,
+                solver.pos_prev_collision_detection,
+                solver.particle_displacements,
             ],
             device=model.device,
         )
@@ -147,12 +162,5 @@ class RigidSoftDAT:
                 self.body_budget,
                 state.body_q,
             ],
-            device=model.device,
-        )
-        # Subsequent self-contact/color updates use their own reference frame.
-        wp.launch(
-            _difference,
-            model.particle_count,
-            [state.particle_q, solver.pos_prev_collision_detection, solver.particle_displacements],
             device=model.device,
         )
