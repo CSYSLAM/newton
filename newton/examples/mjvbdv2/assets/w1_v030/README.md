@@ -6,8 +6,11 @@ DexForce Technology Co., Ltd., assembly manager V2.0, generated July 14, 2026.
 Its original GLB/DAE visuals, OBJ collision meshes, two parallel grippers and
 RealSense D405 camera modules are retained. No additional license is asserted
 for these user-provided assets.
-Mesh contents and URDF joint definitions are unchanged; trailing blank lines
-in URDF text are normalized. Meshes are stored with Git LFS.
+The four finger visuals (`visual/{left_hand,right_hand}/link{7,8}.dae`) have
+repaired triangle winding and matching outward normals so back-face culling
+does not hide their outer surfaces. Vertex positions, UVs, materials, collision
+meshes, and URDF joint definitions are preserved. Trailing blank lines in URDF
+text are normalized. Meshes are stored with Git LFS.
 
 The demo loads `robot.urdf`. The older `DexforceW1V021_grip` robot from the same
 download is not used. `--robot-urdf PATH` can select an equivalent V030 assembly

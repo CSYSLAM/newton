@@ -7,14 +7,17 @@ to turn the bag up. As in the later reference frames, it then releases, clears
 the rim, and regrips from the side while the right hand waits clear. The right
 hand subsequently packs snacks.
 
-The table is 0.98 m high, raised from 0.86 m to put the grasp in a more natural
-part of the W1 arm workspace. Its near edge is at x = 0.36 m, leaving the
-wrist and finger tails outside the table during the inclined rim approach.
-These are scene choices, not measured video dimensions.
+The table is 0.92 m high. Its near edge is at x = 0.36 m, leaving the wrist
+and finger tails outside the table during the inclined rim approach. The lower
+body starts with ankle, knee, and hip angles of 25, -50, and 25 degrees. This
+lowers the torso by about 6.4 cm without leaning it or shifting it horizontally.
+The crouch is held throughout the sequence. These are scene choices inspired by
+the reference, not measured video dimensions or a balance controller.
 
 The robot is the same W1 V030 URDF, mesh geometry, parallel grippers, and wrist
 cameras used by `mjvbd_v2_w1_pick_place`. Scene-local display colors approximate
-the video's yellow shell and black joints. The source robot assets are unchanged.
+the video's yellow shell and black joints. Finger visual assets have repaired
+face winding and normals; their geometry and separate collision meshes are unchanged.
 
 ## Blender assets
 
@@ -74,6 +77,36 @@ uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing --viewer null
 uv run --extra dev -m unittest newton.tests.test_mjvbd_v2_w1_bag_packing
 ```
 
+### Record once and replay
+
+```bash
+uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing --record --test
+uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing --replay --loop
+```
+
+Recording defaults to the null viewer and saves the initial state plus every
+60 Hz simulation frame. The default directory is `newton/tests/outputs/w1_bag_packing`
+in this checkout, independent of the working directory. Both `--record DIRECTORY`
+and `--replay DIRECTORY` accept another location. Existing directories are never
+overwritten; choose a new directory to record another take. A short recording
+(`--num-frames 120`, for example) or an interrupted recording remains playable,
+but its metadata marks it as incomplete until final packing validation passes.
+
+Replay builds only the scene geometry and materials, then reads saved robot,
+snack, and paper poses directly. It does not initialize IK, mesh SDFs, collision
+detection, or either physics solver. Recorded scene options, including snack
+count and robot setback, are restored automatically; incompatible geometry is
+rejected. These are visual recordings, not checkpoints for resuming dynamics.
+
+The replay sidebar offers pause, a frame slider, restart, and looping. Camera
+controls remain available. `--start-frame 1440` starts at 24 seconds;
+`--unthrottled` removes the default 60 FPS cap for benchmarking. Without looping,
+the interactive GL viewer holds the final frame; headless playback exits after
+the last frame. Arrays are streamed through memory-mapped files, so recording
+and seeking do not require keeping the entire sequence in RAM.
+
+### Simulation options
+
 `--snacks 1` limits packing to the green can. Test mode checks an upward-facing
 mouth (up to 30 degrees of tilt), broad-panel mouth bowing (at most 30 mm),
 handle-wall triangle intersections, the bottom remaining within 1 cm of the
@@ -85,7 +118,7 @@ including a 3 mm clearance above its surface. This catches wrist and forearm
 intersections even when the tool-center point is above the table.
 
 The default sequence lasts 50 simulated seconds (3,000 frames). For a shorter
-one-snack run, use `--snacks 1 --num-frames 2280`. Joint commands preserve the
+one-snack run, use `--snacks 1 --num-frames 2280`. Joint commands keep all 14 arm joints at least 10 degrees inside their
 source position limits and cap arm speed at 4 rad/s; coordinated IK updates
 are scaled together to avoid sudden wrist flips. The path is approximate and
 allows up to 4 cm of transient TCP tracking lag during reorientation. Released
@@ -96,10 +129,11 @@ The tipping path keeps the bottom pivot near the same place on the table.
 The left hand grips the upper side edge of the laid bag nearer the finger
 roots. The wrist rotates from 60 to 150 degrees and guides the rim forward
 over the bottom, preserving the full turn while ending at an oblique angle. A weak elbow objective
-keeps the elbows lower and closer to the torso during approach and tipping,
-fades during release, and returns for the left hand during side support.
+keeps both elbows lower and closer to the torso throughout the motion, including
+release and side support. The robot stands 3 cm farther from the table by default;
+`--robot-setback` sets this distance in meters.
 Table clearance feedback adjusts the lifting hand to keep the bottom in contact.
-The right hand waits at the body's side with an inclined wrist and partly
+The right hand waits at the body's side with a nearly horizontal wrist and partly
 closed fingers, then opens as it approaches the snack. Test mode rejects a
 left elbow raised to shoulder level and a head looking away from the active hand.
 
@@ -110,8 +144,9 @@ frame, avoiding the corner contact that tips the bottom under load. A lower elbo
 target keeps the supporting forearm forward instead of sustaining the
 shoulder-high, downward-facing tipping posture. Test mode checks the left
 gripper faces sideways during packing. The right hand approaches
-each snack from above with open fingers, avoiding the wrist turn required by
-a low rearward approach. The single-sided support allows a modest lean and
+each snack from above with open fingers; the first pickup goes directly to the
+approach point without first raising the empty hand to carry height.
+The single-sided support allows a modest lean and
 local folds; the shape checks reject gross collapse, not all deformation.
 The handles rest folded against the bag, following the reference. This remains
 an elastic approximation; it does not model permanent paper creasing or damage.

@@ -1,9 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-"""Turn up a kraft bag with the W1 left hand, then pack snacks with the right.
+"""Crouch at a worktable, turn up a bag with the left hand, then pack snacks.
 
 uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing
 
+Record once with --record (headless by default), then play with --replay --loop.
+Both options accept an optional recording directory.
+Use --robot-setback to tune the distance from the fixed worktable [m].
 Only the robot is prescribed. Paper and snacks move through contact, with no
 attachments, pose resets, or fixed bag vertices. Asset scale is estimated from
 the user's video; packaging graphics are original approximations.
@@ -24,14 +27,14 @@ from newton.examples.mjvbdv2.example_mjvbd_v2_w1_pick_place import ASSET, OPEN, 
 from newton.solvers import SolverMJVBDV2
 
 ASSETS = Path(__file__).resolve().parents[3] / "assets/w1_paper_bag"
-TABLE_Z = 0.98
+TABLE_Z = 0.92
 TABLE_CENTER = np.array((0.66, -0.01, TABLE_Z - 0.022))
 TABLE_HALF = np.array((0.30, 0.66, 0.022))
 DEPTH, WIDTH, HEIGHT = 0.13, 0.32, 0.25
 BAG_Y = 0.0
 SUPPORT_OPENING = 0.0035
 IDLE_OPENING = 0.015
-IDLE_PITCH = math.radians(145)
+IDLE_PITCH = math.radians(100)
 PACK_START = 24.0
 PACK_DURATION = 12.0
 
@@ -125,30 +128,41 @@ def count_handle_crossings(positions, triangles, edges):
 
 
 class Example:
-    def __init__(self, viewer, args):
+    def __init__(self, viewer, args, *, render_only=False):
         self.viewer, self.args = viewer, args
         if args.substeps < 1 or args.iterations < 1 or args.snacks not in (1, 2):
             raise ValueError("Use positive solver settings and one or two snacks")
+        if not math.isfinite(args.robot_setback) or args.robot_setback < 0:
+            raise ValueError("Robot setback must be finite and nonnegative")
         self.frame, self.sim_time = 0, 0.0
         self.tipping_height_offset = 0.0
         self.pack_x = 0.5
         self.support_target = None
         self.support_yaw = 0.0
         self.frame_dt, self.sim_dt = 1 / 60, 1 / (60 * args.substeps)
-        self.home = np.array(((0.28, 0.26, TABLE_Z + 0.20), (0.30, -0.38, TABLE_Z + 0.07)))
+        self.home = np.array(((0.32, 0.28, TABLE_Z + 0.14), (0.32, -0.34, TABLE_Z + 0.14)))
         self.grips = np.array(((-0.060, WIDTH / 2, HEIGHT - 0.013), (0, -WIDTH / 2, HEIGHT - 0.013)))
         self.pick = np.array(((0.43, -0.36, TABLE_Z + 0.060), (0.43, -0.25, TABLE_Z + 0.060)))[: args.snacks]
         self.kinds = ("can", "carton")[: args.snacks]
         self.half = np.array(((0.0325, 0.0325, 0.059), (0.024, 0.030, 0.059)))[: args.snacks]
         builder = newton.ModelBuilder()
         builder.rigid_gap = 0.002
-        builder.add_urdf(str(ASSET), floating=False, enable_self_collisions=False, collapse_fixed_joints=False)
+        builder.add_urdf(
+            str(ASSET),
+            xform=wp.transform(wp.vec3(-args.robot_setback, 0, 0), wp.quat_identity()),
+            floating=False,
+            enable_self_collisions=False,
+            collapse_fixed_joints=False,
+        )
         self.robot_joints, self.robot_coords = builder.joint_count, len(builder.joint_q)
         self.coords = {
             name.rsplit("/", 1)[-1]: builder.joint_q_start[j]
             for j, name in enumerate(builder.joint_label)
             if builder.joint_type[j] != newton.JointType.FIXED
         }
+        # Equal lower links fold symmetrically, lowering the torso without lean.
+        for name, value in (("ANKLE", 25.0), ("KNEE", -50.0), ("BUTTOCK", 25.0)):
+            builder.joint_q[self.coords[name]] = math.radians(value)
         self.ee = [
             next(i for i, name in enumerate(builder.body_label) if name.endswith(f"/{s}_gripper_base")) for s in SIDES
         ]
@@ -182,31 +196,32 @@ class Example:
                 builder.shape_margin[i] = 0.0015
                 if builder.shape_flags[i] & int(newton.ShapeFlags.COLLIDE_PARTICLES):
                     source = builder.shape_source[i]
-                    if source is not None:
+                    if source is not None and not render_only:
                         source.build_sdf(target_voxel_size=0.001)
                     full_shapes.append(i)
-        self.ik_model = builder.finalize()
-        self.table_geometries = []
-        for shape, source in enumerate(builder.shape_source):
-            if source is None:
-                continue
-            transform = np.asarray(builder.shape_transform[shape])
-            rotation = np.asarray(wp.quat_to_matrix(wp.quat(*transform[3:]))).reshape(3, 3)
-            vertices = np.asarray(source.vertices) * np.asarray(builder.shape_scale[shape])
-            vertices = vertices @ rotation.T + transform[:3]
-            bounds = np.array(list(product(*zip(vertices.min(axis=0), vertices.max(axis=0), strict=True))))
-            self.table_geometries.append(
-                (builder.shape_body[shape], vertices, np.asarray(source.indices).reshape(-1, 3), bounds)
-            )
-        self._build_ik()
-        self._solve_ik(self.home, (OPEN, IDLE_OPENING), (math.pi / 3, IDLE_PITCH), iterations=200)
-        builder.joint_q[:] = self.ik_q.numpy()[0].tolist()
-        self.head = next(i for i, name in enumerate(builder.body_label) if name.endswith("/head_pitch_j2_link"))
-        neutral = self.ik_model.state()
-        newton.eval_fk(self.ik_model, self.ik_q.flatten(), neutral.joint_qd, neutral)
-        self.head_origin = neutral.body_q.numpy()[self.head, :3].copy()
-        self.neck = [self.coords["NECK1"], self.coords["NECK2"]]
-        self.head_yaw_range = np.array((0.0, 0.0))
+        if not render_only:
+            self.ik_model = builder.finalize()
+            self.table_geometries = []
+            for shape, source in enumerate(builder.shape_source):
+                if source is None:
+                    continue
+                transform = np.asarray(builder.shape_transform[shape])
+                rotation = np.asarray(wp.quat_to_matrix(wp.quat(*transform[3:]))).reshape(3, 3)
+                vertices = np.asarray(source.vertices) * np.asarray(builder.shape_scale[shape])
+                vertices = vertices @ rotation.T + transform[:3]
+                bounds = np.array(list(product(*zip(vertices.min(axis=0), vertices.max(axis=0), strict=True))))
+                self.table_geometries.append(
+                    (builder.shape_body[shape], vertices, np.asarray(source.indices).reshape(-1, 3), bounds)
+                )
+            self._build_ik()
+            self._solve_ik(self.home, (OPEN, IDLE_OPENING), (IDLE_PITCH, IDLE_PITCH), iterations=200)
+            builder.joint_q[:] = self.ik_q.numpy()[0].tolist()
+            self.head = next(i for i, name in enumerate(builder.body_label) if name.endswith("/head_pitch_j2_link"))
+            neutral = self.ik_model.state()
+            newton.eval_fk(self.ik_model, self.ik_q.flatten(), neutral.joint_qd, neutral)
+            self.head_origin = neutral.body_q.numpy()[self.head, :3].copy()
+            self.neck = [self.coords["NECK1"], self.coords["NECK2"]]
+            self.head_yaw_range = np.array((0.0, 0.0))
 
         cfg = builder.ShapeConfig(ke=4e4, kd=80, mu=0.65)
         builder.add_ground_plane(cfg=builder.ShapeConfig(has_particle_collision=False), color=(0.30, 0.32, 0.34))
@@ -304,10 +319,38 @@ class Example:
                         label=key,
                     )
                 self.objects.append(body)
-        builder.color(include_bending=True)
+        if not render_only:
+            builder.color(include_bending=True)
         self.model = builder.finalize()
         self.model.soft_contact_ke, self.model.soft_contact_kd, self.model.soft_contact_mu = 2e5, 10.0, 0.6
-        self.state_0, self.state_1, self.control = self.model.state(), self.model.state(), self.model.control()
+        self.state_0 = self.model.state()
+        if not render_only:
+            self._build_simulation(full_shapes)
+        self.bag_triangles = wp.array(self.faces[: self.paper_faces].ravel(), dtype=int)
+        self.handle_triangles = wp.array(self.faces[self.paper_faces :].ravel(), dtype=int)
+        self.paper_uv = wp.array(
+            np.column_stack(((self.rest[:, 0] + self.rest[:, 1] + 0.24) * 2.5, self.rest[:, 2] * 3)), dtype=wp.vec2
+        )
+        self.render_transform = wp.array([wp.transform_identity()], dtype=wp.transform)
+        self.render_scale = wp.array([wp.vec3(1)], dtype=wp.vec3)
+        self.render_color = wp.array([wp.vec3(1)], dtype=wp.vec3)
+        self.render_material = wp.array([wp.vec4(0.95, 0, 0, 1)], dtype=wp.vec4)
+        self.graph = None
+        self.peak_ik_error, self.peak_joint_speed = 0.0, 0.0
+        self.peak_z = self.pick[:, 2].copy()
+        self.packed = [False] * args.snacks
+        self.loaded = [False] * args.snacks
+        self.viewer.set_model(self.model)
+        self.viewer.show_particles, self.viewer.show_triangles = False, False
+        self.viewer.set_camera(pos=wp.vec3(1.90, -1.9, 1.85), pitch=-19, yaw=137)
+
+    @classmethod
+    def create_render_scene(cls, viewer, args):
+        """Build matching materials and geometry without IK, SDFs, or physics solvers."""
+        return cls(viewer, args, render_only=True)
+
+    def _build_simulation(self, full_shapes):
+        self.state_1, self.control = self.model.state(), self.model.control()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.state_1.assign(self.state_0)
         self.frame_start, self.frame_end = wp.clone(self.ik_model.joint_q), wp.clone(self.ik_model.joint_q)
@@ -317,7 +360,7 @@ class Example:
             joint_mode="kinematic",
             contact_mode="full",
             vbd_options={
-                "iterations": args.iterations,
+                "iterations": self.args.iterations,
                 "rigid_soft_enable_dat": True,
                 "particle_enable_multilevel_correction": True,
                 "particle_multilevel_operator": "galerkin",
@@ -325,7 +368,11 @@ class Example:
                 "particle_multilevel_coarse_iterations": 32,
                 "particle_multilevel_checkpoints": tuple(
                     sorted(
-                        {max(1, args.iterations // 3), max(1, 2 * args.iterations // 3), max(1, args.iterations - 2)}
+                        {
+                            max(1, self.args.iterations // 3),
+                            max(1, 2 * self.args.iterations // 3),
+                            max(1, self.args.iterations - 2),
+                        }
                     )
                 ),
                 "particle_multilevel_relaxation": 0.8,
@@ -355,23 +402,6 @@ class Example:
                 "soft_contact_max": 131072,
             },
         )
-        self.bag_triangles = wp.array(self.faces[: self.paper_faces].ravel(), dtype=int)
-        self.handle_triangles = wp.array(self.faces[self.paper_faces :].ravel(), dtype=int)
-        self.paper_uv = wp.array(
-            np.column_stack(((self.rest[:, 0] + self.rest[:, 1] + 0.24) * 2.5, self.rest[:, 2] * 3)), dtype=wp.vec2
-        )
-        self.render_transform = wp.array([wp.transform_identity()], dtype=wp.transform)
-        self.render_scale = wp.array([wp.vec3(1)], dtype=wp.vec3)
-        self.render_color = wp.array([wp.vec3(1)], dtype=wp.vec3)
-        self.render_material = wp.array([wp.vec4(0.95, 0, 0, 1)], dtype=wp.vec4)
-        self.graph = None
-        self.peak_ik_error, self.peak_joint_speed = 0.0, 0.0
-        self.peak_z = self.pick[:, 2].copy()
-        self.packed = [False] * args.snacks
-        self.loaded = [False] * args.snacks
-        self.viewer.set_model(self.model)
-        self.viewer.show_particles, self.viewer.show_triangles = False, False
-        self.viewer.set_camera(pos=wp.vec3(1.90, -1.9, 1.85), pitch=-19, yaw=137)
 
     def _build_ik(self):
         self.ik_q = wp.clone(self.ik_model.joint_q).reshape((1, -1))
@@ -397,16 +427,27 @@ class Example:
             body = next(
                 i for i, name in enumerate(self.ik_model.body_label) if name.endswith(f"/elbow_yaw_{side}_j4_link")
             )
+            # Keep a gentle elbow preference even while turning the wrist;
+            # removing it lets the redundant arm drift into another posture.
             self.elbows.append(
                 ik.IKObjectivePosition(
-                    body, wp.vec3(), wp.array([wp.vec3(0.05, sign * 0.30, 1.12)], dtype=wp.vec3), weight=0.005
+                    body,
+                    wp.vec3(),
+                    wp.array([wp.vec3(0.05 - self.args.robot_setback, sign * 0.30, TABLE_Z + 0.14)], dtype=wp.vec3),
+                    weight=0.03,
                 )
             )
+        self.lower, self.upper = self.ik_model.joint_limit_lower.numpy(), self.ik_model.joint_limit_upper.numpy()
+        self.arm_coords = np.array([self.coords[f"{side}_J{j}"] for side in ("LEFT", "RIGHT") for j in range(1, 8)])
+        # Preserve room at each arm joint's stops, including during wrist turns.
+        self.motion_lower, self.motion_upper = self.lower.copy(), self.upper.copy()
+        self.motion_lower[self.arm_coords] += math.radians(10)
+        self.motion_upper[self.arm_coords] -= math.radians(10)
         objectives = (
             self.positions
             + self.elbows
             + self.rotations
-            + [ik.IKObjectiveJointLimit(self.ik_model.joint_limit_lower, self.ik_model.joint_limit_upper, weight=10)]
+            + [ik.IKObjectiveJointLimit(wp.array(self.motion_lower), wp.array(self.motion_upper), weight=10)]
         )
         mask = np.zeros(self.ik_model.joint_dof_count, dtype=bool)
         for side in ("LEFT", "RIGHT"):
@@ -421,13 +462,8 @@ class Example:
             lambda_initial=0.1,
             lambda_min=0.01,
         )
-        self.lower, self.upper = self.ik_model.joint_limit_lower.numpy(), self.ik_model.joint_limit_upper.numpy()
 
     def _solve_ik(self, targets, openings, angles, *, iterations=24):
-        for side, elbow in enumerate(self.elbows):
-            elbow.weight = 0.05 * (1 - smooth((self.sim_time - 11.2) / 2.0))
-            if side == 0:
-                elbow.weight += 0.005 * smooth((self.sim_time - 13.2) / 2.0)
         for side, (position, rotation, point, angle) in enumerate(
             zip(self.positions, self.rotations, targets, angles, strict=True)
         ):
@@ -439,7 +475,7 @@ class Example:
             rotation.set_target_rotation(0, wp.vec4(*orientation))
         previous = self.ik_q.numpy()[0]
         self.ik_solver.step(self.ik_q, self.ik_q, iterations=iterations)
-        q = np.clip(self.ik_q.numpy()[0], self.lower, self.upper)
+        q = np.clip(self.ik_q.numpy()[0], self.motion_lower, self.motion_upper)
         if iterations <= 24:
             delta = q - previous
             fraction = min(1.0, 4.0 * self.frame_dt / max(float(np.max(np.abs(delta))), 1e-9))
@@ -448,8 +484,7 @@ class Example:
             for finger in (1, 2):
                 q[self.coords[f"{side}_FINGER{finger}_JOINT"]] = opening
         if iterations <= 24:
-            active = smooth((self.sim_time - (PACK_START - 1.0)) / 2.0)
-            point = (1 - active) * targets[0] + active * targets[1]
+            point = self._gaze_target(targets, self.sim_time)
             direction = point - self.head_origin
             desired = np.array(
                 (
@@ -468,6 +503,11 @@ class Example:
         self.ik_q.assign(q.reshape(1, -1))
         return q
 
+    @staticmethod
+    def _gaze_target(targets, t):
+        packing = smooth((t - (PACK_START - 1.0)) / 2.0)
+        return (1 - packing) * targets[0] + packing * targets[1]
+
     def _plan(self, t):
         progress = smooth((t - 5.5) / 4.5)
         position, rotation = bag_frame(progress)
@@ -485,6 +525,7 @@ class Example:
             approach = grip + np.array((-0.10, 0, 0))
             a = smooth((t - 1.0) / 2)
             targets = (1 - a) * self.home + a * approach
+            angles[0] = (1 - a) * IDLE_PITCH + a * math.pi / 3
             if t > 3:
                 a = smooth((t - 3) / 1.5)
                 targets = (1 - a) * approach + a * grip
@@ -535,7 +576,7 @@ class Example:
             closed = 0.030 if item == 0 else 0.028
             waypoints = [
                 (0, start, IDLE_OPENING if item == 0 else OPEN, IDLE_PITCH if item == 0 else math.pi / 2),
-                (2.8, above_pick, OPEN, math.pi / 2),
+                (2.8, approach if item == 0 else above_pick, OPEN, math.pi / 2),
                 (4.0, approach, OPEN, math.pi / 2),
                 (5.4, pick, OPEN, math.pi / 2),
                 (6.0, pick, closed, math.pi / 2),
@@ -689,9 +730,8 @@ class Example:
             left_drop = bodies[self.shoulders[0], 2] - bodies[self.elbows[0].link_index, 2]
             if left_drop < 0.05:
                 raise AssertionError("The left elbow rose into the horizontal, outstretched posture")
-            active = smooth((self.sim_time - (PACK_START - 1.0)) / 2.0)
             hands = np.array([wp.transform_point(wp.transform(*bodies[body]), TCP) for body in self.ee])
-            direction = (1 - active) * hands[0] + active * hands[1] - bodies[self.head, :3]
+            direction = self._gaze_target(hands, self.sim_time) - bodies[self.head, :3]
             forward = np.asarray(wp.quat_rotate(wp.quat(*bodies[self.head, 3:]), wp.vec3(1, 0, 0)))
             if np.dot(forward, direction) / np.linalg.norm(direction) < math.cos(math.radians(35)):
                 raise AssertionError("The head turned away from the operating hand")
@@ -739,6 +779,10 @@ class Example:
         joints = self.state_0.joint_q.numpy()[: self.robot_coords]
         if np.any(joints < self.lower - 1e-5) or np.any(joints > self.upper + 1e-5):
             raise AssertionError("Arm motion exceeded the source joint position limits")
+        arms = self.arm_coords
+        margin = np.minimum(joints[arms] - self.lower[arms], self.upper[arms] - joints[arms])
+        if np.min(margin) < math.radians(10) - 1e-5:
+            raise AssertionError("Arm joints must stay at least 10 degrees away from their stops")
         shape_limit = 0.04 if self.sim_time < 11 else 0.025
         if self.shape_error > shape_limit:
             raise AssertionError(f"Paper body collapsed: {self.shape_error:.4f} m")
@@ -773,10 +817,49 @@ class Example:
         parser.add_argument("--snacks", type=int, choices=(1, 2), default=2)
         parser.add_argument("--substeps", type=int, default=10)
         parser.add_argument("--iterations", type=int, default=18)
+        parser.add_argument(
+            "--robot-setback",
+            type=float,
+            default=0.03,
+            help="Move the robot away from the table along -X [m] (default: 0.03).",
+        )
         parser.add_argument("--no-cuda-graph", action="store_true")
+        from newton.examples.mjvbdv2.support.w1_bag_recording import DEFAULT_RECORDING  # noqa: PLC0415
+
+        modes = parser.add_mutually_exclusive_group()
+        modes.add_argument(
+            "--record",
+            nargs="?",
+            const=str(DEFAULT_RECORDING),
+            metavar="DIRECTORY",
+            help="Record every simulation frame to a new directory (defaults to a null viewer).",
+        )
+        modes.add_argument(
+            "--replay",
+            nargs="?",
+            const=str(DEFAULT_RECORDING),
+            metavar="DIRECTORY",
+            help="Play saved states without IK or physics; use the recorded scene settings.",
+        )
+        parser.add_argument("--loop", action="store_true", help="Loop the recording during replay.")
+        parser.add_argument("--start-frame", type=int, default=0, help="First recorded frame to replay.")
+        parser.add_argument("--unthrottled", action="store_true", help="Replay without the 60 FPS limit.")
         return parser
 
 
 if __name__ == "__main__":
-    viewer, args = newton.examples.init(Example.create_parser())
-    newton.examples.run(Example(viewer, args), args)
+    from newton.examples.mjvbdv2.support.w1_bag_recording import run_recording, run_replay
+
+    parser = Example.create_parser()
+    mode = parser.parse_args()
+    if mode.record:
+        parser.set_defaults(viewer="null")
+    if mode.replay:
+        parser.set_defaults(num_frames=2**31 - 1)
+    viewer, args = newton.examples.init(parser)
+    if args.record:
+        run_recording(Example, viewer, args)
+    elif args.replay:
+        run_replay(Example, viewer, args)
+    else:
+        newton.examples.run(Example(viewer, args), args)

@@ -5,10 +5,18 @@
 import unittest
 
 import numpy as np
+import warp as wp
 
+import newton
 from newton.examples.mjvbdv2.example_mjvbd_v2_w1_bag_packing import (
     ASSETS,
+    IDLE_OPENING,
+    IDLE_PITCH,
+    OPEN,
+    PACK_START,
+    SUPPORT_OPENING,
     TABLE_Z,
+    Example,
     bag_frame,
     count_handle_crossings,
     fit_bag,
@@ -16,6 +24,7 @@ from newton.examples.mjvbdv2.example_mjvbd_v2_w1_bag_packing import (
     snack_extent,
     triangles_overlap_box,
 )
+from newton.viewer import ViewerNull
 
 
 class TestW1PaperBag(unittest.TestCase):
@@ -122,6 +131,47 @@ class TestW1PaperBag(unittest.TestCase):
             self.assertLess(error, 1e-6)
         world[rest[:, 2] > 0.12, 0] += 0.025
         self.assertGreater(fit_bag(rest, world)[2], 0.004)
+
+
+class TestW1BagMotion(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with wp.ScopedDevice("cpu"):
+            cls.scene = Example.create_render_scene(ViewerNull(), Example.create_parser().parse_args([]))
+
+    def test_right_hand_waits_clear_during_left_hand_tipping_and_regrasp(self):
+        """Keep the right hand relaxed at home until the snack pickup starts."""
+        scene = self.scene
+        for time in np.linspace(0, PACK_START, 145):
+            targets, openings, angles = scene._plan(time)
+            np.testing.assert_allclose(targets[1], scene.home[1], atol=1e-7)
+            self.assertAlmostEqual(openings[1], IDLE_OPENING)
+            self.assertAlmostEqual(angles[1], IDLE_PITCH)
+        for time in (5.5, 7.5, 10.0, 20.5):
+            targets, openings, _ = scene._plan(time)
+            self.assertGreater(np.linalg.norm(targets[0] - scene.home[0]), 0.10)
+            self.assertAlmostEqual(openings[0], SUPPORT_OPENING)
+        _, openings, _ = scene._plan(14.0)
+        self.assertAlmostEqual(openings[0], OPEN)
+
+    def test_crouch_lowers_torso_without_pitching_it(self):
+        """Lower the torso through coordinated leg joints while preserving its upright orientation."""
+        scene = self.scene
+        model = scene.model
+        leg = [scene.coords[name] for name in ("ANKLE", "KNEE", "BUTTOCK")]
+        torso = next(i for i, name in enumerate(model.body_label) if name.endswith("/upper_body_base"))
+        crouched, straight = model.state(), model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, crouched)
+        q = model.joint_q.numpy()
+        self.assertGreater(abs(q[leg[1]]), np.radians(20))
+        q[leg] = 0
+        straight.joint_q.assign(q)
+        newton.eval_fk(model, straight.joint_q, model.joint_qd, straight)
+        a, b = crouched.body_q.numpy()[torso], straight.body_q.numpy()[torso]
+        self.assertGreater(b[2] - a[2], 0.03)
+        self.assertLess(b[2] - a[2], 0.12)
+        np.testing.assert_allclose(a[3:], b[3:], atol=1e-6)
+        np.testing.assert_allclose(a[:2], b[:2], atol=1e-6)
 
 
 if __name__ == "__main__":
