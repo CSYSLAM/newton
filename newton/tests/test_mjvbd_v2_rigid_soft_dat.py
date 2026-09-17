@@ -10,13 +10,20 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.mjvbd_v2.rigid_soft_dat import _apply_particles, _prepare_updates
+from newton._src.solvers.mjvbd_v2.rigid_soft_dat import (
+    _apply_updates,
+    _prepare_truncated_updates,
+    _prepare_updates,
+)
 from newton._src.solvers.mjvbd_v2.rigid_soft_dat_kernels import (
     apply_body_truncation_ts,
     apply_rigid_soft_truncation,
     planar_truncation_t,
 )
-from newton._src.solvers.mjvbd_v2.vbd.particle_vbd_kernels import accelerate_particle_iteration_chebyshev_guarded
+from newton._src.solvers.mjvbd_v2.vbd.particle_vbd_kernels import (
+    accelerate_particle_iteration_chebyshev_guarded,
+    apply_truncation_ts,
+)
 from newton.solvers import SolverMJVBDV2
 
 
@@ -29,6 +36,152 @@ def _plane_probe(out: wp.array[float]):
 
 
 class TestRigidSoftDAT(unittest.TestCase):
+    def test_fused_preparation_matches_separate_truncation(self):
+        """Preserve both detection references, clipping flags, and resets on graph replay."""
+        for device, body_count, guarded in product(wp.get_devices(), (0, 7), (False, True)):
+            with self.subTest(device=str(device), bodies=body_count, guarded=guarded), wp.ScopedDevice(device):
+                self._check_fused_preparation(device, body_count, guarded)
+
+    def _check_fused_preparation(self, device, body_count, guarded):
+        self_reference = wp.array(((0.4, 0, 0),) * 4, dtype=wp.vec3)
+        reference = wp.array(((0.3, 0.1, 0),) * 4, dtype=wp.vec3)
+        initial = wp.array(((0.03, 0.04, 0), (0.002, 0, 0), (0.001, 0, 0), (0, 0, 0)), dtype=wp.vec3)
+        factors = wp.array((0.5, 0.25, 1.0, 1.0), dtype=float)
+        initial_factors = wp.clone(factors)
+        fused_factors = wp.clone(factors)
+        delta, expected_delta = wp.clone(initial), wp.clone(initial)
+        q, expected_q = wp.empty_like(initial), wp.empty_like(initial)
+        excluded = wp.zeros(4, dtype=int) if guarded else None
+        expected_excluded = wp.zeros(4, dtype=int) if guarded else None
+        cleanup = wp.zeros(1, dtype=int) if guarded else None
+        expected_cleanup = wp.zeros(1, dtype=int) if guarded else None
+        out, expected_out = wp.empty_like(initial), wp.empty_like(initial)
+        particle_factors, expected_factors = wp.zeros(4), wp.zeros(4)
+        body_factors, expected_body_factors = wp.zeros(body_count), wp.zeros(body_count)
+        wp.launch(
+            apply_truncation_ts,
+            4,
+            [
+                self_reference,
+                expected_delta,
+                factors,
+                0.01,
+                expected_delta,
+                expected_q,
+                expected_excluded,
+                expected_cleanup,
+            ],
+        )
+        wp.launch(
+            _prepare_updates,
+            max(4, body_count),
+            [expected_q, reference, expected_out, expected_factors, expected_body_factors],
+        )
+        np.testing.assert_array_equal(factors.numpy(), np.ones(4))
+
+        def prepare():
+            delta.assign(initial)
+            fused_factors.assign(initial_factors)
+            particle_factors.zero_()
+            body_factors.zero_()
+            if guarded:
+                excluded.zero_()
+                cleanup.zero_()
+            wp.launch(
+                _prepare_truncated_updates,
+                max(4, body_count),
+                [
+                    self_reference,
+                    delta,
+                    fused_factors,
+                    0.01,
+                    excluded,
+                    cleanup,
+                    q,
+                    reference,
+                    out,
+                    particle_factors,
+                    body_factors,
+                ],
+            )
+
+        prepare()
+        graph = None
+        if device.is_cuda:
+            with wp.ScopedCapture() as capture:
+                prepare()
+            graph = capture.graph
+        for _ in range(2):
+            if graph is not None:
+                wp.capture_launch(graph)
+            else:
+                prepare()
+            for actual, expected in (
+                (q, expected_q),
+                (delta, expected_delta),
+                (out, expected_out),
+                (particle_factors, expected_factors),
+                (body_factors, expected_body_factors),
+                (excluded, expected_excluded),
+                (cleanup, expected_cleanup),
+            ):
+                if actual is not None:
+                    np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+            np.testing.assert_array_equal(fused_factors.numpy(), np.ones(4))
+        np.testing.assert_allclose(delta.numpy(), ((0.006, 0.008, 0), (0.0005, 0, 0), (0.001, 0, 0), (0, 0, 0)))
+        if guarded:
+            np.testing.assert_array_equal(excluded.numpy(), (1, 1, 0, 0))
+            np.testing.assert_array_equal(cleanup.numpy(), (1,))
+
+    def test_fused_updates_preserve_body_and_particle_bounds(self):
+        """Preserve COM rotation, isotropic limits, and kinematic poses in a mixed update."""
+        for device in wp.get_devices():
+            with self.subTest(device=str(device)), wp.ScopedDevice(device):
+                reference = wp.array(((0.5, 0, 0), (0.7, 0, 0)), dtype=wp.vec3)
+                q = wp.empty_like(reference)
+                excluded = wp.zeros(2, dtype=int)
+                self_reference = wp.full(2, wp.vec3(0.4, 0, 0), dtype=wp.vec3)
+                self_displacements = wp.empty_like(q)
+                rotated = wp.transform(wp.vec3(0.2, 0, 0), wp.quat_from_axis_angle(wp.vec3(0, 0, 1), np.pi / 2))
+                translated = wp.transform(wp.vec3(0.2, 0, 0), wp.quat_identity())
+                bodies = wp.array([rotated, rotated, translated, translated, translated], dtype=wp.transform)
+                wp.launch(
+                    _apply_updates,
+                    5,
+                    [
+                        reference,
+                        wp.array(((0.004, 0, 0), (0.0001, 0, 0)), dtype=wp.vec3),
+                        wp.array((0.5, 1.0), dtype=float),
+                        0.001,
+                        q,
+                        excluded,
+                        self_reference,
+                        self_displacements,
+                        wp.array([wp.transform_identity()] * 5, dtype=wp.transform),
+                        wp.array((2, 1, 1, 1, 1), dtype=int),
+                        wp.full(5, wp.vec3(0.1, 0, 0), dtype=wp.vec3),
+                        wp.array((0, 0.5, 1, 0, 1), dtype=float),
+                        wp.full(5, 0.5),
+                        wp.array((0.01, 1, 0.01, 1, 1), dtype=float),
+                        bodies,
+                    ],
+                )
+                np.testing.assert_allclose(q.numpy(), ((0.501, 0, 0), (0.7001, 0, 0)), atol=1e-7)
+                np.testing.assert_array_equal(excluded.numpy(), (1, 0))
+                np.testing.assert_allclose(self_displacements.numpy(), q.numpy() - self_reference.numpy())
+                half_rotation = wp.quat_from_axis_angle(wp.vec3(0, 0, 1), np.pi / 4)
+                half_translation = wp.vec3(0.15, 0.05, 0) - wp.quat_rotate(half_rotation, wp.vec3(0.1, 0, 0))
+                expected = np.array(
+                    [
+                        rotated,
+                        wp.transform(half_translation, half_rotation),
+                        wp.transform(wp.vec3(0.01, 0, 0), wp.quat_identity()),
+                        wp.transform_identity(),
+                        translated,
+                    ]
+                )
+                np.testing.assert_allclose(bodies.numpy(), expected, atol=1e-7)
+
     def test_prepare_updates_resets_both_factor_arrays(self):
         """Reset all factors even when there are more bodies than particles."""
         for device in wp.get_devices():
@@ -185,7 +338,7 @@ class TestRigidSoftDAT(unittest.TestCase):
                 self_reference = wp.full(2, wp.vec3(0.0002, 0, 0), dtype=wp.vec3)
                 self_displacements = wp.empty(2, dtype=wp.vec3)
                 wp.launch(
-                    _apply_particles,
+                    _apply_updates,
                     2,
                     [
                         reference,
@@ -196,6 +349,13 @@ class TestRigidSoftDAT(unittest.TestCase):
                         excluded,
                         self_reference,
                         self_displacements,
+                        wp.empty(0, dtype=wp.transform),
+                        wp.empty(0, dtype=int),
+                        wp.empty(0, dtype=wp.vec3),
+                        wp.empty(0, dtype=float),
+                        wp.empty(0, dtype=float),
+                        wp.empty(0, dtype=float),
+                        wp.empty(0, dtype=wp.transform),
                     ],
                 )
                 np.testing.assert_array_equal(excluded.numpy(), (1, 0))

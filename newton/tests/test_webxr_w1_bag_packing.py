@@ -5,19 +5,23 @@
 
 import json
 import struct
+import time
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
 
 import newton
+from newton.examples.mjvbdv2 import example_mjvbd_v2_w1_bag_packing as packing
 from newton.examples.mjvbdv2._webxr_gripper_input import GripperInput
 from newton.examples.mjvbdv2._webxr_parallel_gripper import ParallelGripperRetargeter
 from newton.examples.mjvbdv2._webxr_teleop import ControllerState, HandState, Pose, XRFrame
 from newton.examples.mjvbdv2.example_mjvbd_v2_w1_pick_place import ASSET
 from newton.examples.mjvbdv2.example_mjvbd_v2_webxr_w1_bag_packing import Example
 from newton.tests.test_webxr_parallel_gripper import skeleton
+from newton.viewer import ViewerNull
 
 
 def frame(sequence=0, *, mode="controllers", position=(0, 0, 0), activation=1, enabled=True, span=0.10):
@@ -36,6 +40,116 @@ def frame(sequence=0, *, mode="controllers", position=(0, 0, 0), activation=1, e
         input_mode=mode,
         hands={"left": HandState(pose, skeleton(span), enabled, activation)},
     )
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "Requires CUDA for the full packing solver")
+class TestPackingPhysics(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.device_scope = wp.ScopedDevice("cuda:0")
+        cls.device_scope.__enter__()
+        cls.addClassCleanup(cls.device_scope.__exit__, None, None, None)
+        with patch.object(packing, "SolverMJVBDV2", wraps=packing.SolverMJVBDV2) as factory:
+            cls.automatic = packing.Example(ViewerNull(), packing.Example.create_parser().parse_args([]))
+            cls.teleop = Example(ViewerNull(), Example.create_parser().parse_args(["--no-webxr-server"]))
+            cls.addClassCleanup(cls.teleop.close)
+            cls.options = [call.kwargs for call in factory.call_args_list]
+
+    def test_physical_model_and_contact_options_match(self):
+        """Keep material arrays, gripper contacts and solver budgets identical to automatic packing."""
+        a, b = self.automatic, self.teleop
+        self.assertEqual(self.options[0], self.options[1])
+        self.assertEqual((a.frame_dt, a.sim_dt, a.args.substeps), (b.frame_dt, b.sim_dt, b.args.substeps))
+        for name in (
+            "particle_mass",
+            "particle_radius",
+            "tri_materials",
+            "edge_bending_properties",
+            "shape_material_ke",
+            "shape_material_kd",
+            "shape_material_mu",
+            "shape_margin",
+            "shape_gap",
+            "shape_flags",
+            "shape_type",
+            "shape_scale",
+            "shape_transform",
+            "body_mass",
+            "body_inertia",
+            "body_flags",
+        ):
+            with self.subTest(field=name):
+                np.testing.assert_array_equal(getattr(a.model, name).numpy(), getattr(b.model, name).numpy())
+        for name in ("soft_contact_ke", "soft_contact_kd", "soft_contact_mu"):
+            self.assertEqual(getattr(a.model, name), getattr(b.model, name))
+        self.assertEqual(a.model.shape_collision_filter_pairs, b.model.shape_collision_filter_pairs)
+        for field in ("particle_color_groups", "body_color_groups"):
+            for group_a, group_b in zip(getattr(a.model, field), getattr(b.model, field), strict=True):
+                np.testing.assert_array_equal(group_a.numpy(), group_b.numpy())
+        for index in self.options[0]["collision_options"]["rigid_soft_full_surface_shape_indices"]:
+            source_a, source_b = a.model.shape_source[index], b.model.shape_source[index]
+            if isinstance(source_a, newton.Mesh):
+                np.testing.assert_array_equal(source_a.vertices, source_b.vertices)
+                np.testing.assert_array_equal(source_a.indices, source_b.indices)
+                self.assertIsNotNone(source_a.sdf)
+                self.assertIsNotNone(source_b.sdf)
+                self.assertEqual(source_a.sdf.shape_margin, source_b.sdf.shape_margin)
+                for field in ("sparse_voxel_size", "coarse_voxel_size", "center", "half_extents"):
+                    np.testing.assert_array_equal(
+                        np.asarray(getattr(source_a.sdf.data, field)), np.asarray(getattr(source_b.sdf.data, field))
+                    )
+
+    def test_gripper_closure_preserves_paper_clearance(self):
+        """Keep controller and optical full closure at the automatic bag grasp opening."""
+        for control in self.teleop.inputs.values():
+            np.testing.assert_allclose(control.mapper.coordinates(1), packing.SUPPORT_OPENING)
+            np.testing.assert_allclose(control.mapper.solve(skeleton(0.015)), packing.SUPPORT_OPENING)
+            np.testing.assert_allclose(control.mapper.coordinates(0), packing.OPEN)
+
+    def test_same_commands_produce_matching_contact_motion(self):
+        """Use the same physical stepping path and reproduce contact motion after reset."""
+        a, b = self.automatic, self.teleop
+        self.assertFalse(b.args.no_cuda_graph)
+        for _ in range(3):
+            a.step()
+            b.frame_start.assign(a.frame_start)
+            b.frame_end.assign(a.frame_end)
+            b._advance_physics()
+            np.testing.assert_allclose(b.state_0.particle_q.numpy(), a.state_0.particle_q.numpy(), atol=1e-4)
+            np.testing.assert_allclose(b.state_0.body_q.numpy(), a.state_0.body_q.numpy(), atol=1e-4)
+        self.assertIsNotNone(b.graph)
+        b.reset_physics(source="test")
+        b.step()
+        b.test_post_step()
+
+    def test_teleop_graph_tracks_both_input_modes_after_reset(self):
+        """Refresh graph targets from both hands and retain independent grippers after reset."""
+        b = self.teleop
+        for mode in ("controllers", "hands"):
+            b.reset_physics(source="test")
+            previous = b.ik_q.numpy()[0].copy()
+            for sequence in range(40):
+                value = frame(sequence, mode=mode, position=(sequence * 0.0005, 0, 0), span=0.015)
+                right = replace(value.controllers["left"], handedness="right", trigger_value=0)
+                b.xr_state.update(
+                    replace(
+                        value,
+                        stream_id=mode,
+                        received_monotonic=time.monotonic(),
+                        controllers={"left": value.controllers["left"], "right": right},
+                        hands={
+                            "left": value.hands["left"],
+                            "right": replace(value.hands["left"], joints=skeleton(0.10)),
+                        },
+                    )
+                )
+                b.step()
+                b.test_post_step()
+            self.assertIsNotNone(b.ik_graph)
+            current = b.ik_q.numpy()[0]
+            self.assertGreater(np.linalg.norm(current[b.arm_indices] - previous[b.arm_indices]), 1e-4)
+            np.testing.assert_allclose(current[b.finger_indices["left"]], packing.SUPPORT_OPENING, atol=1e-6)
+            np.testing.assert_allclose(current[b.finger_indices["right"]], packing.OPEN, atol=1e-6)
 
 
 class TestPackingGeometry(unittest.TestCase):

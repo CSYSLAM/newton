@@ -442,10 +442,23 @@ class Example:
             objectives,
             joint_dof_mask=wp.array(mask, dtype=wp.bool),
             jacobian_mode=ik.IKJacobianType.ANALYTIC,
+            parallel_objectives=False,
+            enable_cuda_fast_path=True,
             lambda_initial=0.1,
             lambda_min=0.01,
         )
         self.ik_graph = None
+
+    def _step_ik(self, iterations):
+        """Run the same IK scheduling for scripted and teleoperated targets."""
+        if self.ik_model.device.is_cuda and not self.args.no_cuda_graph and iterations == 24:
+            if self.ik_graph is None:
+                with wp.ScopedCapture() as capture:
+                    self.ik_solver.step(self.ik_q, self.ik_q, iterations=iterations)
+                self.ik_graph = capture.graph
+            wp.capture_launch(self.ik_graph)
+        else:
+            self.ik_solver.step(self.ik_q, self.ik_q, iterations=iterations)
 
     def _solve_ik(self, targets, openings, angles, *, iterations=24):
         for side, (position, rotation, point, angle) in enumerate(
@@ -458,14 +471,7 @@ class Example:
                 orientation = wp.quat_from_axis_angle(wp.vec3(0, 0, 1), yaw) * orientation
             rotation.set_target_rotation(0, wp.vec4(*orientation))
         previous = self.ik_q.numpy()[0]
-        if self.ik_model.device.is_cuda and not self.args.no_cuda_graph and iterations == 24:
-            if self.ik_graph is None:
-                with wp.ScopedCapture() as capture:
-                    self.ik_solver.step(self.ik_q, self.ik_q, iterations=iterations)
-                self.ik_graph = capture.graph
-            wp.capture_launch(self.ik_graph)
-        else:
-            self.ik_solver.step(self.ik_q, self.ik_q, iterations=iterations)
+        self._step_ik(iterations)
         q = np.clip(self.ik_q.numpy()[0], self.motion_lower, self.motion_upper)
         if iterations <= 24:
             delta = q - previous
@@ -615,6 +621,22 @@ class Example:
             self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
+    def _advance_physics(self):
+        """Advance one physical frame with identical graph and contact handling in both demos."""
+        if self.graph is None:
+            self._simulate()
+            if self.model.device.is_cuda and not self.args.no_cuda_graph and self.args.substeps % 2 == 0:
+                saved_a, saved_b = self.model.state(), self.model.state()
+                saved_a.assign(self.state_0)
+                saved_b.assign(self.state_1)
+                with wp.ScopedCapture() as capture:
+                    self._simulate()
+                self.state_0.assign(saved_a)
+                self.state_1.assign(saved_b)
+                self.graph = capture.graph
+        else:
+            wp.capture_launch(self.graph)
+
     def step(self):
         if self.sim_time >= 17.0 and self.support_target is None:
             # Regrasp the settled rim once; following contacted vertices would
@@ -637,19 +659,7 @@ class Example:
         self.peak_joint_speed = max(self.peak_joint_speed, float(np.max(np.abs(end - start)) / self.frame_dt))
         self.frame_start.assign(start)
         self.frame_end.assign(end)
-        if self.graph is None:
-            self._simulate()
-            if self.model.device.is_cuda and not self.args.no_cuda_graph and self.args.substeps % 2 == 0:
-                saved_a, saved_b = self.model.state(), self.model.state()
-                saved_a.assign(self.state_0)
-                saved_b.assign(self.state_1)
-                with wp.ScopedCapture() as capture:
-                    self._simulate()
-                self.state_0.assign(saved_a)
-                self.state_1.assign(saved_b)
-                self.graph = capture.graph
-        else:
-            wp.capture_launch(self.graph)
+        self._advance_physics()
         self.frame += 1
         self.sim_time = self.frame / 60
         bodies, q = self.state_0.body_q.numpy(), self.state_0.particle_q.numpy()

@@ -1,0 +1,1 @@
+Align W1 bag teleoperation with automatic packing by sharing physical frame stepping and IK graph execution. Enable CUDA graphs by default for this teleoperation scene, retain explicit opt-out controls, and map controller and optical gripper input to the automatic paper-grasp opening range. Add regression coverage for material/contact settings, commanded motion, and reset.

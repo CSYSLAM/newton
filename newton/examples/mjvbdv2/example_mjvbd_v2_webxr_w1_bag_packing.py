@@ -57,14 +57,12 @@ class Example(scene.Example):
     reset_in_place = True
 
     def __init__(self, viewer, args):
-        if args.graph_capture:
-            raise ValueError("WebXR packing requires --no-graph-capture")
         if args.ik_iterations < 1 or args.record_flush_every < 1:
             raise ValueError("IK iterations and recording flush interval must be positive")
         for name in ("xr_stale_seconds", "xr_translation_scale", "xr_max_translation", "arm_speed", "gripper_speed"):
             if not np.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
-        args.no_cuda_graph = True
+        args.no_cuda_graph = args.no_cuda_graph or not args.graph_capture
         super().__init__(viewer, args)
         self.xr_state = LatestXRFrame()
         self.teleoperation_active = self.simulation_active = True
@@ -92,9 +90,14 @@ class Example(scene.Example):
         self.inputs = {}
         bodies, q = self.state_0.body_q.numpy(), self.state_0.joint_q.numpy()
         for hand, body in zip(HANDS, self.ee, strict=True):
+            mapper = ParallelGripperRetargeter(scene.ASSET, side=hand)
+            # Match the scripted paper grasp instead of squeezing the jaws to zero.
+            mapper.lower = np.maximum(mapper.lower, scene.SUPPORT_OPENING)
+            mapper.upper = np.minimum(mapper.upper, scene.OPEN)
+            mapper.reset(q[self.finger_indices[hand]])
             self.inputs[hand] = GripperInput(
                 hand,
-                ParallelGripperRetargeter(scene.ASSET, side=hand),
+                mapper,
                 self._tcp_pose(bodies[body]),
                 q[self.finger_indices[hand]],
                 translation_scale=args.xr_translation_scale,
@@ -205,7 +208,7 @@ class Example(scene.Example):
             self.rotations[index].set_target_rotation(0, wp.vec4(*control.orientation))
             self.elbows[index].weight = 0.005
         if any(control.retargeter.active for control in self.inputs.values()):
-            self.ik_solver.step(self.ik_q, self.ik_q, iterations=self.args.ik_iterations)
+            self._step_ik(self.args.ik_iterations)
         solved = self.ik_q.numpy()[0]
         if not np.isfinite(solved).all():
             solved = previous.copy()
@@ -228,7 +231,7 @@ class Example(scene.Example):
             return
         frame = self._prepare_frame()
         self._solve_teleop_ik()
-        self._simulate()
+        self._advance_physics()
         self.frame += 1
         self.episode_frame += 1
         self.sim_time = self.frame * self.frame_dt
@@ -460,8 +463,8 @@ class Example(scene.Example):
     @staticmethod
     def create_parser():
         parser = scene.Example.create_parser()
-        parser.set_defaults(num_frames=600, no_cuda_graph=True)
-        parser.add_argument("--graph-capture", action=argparse.BooleanOptionalAction, default=False)
+        parser.set_defaults(num_frames=600)
+        parser.add_argument("--graph-capture", action=argparse.BooleanOptionalAction, default=True)
         parser.add_argument("--ik-iterations", type=int, default=24)
         parser.add_argument("--arm-speed", type=float, default=2.0, help="Maximum arm joint speed [rad/s].")
         parser.add_argument("--gripper-speed", type=float, default=0.08, help="Maximum speed of each jaw [m/s].")

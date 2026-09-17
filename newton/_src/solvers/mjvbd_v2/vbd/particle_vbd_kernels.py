@@ -2455,6 +2455,15 @@ def apply_untruncated_displacements(
         pos_out[i] = pos[i] + displacement[i]
 
 
+@wp.func
+def truncate_particle_displacement(displacement: wp.vec3, t: float, max_displacement: float):
+    particle_displacement = displacement * t
+    length = wp.length(particle_displacement)
+    if length > max_displacement:
+        particle_displacement = particle_displacement * max_displacement / length
+    return particle_displacement, t < 1.0 - 1.0e-6 or length > max_displacement
+
+
 @wp.kernel
 def apply_truncation_ts(
     pos: wp.array[wp.vec3],
@@ -2467,14 +2476,10 @@ def apply_truncation_ts(
     chebyshev_cleanup_status: wp.array[wp.int32],
 ):
     i = wp.tid()
-    t = truncation_ts[i]
-    particle_displacement = displacement_in[i] * t
-
-    # Nuts-saving truncation: clamp displacement magnitude to max_displacement
-    len_displacement = wp.length(particle_displacement)
-    if len_displacement > max_displacement:
-        particle_displacement = particle_displacement * max_displacement / len_displacement
-    if t < 1.0 - 1.0e-6 or len_displacement > max_displacement:
+    particle_displacement, truncated = truncate_particle_displacement(
+        displacement_in[i], truncation_ts[i], max_displacement
+    )
+    if truncated:
         if chebyshev_excluded:
             chebyshev_excluded[i] = 1
         if chebyshev_cleanup_status:
@@ -2483,6 +2488,8 @@ def apply_truncation_ts(
     displacement_out[i] = particle_displacement
     if pos_out:
         pos_out[i] = pos[i] + particle_displacement
+    # Prepare the next sweep without a separate full-array fill.
+    truncation_ts[i] = 1.0
 
 
 @wp.kernel(enable_backward=False)
