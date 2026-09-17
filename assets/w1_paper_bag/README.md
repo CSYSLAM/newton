@@ -25,7 +25,7 @@ face winding and normals; their geometry and separate collision meshes are uncha
 
 - `w1_bag_and_snacks.blend`: editable bag and snack models, with packed paper grain.
 - `bag.npz`: an open, welded paper shell with side gussets, a pressed bottom fold,
-  and folded-down multilayer paper handles.
+  and raised multilayer paper handles extending above the mouth.
 - `snacks.npz` and `snacks.json`: colored geometry for a green crisp can and red
   biscuit carton, including rolled metal rims, lettering, and food illustrations.
 - `kraft.png`: original procedural cellulose grain.
@@ -63,6 +63,8 @@ panel dents. The double-ply top hem uses bending stiffness 120 and damping 2.0.
 All particles have positive mass. Handles start outside the paper surface,
 with 2.6 mm folded thickness and a 1.5 mm rest-contact exclusion distance,
 so nearby handle-wall contacts remain active.
+Handle arches and their welded connections use bending stiffness 0.3 and
+damping 0.01 in both the automatic and teleoperated scenes.
 The snacks are free rigid bodies. Only contact and friction stand the bag up
 and lift the snacks; there are no grasp attachments, table anchors, or scripted
 object poses. Materials are demonstration parameters, not measured paper or
@@ -148,7 +150,8 @@ each snack from above with open fingers; the first pickup goes directly to the
 approach point without first raising the empty hand to carry height.
 The single-sided support allows a modest lean and
 local folds; the shape checks reject gross collapse, not all deformation.
-The handles rest folded against the bag, following the reference. This remains
+The handles arch toward the bag opening, with their tops about 30 mm above
+the rim in the upright asset, making them accessible for grasping. This remains
 an elastic approximation; it does not model permanent paper creasing or damage.
 
 Packing targets account for the supported bag's tilt and leave space for each

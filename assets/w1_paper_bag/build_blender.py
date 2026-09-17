@@ -84,7 +84,8 @@ def build(directory):
     roots = {}
     for i in (0, nx):
         for j in (5, 14):
-            roots[i, j] = [vertex(i, j, 14), vertex(i, j + 1, 14), vertex(i, j + 1, 15), vertex(i, j, 15)]
+            # Start at the upper edge so the sleeve opens toward the rising arch.
+            roots[i, j] = [vertex(i, j + 1, 15), vertex(i, j, 15), vertex(i, j, 14), vertex(i, j + 1, 14)]
     faces = [face for face in faces if not any(set(face) <= set(root) for root in roots.values())]
     paper_faces = len(faces)
     handles = []
@@ -93,8 +94,8 @@ def build(directory):
         for k in range(1, 24):
             t = math.pi * k / 24
             y = -0.072 * math.cos(t)
-            z = height * 14.5 / nz - 0.072 * math.sin(t)
-            tangent = np.array((0.072 * math.sin(t), -0.072 * math.cos(t)))
+            z = height * 14.5 / nz + 0.072 * math.sin(t)
+            tangent = np.array((0.072 * math.sin(t), 0.072 * math.cos(t)))
             normal = np.array((-tangent[1], tangent[0])) / np.linalg.norm(tangent)
             row = []
             for thick, wide in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
@@ -108,7 +109,7 @@ def build(directory):
                 n = (j + 1) % 4
                 faces.extend(((a[j], a[n], b[n]), (a[j], b[n], b[j])))
         handles.append(np.array(rows).ravel())
-    obj = mesh_object("Creased kraft bag with folded-down paper handles", vertices, faces, paper)
+    obj = mesh_object("Creased kraft bag with raised paper handles", vertices, faces, paper)
     obj.data.materials.append(ribbon)
     for polygon in obj.data.polygons[paper_faces:]:
         polygon.material_index = 1

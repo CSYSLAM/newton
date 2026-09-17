@@ -1,0 +1,1 @@
+Make the W1 bag teleoperation stop script terminate the scene and clean up matching GPU and orphaned processes, escalating to SIGKILL after a grace period. Other scene stop scripts retain their standby behavior.

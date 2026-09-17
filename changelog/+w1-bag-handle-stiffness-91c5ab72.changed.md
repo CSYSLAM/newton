@@ -1,0 +1,1 @@
+Raise the authored W1 bag handles above the mouth and increase their bending stiffness and damping tenfold in both packing demos to help grasp the handles when standing the bag up. Rebuild recordings made with the previous bag geometry before replaying them.

@@ -56,7 +56,7 @@ class Example(scene.Example):
 
     reset_in_place = True
     _initial_bag_yaw = np.pi / 2
-    _initial_bag_offset = (0.0, 0.08, 0.0)
+    _initial_bag_offset = (0.0, 0.20, 0.0)
     _initial_gripper_openings = (scene.OPEN, scene.SNACK_OPENINGS["can"])
 
     def __init__(self, viewer, args):

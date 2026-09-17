@@ -71,6 +71,20 @@ class TestW1PaperBag(unittest.TestCase):
         edges = edges[np.all(edges >= paper_count, axis=1)]
         self.assertEqual(count_handle_crossings(vertices, faces[:paper_faces], edges), 0)
 
+    def test_handles_arch_above_the_bag_mouth(self):
+        """Expose both handle arches above the rim while keeping their welded roots."""
+        with np.load(ASSETS / "bag.npz") as data:
+            vertices = data["vertices"]
+            paper_count = int(data["paper_count"])
+            rim_height = vertices[data["rim"], 2].max()
+            for name in ("handle_0", "handle_1"):
+                handle = data[name]
+                roots = handle[handle < paper_count]
+                free = handle[handle >= paper_count]
+                self.assertEqual(len(np.unique(roots)), 8)
+                self.assertGreater(float(vertices[free, 2].max()), rim_height + 0.02)
+                self.assertGreater(float(np.median(vertices[free, 2])), float(vertices[roots, 2].max()))
+
     def test_can_extent_is_invariant_to_spin(self):
         """Do not reject a contained spinning can using fictitious box corners."""
         half = np.array((0.0325, 0.0325, 0.059))

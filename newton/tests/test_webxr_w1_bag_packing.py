@@ -58,7 +58,7 @@ class TestPackingPhysics(unittest.TestCase):
             # Compare motion separately with matching initial geometry.
             with (
                 patch.object(packing.Example, "_initial_bag_yaw", np.pi / 2),
-                patch.object(packing.Example, "_initial_bag_offset", (0, 0.08, 0), create=True),
+                patch.object(packing.Example, "_initial_bag_offset", Example._initial_bag_offset),
                 patch.object(packing.Example, "_initial_gripper_openings", Example._initial_gripper_openings),
             ):
                 cls.aligned = packing.Example(ViewerNull(), packing.Example.create_parser().parse_args([]))
@@ -72,7 +72,9 @@ class TestPackingPhysics(unittest.TestCase):
         mouth = position + rotation @ np.array((0, 0, packing.HEIGHT))
         self.assertGreater(float((b.pick.mean(axis=0) - mouth) @ rotation[:, 2]), 0.05)
         self.assertLess(error, 1e-5)
-        self.assertAlmostEqual(float((points[:, 1].min() + points[:, 1].max()) / 2), 0.08, places=5)
+        self.assertAlmostEqual(
+            float((points[:, 1].min() + points[:, 1].max()) / 2), Example._initial_bag_offset[1], places=5
+        )
         np.testing.assert_allclose(
             b._initial_state.joint_q.numpy()[b.finger_indices["right"]], packing.SNACK_OPENINGS["can"]
         )

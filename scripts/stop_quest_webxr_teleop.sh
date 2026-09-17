@@ -32,6 +32,110 @@ unit_is_alive() {
   [[ "${state}" == "active" || "${state}" == "activating" || "${state}" == "deactivating" ]]
 }
 
+is_cleanup_pid() {
+  local candidate="$1" index argument
+  local -a arguments=()
+  [[ "${candidate}" =~ ^[0-9]+$ && "${candidate}" -gt 1 ]] || return 1
+  [[ -O "/proc/${candidate}" && -r "/proc/${candidate}/cmdline" ]] || return 1
+  mapfile -d '' -t arguments 2>/dev/null < "/proc/${candidate}/cmdline" || return 1
+  [[ ${#arguments[@]} -gt 0 ]] || return 1
+  # Match actual launch arguments, not a substring in a shell/Python command.
+  [[ "${arguments[0]##*/}" =~ ^(python([0-9]+(\.[0-9]+)*)?|uv)$ ]] || return 1
+  for ((index = 1; index < ${#arguments[@]}; index += 1)); do
+    argument="${arguments[index]}"
+    [[ "${argument}" != "-c" ]] || return 1
+    if [[ "${argument}" == "-m" ]]; then
+      [[ "${arguments[index+1]:-}" == "newton.examples" && "${arguments[index+2]:-}" == "${example_name}" ]] \
+        || [[ "${arguments[index+1]:-}" == "newton.examples.mjvbdv2.example_${example_name}" ]]
+      return
+    fi
+    if [[ "${argument}" == *.py ]]; then
+      [[ "${argument##*/}" == "example_${example_name}.py" ]]
+      return
+    fi
+  done
+  return 1
+}
+
+cleanup_demo_processes() {
+  local candidate proc_file gpu_pids main_pid attempt pending
+  local -A targets=()
+  # Include orphaned GPU workers even when the PID file and service are gone.
+  if command -v nvidia-smi >/dev/null \
+    && gpu_pids="$(timeout 5s nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null)"; then
+    while read -r candidate; do
+      if is_cleanup_pid "${candidate}"; then targets["${candidate}"]=1; fi
+    done <<< "${gpu_pids}"
+  else
+    echo "GPU 进程查询不可用，继续按 /proc 中的场景启动参数查找残留进程。" >&2
+  fi
+  for proc_file in /proc/[0-9]*/cmdline; do
+    candidate="${proc_file%/cmdline}"
+    candidate="${candidate##*/}"
+    if is_cleanup_pid "${candidate}"; then targets["${candidate}"]=1; fi
+  done
+  main_pid="$(systemctl --user show --property=MainPID --value "${unit_name}" 2>/dev/null || true)"
+  if [[ "${main_pid}" =~ ^[0-9]+$ && "${main_pid}" -gt 1 ]]; then
+    if ! is_cleanup_pid "${main_pid}"; then
+      echo "错误：${unit_name} 的 PID ${main_pid} 不是当前用户的 ${teleop_name} 仿真。" >&2
+      return 1
+    fi
+    targets["${main_pid}"]=1
+  fi
+  if [[ ${#targets[@]} -gt 0 ]]; then
+    curl --silent --fail --max-time 2 -X POST \
+      "http://127.0.0.1:${port}/control/exit-immersive" >/dev/null 2>&1 || true
+    curl --silent --fail --max-time 2 -X POST \
+      "http://127.0.0.1:${port}/control/shutdown" >/dev/null 2>&1 || true
+  fi
+  if is_cleanup_pid "${main_pid}"; then
+    # Stop the unit as well so a managed worker is not restarted after cleanup.
+    systemctl --user --no-block stop "${unit_name}" >/dev/null 2>&1 || true
+  fi
+  for candidate in "${!targets[@]}"; do
+    if is_cleanup_pid "${candidate}"; then
+      echo "停止 ${teleop_name} 残留进程 PID ${candidate}（SIGTERM）。"
+      kill -TERM "${candidate}" 2>/dev/null || true
+    fi
+  done
+  for ((attempt = 0; attempt < 50; attempt += 1)); do
+    pending=false
+    for candidate in "${!targets[@]}"; do
+      if is_cleanup_pid "${candidate}"; then pending=true; fi
+    done
+    [[ "${pending}" == true ]] || break
+    sleep 0.1
+  done
+  for candidate in "${!targets[@]}"; do
+    if is_cleanup_pid "${candidate}"; then
+      echo "强制结束 ${teleop_name} 残留进程 PID ${candidate}（SIGKILL）。"
+      kill -KILL "${candidate}" 2>/dev/null || true
+    fi
+  done
+  for ((attempt = 0; attempt < 20; attempt += 1)); do
+    pending=false
+    for proc_file in /proc/[0-9]*/cmdline; do
+      candidate="${proc_file%/cmdline}"
+      candidate="${candidate##*/}"
+      if is_cleanup_pid "${candidate}"; then pending=true; fi
+    done
+    [[ "${pending}" == true ]] || break
+    sleep 0.1
+  done
+  if [[ "${pending}" == true ]]; then
+    echo "错误：仍有 ${teleop_name} 进程未退出；保留运行记录，请检查 GPU/进程状态。" >&2
+    return 1
+  fi
+  adb reverse --remove "tcp:${port}" >/dev/null 2>&1 || true
+  rm -f "${pid_file}" "${active_run_file}"
+  echo "已停止 ${teleop_name}，并清理当前用户的该场景 GPU/仿真残留进程。"
+}
+
+if [[ "${NEWTON_WEBXR_CLEANUP_PROCESSES:-0}" == "1" ]]; then
+  cleanup_demo_processes
+  exit 0
+fi
+
 stopped=false
 standing_by=false
 parked=false

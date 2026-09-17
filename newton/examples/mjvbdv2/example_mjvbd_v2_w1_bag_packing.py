@@ -273,7 +273,8 @@ class Example:
         )
         for i, edge in enumerate(builder.edge_indices):
             if max(edge) >= self.paper_count:
-                builder.edge_bending_properties[i] = (0.03, 0.001)
+                # Keep the handles graspable while allowing them to unfold as the bag tips up.
+                builder.edge_bending_properties[i] = (30, 0.1)
                 continue
             points = self.rest[np.asarray(edge)[np.asarray(edge) >= 0]]
             hinge = self.rest[np.asarray(edge)[2:]]
