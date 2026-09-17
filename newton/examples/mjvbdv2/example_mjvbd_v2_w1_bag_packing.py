@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-"""Turn up a kraft bag with the W1 left hand, then pack snacks with the right.
+"""Crouch at a worktable, turn up a bag with the left hand, then pack snacks.
 
 uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing
 
@@ -27,7 +27,7 @@ from newton.examples.mjvbdv2.example_mjvbd_v2_w1_pick_place import ASSET, OPEN, 
 from newton.solvers import SolverMJVBDV2
 
 ASSETS = Path(__file__).resolve().parents[3] / "assets/w1_paper_bag"
-TABLE_Z = 0.98
+TABLE_Z = 0.92
 TABLE_CENTER = np.array((0.66, -0.01, TABLE_Z - 0.022))
 TABLE_HALF = np.array((0.30, 0.66, 0.022))
 DEPTH, WIDTH, HEIGHT = 0.13, 0.32, 0.25
@@ -160,6 +160,9 @@ class Example:
             for j, name in enumerate(builder.joint_label)
             if builder.joint_type[j] != newton.JointType.FIXED
         }
+        # Equal lower links fold symmetrically, lowering the torso without lean.
+        for name, value in (("ANKLE", 25.0), ("KNEE", -50.0), ("BUTTOCK", 25.0)):
+            builder.joint_q[self.coords[name]] = math.radians(value)
         self.ee = [
             next(i for i, name in enumerate(builder.body_label) if name.endswith(f"/{s}_gripper_base")) for s in SIDES
         ]
@@ -430,15 +433,21 @@ class Example:
                 ik.IKObjectivePosition(
                     body,
                     wp.vec3(),
-                    wp.array([wp.vec3(0.05 - self.args.robot_setback, sign * 0.30, 1.12)], dtype=wp.vec3),
+                    wp.array([wp.vec3(0.05 - self.args.robot_setback, sign * 0.30, TABLE_Z + 0.14)], dtype=wp.vec3),
                     weight=0.03,
                 )
             )
+        self.lower, self.upper = self.ik_model.joint_limit_lower.numpy(), self.ik_model.joint_limit_upper.numpy()
+        self.arm_coords = np.array([self.coords[f"{side}_J{j}"] for side in ("LEFT", "RIGHT") for j in range(1, 8)])
+        # Preserve room at each arm joint's stops, including during wrist turns.
+        self.motion_lower, self.motion_upper = self.lower.copy(), self.upper.copy()
+        self.motion_lower[self.arm_coords] += math.radians(10)
+        self.motion_upper[self.arm_coords] -= math.radians(10)
         objectives = (
             self.positions
             + self.elbows
             + self.rotations
-            + [ik.IKObjectiveJointLimit(self.ik_model.joint_limit_lower, self.ik_model.joint_limit_upper, weight=10)]
+            + [ik.IKObjectiveJointLimit(wp.array(self.motion_lower), wp.array(self.motion_upper), weight=10)]
         )
         mask = np.zeros(self.ik_model.joint_dof_count, dtype=bool)
         for side in ("LEFT", "RIGHT"):
@@ -453,7 +462,6 @@ class Example:
             lambda_initial=0.1,
             lambda_min=0.01,
         )
-        self.lower, self.upper = self.ik_model.joint_limit_lower.numpy(), self.ik_model.joint_limit_upper.numpy()
 
     def _solve_ik(self, targets, openings, angles, *, iterations=24):
         for side, (position, rotation, point, angle) in enumerate(
@@ -467,7 +475,7 @@ class Example:
             rotation.set_target_rotation(0, wp.vec4(*orientation))
         previous = self.ik_q.numpy()[0]
         self.ik_solver.step(self.ik_q, self.ik_q, iterations=iterations)
-        q = np.clip(self.ik_q.numpy()[0], self.lower, self.upper)
+        q = np.clip(self.ik_q.numpy()[0], self.motion_lower, self.motion_upper)
         if iterations <= 24:
             delta = q - previous
             fraction = min(1.0, 4.0 * self.frame_dt / max(float(np.max(np.abs(delta))), 1e-9))
@@ -476,8 +484,7 @@ class Example:
             for finger in (1, 2):
                 q[self.coords[f"{side}_FINGER{finger}_JOINT"]] = opening
         if iterations <= 24:
-            active = smooth((self.sim_time - (PACK_START - 1.0)) / 2.0)
-            point = (1 - active) * targets[0] + active * targets[1]
+            point = self._gaze_target(targets, self.sim_time)
             direction = point - self.head_origin
             desired = np.array(
                 (
@@ -495,6 +502,11 @@ class Example:
             self.head_yaw_range[1] = max(self.head_yaw_range[1], q[self.neck[0]])
         self.ik_q.assign(q.reshape(1, -1))
         return q
+
+    @staticmethod
+    def _gaze_target(targets, t):
+        packing = smooth((t - (PACK_START - 1.0)) / 2.0)
+        return (1 - packing) * targets[0] + packing * targets[1]
 
     def _plan(self, t):
         progress = smooth((t - 5.5) / 4.5)
@@ -718,9 +730,8 @@ class Example:
             left_drop = bodies[self.shoulders[0], 2] - bodies[self.elbows[0].link_index, 2]
             if left_drop < 0.05:
                 raise AssertionError("The left elbow rose into the horizontal, outstretched posture")
-            active = smooth((self.sim_time - (PACK_START - 1.0)) / 2.0)
             hands = np.array([wp.transform_point(wp.transform(*bodies[body]), TCP) for body in self.ee])
-            direction = (1 - active) * hands[0] + active * hands[1] - bodies[self.head, :3]
+            direction = self._gaze_target(hands, self.sim_time) - bodies[self.head, :3]
             forward = np.asarray(wp.quat_rotate(wp.quat(*bodies[self.head, 3:]), wp.vec3(1, 0, 0)))
             if np.dot(forward, direction) / np.linalg.norm(direction) < math.cos(math.radians(35)):
                 raise AssertionError("The head turned away from the operating hand")
@@ -768,6 +779,10 @@ class Example:
         joints = self.state_0.joint_q.numpy()[: self.robot_coords]
         if np.any(joints < self.lower - 1e-5) or np.any(joints > self.upper + 1e-5):
             raise AssertionError("Arm motion exceeded the source joint position limits")
+        arms = self.arm_coords
+        margin = np.minimum(joints[arms] - self.lower[arms], self.upper[arms] - joints[arms])
+        if np.min(margin) < math.radians(10) - 1e-5:
+            raise AssertionError("Arm joints must stay at least 10 degrees away from their stops")
         shape_limit = 0.04 if self.sim_time < 11 else 0.025
         if self.shape_error > shape_limit:
             raise AssertionError(f"Paper body collapsed: {self.shape_error:.4f} m")

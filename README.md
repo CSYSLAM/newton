@@ -1195,10 +1195,11 @@ uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing --record --te
 uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing --replay --loop
 ```
 
-The W1 V030 uses its left hand to turn up a paper bag, then regrips the rim
-from the side while the right hand packs snacks. Its head follows the operating
-hand. The Blender-authored
-paper bag and snacks remain dynamic throughout. See the
+The W1 V030 crouches at a 92 cm worktable and uses its left hand to turn up a
+paper bag, then regrips the rim from the side. The right hand waits at its side
+until it starts packing snacks. Arm joints retain a 10-degree margin from their
+limits, and the head follows the operating hand. The Blender-authored paper bag
+and snacks remain dynamic throughout. See the
 [reference, asset, and validation notes](assets/w1_paper_bag/README.md).
 
 ## Project Governance, Legal, and Members

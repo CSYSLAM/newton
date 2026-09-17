@@ -7,14 +7,17 @@ to turn the bag up. As in the later reference frames, it then releases, clears
 the rim, and regrips from the side while the right hand waits clear. The right
 hand subsequently packs snacks.
 
-The table is 0.98 m high, raised from 0.86 m to put the grasp in a more natural
-part of the W1 arm workspace. Its near edge is at x = 0.36 m, leaving the
-wrist and finger tails outside the table during the inclined rim approach.
-These are scene choices, not measured video dimensions.
+The table is 0.92 m high. Its near edge is at x = 0.36 m, leaving the wrist
+and finger tails outside the table during the inclined rim approach. The lower
+body starts with ankle, knee, and hip angles of 25, -50, and 25 degrees. This
+lowers the torso by about 6.4 cm without leaning it or shifting it horizontally.
+The crouch is held throughout the sequence. These are scene choices inspired by
+the reference, not measured video dimensions or a balance controller.
 
 The robot is the same W1 V030 URDF, mesh geometry, parallel grippers, and wrist
 cameras used by `mjvbd_v2_w1_pick_place`. Scene-local display colors approximate
-the video's yellow shell and black joints. The source robot assets are unchanged.
+the video's yellow shell and black joints. Finger visual assets have repaired
+face winding and normals; their geometry and separate collision meshes are unchanged.
 
 ## Blender assets
 
@@ -115,7 +118,7 @@ including a 3 mm clearance above its surface. This catches wrist and forearm
 intersections even when the tool-center point is above the table.
 
 The default sequence lasts 50 simulated seconds (3,000 frames). For a shorter
-one-snack run, use `--snacks 1 --num-frames 2280`. Joint commands preserve the
+one-snack run, use `--snacks 1 --num-frames 2280`. Joint commands keep all 14 arm joints at least 10 degrees inside their
 source position limits and cap arm speed at 4 rad/s; coordinated IK updates
 are scaled together to avoid sudden wrist flips. The path is approximate and
 allows up to 4 cm of transient TCP tracking lag during reorientation. Released
