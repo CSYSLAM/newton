@@ -33,6 +33,7 @@ TABLE_HALF = np.array((0.30, 0.66, 0.022))
 DEPTH, WIDTH, HEIGHT = 0.13, 0.32, 0.25
 BAG_Y = 0.0
 SUPPORT_OPENING = 0.0035
+SNACK_OPENINGS = {"can": 0.030, "carton": 0.028}
 IDLE_OPENING = 0.015
 IDLE_PITCH = math.radians(100)
 PACK_START = 24.0
@@ -128,6 +129,9 @@ def count_handle_crossings(positions, triangles, edges):
 
 
 class Example:
+    _initial_bag_yaw = 0.0
+    _initial_gripper_openings = (OPEN, IDLE_OPENING)
+
     def __init__(self, viewer, args, *, render_only=False):
         self.viewer, self.args = viewer, args
         if args.substeps < 1 or args.iterations < 1 or args.snacks not in (1, 2):
@@ -203,7 +207,7 @@ class Example:
                     (builder.shape_body[shape], vertices, np.asarray(source.indices).reshape(-1, 3), bounds)
                 )
             self._build_ik()
-            self._solve_ik(self.home, (OPEN, IDLE_OPENING), (IDLE_PITCH, IDLE_PITCH), iterations=200)
+            self._solve_ik(self.home, self._initial_gripper_openings, (IDLE_PITCH, IDLE_PITCH), iterations=200)
             builder.joint_q[:] = self.ik_q.numpy()[0].tolist()
             self.head = next(i for i, name in enumerate(builder.body_label) if name.endswith("/head_pitch_j2_link"))
             neutral = self.ik_model.state()
@@ -250,10 +254,10 @@ class Example:
         edges = np.concatenate([handle_faces[:, [0, 1]], handle_faces[:, [1, 2]], handle_faces[:, [2, 0]]])
         edges = np.unique(np.sort(edges, axis=1), axis=0)
         self.free_handle_edges = edges[np.all(edges >= self.paper_count, axis=1)]
-        position, _ = bag_frame(0)
+        position, rotation = self._initial_bag_transform()
         builder.add_cloth_mesh(
             pos=wp.vec3(*position),
-            rot=wp.quat_from_axis_angle(wp.vec3(0, 1, 0), -math.pi / 2),
+            rot=rotation,
             scale=1,
             vel=wp.vec3(),
             vertices=self.rest.tolist(),
@@ -326,6 +330,24 @@ class Example:
         self.viewer.set_model(self.model)
         self.viewer.show_particles, self.viewer.show_triangles = False, True
         self.viewer.set_camera(pos=wp.vec3(1.90, -1.9, 1.85), pitch=-19, yaw=137)
+
+    def _initial_bag_transform(self):
+        """Place the same physical bag at the scene's yaw, keeping it on the worktable."""
+        position, matrix = bag_frame(0)
+        rotation = wp.quat_from_axis_angle(wp.vec3(0, 1, 0), -math.pi / 2)
+        if self._initial_bag_yaw:
+            yaw = wp.quat_from_axis_angle(wp.vec3(0, 0, 1), self._initial_bag_yaw)
+            yaw_matrix = np.asarray(wp.quat_to_matrix(yaw)).reshape(3, 3)
+            vertices = self.rest @ matrix.T + position
+            center = (vertices.min(axis=0) + vertices.max(axis=0)) / 2
+            vertices = (vertices - center) @ yaw_matrix.T + center
+            position = yaw_matrix @ (position - center) + center
+            # Rotation about the bag center can move its wide side beyond the table.
+            lower, upper = (TABLE_CENTER - TABLE_HALF)[:2] + 0.004, (TABLE_CENTER + TABLE_HALF)[:2] - 0.004
+            position[:2] += np.maximum(lower - vertices[:, :2].min(axis=0), 0)
+            position[:2] += np.minimum(upper - vertices[:, :2].max(axis=0), 0)
+            rotation = yaw * rotation
+        return position, rotation
 
     @classmethod
     def create_render_scene(cls, viewer, args):
@@ -570,7 +592,7 @@ class Example:
             # bodies above the rim when they open.
             drop = carry - np.array((0, 0, 0.07))
             start = self.home[1] if item == 0 else np.array((self.pack_x - 0.10, BAG_Y - 0.045, high))
-            closed = 0.030 if item == 0 else 0.028
+            closed = SNACK_OPENINGS[self.kinds[item]]
             waypoints = [
                 (0, start, IDLE_OPENING if item == 0 else OPEN, IDLE_PITCH if item == 0 else math.pi / 2),
                 (2.8, approach if item == 0 else above_pick, OPEN, math.pi / 2),

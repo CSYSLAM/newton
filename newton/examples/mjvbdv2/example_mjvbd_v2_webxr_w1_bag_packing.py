@@ -55,6 +55,8 @@ class Example(scene.Example):
     """Drive both V030 arms and grippers while retaining physical bag/snack contact."""
 
     reset_in_place = True
+    _initial_bag_yaw = np.pi / 2
+    _initial_gripper_openings = (scene.OPEN, scene.SNACK_OPENINGS["can"])
 
     def __init__(self, viewer, args):
         if args.ik_iterations < 1 or args.record_flush_every < 1:
@@ -88,11 +90,12 @@ class Example(scene.Example):
             eye_position=(0.10, 0, 0),
         )
         self.inputs = {}
+        self._right_grasp_body = None
         bodies, q = self.state_0.body_q.numpy(), self.state_0.joint_q.numpy()
         for hand, body in zip(HANDS, self.ee, strict=True):
             mapper = ParallelGripperRetargeter(scene.ASSET, side=hand)
-            # Match the scripted paper grasp instead of squeezing the jaws to zero.
-            mapper.lower = np.maximum(mapper.lower, scene.SUPPORT_OPENING)
+            minimum = scene.SUPPORT_OPENING if hand == "left" else scene.SNACK_OPENINGS["can"]
+            mapper.lower = np.maximum(mapper.lower, minimum)
             mapper.upper = np.minimum(mapper.upper, scene.OPEN)
             mapper.reset(q[self.finger_indices[hand]])
             self.inputs[hand] = GripperInput(
@@ -198,7 +201,32 @@ class Example(scene.Example):
             control = self.inputs[hand]
             control.update(frame, self._tcp_pose(bodies[body]), q[self.finger_indices[hand]])
             control.position = np.clip(control.position, WORKSPACE_LOWER, WORKSPACE_UPPER)
+        if (
+            frame is not None
+            and (
+                (frame.input_mode == "controllers" and "right" in frame.controllers)
+                or (frame.input_mode == "hands" and self.inputs["right"].status == "tracking")
+            )
+            and frame.visibility_state == "visible"
+        ):
+            self._update_right_grasp_limit(bodies)
         return frame
+
+    def _update_right_grasp_limit(self, bodies) -> None:
+        """Latch the nearby snack's grasp opening until the right hand releases it."""
+        control = self.inputs["right"]
+        closure = control.mapper.closure(control.jaws)
+        if closure <= 0.05:
+            self._right_grasp_body = None
+        elif self._right_grasp_body is None:
+            tcp = self._tcp_pose(bodies[self.ee[1]]).position
+            distances = np.linalg.norm(bodies[self.objects, :3] - tcp, axis=1)
+            nearest = int(np.argmin(distances))
+            if distances[nearest] <= 0.12:
+                self._right_grasp_body = self.objects[nearest]
+        kind = "can" if self._right_grasp_body is None else self.kinds[self.objects.index(self._right_grasp_body)]
+        control.mapper.lower[:] = scene.SNACK_OPENINGS[kind]
+        control.jaws = control.mapper.coordinates(closure)
 
     def _solve_teleop_ik(self) -> None:
         previous = self.ik_q.numpy()[0]
@@ -294,6 +322,8 @@ class Example(scene.Example):
         wp.copy(self.frame_start, self._initial_ik.flatten())
         wp.copy(self.frame_end, self.frame_start)
         self._hold_inputs()
+        self._right_grasp_body = None
+        self.inputs["right"].mapper.lower[:] = scene.SNACK_OPENINGS["can"]
         self.head_control.reset()
         self.episode_index += 1
         self.episode_frame = 0

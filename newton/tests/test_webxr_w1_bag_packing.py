@@ -54,6 +54,27 @@ class TestPackingPhysics(unittest.TestCase):
             cls.teleop = Example(ViewerNull(), Example.create_parser().parse_args(["--no-webxr-server"]))
             cls.addClassCleanup(cls.teleop.close)
             cls.options = [call.kwargs for call in factory.call_args_list]
+            # Compare motion separately with matching initial geometry.
+            with (
+                patch.object(packing.Example, "_initial_bag_yaw", np.pi / 2),
+                patch.object(packing.Example, "_initial_gripper_openings", Example._initial_gripper_openings),
+            ):
+                cls.aligned = packing.Example(ViewerNull(), packing.Example.create_parser().parse_args([]))
+
+    def test_initial_bag_mouth_faces_snacks(self):
+        """Rotate the laid bag toward the snacks while keeping it supported by the table."""
+        b = self.teleop
+        points = b._initial_state.particle_q.numpy()
+        position, rotation, error = packing.fit_bag(b.rest[: b.paper_count], points[: b.paper_count])
+        np.testing.assert_allclose(rotation[:, 2], (0, -1, 0), atol=1e-6)
+        mouth = position + rotation @ np.array((0, 0, packing.HEIGHT))
+        self.assertGreater(float((b.pick.mean(axis=0) - mouth) @ rotation[:, 2]), 0.05)
+        self.assertLess(error, 1e-5)
+        np.testing.assert_allclose(
+            b._initial_state.joint_q.numpy()[b.finger_indices["right"]], packing.SNACK_OPENINGS["can"]
+        )
+        self.assertTrue(np.all(points[:, :2].min(axis=0) >= (packing.TABLE_CENTER - packing.TABLE_HALF)[:2]))
+        self.assertTrue(np.all(points[:, :2].max(axis=0) <= (packing.TABLE_CENTER + packing.TABLE_HALF)[:2]))
 
     def test_physical_model_and_contact_options_match(self):
         """Keep material arrays, gripper contacts and solver budgets identical to automatic packing."""
@@ -79,7 +100,9 @@ class TestPackingPhysics(unittest.TestCase):
             "body_flags",
         ):
             with self.subTest(field=name):
-                np.testing.assert_array_equal(getattr(a.model, name).numpy(), getattr(b.model, name).numpy())
+                np.testing.assert_allclose(
+                    getattr(a.model, name).numpy(), getattr(b.model, name).numpy(), rtol=2e-5, atol=1e-10
+                )
         for name in ("soft_contact_ke", "soft_contact_kd", "soft_contact_mu"):
             self.assertEqual(getattr(a.model, name), getattr(b.model, name))
         self.assertEqual(a.model.shape_collision_filter_pairs, b.model.shape_collision_filter_pairs)
@@ -100,15 +123,16 @@ class TestPackingPhysics(unittest.TestCase):
                     )
 
     def test_gripper_closure_preserves_paper_clearance(self):
-        """Keep controller and optical full closure at the automatic bag grasp opening."""
-        for control in self.teleop.inputs.values():
-            np.testing.assert_allclose(control.mapper.coordinates(1), packing.SUPPORT_OPENING)
-            np.testing.assert_allclose(control.mapper.solve(skeleton(0.015)), packing.SUPPORT_OPENING)
+        """Use separate paper and snack grasp openings for both input modes."""
+        for hand, control in self.teleop.inputs.items():
+            minimum = packing.SUPPORT_OPENING if hand == "left" else packing.SNACK_OPENINGS["can"]
+            np.testing.assert_allclose(control.mapper.coordinates(1), minimum)
+            np.testing.assert_allclose(control.mapper.solve(skeleton(0.015)), minimum)
             np.testing.assert_allclose(control.mapper.coordinates(0), packing.OPEN)
 
     def test_same_commands_produce_matching_contact_motion(self):
         """Use the same physical stepping path and reproduce contact motion after reset."""
-        a, b = self.automatic, self.teleop
+        a, b = self.aligned, self.teleop
         self.assertFalse(b.args.no_cuda_graph)
         for _ in range(3):
             a.step()
@@ -150,6 +174,56 @@ class TestPackingPhysics(unittest.TestCase):
             self.assertGreater(np.linalg.norm(current[b.arm_indices] - previous[b.arm_indices]), 1e-4)
             np.testing.assert_allclose(current[b.finger_indices["left"]], packing.SUPPORT_OPENING, atol=1e-6)
             np.testing.assert_allclose(current[b.finger_indices["right"]], packing.OPEN, atol=1e-6)
+            for sequence in range(40, 70):
+                value = replace(
+                    value,
+                    sequence=sequence,
+                    stream_id=mode,
+                    received_monotonic=time.monotonic(),
+                    controllers={"left": value.controllers["left"], "right": replace(right, trigger_value=1)},
+                    hands={"left": value.hands["left"], "right": replace(value.hands["left"], joints=skeleton(0.015))},
+                )
+                b.xr_state.update(value)
+                b.step()
+                b.test_post_step()
+                self.assertGreaterEqual(float(b.ik_q.numpy()[0, b.finger_indices["right"]].min()), 0.030 - 1e-6)
+            np.testing.assert_allclose(b.ik_q.numpy()[0, b.finger_indices["right"]], 0.030, atol=1e-6)
+
+
+class TestRightGraspLimit(unittest.TestCase):
+    def setUp(self):
+        self.example = Example.__new__(Example)
+        self.example.ee = (-1, 0)
+        self.example.objects = [1, 2]
+        self.example.kinds = ("can", "carton")
+        self.example._right_grasp_body = None
+        pose = Pose(np.array((0, 0, 0.125)), np.array((0, 0, 0, 1)))
+        mapper = ParallelGripperRetargeter(ASSET, side="right")
+        self.control = GripperInput("right", mapper, pose, np.array((0.045, 0.045)))
+        self.example.inputs = {"right": self.control}
+        self.bodies = np.array(((0, 0, 0, 0, 0, 0, 1), (0.01, 0, 0.125, 0, 0, 0, 1), (0.2, 0, 0.125, 0, 0, 0, 1)))
+
+    def test_closing_uses_snack_limit_and_latches_until_release(self):
+        """Keep full closure at the selected snack's scripted grasp opening until release."""
+        self.control.jaws = self.control.mapper.coordinates(1)
+        self.example._update_right_grasp_limit(self.bodies)
+        np.testing.assert_allclose(self.control.jaws, 0.030)
+        self.bodies[[1, 2], :3] = self.bodies[[2, 1], :3]
+        self.example._update_right_grasp_limit(self.bodies)
+        np.testing.assert_allclose(self.control.jaws, 0.030)
+        self.control.jaws = self.control.mapper.coordinates(0)
+        self.example._update_right_grasp_limit(self.bodies)
+        self.control.jaws = self.control.mapper.solve(skeleton(0.015))
+        self.example._update_right_grasp_limit(self.bodies)
+        np.testing.assert_allclose(self.control.jaws, 0.028)
+
+    def test_no_nearby_snack_uses_conservative_can_limit(self):
+        """Prevent full closure to the paper-grasp range when no snack is in reach."""
+        self.bodies[1:, 0] += 1
+        self.control.jaws = self.control.mapper.coordinates(1)
+        self.example._update_right_grasp_limit(self.bodies)
+        np.testing.assert_allclose(self.control.jaws, 0.030)
+        self.assertIsNone(self.example._right_grasp_body)
 
 
 class TestPackingGeometry(unittest.TestCase):
