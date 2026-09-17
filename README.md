@@ -1190,6 +1190,9 @@ See the [asset and material notes](assets/piper_paper_bag/README.md).
 
 ```bash
 uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing
+# Record once without rendering, then replay at 60 FPS without physics:
+uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing --record --test
+uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing --replay --loop
 ```
 
 The W1 V030 uses its left hand to turn up a paper bag, then regrips the rim
