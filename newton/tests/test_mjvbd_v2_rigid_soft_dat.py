@@ -10,7 +10,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.mjvbd_v2.rigid_soft_dat import _apply_particles
+from newton._src.solvers.mjvbd_v2.rigid_soft_dat import _apply_particles, _prepare_updates
 from newton._src.solvers.mjvbd_v2.rigid_soft_dat_kernels import (
     apply_body_truncation_ts,
     apply_rigid_soft_truncation,
@@ -29,6 +29,20 @@ def _plane_probe(out: wp.array[float]):
 
 
 class TestRigidSoftDAT(unittest.TestCase):
+    def test_prepare_updates_resets_both_factor_arrays(self):
+        """Reset all factors even when there are more bodies than particles."""
+        for device in wp.get_devices():
+            with self.subTest(device=str(device)), wp.ScopedDevice(device):
+                q = wp.array(((0.1, 0.2, 0.3), (0.4, 0.5, 0.6)), dtype=wp.vec3)
+                reference = wp.full(2, wp.vec3(0.1), dtype=wp.vec3)
+                delta = wp.empty(2, dtype=wp.vec3)
+                particle_factors = wp.zeros(2, dtype=float)
+                body_factors = wp.zeros(5, dtype=float)
+                wp.launch(_prepare_updates, 5, [q, reference, delta, particle_factors, body_factors])
+                np.testing.assert_allclose(delta.numpy(), q.numpy() - reference.numpy())
+                np.testing.assert_array_equal(particle_factors.numpy(), np.ones(2))
+                np.testing.assert_array_equal(body_factors.numpy(), np.ones(5))
+
     @unittest.skipUnless(wp.is_cuda_available(), "Coupled translation requires CUDA")
     def test_dat_rejects_coupled_translation(self):
         """Keep coupled body-particle corrections available only without DAT."""
@@ -162,11 +176,14 @@ class TestRigidSoftDAT(unittest.TestCase):
                 self.assertLess(float(q[:25, 2].mean()), 0.003)
 
     def test_dat_clipping_excludes_further_chebyshev_extrapolation(self):
+        """Preserve clipping exclusions and refresh displacements in the self-contact frame."""
         for device in wp.get_devices():
             with self.subTest(device=str(device)), wp.ScopedDevice(device):
                 reference = wp.zeros(2, dtype=wp.vec3)
                 q = wp.zeros(2, dtype=wp.vec3)
                 excluded = wp.zeros(2, dtype=int)
+                self_reference = wp.full(2, wp.vec3(0.0002, 0, 0), dtype=wp.vec3)
+                self_displacements = wp.empty(2, dtype=wp.vec3)
                 wp.launch(
                     _apply_particles,
                     2,
@@ -177,9 +194,12 @@ class TestRigidSoftDAT(unittest.TestCase):
                         0.001,
                         q,
                         excluded,
+                        self_reference,
+                        self_displacements,
                     ],
                 )
                 np.testing.assert_array_equal(excluded.numpy(), (1, 0))
+                np.testing.assert_allclose(self_displacements.numpy(), q.numpy() - self_reference.numpy())
                 correction = wp.zeros(2, dtype=wp.vec3)
                 wp.launch(
                     accelerate_particle_iteration_chebyshev_guarded,

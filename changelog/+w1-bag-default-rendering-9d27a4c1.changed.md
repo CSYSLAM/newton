@@ -1,0 +1,1 @@
+Use default untextured rendering for the W1 bag packing example, replacing robot texture recoloring and the custom textured paper bag renderer. Render snack cans and cartons as plain primitives without packaging graphics, including in WebXR teleoperation. Existing scene options and recordings remain compatible.

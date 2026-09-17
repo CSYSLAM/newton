@@ -3,15 +3,20 @@
 
 """Exercise independent W1 V030 controller and optical gripper input."""
 
+import json
+import struct
 import unittest
 from dataclasses import replace
 
 import numpy as np
+import warp as wp
 
+import newton
 from newton.examples.mjvbdv2._webxr_gripper_input import GripperInput
 from newton.examples.mjvbdv2._webxr_parallel_gripper import ParallelGripperRetargeter
 from newton.examples.mjvbdv2._webxr_teleop import ControllerState, HandState, Pose, XRFrame
 from newton.examples.mjvbdv2.example_mjvbd_v2_w1_pick_place import ASSET
+from newton.examples.mjvbdv2.example_mjvbd_v2_webxr_w1_bag_packing import Example
 from newton.tests.test_webxr_parallel_gripper import skeleton
 
 
@@ -31,6 +36,55 @@ def frame(sequence=0, *, mode="controllers", position=(0, 0, 0), activation=1, e
         input_mode=mode,
         hands={"left": HandState(pose, skeleton(span), enabled, activation)},
     )
+
+
+class TestPackingGeometry(unittest.TestCase):
+    def test_visible_snack_primitives_are_exported(self):
+        """Export both plain snacks at their physical size, omitting hidden packaging."""
+        builder = newton.ModelBuilder()
+        can, carton = builder.add_body(), builder.add_body()
+        transform = wp.transform((0.1, 0.2, 0.3), wp.quat_identity())
+        builder.add_shape_cylinder(can, radius=0.0325, half_height=0.059, xform=transform)
+        builder.add_shape_box(carton, hx=0.024, hy=0.030, hz=0.059)
+        builder.add_shape_mesh(
+            can,
+            mesh=newton.Mesh.create_box(0.1),
+            cfg=newton.ModelBuilder.ShapeConfig(is_visible=False),
+        )
+        builder.add_shape_box(-1, hx=1.0, hy=0.5, hz=0.05)
+        for point in ((0, 0, 0), (1, 0, 0), (0, 1, 0)):
+            builder.add_particle(point, (0, 0, 0), 1.0)
+        example = Example.__new__(Example)
+        example.model = builder.finalize(device="cpu")
+        example.state_0 = example.model.state()
+        example.objects = (can, carton)
+        example.faces = np.array(((0, 1, 2),), dtype=np.int32)
+        example.paper_faces = 1
+        example._static_boxes, example._bag_meshes = [], []
+
+        payload = example._build_webxr_geometry()
+        header_size = struct.unpack_from("<I", payload, 4)[0]
+        header = json.loads(payload[8 : 8 + header_size])
+        snacks = [shape for shape in header["shapes"] if shape["role"] == "snack"]
+        self.assertEqual([shape["body"] for shape in snacks], [can, carton])
+        self.assertEqual(len(example._static_boxes), 1)
+        self.assertEqual(len(example._bag_meshes), 2)
+        np.testing.assert_allclose(snacks[0]["position"], (0.1, 0.2, 0.3))
+        np.testing.assert_allclose(snacks[0]["orientation"], (0, 0, 0, 1))
+        data_offset = (8 + header_size + 3) & ~3
+        for shape, half in zip(snacks, ((0.0325, 0.0325, 0.059), (0.024, 0.030, 0.059)), strict=True):
+            mesh = header["meshes"][shape["mesh"]]
+            vertices = (
+                np.frombuffer(
+                    payload,
+                    dtype="<f4",
+                    count=mesh["vertexCount"] * 6,
+                    offset=data_offset + mesh["vertexByteOffset"],
+                ).reshape(-1, 6)[:, :3]
+                * shape["scale"]
+            )
+            np.testing.assert_allclose(vertices.min(axis=0), -np.array(half), atol=1e-6)
+            np.testing.assert_allclose(vertices.max(axis=0), half, atol=1e-6)
 
 
 class TestPackingInput(unittest.TestCase):

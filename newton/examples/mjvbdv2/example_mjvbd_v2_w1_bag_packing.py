@@ -9,7 +9,7 @@ Both options accept an optional recording directory.
 Use --robot-setback to tune the distance from the fixed worktable [m].
 Only the robot is prescribed. Paper and snacks move through contact, with no
 attachments, pose resets, or fixed bag vertices. Asset scale is estimated from
-the user's video; packaging graphics are original approximations.
+the user's video; snacks use untextured primitive rendering.
 """
 
 import json
@@ -178,20 +178,9 @@ class Example:
             builder.shape_material_mu[i] = 1.2
             builder.shape_material_ke[i], builder.shape_material_kd[i] = 4e4, 80.0
             label = builder.body_label[builder.shape_body[i]].lower()
-            if builder.shape_flags[i] & int(newton.ShapeFlags.VISIBLE):
-                color = builder.shape_color[i]
-                hand = any(name in label for name in ("finger", "gripper", "adapter", "camera", "stand", "hand_base"))
-                builder.shape_color[i] = (
-                    (0.045, 0.050, 0.055) if hand else ((0.96, 0.68, 0.012) if max(color) > 0.18 else color)
-                )
-                source = builder.shape_source[i]
-                if source is not None and isinstance(getattr(source, "texture", None), np.ndarray):
-                    texture = source.texture.copy()
-                    rgb = texture[..., :3]
-                    colored = (rgb.max(axis=-1).astype(int) - rgb.min(axis=-1).astype(int)) > 40
-                    rgb[colored] = (216, 182, 0)
-                    source.texture = texture
-                    builder.shape_color[i] = (1.0, 1.0, 1.0)
+            source = builder.shape_source[i]
+            if isinstance(source, newton.Mesh):
+                source.texture = None
             if "finger" in label or label.endswith(("/link7", "/link8")):
                 builder.shape_margin[i] = 0.0015
                 if builder.shape_flags[i] & int(newton.ShapeFlags.COLLIDE_PARTICLES):
@@ -302,19 +291,22 @@ class Example:
         with np.load(ASSETS / "snacks.npz") as meshes:
             for kind, point, half in zip(self.kinds, self.pick, self.half, strict=True):
                 body = builder.add_body(xform=wp.transform(wp.vec3(*point), wp.quat_identity()), label=kind)
-                contact = builder.ShapeConfig(density=280, ke=4e4, kd=80, mu=1.2, is_visible=False)
+                contact = builder.ShapeConfig(density=280, ke=4e4, kd=80, mu=1.2)
                 if kind == "can":
                     shape = builder.add_shape_cylinder(body, radius=half[0], half_height=half[2], cfg=contact)
                 else:
                     shape = builder.add_shape_box(body, hx=half[0], hy=half[1], hz=half[2], cfg=contact)
                 full_shapes.append(shape)
+                # Retain hidden packaging geometry for existing recording signatures.
                 for part in snack_info[kind]:
                     key = part["key"]
                     builder.add_shape_mesh(
                         body,
                         xform=wp.transform(wp.vec3(), wp.quat(0, 0, 1, 0)),
                         mesh=newton.Mesh(meshes[key + "_vertices"], meshes[key + "_faces"].ravel()),
-                        cfg=builder.ShapeConfig(density=0, has_shape_collision=False, has_particle_collision=False),
+                        cfg=builder.ShapeConfig(
+                            density=0, has_shape_collision=False, has_particle_collision=False, is_visible=False
+                        ),
                         color=tuple(part["color"]),
                         label=key,
                     )
@@ -326,27 +318,18 @@ class Example:
         self.state_0 = self.model.state()
         if not render_only:
             self._build_simulation(full_shapes)
-        self.bag_triangles = wp.array(self.faces[: self.paper_faces].ravel(), dtype=int)
-        self.handle_triangles = wp.array(self.faces[self.paper_faces :].ravel(), dtype=int)
-        self.paper_uv = wp.array(
-            np.column_stack(((self.rest[:, 0] + self.rest[:, 1] + 0.24) * 2.5, self.rest[:, 2] * 3)), dtype=wp.vec2
-        )
-        self.render_transform = wp.array([wp.transform_identity()], dtype=wp.transform)
-        self.render_scale = wp.array([wp.vec3(1)], dtype=wp.vec3)
-        self.render_color = wp.array([wp.vec3(1)], dtype=wp.vec3)
-        self.render_material = wp.array([wp.vec4(0.95, 0, 0, 1)], dtype=wp.vec4)
         self.graph = None
         self.peak_ik_error, self.peak_joint_speed = 0.0, 0.0
         self.peak_z = self.pick[:, 2].copy()
         self.packed = [False] * args.snacks
         self.loaded = [False] * args.snacks
         self.viewer.set_model(self.model)
-        self.viewer.show_particles, self.viewer.show_triangles = False, False
+        self.viewer.show_particles, self.viewer.show_triangles = False, True
         self.viewer.set_camera(pos=wp.vec3(1.90, -1.9, 1.85), pitch=-19, yaw=137)
 
     @classmethod
     def create_render_scene(cls, viewer, args):
-        """Build matching materials and geometry without IK, SDFs, or physics solvers."""
+        """Build matching geometry without IK, SDFs, or physics solvers."""
         return cls(viewer, args, render_only=True)
 
     def _build_simulation(self, full_shapes):
@@ -462,6 +445,7 @@ class Example:
             lambda_initial=0.1,
             lambda_min=0.01,
         )
+        self.ik_graph = None
 
     def _solve_ik(self, targets, openings, angles, *, iterations=24):
         for side, (position, rotation, point, angle) in enumerate(
@@ -474,7 +458,14 @@ class Example:
                 orientation = wp.quat_from_axis_angle(wp.vec3(0, 0, 1), yaw) * orientation
             rotation.set_target_rotation(0, wp.vec4(*orientation))
         previous = self.ik_q.numpy()[0]
-        self.ik_solver.step(self.ik_q, self.ik_q, iterations=iterations)
+        if self.ik_model.device.is_cuda and not self.args.no_cuda_graph and iterations == 24:
+            if self.ik_graph is None:
+                with wp.ScopedCapture() as capture:
+                    self.ik_solver.step(self.ik_q, self.ik_q, iterations=iterations)
+                self.ik_graph = capture.graph
+            wp.capture_launch(self.ik_graph)
+        else:
+            self.ik_solver.step(self.ik_q, self.ik_q, iterations=iterations)
         q = np.clip(self.ik_q.numpy()[0], self.motion_lower, self.motion_upper)
         if iterations <= 24:
             delta = q - previous
@@ -691,33 +682,6 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
-        self.viewer.log_mesh(
-            "/bag/paper",
-            self.state_0.particle_q,
-            self.bag_triangles,
-            color=(1, 1, 1),
-            roughness=0.95,
-            backface_culling=False,
-            uvs=self.paper_uv,
-            texture=str(ASSETS / "kraft.png"),
-            hidden=True,
-        )
-        self.viewer.log_instances(
-            "/bag/kraft",
-            "/bag/paper",
-            self.render_transform,
-            self.render_scale,
-            self.render_color,
-            self.render_material,
-        )
-        self.viewer.log_mesh(
-            "/bag/handles",
-            self.state_0.particle_q,
-            self.handle_triangles,
-            color=(0.42, 0.32, 0.16),
-            roughness=0.9,
-            backface_culling=False,
-        )
         self.viewer.end_frame()
 
     def test_post_step(self):
@@ -815,8 +779,8 @@ class Example:
         parser = newton.examples.create_parser()
         parser.set_defaults(num_frames=3000)
         parser.add_argument("--snacks", type=int, choices=(1, 2), default=2)
-        parser.add_argument("--substeps", type=int, default=10)
-        parser.add_argument("--iterations", type=int, default=18)
+        parser.add_argument("--substeps", type=int, default=6)
+        parser.add_argument("--iterations", type=int, default=12)
         parser.add_argument(
             "--robot-setback",
             type=float,

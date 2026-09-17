@@ -311,24 +311,40 @@ class Example(scene.Example):
         flags, types = self.model.shape_flags.numpy(), self.model.shape_type.numpy()
         transforms, scales = self.model.shape_transform.numpy(), self.model.shape_scale.numpy()
         colors = self.model.shape_color.numpy()
-        for index, source in enumerate(self.model.shape_source):
+        for index, shape_source in enumerate(self.model.shape_source):
             if not int(flags[index]) & int(newton.ShapeFlags.VISIBLE):
                 continue
             body, transform = int(body_ids[index]), transforms[index]
             role = "snack" if body in self.objects else "robot"
+            source = shape_source
+            scale = scales[index]
+            mesh_key = ("mesh", id(source))
+            # Plain snack primitives need triangle meshes for the Quest client.
+            if body >= 0 and int(types[index]) == int(newton.GeoType.BOX):
+                source = newton.Mesh.create_box(*scale, compute_inertia=False)
+                mesh_key, scale = ("primitive", index), np.ones(3)
+            elif body >= 0 and int(types[index]) == int(newton.GeoType.CYLINDER):
+                source = newton.Mesh.create_cylinder(
+                    radius=float(scale[0]),
+                    half_height=float(scale[1]),
+                    barrel_radius=float(scale[2]),
+                    up_axis=newton.Axis.Z,
+                    compute_inertia=False,
+                )
+                mesh_key, scale = ("primitive", index), np.ones(3)
             if isinstance(source, newton.Mesh):
-                if id(source) not in mesh_ids:
+                if mesh_key not in mesh_ids:
                     vertices = np.asarray(source.vertices, dtype=np.float32)
-                    mesh_ids[id(source)] = len(meshes)
+                    mesh_ids[mesh_key] = len(meshes)
                     meshes.append((vertices, _normals(vertices, source.indices), source.indices))
                 shapes.append(
                     {
                         "body": body,
                         "role": role,
-                        "mesh": mesh_ids[id(source)],
+                        "mesh": mesh_ids[mesh_key],
                         "position": transform[:3].tolist(),
                         "orientation": transform[3:].tolist(),
-                        "scale": scales[index].tolist(),
+                        "scale": scale.tolist(),
                         "color": colors[index].tolist(),
                     }
                 )
