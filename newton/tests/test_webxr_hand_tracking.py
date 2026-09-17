@@ -12,11 +12,11 @@ from unittest.mock import Mock
 import numpy as np
 
 from newton.examples.mjvbdv2 import (
-    example_cloth_mjvbd_v2_dexforce_webxr_bimanual_fold_tshirt_waic_house_final00 as tshirt,
+    example_mjvbd_v2_webxr_inflatable_bag_grasp as bag,
 )
-from newton.examples.mjvbdv2 import example_mjvbd_v2_dexforce_webxr_plug_socket as plug
+from newton.examples.mjvbdv2 import example_mjvbd_v2_webxr_plug_socket as plug
 from newton.examples.mjvbdv2 import (
-    example_vbd_mjvbd_v2_dexforce_webxr_plastic_inflatable_bag_pick_release_final00 as bag,
+    example_mjvbd_v2_webxr_tshirt_fold as tshirt,
 )
 from newton.examples.mjvbdv2._webxr_teleop import ProtocolError, RelativePoseRetargeter, XRFrame
 from newton.examples.mjvbdv2._webxr_w1_hand import W1HandRetargeter

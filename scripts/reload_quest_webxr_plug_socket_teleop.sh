@@ -4,7 +4,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 export NEWTON_WEBXR_NAME="plug-socket"
-export NEWTON_WEBXR_EXAMPLE="mjvbd_v2_dexforce_webxr_plug_socket"
+export NEWTON_WEBXR_EXAMPLE="mjvbd_v2_webxr_plug_socket"
 export NEWTON_WEBXR_PORT="${NEWTON_WEBXR_PORT:-8765}"
 export NEWTON_WEBXR_UNIT="newton-quest-webxr.service"
 export NEWTON_WEBXR_RUNTIME_NAME="newton-webxr-teleop"

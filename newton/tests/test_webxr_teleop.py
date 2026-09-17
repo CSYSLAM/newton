@@ -17,19 +17,19 @@ import numpy as np
 import warp as wp
 
 from newton.examples.mjvbdv2 import (
-    example_cloth_mjvbd_v2_dexforce_webxr_bimanual_fold_tshirt_waic_house_final00 as webxr_tshirt_example,
+    example_mjvbd_v2_webxr_bag_drop as webxr_nonwoven_bag_example,
 )
 from newton.examples.mjvbdv2 import (
-    example_mjvbd_v2_dexforce_webxr_nonwoven_bag_table_drop as webxr_nonwoven_bag_example,
-)
-from newton.examples.mjvbdv2 import example_mjvbd_v2_dexforce_webxr_plug_socket as webxr_example
-from newton.examples.mjvbdv2 import example_mjvbd_v2_dexforce_webxr_push_chair as webxr_chair_example
-from newton.examples.mjvbdv2 import example_mjvbd_v2_webxr_bimanual_nut_bolt as webxr_nut_bolt_example
-from newton.examples.mjvbdv2 import (
-    example_vbd_mjvbd_v2_dexforce_webxr_plastic_inflatable_bag_pick_release_final00 as webxr_bag_example,
+    example_mjvbd_v2_webxr_cubes_into_bag as webxr_soft_rigid_bag_example,
 )
 from newton.examples.mjvbdv2 import (
-    example_vbd_mjvbd_v2_dexforce_webxr_soft_then_rigid_cube_into_bag_final00 as webxr_soft_rigid_bag_example,
+    example_mjvbd_v2_webxr_inflatable_bag_grasp as webxr_bag_example,
+)
+from newton.examples.mjvbdv2 import example_mjvbd_v2_webxr_nut_bolt as webxr_nut_bolt_example
+from newton.examples.mjvbdv2 import example_mjvbd_v2_webxr_plug_socket as webxr_example
+from newton.examples.mjvbdv2 import example_mjvbd_v2_webxr_push_chair as webxr_chair_example
+from newton.examples.mjvbdv2 import (
+    example_mjvbd_v2_webxr_tshirt_fold as webxr_tshirt_example,
 )
 from newton.examples.mjvbdv2._webxr_teleop import (
     JsonlTrajectoryRecorder,
@@ -710,7 +710,7 @@ class TestQuestBrowserLaunch(unittest.TestCase):
     def test_start_reuses_browser_tab_created_by_the_same_application_id(self):
         repo_root = Path(__file__).resolve().parents[2]
         start_script = repo_root / "scripts" / "start_quest_webxr_teleop.sh"
-        example_name = "mjvbd_v2_dexforce_webxr_plug_socket"
+        example_name = "mjvbd_v2_webxr_plug_socket"
 
         with tempfile.TemporaryDirectory() as directory:
             temp_root = Path(directory)
@@ -801,7 +801,7 @@ class TestSafeStopScript(unittest.TestCase):
     def test_default_stop_enters_standby_without_terminating_or_removing_adb(self):
         repo_root = Path(__file__).resolve().parents[2]
         stop_script = repo_root / "scripts" / "stop_quest_webxr_teleop.sh"
-        example_name = "mjvbd_v2_dexforce_webxr_plug_socket"
+        example_name = "mjvbd_v2_webxr_plug_socket"
 
         with tempfile.TemporaryDirectory() as directory:
             temp_root = Path(directory)
@@ -919,7 +919,7 @@ class TestStagedReloadScript(unittest.TestCase):
         self.assertNotIn("systemctl --user kill", reload_source)
         self.assertNotIn("kill -KILL", reload_source)
 
-        example_name = "mjvbd_v2_dexforce_webxr_plug_socket"
+        example_name = "mjvbd_v2_webxr_plug_socket"
         with tempfile.TemporaryDirectory() as directory:
             temp_root = Path(directory)
             bin_dir = temp_root / "bin"
@@ -1067,7 +1067,7 @@ class TestSafeSceneHandoff(unittest.TestCase):
     def test_start_parks_standby_peer_only_after_target_is_ready(self):
         repo_root = Path(__file__).resolve().parents[2]
         start_script = repo_root / "scripts" / "start_quest_webxr_teleop.sh"
-        example_name = "mjvbd_v2_dexforce_webxr_plug_socket"
+        example_name = "mjvbd_v2_webxr_plug_socket"
 
         with tempfile.TemporaryDirectory() as directory:
             temp_root = Path(directory)

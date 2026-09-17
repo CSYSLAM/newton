@@ -1,5 +1,53 @@
 # Quest 3S WebXR 遥操
 
+遥操入口已统一为 `mjvbd_v2_webxr_<场景名>`，例如 `mjvbd_v2_webxr_tshirt_fold`、
+`mjvbd_v2_webxr_nut_bolt` 和 `mjvbd_v2_webxr_bag_drop`。
+原来的 USB 启动脚本名称不变；直接调用旧模块或命令的用户请参考
+[名称迁移表](../newton/examples/mjvbdv2/README.md#quest-webxr-teleoperation)。
+
+## W1 V030 纸袋装零食
+
+```bash
+./scripts/start_quest_webxr_w1_bag_packing_teleop.sh
+```
+
+Quest 地址为 `http://127.0.0.1:8773/`。场景沿用自动装袋 demo 的完整 V030 机器人、
+桌面、横放纸袋和两件零食，启动后双臂保持初始姿态，操作过程由你控制。
+纸袋没有固定顶点，零食是动态刚体，夹取和装袋通过接触与摩擦实现。
+
+| 输入 | 操作 |
+| --- | --- |
+| 左右手柄 Grip | 按住后移动或转动对应手臂，松开保持 |
+| 左右手柄 Trigger | 分别控制左右二指夹，松开张开、按下闭合 |
+| 裸手模式（实验） | 双手腕分别控制双臂；拇指与食指间距映射为对应夹爪开度 |
+| 看向控制面板 | 暂停手势跟随；移开视线并稳定追踪后重新对齐继续 |
+| X / 视角按钮 | 切换机器人第一人称，头部跟随头显转动 |
+| A / 面板录制按钮 | 开始、暂停或继续 JSONL 录制 |
+| 右摇杆按下 / 复位按钮 | 同时复位机器人、纸袋和零食 |
+
+手势间距 15 mm 对应闭合，100 mm 对应张开；两侧独立计算。追踪丢失、会话隐藏或
+手腕跳变时保持当前姿态与夹爪开度，恢复后重新建立手腕基准。
+默认每个夹爪滑块限速 0.08 m/s，双臂限速 2 rad/s 并受模型关节限位约束。
+可通过 `--gripper-speed`、`--arm-speed`、`--xr-translation-scale` 调整。
+
+```bash
+./scripts/stop_quest_webxr_w1_bag_packing_teleop.sh
+./scripts/reload_quest_webxr_w1_bag_packing_teleop.sh
+```
+
+停止、重载和切换场景沿用已有的待机、停泊、恢复流程。
+默认按需录制到 `recordings/webxr_w1_bag_packing_*.jsonl`，也可指定 `--trajectory-output`。
+记录包含双手原始输入、目标位姿、夹爪开度、机器人关节、纸袋粒子和零食刚体状态。
+
+直接启动或无头验证：
+
+```bash
+uv run --extra examples -m newton.examples mjvbd_v2_webxr_w1_bag_packing
+uv run --extra examples -m newton.examples mjvbd_v2_webxr_w1_bag_packing --viewer null --num-frames 3 --no-webxr-server --test
+```
+
+![W1 纸袋装零食遥操](images/examples/example_mjvbd_v2_webxr_w1_bag_packing.jpg)
+
 以下命令都在 Newton 仓库根目录执行：
 
 ```bash
@@ -40,7 +88,7 @@ cd /home/oem/code/repos/newton
 
 ## W1 二指夹插头场景
 
-独立例子 `mjvbd_v2_dexforce_webxr_gripper_plug_socket` 使用 [Dexsim MR 1269](http://192.168.3.16/Engine/dexsim/-/merge_requests/1269)
+独立例子 `mjvbd_v2_webxr_gripper_plug_socket` 使用 [Dexsim MR 1269](http://192.168.3.16/Engine/dexsim/-/merge_requests/1269)
 中提交 `57acb4907f639d2af86cbb159b5fd0cf20e0f396` 的 W1 Pikka 二指夹模型。原五指插头例子继续保留。
 MR 中两侧末端均为二指夹，本例沿用右臂插头任务，左臂保持初始姿态。
 
@@ -83,7 +131,7 @@ IK 使用源模型 `right_gripper_tcp`，位于 `right_ee` 的 +Z 方向 140 mm�
 目前已完成不导入 Newton/Warp 的 CPU 映射测试、URDF 依赖检查，以及独立 CPU 运动学可达性检查。
 初始 TCP 在独立运动学求解中的位置误差小于 0.001 mm。下图为实际资产的 CPU 几何预览，尚未进行 Newton 接触仿真或 Quest 插拔验收。
 
-![W1 二指夹模型预览](images/examples/example_mjvbd_v2_dexforce_webxr_gripper_plug_socket.jpg)
+![W1 二指夹模型预览](images/examples/example_mjvbd_v2_webxr_gripper_plug_socket.jpg)
 
 独立回归测试：
 

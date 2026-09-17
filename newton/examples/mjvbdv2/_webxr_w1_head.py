@@ -62,7 +62,9 @@ def serialize_head_pose(head_pose: Pose | None) -> list[float] | None:
 class W1HeadController:
     """Rate-limit Quest head motion into W1 NECK1/NECK2 targets."""
 
-    def __init__(self, model, device, base_rotation):
+    def __init__(
+        self, model, device, base_rotation, *, body_names=("neck1", "neck2"), eye_position=EYES_POSITION_IN_NECK2
+    ):
         neck_joints = [self._label_index(model.joint_label, name) for name in ("NECK1", "NECK2")]
         joint_q_start = model.joint_q_start.numpy()
         joint_qd_start = model.joint_qd_start.numpy()
@@ -90,8 +92,9 @@ class W1HeadController:
         )
         self.targets = self.neutral.copy()
         self._desired_targets = self.neutral.copy()
-        self.hidden_body_ids = tuple(self._label_index(model.body_label, name) for name in ("neck1", "neck2"))
+        self.hidden_body_ids = tuple(self._label_index(model.body_label, name) for name in body_names)
         self._eye_body = self.hidden_body_ids[-1]
+        self._eye_position = np.asarray(eye_position, dtype=np.float32)
 
         base_orientation = self._quat_array(base_rotation)
         self._robot_forward = self._rotate_vector(base_orientation, ROBOT_FORWARD)
@@ -151,7 +154,7 @@ class W1HeadController:
     def camera_state(self, body_q: np.ndarray) -> dict[str, list[float]]:
         """Return an eye anchor whose orientation is supplied by WebXR."""
         neck_pose = body_q[self._eye_body]
-        eye_position = neck_pose[:3] + self._rotate_vector(neck_pose[3:7], EYES_POSITION_IN_NECK2)
+        eye_position = neck_pose[:3] + self._rotate_vector(neck_pose[3:7], self._eye_position)
         return {
             "position": eye_position.tolist(),
             "front": self._robot_forward.tolist(),

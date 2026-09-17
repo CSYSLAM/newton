@@ -31,8 +31,9 @@ class ParallelGripperRetargeter:
         self.upper = np.asarray([float(joint.find("limit").attrib["upper"]) for joint in selected])
         if not np.isfinite([self.lower, self.upper]).all() or np.any(self.upper <= self.lower):
             raise ValueError("Gripper limits must be finite with positive travel")
-        axes = [np.fromstring(joint.find("axis").attrib["xyz"], sep=" ") for joint in selected]
-        if not np.allclose(axes[0], -axes[1]) or not np.isclose(np.linalg.norm(axes[0]), 1):
+        axes = [self._parent_axis(joint) for joint in selected]
+        # Exported URDF origins round pi/2 and pi to four decimal places.
+        if not np.allclose(axes[0], -axes[1], atol=2e-5) or not np.isclose(np.linalg.norm(axes[0]), 1):
             raise ValueError("Expected opposite unit finger axes")
         mimic = selected[1].find("mimic")
         if (
@@ -47,6 +48,23 @@ class ParallelGripperRetargeter:
         self.closed_span = closed_span
         self.open_span = open_span
         self.q = self.upper.astype(np.float32)
+
+    @staticmethod
+    def _parent_axis(joint) -> np.ndarray:
+        """Compare jaw axes in their common parent frame, including URDF origins."""
+        axis = np.fromstring(joint.find("axis").attrib["xyz"], sep=" ")
+        origin = joint.find("origin")
+        rpy = np.fromstring("0 0 0" if origin is None else origin.get("rpy", "0 0 0"), sep=" ")
+        cr, cp, cy = np.cos(rpy)
+        sr, sp, sy = np.sin(rpy)
+        rotation = np.array(
+            (
+                (cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr),
+                (sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr),
+                (-sp, cp * sr, cp * cr),
+            )
+        )
+        return rotation @ axis
 
     def reset(self, current_q: np.ndarray) -> None:
         """Seed the mapper with the held jaw coordinates [m]."""

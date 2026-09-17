@@ -1,0 +1,1 @@
+Rename the eight Quest teleoperation demos to `mjvbd_v2_webxr_<scene>` to match the concise MJVBDV2 scene names. Update direct module imports and CLI invocations using the migration table in `newton/examples/mjvbdv2/README.md`; existing USB launcher filenames remain available.

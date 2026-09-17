@@ -1,0 +1,1 @@
+Add `mjvbd_v2_webxr_w1_bag_packing` with independent dual-controller and experimental optical-hand control of the W1 V030 parallel grippers, physical paper and snacks, first-person head tracking, recording, and in-place reset.

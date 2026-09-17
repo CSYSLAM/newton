@@ -756,14 +756,21 @@ If you run the examples from a source checkout with uv, use
   </tr>
   <tr>
     <td align="center" width="33%">
-      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_webxr_gripper_plug_socket.py">
-        <img width="320" height="320" src="docs/images/examples/example_mjvbd_v2_dexforce_webxr_gripper_plug_socket.jpg" alt="W1 Pikka gripper plug teleoperation model preview">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_webxr_gripper_plug_socket.py">
+        <img width="320" height="320" src="docs/images/examples/example_mjvbd_v2_webxr_gripper_plug_socket.jpg" alt="W1 Pikka gripper plug teleoperation model preview">
       </a><br>
       W1 Pikka gripper: controller and optical hand teleoperation<br>
-      <code>python -m newton.examples mjvbd_v2_dexforce_webxr_gripper_plug_socket</code><br>
+      <code>python -m newton.examples mjvbd_v2_webxr_gripper_plug_socket</code><br>
       <a href="docs/quest_webxr_teleop.md#w1-二指夹插头场景">Model download and Quest setup</a> · CPU model preview
     </td>
-    <td width="33%"></td>
+    <td align="center" width="33%">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_webxr_w1_bag_packing.py">
+        <img width="320" height="320" src="docs/images/examples/example_mjvbd_v2_webxr_w1_bag_packing.jpg" alt="W1 V030 paper bag and snack packing teleoperation">
+      </a><br>
+      W1 paper bag packing: controllers and optical hands<br>
+      <code>python -m newton.examples mjvbd_v2_webxr_w1_bag_packing</code><br>
+      <a href="docs/quest_webxr_teleop.md#w1-v030-纸袋装零食">Quest setup and controls</a>
+    </td>
     <td width="33%"></td>
   </tr>
   <tr>
@@ -874,63 +881,63 @@ If you run the examples from a source checkout with uv, use
   </tr>
   <tr>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_webxr_plug_socket.py">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_webxr_plug_socket.py">
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_dexforce_realtime_plug_socket.jpg" alt="MJVBDV2 Quest WebXR Plug Insertion">
       </a>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_webxr_push_chair.py">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_webxr_push_chair.py">
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_dexforce_realtime_push_chair.jpg" alt="MJVBDV2 Quest WebXR Chair Teleoperation">
       </a>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_vbd_mjvbd_v2_dexforce_webxr_plastic_inflatable_bag_pick_release_final00.py">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_webxr_inflatable_bag_grasp.py">
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_mjvbd_v2_right_hand_recorded_plastic_inflatable_bag_pick_release.jpg" alt="MJVBDV2 Quest WebXR Plastic Inflatable Bag Teleoperation">
       </a>
     </td>
   </tr>
   <tr>
     <td align="center" width="33%">
-      <code>python -m newton.examples mjvbd_v2_dexforce_webxr_plug_socket</code>
+      <code>python -m newton.examples mjvbd_v2_webxr_plug_socket</code>
     </td>
     <td align="center" width="33%">
-      <code>python -m newton.examples mjvbd_v2_dexforce_webxr_push_chair</code>
+      <code>python -m newton.examples mjvbd_v2_webxr_push_chair</code>
     </td>
     <td align="center" width="33%">
-      <code>python -m newton.examples vbd_mjvbd_v2_dexforce_webxr_plastic_inflatable_bag_pick_release_final00</code>
+      <code>python -m newton.examples mjvbd_v2_webxr_inflatable_bag_grasp</code>
     </td>
   </tr>
   <tr>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_vbd_mjvbd_v2_dexforce_webxr_soft_then_rigid_cube_into_bag_final00.py">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_webxr_cubes_into_bag.py">
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_vbd_mjvbd_v2_right_hand_recorded_plastic_inflatable_bag_pick_release.jpg" alt="MJVBDV2 Quest WebXR Soft and Rigid Cubes Into Bag">
       </a>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_cloth_mjvbd_v2_dexforce_webxr_bimanual_fold_tshirt_waic_house_final00.py">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_webxr_tshirt_fold.py">
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_mjvbd_v2_dynamic_dexforce_bimanual_fold_tshirt_waic_house.jpg" alt="MJVBDV2 Quest WebXR Bimanual T-Shirt Fold">
       </a>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_webxr_bimanual_nut_bolt.py">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_webxr_nut_bolt.py">
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_bimanual_nut_bolt.jpg" alt="MJVBDV2 Quest WebXR Bimanual Nut and Bolt">
       </a>
     </td>
   </tr>
   <tr>
     <td align="center" width="33%">
-      <code>python -m newton.examples vbd_mjvbd_v2_dexforce_webxr_soft_then_rigid_cube_into_bag_final00</code>
+      <code>python -m newton.examples mjvbd_v2_webxr_cubes_into_bag</code>
     </td>
     <td align="center" width="33%">
-      <code>python -m newton.examples cloth_mjvbd_v2_dexforce_webxr_bimanual_fold_tshirt_waic_house_final00</code>
+      <code>python -m newton.examples mjvbd_v2_webxr_tshirt_fold</code>
     </td>
     <td align="center" width="33%">
-      <code>python -m newton.examples mjvbd_v2_webxr_bimanual_nut_bolt</code>
+      <code>python -m newton.examples mjvbd_v2_webxr_nut_bolt</code>
     </td>
   </tr>
   <tr>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_dexforce_webxr_nonwoven_bag_table_drop.py">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mjvbdv2/example_mjvbd_v2_webxr_bag_drop.py">
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mjvbd_v2_nonwoven_bag_table_drop.jpg" alt="MJVBDV2 Quest WebXR Bimanual Nonwoven Bag Grasp">
       </a>
     </td>
@@ -939,7 +946,7 @@ If you run the examples from a source checkout with uv, use
   </tr>
   <tr>
     <td align="center" width="33%">
-      <code>python -m newton.examples mjvbd_v2_dexforce_webxr_nonwoven_bag_table_drop</code>
+      <code>python -m newton.examples mjvbd_v2_webxr_bag_drop</code>
     </td>
     <td align="center" width="33%"></td>
     <td align="center" width="33%"></td>

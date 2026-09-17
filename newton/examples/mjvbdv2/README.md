@@ -16,6 +16,7 @@ uv run --extra examples -m newton.examples mjvbd_v2_conveyor_sorting --help
 | --- | --- | --- |
 | W1 V030 two-gripper pick and place | `mjvbd_v2_w1_pick_place` | [example_mjvbd_v2_w1_pick_place.py](example_mjvbd_v2_w1_pick_place.py) |
 | W1 V030 paper bag and snack packing | `mjvbd_v2_w1_bag_packing` | [example_mjvbd_v2_w1_bag_packing.py](example_mjvbd_v2_w1_bag_packing.py) |
+| Quest W1 paper bag packing (controllers / optical hands) | `mjvbd_v2_webxr_w1_bag_packing` | [example_mjvbd_v2_webxr_w1_bag_packing.py](example_mjvbd_v2_webxr_w1_bag_packing.py) |
 | W1 T-shirt folding | `mjvbd_v2_tshirt_fold` | [example_mjvbd_v2_tshirt_fold.py](example_mjvbd_v2_tshirt_fold.py) |
 | W1 tablecloth placement | `mjvbd_v2_tablecloth_place` | [example_mjvbd_v2_tablecloth_place.py](example_mjvbd_v2_tablecloth_place.py) |
 | Dynamic W1 T-shirt folding | `mjvbd_v2_tshirt_fold_dynamic` | [example_mjvbd_v2_tshirt_fold_dynamic.py](example_mjvbd_v2_tshirt_fold_dynamic.py) |
@@ -218,3 +219,31 @@ SDFs require CUDA. Test mode also checks that both handles stay on the rack.
 The bag's bending recovery can be adjusted with `--bending-stiffness` (default
 `5e-5`; use `5e-7` to compare the earlier softer response). The membrane
 stiffness remains independently controlled by `--membrane-stiffness`.
+
+## Quest WebXR teleoperation
+
+Use the same concise scene names with a `webxr_` prefix. Existing USB launcher scripts retain their names.
+
+For the new V030 paper-bag packing scene, run
+`./scripts/start_quest_webxr_w1_bag_packing_teleop.sh` or
+`uv run --extra examples -m newton.examples mjvbd_v2_webxr_w1_bag_packing`.
+Both controllers clutch their respective arms; both triggers close the parallel
+grippers. Experimental optical mode follows wrists and maps thumb/index spacing
+to jaw opening. Tracking loss holds the current pose and opening until a new
+activation re-anchors that hand. The paper bag and snacks remain physical.
+The scene includes first-person head tracking, JSONL recording, in-place reset,
+and the shared standby/park/resume protocol. See the
+[Quest instructions](../../../docs/quest_webxr_teleop.md#w1-v030-纸袋装零食).
+
+![W1 paper bag packing teleoperation](../../../docs/images/examples/example_mjvbd_v2_webxr_w1_bag_packing.jpg)
+
+| Previous command | Current command |
+| --- | --- |
+| `cloth_mjvbd_v2_dexforce_webxr_bimanual_fold_tshirt_waic_house_final00` | `mjvbd_v2_webxr_tshirt_fold` |
+| `mjvbd_v2_dexforce_webxr_gripper_plug_socket` | `mjvbd_v2_webxr_gripper_plug_socket` |
+| `mjvbd_v2_dexforce_webxr_nonwoven_bag_table_drop` | `mjvbd_v2_webxr_bag_drop` |
+| `mjvbd_v2_dexforce_webxr_plug_socket` | `mjvbd_v2_webxr_plug_socket` |
+| `mjvbd_v2_dexforce_webxr_push_chair` | `mjvbd_v2_webxr_push_chair` |
+| `mjvbd_v2_webxr_bimanual_nut_bolt` | `mjvbd_v2_webxr_nut_bolt` |
+| `vbd_mjvbd_v2_dexforce_webxr_plastic_inflatable_bag_pick_release_final00` | `mjvbd_v2_webxr_inflatable_bag_grasp` |
+| `vbd_mjvbd_v2_dexforce_webxr_soft_then_rigid_cube_into_bag_final00` | `mjvbd_v2_webxr_cubes_into_bag` |

@@ -16,11 +16,14 @@ active_run_file="${state_root}/active-run"
 uv_cache_dir="${cache_root}/uv-cache"
 sdf_cache_dir="${cache_root}/sdf"
 unit_name="${NEWTON_WEBXR_UNIT:-newton-quest-webxr.service}"
-example_name="${NEWTON_WEBXR_EXAMPLE:-mjvbd_v2_dexforce_webxr_plug_socket}"
+example_name="${NEWTON_WEBXR_EXAMPLE:-mjvbd_v2_webxr_plug_socket}"
 sdf_cache_enabled="${NEWTON_WEBXR_SDF_CACHE:-1}"
 read -r -a peer_specs <<< "${NEWTON_WEBXR_PEERS:-newton-quest-webxr-chair.service:8766 newton-quest-webxr-bag.service:8767 newton-quest-webxr-soft-rigid-bag.service:8768 newton-quest-webxr-tshirt.service:8769 newton-quest-webxr-nut-bolt.service:8770 newton-quest-webxr-nonwoven-bag.service:8771}"
-if [[ "${unit_name}" != "newton-quest-webxr-gripper-plug.service" ]]; then
+if [[ ! -v NEWTON_WEBXR_PEERS && "${unit_name}" != "newton-quest-webxr-gripper-plug.service" ]]; then
   peer_specs+=("newton-quest-webxr-gripper-plug.service:8772")
+fi
+if [[ ! -v NEWTON_WEBXR_PEERS && "${unit_name}" != "newton-quest-webxr-w1-bag-packing.service" ]]; then
+  peer_specs+=("newton-quest-webxr-w1-bag-packing.service:8773")
 fi
 host="${NEWTON_WEBXR_HOST:-127.0.0.1}"
 port="${NEWTON_WEBXR_PORT:-8765}"
@@ -39,7 +42,7 @@ else
     "${repo_root}/newton/examples/mjvbdv2/_webxr_teleop.py"
     "${repo_root}/newton/examples/mjvbdv2/_webxr_w1_head.py"
   )
-  if [[ "${example_name}" == "mjvbd_v2_dexforce_webxr_plug_socket" ]]; then
+  if [[ "${example_name}" == "mjvbd_v2_webxr_plug_socket" ]]; then
     reload_sources+=(
       "${repo_root}/newton/examples/mjvbdv2/example_mjvbd_v2_plug_socket.py"
       "${repo_root}/newton/examples/mjvbdv2/_webxr_w1_hand.py"
