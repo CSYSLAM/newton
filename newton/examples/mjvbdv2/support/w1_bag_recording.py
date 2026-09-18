@@ -12,7 +12,7 @@ from typing import ClassVar
 import numpy as np
 
 DEFAULT_RECORDING = Path(__file__).resolve().parents[3] / "tests/outputs/w1_bag_packing"
-SCENE_OPTIONS = ("snacks", "robot_setback", "substeps", "iterations")
+SCENE_OPTIONS = ("snacks", "robot_setback", "substeps", "iterations", "soft_cube", "bag_variant")
 FORMAT = "newton-w1-bag-visual-v1"
 
 
@@ -187,6 +187,12 @@ class TeleopRecordingReader:
             stream.seek(self.offsets[frame])
             record = json.loads(stream.readline())
         values = {name: np.asarray(record[key], dtype=np.float32) for name, key in self._fields.items()}
+        if self.metadata["scene_options"].get("soft_cube", False):
+            for name, key in (("particle_q", "softCubeParticleQ"), ("particle_qd", "softCubeParticleQd")):
+                cube = np.asarray(record[key], dtype=np.float32)
+                if cube.ndim != 2 or cube.shape[1] != 3:
+                    raise ValueError(f"Recording field {key} has an incompatible shape")
+                values[name] = np.concatenate((values[name], cube))
         values["sim_time"] = np.asarray(record["simulationTimeSeconds"], dtype=np.float64)
         for name, value in values.items():
             if not np.isfinite(value).all():
@@ -299,8 +305,15 @@ def run_replay(scene_type, viewer, args):
             )
         recording = TeleopRecordingReader(path) if path.is_file() else RecordingReader(path)
         playback = Playback(recording, start_frame=args.start_frame, loop=args.loop)
+        defaults = {"soft_cube": False, "bag_variant": "handles"}
         for name in SCENE_OPTIONS:
-            setattr(args, name, recording.metadata["scene_options"][name])
+            # Older recordings use the original handled bag and may predate the cube.
+            value = (
+                recording.metadata["scene_options"].get(name, defaults[name])
+                if name in defaults
+                else recording.metadata["scene_options"][name]
+            )
+            setattr(args, name, value)
         scene = scene_type.create_render_scene(viewer, args)
         recording.validate_scene(scene)
         if hasattr(viewer, "register_ui_callback"):

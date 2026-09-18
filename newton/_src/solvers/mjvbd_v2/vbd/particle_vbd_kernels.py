@@ -17,7 +17,7 @@ import warp as wp
 from newton._src.math import orthonormal_basis
 
 from ....geometry import ParticleFlags
-from ....geometry.kernels import triangle_closest_point
+from ....geometry.kernels import TRI_CONTACT_FEATURE_FACE_INTERIOR, triangle_closest_point
 from ....utils.mesh import (
     MeshAdjacencyData,
     get_vertex_adjacent_edge_id_order,
@@ -27,6 +27,7 @@ from ....utils.mesh import (
     get_vertex_num_adjacent_faces,
     get_vertex_num_adjacent_tets,
 )
+from ..rigid_soft_dat_kernels import dat_separation_epsilon, place_dat_division_plane
 from .rigid_vbd_kernels import (
     _eval_body_particle_contact,
     _eval_soft_ef_contact,
@@ -2053,13 +2054,36 @@ def segment_plane_intersects(
     nv = wp.dot(n, delta_v)
     num = -wp.dot(n, v - d)
 
-    # Parallel (or nearly): either coplanar or no hit
-    if wp.abs(nv) < eps_parallel:
+    # A small normal step can still cross a smaller gap. Only a truly
+    # tangent step may bypass the crossing test.
+    if nv == 0.0:
         return coplanar_counts and (wp.abs(num) < eps_parallel)
+
+    # Reserve a representable band even when the proposed endpoint stops
+    # just short of the mathematical plane. Otherwise float32 position
+    # updates can round an approaching point onto the other side.
+    scale = wp.max(wp.max(wp.abs(v)), wp.max(wp.abs(d)))
+    if num * nv >= 0.0 and wp.abs(num) - wp.abs(nv) <= dat_separation_epsilon(scale):
+        return True
 
     t = num / nv
     # consider tiny tolerance at ends
     return (t >= eps_intersect_near) and (t <= 1.0 + eps_intersect_far)
+
+
+@wp.func
+def vertex_triangle_separation(v: wp.vec3, t1: wp.vec3, t2: wp.vec3, t3: wp.vec3):
+    """Compute the contact gap without subtracting rounded world-space closest points."""
+    _closest, bary, feature = triangle_closest_point(t1, t2, t3, v)
+    ab, ac = t2 - t1, t3 - t1
+    offset = v - t1
+    gap = offset - bary[1] * ab - bary[2] * ac
+    if feature == TRI_CONTACT_FEATURE_FACE_INTERIOR:
+        # At tight contact, a noisy tangential component can tilt the division
+        # plane through the triangle. Its face normal remains well conditioned.
+        normal = wp.normalize(wp.cross(ab, ac))
+        gap = wp.dot(offset, normal) * normal
+    return v - gap, gap
 
 
 @wp.func
@@ -2076,9 +2100,7 @@ def create_vertex_triangle_division_plane_closest_pt(
     """
     n points to the vertex side
     """
-    closest_p, _bary, _feature_type = triangle_closest_point(t1, t2, t3, v)
-
-    n_hat = v - closest_p
+    closest_p, n_hat = vertex_triangle_separation(v, t1, t2, t3)
 
     if wp.length(n_hat) < 1e-12:
         return wp.vector(False, False, False, False, length=4, dtype=wp.bool), wp.vec3(0.0), v
@@ -2095,12 +2117,10 @@ def create_vertex_triangle_division_plane_closest_pt(
         )
     )
 
-    if delta_t_n + delta_v_n == 0.0:
-        d = closest_p + 0.5 * n_hat
-    else:
-        lmbd = delta_t_n / (delta_t_n + delta_v_n)
-        lmbd = wp.clamp(lmbd, 0.05, 0.95)
-        d = closest_p + lmbd * n_hat
+    scale = wp.max(wp.max(wp.abs(v)), wp.max(wp.abs(closest_p)))
+    d, _blend = place_dat_division_plane(
+        n, closest_p, wp.length(n_hat), delta_v_n, delta_t_n, dat_separation_epsilon(scale)
+    )
 
     if delta_v_n == 0.0:
         is_dummy_for_v = True
@@ -2235,13 +2255,8 @@ def create_edge_edge_division_plane_closest_pt(
         )
     )
 
-    if delta_e0 + delta_e1 == 0.0:
-        d = c2 + 0.5 * n_hat
-    else:
-        lmbd = delta_e1 / (delta_e1 + delta_e0)
-
-        lmbd = wp.clamp(lmbd, 0.05, 0.95)
-        d = c2 + lmbd * n_hat
+    scale = wp.max(wp.max(wp.abs(c1)), wp.max(wp.abs(c2)))
+    d, _blend = place_dat_division_plane(n, c2, wp.length(n_hat), delta_e0, delta_e1, dat_separation_epsilon(scale))
 
     if delta_e0 == 0.0:
         is_dummy_for_e0_v0 = True
@@ -2267,43 +2282,31 @@ def create_edge_edge_division_plane_closest_pt(
 
 
 @wp.func
-def planar_truncation(
-    v: wp.vec3, delta_v: wp.vec3, n: wp.vec3, d: wp.vec3, eps: float, gamma_r: float, gamma_min: float = 1e-3
-):
-    nv = wp.dot(n, delta_v)
-    num = wp.dot(n, d - v)
-
-    # Parallel (or nearly): do not truncate
-    if wp.abs(nv) < eps:
-        return delta_v
-
-    t = num / nv
-
-    t = wp.max(wp.min(t * gamma_r, t - gamma_min), 0.0)
-    if t >= 1:
-        return delta_v
-    else:
-        return t * delta_v
-
-
-@wp.func
 def planar_truncation_t(
     v: wp.vec3, delta_v: wp.vec3, n: wp.vec3, d: wp.vec3, eps: float, gamma_r: float, gamma_min: float = 1e-3
 ):
     denom = wp.dot(n, delta_v)
 
-    # Parallel (or nearly parallel) → no intersection
-    if wp.abs(denom) < eps:
+    # The geometric parallel tolerance is not a minimum safe displacement:
+    # at tight contact, even sub-micrometer motion can cross the plane.
+    if denom == 0.0:
         return 1.0
 
-    # Solve: dot(n, v + t*delta_v - d) = 0
-    t = wp.dot(n, d - v) / denom
-
-    if t < 0:
+    signed_distance = wp.dot(n, v - d)
+    if signed_distance * denom > 0.0:
         return 1.0
 
-    t = wp.clamp(wp.min(t * gamma_r, t - gamma_min), 0.0, 1.0)
-    return t
+    scale = wp.max(wp.max(wp.abs(v)), wp.max(wp.abs(d)))
+    clearance = dat_separation_epsilon(scale)
+    t = (wp.abs(signed_distance) - clearance) / wp.abs(denom)
+    return wp.clamp(wp.min(t * gamma_r, t - gamma_min), 0.0, 1.0)
+
+
+@wp.func
+def planar_truncation(
+    v: wp.vec3, delta_v: wp.vec3, n: wp.vec3, d: wp.vec3, eps: float, gamma_r: float, gamma_min: float = 1e-3
+):
+    return planar_truncation_t(v, delta_v, n, d, eps, gamma_r, gamma_min) * delta_v
 
 
 @wp.kernel

@@ -19,6 +19,7 @@ from newton.examples.mjvbdv2 import example_mjvbd_v2_w1_bag_packing as packing
 from newton.examples.mjvbdv2._webxr_gripper_input import GripperInput
 from newton.examples.mjvbdv2._webxr_parallel_gripper import ParallelGripperRetargeter
 from newton.examples.mjvbdv2._webxr_teleop import ControllerState, HandState, Pose, XRFrame
+from newton.examples.mjvbdv2._webxr_w1_head import HEAD_MAX_SPEED_RADIANS_S, W1HeadController
 from newton.examples.mjvbdv2.example_mjvbd_v2_w1_pick_place import ASSET
 from newton.examples.mjvbdv2.example_mjvbd_v2_webxr_w1_bag_packing import Example
 from newton.tests.test_webxr_parallel_gripper import skeleton
@@ -60,13 +61,14 @@ class TestPackingPhysics(unittest.TestCase):
                 patch.object(packing.Example, "_initial_bag_yaw", np.pi / 2),
                 patch.object(packing.Example, "_initial_bag_offset", Example._initial_bag_offset),
                 patch.object(packing.Example, "_initial_gripper_openings", Example._initial_gripper_openings),
+                patch.object(packing.Example, "_initial_head_pitch", Example._initial_head_pitch),
             ):
                 cls.aligned = packing.Example(ViewerNull(), packing.Example.create_parser().parse_args([]))
 
     def test_initial_bag_mouth_faces_snacks(self):
         """Rotate the laid bag toward the snacks while keeping it supported by the table."""
         b = self.teleop
-        points = b._initial_state.particle_q.numpy()
+        points = b._initial_state.particle_q.numpy()[: b.bag_particle_count]
         position, rotation, error = packing.fit_bag(b.rest[: b.paper_count], points[: b.paper_count])
         np.testing.assert_allclose(rotation[:, 2], (0, -1, 0), atol=1e-6)
         mouth = position + rotation @ np.array((0, 0, packing.HEIGHT))
@@ -78,6 +80,7 @@ class TestPackingPhysics(unittest.TestCase):
         np.testing.assert_allclose(
             b._initial_state.joint_q.numpy()[b.finger_indices["right"]], packing.SNACK_OPENINGS["can"]
         )
+        self.assertAlmostEqual(float(b._initial_state.joint_q.numpy()[b.neck[1]]), np.pi / 4, places=6)
         self.assertTrue(np.all(points[:, :2].min(axis=0) >= (packing.TABLE_CENTER - packing.TABLE_HALF)[:2]))
         self.assertTrue(np.all(points[:, :2].max(axis=0) <= (packing.TABLE_CENTER + packing.TABLE_HALF)[:2]))
 
@@ -89,6 +92,9 @@ class TestPackingPhysics(unittest.TestCase):
         for name in (
             "particle_mass",
             "particle_radius",
+            "tet_materials",
+            "tet_indices",
+            "tet_poses",
             "tri_materials",
             "edge_bending_properties",
             "shape_material_ke",
@@ -135,6 +141,36 @@ class TestPackingPhysics(unittest.TestCase):
             np.testing.assert_allclose(control.mapper.solve(skeleton(0.015)), minimum)
             np.testing.assert_allclose(control.mapper.coordinates(0), packing.OPEN)
 
+    def test_soft_cube_settles_and_resets_without_inverted_tetrahedra(self):
+        """Keep the free bread cube supported and preserve its volume under gravity."""
+        b = self.teleop
+        b.reset_physics(source="test")
+        self.addCleanup(b.reset_physics, source="test")
+        initial = b.state_0.particle_q.numpy()
+        indices = b.model.tet_indices.numpy()
+
+        def volumes(points):
+            tetrahedra = points[indices].astype(np.float64)
+            return np.linalg.det(tetrahedra[:, 1:] - tetrahedra[:, :1]) / 6
+
+        rest = volumes(initial)
+        self.assertEqual(len(indices), 320)
+        self.assertTrue(np.all(rest > 0))
+        masses = b.model.particle_mass.numpy()
+        self.assertGreater(masses[: b.bag_particle_count].sum(), 0.15)
+        np.testing.assert_allclose(masses[b.soft_cube_start :].sum(), 0.12005, rtol=1e-4)
+        self.assertTrue(np.all(b.model.body_mass.numpy()[b.objects] > 0.2))
+        for _ in range(120):
+            b.step()
+        points = b.state_0.particle_q.numpy()
+        cube = points[b.soft_cube_start : b.soft_cube_end]
+        self.assertTrue(np.isfinite(points).all())
+        self.assertGreater((volumes(points) / rest).min(), 0.8)
+        self.assertGreater(cube[:, 2].min(), packing.TABLE_Z - 0.002)
+        self.assertLess(cube[:, 2].min(), packing.TABLE_Z + 0.003)
+        b.reset_physics(source="test")
+        np.testing.assert_array_equal(b.state_0.particle_q.numpy(), initial)
+
     def test_same_commands_produce_matching_contact_motion(self):
         """Use the same physical stepping path and reproduce contact motion after reset."""
         a, b = self.aligned, self.teleop
@@ -144,7 +180,9 @@ class TestPackingPhysics(unittest.TestCase):
             b.frame_start.assign(a.frame_start)
             b.frame_end.assign(a.frame_end)
             b._advance_physics()
-            np.testing.assert_allclose(b.state_0.particle_q.numpy(), a.state_0.particle_q.numpy(), atol=1e-4)
+            actual, expected = b.state_0.particle_q.numpy(), a.state_0.particle_q.numpy()
+            np.testing.assert_allclose(actual[: b.bag_particle_count], expected[: b.bag_particle_count], atol=1e-4)
+            np.testing.assert_allclose(actual[b.soft_cube_start :], expected[b.soft_cube_start :], atol=1e-4)
             np.testing.assert_allclose(b.state_0.body_q.numpy(), a.state_0.body_q.numpy(), atol=1e-4)
         self.assertIsNotNone(b.graph)
         b.reset_physics(source="test")
@@ -176,6 +214,8 @@ class TestPackingPhysics(unittest.TestCase):
                 b.test_post_step()
             self.assertIsNotNone(b.ik_graph)
             current = b.ik_q.numpy()[0]
+            self.assertGreaterEqual(float(current[b.neck[1]]), np.deg2rad(20) - 1e-6)
+            self.assertLessEqual(float(current[b.neck[1]]), np.pi / 4 + 1e-6)
             self.assertGreater(np.linalg.norm(current[b.arm_indices] - previous[b.arm_indices]), 1e-4)
             np.testing.assert_allclose(current[b.finger_indices["left"]], packing.SUPPORT_OPENING, atol=1e-6)
             np.testing.assert_allclose(current[b.finger_indices["right"]], packing.OPEN, atol=1e-6)
@@ -195,6 +235,72 @@ class TestPackingPhysics(unittest.TestCase):
             np.testing.assert_allclose(b.ik_q.numpy()[0, b.finger_indices["right"]], 0.030, atol=1e-6)
 
 
+class TestPackingHeadGaze(unittest.TestCase):
+    def setUp(self):
+        self.example = Example.__new__(Example)
+        self.example.head = 1
+        self.example.ee = (2, 3)
+        model = SimpleNamespace(
+            joint_label=["NECK1", "NECK2"],
+            joint_q_start=wp.array([0, 1, 2], dtype=int, device="cpu"),
+            joint_qd_start=wp.array([0, 1, 2], dtype=int, device="cpu"),
+            joint_q=wp.array([0.0, 0.0], device="cpu"),
+            joint_limit_lower=wp.array([-np.pi / 2, -0.698], device="cpu"),
+            joint_limit_upper=wp.array([np.pi / 2, np.pi / 4], device="cpu"),
+            body_label=["head_yaw_j1_link", "head_pitch_j2_link"],
+        )
+        self.example.head_control = W1HeadController(
+            model, "cpu", wp.quat_identity(), body_names=tuple(model.body_label)
+        )
+        self.joints = wp.zeros(2, device="cpu")
+        self.bodies = np.array(
+            [
+                (0, 0, 1.55, 0, 0, 0, 1),
+                (0, 0, 1.6, 0, 0, 0, 1),
+                (0.5, 0.3, 1.1, 0, 0, 0, 1),
+                (0.5, -0.3, 1.1, 0, 0, 0, 1),
+            ]
+        )
+
+    def settle(self, pose):
+        for _ in range(120):
+            self.example._update_head_gaze(self.bodies, pose)
+            previous = self.example.head_control.targets.copy()
+            self.example.head_control.write_targets(self.joints, 1 / 60)
+            self.assertLessEqual(
+                np.max(np.abs(self.example.head_control.targets - previous)), HEAD_MAX_SPEED_RADIANS_S / 60 + 1e-7
+            )
+        return self.joints.numpy().copy()
+
+    def test_pitch_watches_both_hands_while_yaw_tracks_headset(self):
+        """Ignore headset pitch in either view while preserving left/right tracking."""
+        for view in ("observer", "robot-first-person"):
+            self.example.view_mode = view
+            for yaw in (-0.4, 0.4):
+                for pitch in (-0.5, 0.5):
+                    orientation = wp.quat_from_axis_angle(wp.vec3(0, 1, 0), yaw) * wp.quat_from_axis_angle(
+                        wp.vec3(1, 0, 0), pitch
+                    )
+                    actual = self.settle(Pose(np.zeros(3), np.asarray(orientation)))
+                    hands = np.array([Example._tcp_pose(self.bodies[i]).position for i in self.example.ee])
+                    direction = hands.mean(axis=0) - self.bodies[self.example.head, :3]
+                    expected = np.arctan2(-direction[2], np.linalg.norm(direction[:2]))
+                    np.testing.assert_allclose(actual, (yaw, expected), atol=1e-6)
+
+    def test_hand_height_pitch_limits_and_tracking_loss(self):
+        """Stay looking down when hands rise and hold yaw when tracking disappears."""
+        self.bodies[2:, 2] += 0.2
+        orientation = np.asarray(wp.quat_from_axis_angle(wp.vec3(0, 1, 0), 0.4))
+        original = self.settle(Pose(np.zeros(3), orientation))
+        self.bodies[2:, 2] -= 1
+        lowered = self.settle(None)
+        self.assertGreater(lowered[1], original[1])
+        np.testing.assert_allclose(lowered, (0.4, np.pi / 4), atol=1e-6)
+        self.bodies[2:, 2] += 3
+        raised = self.settle(None)
+        np.testing.assert_allclose(raised, (0.4, np.deg2rad(20)), atol=1e-6)
+
+
 class TestRightGraspLimit(unittest.TestCase):
     def setUp(self):
         self.example = Example.__new__(Example)
@@ -204,6 +310,7 @@ class TestRightGraspLimit(unittest.TestCase):
         self.example._right_grasp_target = None
         self.example.half = np.array(((0.0325, 0.0325, 0.059), (0.024, 0.030, 0.059)))
         self.example.state_0 = SimpleNamespace(particle_q=wp.array([(10, 0, 0)], dtype=wp.vec3, device="cpu"))
+        self.example.bag_particle_count = self.example.soft_cube_start = self.example.soft_cube_end = 1
         pose = Pose(np.array((0, 0, 0.125)), np.array((0, 0, 0, 1)))
         mapper = ParallelGripperRetargeter(ASSET, side="right")
         self.control = GripperInput("right", mapper, pose, np.array((0.045, 0.045)))
@@ -232,6 +339,46 @@ class TestRightGraspLimit(unittest.TestCase):
         self.example._update_right_grasp_limit(self.bodies)
         np.testing.assert_allclose(self.control.jaws, 0.030)
         self.assertIsNone(self.example._right_grasp_target)
+
+    def test_soft_cube_grasp_retains_clearance_beside_bag(self):
+        """Treat cube particles separately and keep a cube grasp latched beside the bag."""
+        self.bodies[1:, 0] += 1
+        self.example.soft_cube_end = 3
+        self.example.state_0.particle_q = wp.array(
+            [(10, 0, 0), (-0.035, -0.035, 0.09), (0.035, 0.035, 0.16)], dtype=wp.vec3, device="cpu"
+        )
+        self.control.jaws = self.control.mapper.coordinates(1)
+        self.example._update_right_grasp_limit(self.bodies)
+        self.assertEqual(self.example._right_grasp_target, "soft-cube")
+        np.testing.assert_allclose(self.control.jaws, packing.SOFT_CUBE_OPENING)
+        self.example.state_0.particle_q.assign([(0.001, 0, 0.125), (1, 1, 1), (2, 2, 2)])
+        self.example._update_right_grasp_limit(self.bodies)
+        np.testing.assert_allclose(self.control.jaws, packing.SOFT_CUBE_OPENING)
+        self.control.jaws = self.control.mapper.coordinates(0)
+        self.example._update_right_grasp_limit(self.bodies)
+        self.control.jaws = self.control.mapper.coordinates(1)
+        self.example._update_right_grasp_limit(self.bodies)
+        np.testing.assert_allclose(self.control.jaws, packing.SUPPORT_OPENING)
+
+    def test_either_hand_limits_cube_compression_for_both_inputs(self):
+        """Keep at least 95 percent of the cube width between the collision meshes."""
+        self.example.ee = (0, 0)
+        self.bodies[1:, 0] += 1
+        self.example.soft_cube_end = 3
+        self.example.state_0.particle_q = wp.array(
+            [(10, 0, 0), (-0.035, -0.035, 0.09), (0.035, 0.035, 0.16)], dtype=wp.vec3, device="cpu"
+        )
+        for hand in ("left", "right"):
+            mapper = ParallelGripperRetargeter(ASSET, side=hand)
+            pose = Pose(self.control.position, self.control.orientation)
+            self.example.inputs[hand] = GripperInput(hand, mapper, pose, mapper.coordinates(0))
+            control = self.example.inputs[hand]
+            for optical in (False, True):
+                control.jaws = mapper.solve(skeleton(0.015)) if optical else mapper.coordinates(1)
+                self.example._update_grasp_limit(hand, self.bodies)
+                # Each mesh protrudes approximately 0.701 mm inward past its slider origin.
+                self.assertGreaterEqual(float(control.jaws.sum()) - 0.001403, 0.95 * packing.SOFT_CUBE_SIZE)
+                self.assertLess(float(control.jaws.sum()), packing.SOFT_CUBE_SIZE)
 
     def test_bag_grasp_uses_left_hand_limit_until_release(self):
         """Allow a nearby bag grasp to close fully and keep its limit until release."""
@@ -279,6 +426,9 @@ class TestPackingGeometry(unittest.TestCase):
         example.objects = (can, carton)
         example.faces = np.array(((0, 1, 2),), dtype=np.int32)
         example.paper_faces = 1
+        example.bag_particle_count = example.soft_cube_start = example.soft_cube_end = 3
+        example.soft_cube_faces = np.empty((0, 3), dtype=np.int32)
+        example._soft_cube_mesh = None
         example._static_boxes, example._bag_meshes = [], []
 
         payload = example._build_webxr_geometry()
@@ -287,7 +437,7 @@ class TestPackingGeometry(unittest.TestCase):
         snacks = [shape for shape in header["shapes"] if shape["role"] == "snack"]
         self.assertEqual([shape["body"] for shape in snacks], [can, carton])
         self.assertEqual(len(example._static_boxes), 1)
-        self.assertEqual(len(example._bag_meshes), 2)
+        self.assertEqual(len(example._bag_meshes), 1)
         np.testing.assert_allclose(snacks[0]["position"], (0.1, 0.2, 0.3))
         np.testing.assert_allclose(snacks[0]["orientation"], (0, 0, 0, 1))
         data_offset = (8 + header_size + 3) & ~3

@@ -338,6 +338,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_chebyshev_cleanup_max_radius_fraction: float | None = None,
         particle_enable_multilevel_correction: bool | Literal["auto"] = False,
         particle_multilevel_operator: Literal["graph", "galerkin"] = "graph",
+        particle_multilevel_include_tetrahedra: bool = True,
         particle_multilevel_cluster_size: int = 8,
         particle_multilevel_coarse_iterations: int = 8,
         particle_multilevel_selective_polish_iterations: int = 0,
@@ -465,6 +466,9 @@ class SolverVBD(SolverBase, CouplingInterface):
                 inertia, and diagonal contact Hessians into the aggregate translation basis. The latter captures
                 elastic anisotropy but rebuilds a block-sparse operator for each correction. Models with movable
                 tetrahedral clusters retain the six-DOF mixed/tet operator regardless of this surface-only option.
+            particle_multilevel_include_tetrahedra: Include tetrahedral particles in the coarse correction.
+                Set False to accelerate only surface particles; tetrahedral elasticity and all contacts still
+                use the ordinary fine VBD solve. This can avoid a six-DOF coarse solve for small soft objects.
             particle_multilevel_cluster_size: Target number of topologically adjacent particles per coarse cluster.
             particle_multilevel_coarse_iterations: Number of fixed PCG iterations on the coarse graph.
             particle_multilevel_selective_polish_iterations: Additional fine sweeps restricted to unresolved surface
@@ -752,6 +756,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             particle_chebyshev_cleanup_max_radius_fraction,
             particle_enable_multilevel_correction,
             particle_multilevel_operator,
+            particle_multilevel_include_tetrahedra,
             particle_multilevel_cluster_size,
             particle_multilevel_coarse_iterations,
             particle_multilevel_selective_polish_iterations,
@@ -907,6 +912,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_chebyshev_cleanup_max_radius_fraction: float | None,
         particle_enable_multilevel_correction: bool | Literal["auto"],
         particle_multilevel_operator: Literal["graph", "galerkin"],
+        particle_multilevel_include_tetrahedra: bool,
         particle_multilevel_cluster_size: int,
         particle_multilevel_coarse_iterations: int,
         particle_multilevel_selective_polish_iterations: int,
@@ -1044,6 +1050,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             correction = ParticleMultilevelCorrection(
                 model,
                 operator=multilevel_operator,
+                include_tetrahedra=particle_multilevel_include_tetrahedra,
                 cluster_size=particle_multilevel_cluster_size,
                 coarse_iterations=particle_multilevel_coarse_iterations,
                 selective_polish_iterations=particle_multilevel_selective_polish_iterations,

@@ -74,8 +74,7 @@ def _make_kernels(k):
                     p1 = pos[triangles[tri, 0]]
                     p2 = pos[triangles[tri, 1]]
                     p3 = pos[triangles[tri, 2]]
-                    c, _bary, _feature = k.triangle_closest_point(p1, p2, p3, p)
-                    nhat = p - c
+                    c, nhat = k.vertex_triangle_separation(p, p1, p2, p3)
                     n = wp.vec3(0.0)
                     flag = float(1.0)
                     if wp.length(nhat) < 1.0e-12:
@@ -115,10 +114,9 @@ def _make_kernels(k):
         else:
             a = wp.max(-wp.dot(n, d0), 0.0)
             b = wp.max(wp.vec4(wp.dot(n, d1), wp.dot(n, d2), wp.dot(n, d3), 0.0))
-        origin = base + 0.5 * hat
-        if a + b != 0.0:
-            blend = wp.clamp(b / (a + b), 0.05, 0.95)
-            origin = base + blend * hat
+        positive = base + hat
+        scale = wp.max(wp.max(wp.abs(positive)), wp.max(wp.abs(base)))
+        origin, _blend = k.place_dat_division_plane(n, base, wp.length(hat), a, b, k.dat_separation_epsilon(scale))
         eps_far = float(1.0e-8)
         if ee:
             eps_far = 1.0e-6

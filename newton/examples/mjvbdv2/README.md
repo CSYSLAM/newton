@@ -17,6 +17,7 @@ uv run --extra examples -m newton.examples mjvbd_v2_conveyor_sorting --help
 | W1 V030 two-gripper pick and place | `mjvbd_v2_w1_pick_place` | [example_mjvbd_v2_w1_pick_place.py](example_mjvbd_v2_w1_pick_place.py) |
 | W1 V030 paper bag and snack packing | `mjvbd_v2_w1_bag_packing` | [example_mjvbd_v2_w1_bag_packing.py](example_mjvbd_v2_w1_bag_packing.py) |
 | Quest W1 paper bag packing (controllers / optical hands) | `mjvbd_v2_webxr_w1_bag_packing` | [example_mjvbd_v2_webxr_w1_bag_packing.py](example_mjvbd_v2_webxr_w1_bag_packing.py) |
+| Quest W1 handle-free bag packing (controllers / optical hands) | `mjvbd_v2_webxr_w1_bag_packing_no_handles` | [example_mjvbd_v2_webxr_w1_bag_packing_no_handles.py](example_mjvbd_v2_webxr_w1_bag_packing_no_handles.py) |
 | W1 T-shirt folding | `mjvbd_v2_tshirt_fold` | [example_mjvbd_v2_tshirt_fold.py](example_mjvbd_v2_tshirt_fold.py) |
 | W1 tablecloth placement | `mjvbd_v2_tablecloth_place` | [example_mjvbd_v2_tablecloth_place.py](example_mjvbd_v2_tablecloth_place.py) |
 | Dynamic W1 T-shirt folding | `mjvbd_v2_tshirt_fold_dynamic` | [example_mjvbd_v2_tshirt_fold_dynamic.py](example_mjvbd_v2_tshirt_fold_dynamic.py) |
@@ -230,12 +231,30 @@ For the new V030 paper-bag packing scene, run
 Both controllers clutch their respective arms; both triggers close the parallel
 grippers. Experimental optical mode follows wrists and maps thumb/index spacing
 to jaw opening. Tracking loss holds the current pose and opening until a new
-activation re-anchors that hand. The paper bag and snacks remain physical.
+activation re-anchors that hand. The heavier, stiffer paper bag and denser rigid
+snacks share their material settings with the automatic demo. A 7 cm deformable
+cube beside the snacks provides a bread proxy; use `--no-soft-cube` to omit it.
 The scene includes first-person head tracking, JSONL recording, in-place reset,
-and the shared standby/park/resume protocol. See the
+and the shared standby/park/resume protocol. Recordings include cube deformation;
+older recordings replay without adding a cube. See the
 [Quest instructions](../../../docs/quest_webxr_teleop.md#w1-v030-纸袋装零食).
 
 ![W1 paper bag packing teleoperation](../../../docs/images/examples/example_mjvbd_v2_webxr_w1_bag_packing.jpg)
+
+The independent handle-free variant uses the same controls, physics parameters,
+snacks and soft cube, with a separate bag mesh and port 8774:
+
+```bash
+./scripts/start_quest_webxr_w1_bag_packing_no_handles_teleop.sh --trajectory-output recordings/bag_no_handles_01.jsonl
+```
+
+Press right-controller A or the optical-hand panel's record button to begin.
+Use `stop_quest_webxr_w1_bag_packing_no_handles_teleop.sh` in `scripts/` to finish.
+The existing `mjvbd_v2_w1_bag_packing --replay` entry automatically selects the
+recorded asset; old recordings retain handles. See the
+[handle-free asset guide](../../../assets/w1_paper_bag_no_handles/README.md).
+
+![Handle-free W1 packing CPU model preview](../../../docs/images/examples/example_mjvbd_v2_webxr_w1_bag_packing_no_handles.jpg)
 
 | Previous command | Current command |
 | --- | --- |

@@ -552,6 +552,45 @@ class TestMJVBDV2ParticleMultilevel(unittest.TestCase):
 
         self.assertFalse(correction.use_rigid_basis)
 
+    def test_surface_only_correction_keeps_tets_dynamic(self):
+        """Exclude live tets from the coarse solve while retaining their fine dynamics."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        for p in ((0, 0, 0), (0.1, 0, 0), (0, 0.1, 0), (0, 0, 0.1), (1, 0, 0), (1.1, 0, 0), (1, 0.1, 0)):
+            builder.add_particle(wp.vec3(*p), wp.vec3(), 0.01)
+        builder.add_tetrahedron(0, 1, 2, 3)
+        builder.add_triangle(4, 5, 6)
+        builder.color()
+        model = builder.finalize(device="cpu")
+        masses, flags = model.particle_mass.numpy(), model.particle_flags.numpy()
+        for include in (True, False):
+            correction = ParticleMultilevelCorrection(
+                model,
+                operator="galerkin",
+                include_tetrahedra=include,
+                cluster_size=4,
+                coarse_iterations=2,
+                coupling=0.5,
+                relaxation=0.1,
+                max_radius_fraction=0.05,
+                minimum_residual_reduction=None,
+                max_clamp_fraction=1.0,
+            )
+            self.assertEqual(correction.use_rigid_basis, include)
+            mapping = correction.fine_to_coarse.numpy()
+            self.assertTrue(np.all(mapping[:4] >= 0) if include else np.all(mapping[:4] == -1))
+            self.assertTrue(np.all(mapping[4:] >= 0))
+        np.testing.assert_array_equal(model.particle_mass.numpy(), masses)
+        np.testing.assert_array_equal(model.particle_flags.numpy(), flags)
+        for solver_type in (SolverVBDComplete, SolverVBDSoft):
+            solver = solver_type(model, particle_multilevel_include_tetrahedra=False)
+            start, end = model.state(), model.state()
+            initial = start.particle_q.numpy().copy()
+            velocity = start.particle_qd.numpy()
+            velocity[:4, 2] = 0.1
+            start.particle_qd.assign(velocity)
+            solver.step(start, end, model.control(), None, 0.001)
+            np.testing.assert_allclose(end.particle_q.numpy()[:4, 2] - initial[:4, 2], 0.0001, atol=1e-6)
+
     @unittest.skipUnless(wp.is_cuda_available(), "Particle multilevel correction requires CUDA")
     def test_galerkin_rejects_nonpositive_pcg_curvature(self):
         """Reject an indefinite coarse system even without residual validation."""

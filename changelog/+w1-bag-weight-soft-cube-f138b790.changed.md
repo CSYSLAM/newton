@@ -1,0 +1,1 @@
+Increase W1 packing bag mass and stiffness, increase rigid snack mass and reduce snack friction, and add a deformable bread-sized cube with Quest rendering and full-state recording. Share materials between automatic and teleoperated scenes; use `--no-soft-cube` to omit the cube. Replay older recordings with their original particle layout.

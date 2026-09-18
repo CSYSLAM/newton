@@ -711,16 +711,28 @@ class JsonlTrajectoryRecorder:
         self.recording = False
         self.sample_count = 0
         self._file = None
+        self._restart_pending = False
 
     def start(self) -> None:
         """Open the output lazily and begin accepting samples."""
+        if self._restart_pending:
+            self.close()
         if self._file is None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._file = self.path.open("w", encoding="utf-8")
             header = {"type": "metadata", "format": "newton_webxr_trajectory_v1", **self.metadata}
             self._file.write(json.dumps(header, separators=(",", ":")) + "\n")
             self._file.flush()
+        if self._restart_pending:
+            self.sample_count = 0
+            self._restart_pending = False
         self.recording = True
+
+    def restart_on_next_start(self) -> None:
+        """Replace the paused file on the next start, retaining it until then."""
+        if self.recording:
+            raise RuntimeError("Pause recording before requesting a new take")
+        self._restart_pending = True
 
     def pause(self) -> None:
         """Pause sample writes without closing the trajectory."""

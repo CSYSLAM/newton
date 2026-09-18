@@ -337,6 +337,7 @@ showcontent = true
 files.extend-exclude = ["/examples/assets", "*.urdf", "*.usd", "*.usda", "*.mjcf", "*.js"]
 
 [tool.typos.default.extend-words]
+AER = "AER"  # PCI Express Advanced Error Reporting
 arange = "arange"
 precess = "precess"
 ba = "ba"

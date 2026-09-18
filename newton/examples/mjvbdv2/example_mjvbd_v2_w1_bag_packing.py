@@ -2,16 +2,41 @@
 # SPDX-License-Identifier: Apache-2.0
 """Crouch at a worktable, turn up a bag with the left hand, then pack snacks.
 
+遥操轨迹回放 (在仓库根目录执行):
+
+uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing --replay recordings/bag_take_06.jsonl --loop
+
+将 --replay 后的路径换成自己的遥操 JSONL 文件。去掉 --loop 可播放一次。
+--start-frame 600 从第 600 个保存帧开始 (编号从 0 起); --unthrottled 取消默认 60 FPS 限制。
+窗口侧栏支持暂停、继续和拖动进度条。
+回放逐帧恢复机器人关节、刚体位姿以及纸袋和软体方块的粒子位置与速度。
+回放期间关闭 IK 和物理求解。因此修改当前物理参数不会改变已经录下的运动。
+场景选项从录制元数据恢复并检查资产是否匹配。旧的 bag_take_06 没有软体方块。
+回放时会自动关闭方块。需要方块的变形轨迹时请使用新版遥操重新录制。
+
+录制新的遥操轨迹:
+
+./scripts/start_quest_webxr_w1_bag_packing_teleop.sh --trajectory-output recordings/bag_take_new.jsonl
+
+使用新的文件名。按右手柄 A 或手势面板录制按钮开始录制。再按一次暂停。
+结束后运行 ./scripts/stop_quest_webxr_w1_bag_packing_teleop.sh 关闭并刷盘。
+若遥操已在运行则先停止再用新路径启动。仅启动脚本不会自动开始录制。
+--replay 需要带 full-state 元数据的录制。仅含手柄输入的旧轨迹无法还原完整场景。
+
+Run the scripted simulation:
+
 uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing
 
-Record once with --record (headless by default), then play with --replay --loop.
-Both options accept an optional recording directory.
+Record the scripted simulation with --record (headless by default), then play
+with --replay --loop. --record accepts an optional new recording directory;
+--replay accepts a recording directory or a full-state teleoperation JSONL file.
 Use --robot-setback to tune the distance from the fixed worktable [m].
 Only the robot is prescribed. Paper and snacks move through contact, with no
 attachments, pose resets, or fixed bag vertices. Asset scale is estimated from
 the user's video; snacks use untextured primitive rendering.
 """
 
+import argparse
 import json
 import math
 from itertools import pairwise, product
@@ -24,9 +49,11 @@ import newton
 import newton.examples
 import newton.ik as ik
 from newton.examples.mjvbdv2.example_mjvbd_v2_w1_pick_place import ASSET, OPEN, SIDES, TCP, _prescribe
+from newton.examples.mjvbdv2.support.w1_bag_diagnostics import checkpoint
 from newton.solvers import SolverMJVBDV2
 
 ASSETS = Path(__file__).resolve().parents[3] / "assets/w1_paper_bag"
+NO_HANDLE_ASSETS = ASSETS.with_name("w1_paper_bag_no_handles")
 TABLE_Z = 0.92
 TABLE_CENTER = np.array((0.66, -0.01, TABLE_Z - 0.022))
 TABLE_HALF = np.array((0.30, 0.66, 0.022))
@@ -34,10 +61,57 @@ DEPTH, WIDTH, HEIGHT = 0.13, 0.32, 0.25
 BAG_Y = 0.0
 SUPPORT_OPENING = 0.0035
 SNACK_OPENINGS = {"can": 0.030, "carton": 0.028}
+BAG_SURFACE_DENSITY = 0.54
+SNACK_DENSITY = 600.0
+SNACK_FRICTION = 0.35
+SOFT_CUBE_SIZE = 0.07
+SOFT_CUBE_POSITION = np.array((0.43, -0.46, TABLE_Z + SOFT_CUBE_SIZE / 2 + 0.002))
+SOFT_CUBE_COLOR = (0.82, 0.55, 0.28)
+# Each collision mesh extends 0.701 mm inward: 34 mm sliders leave a 66.6 mm gap.
+SOFT_CUBE_OPENING = 0.034
 IDLE_OPENING = 0.015
 IDLE_PITCH = math.radians(100)
 PACK_START = 24.0
 PACK_DURATION = 12.0
+
+
+def add_soft_cube(builder, *, position=SOFT_CUBE_POSITION):
+    """Add a bread-sized tetrahedral cube with volume-lumped particle masses [kg]."""
+    start, first_cube_tet = builder.particle_count, builder.tet_count
+    builder.add_soft_grid(
+        pos=wp.vec3(*(np.asarray(position) - SOFT_CUBE_SIZE / 2)),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(),
+        dim_x=4,
+        dim_y=4,
+        dim_z=4,
+        cell_x=SOFT_CUBE_SIZE / 4,
+        cell_y=SOFT_CUBE_SIZE / 4,
+        cell_z=SOFT_CUBE_SIZE / 4,
+        density=350.0,
+        k_mu=3e3,
+        k_lambda=7e3,
+        k_damp=0.5,
+        particle_radius=0.0012,
+        color=SOFT_CUBE_COLOR,
+        label="soft_bread_cube",
+    )
+    # Lump tetrahedron masses onto their vertices; grid boundary vertices
+    # must not each receive a full cell's mass.
+    cube_tets = np.asarray(builder.tet_indices[first_cube_tet:]) - start
+    cube_points = np.asarray(builder.particle_q[start:])[cube_tets]
+    volumes = np.linalg.det(cube_points[:, 1:] - cube_points[:, :1]) / 6
+    masses = np.bincount(cube_tets.ravel(), weights=np.repeat(volumes * 350.0 / 4, 4))
+    builder.particle_mass[start:] = masses.tolist()
+
+
+def soft_cube_contact_filter(start, end, faces, triangle_count):
+    """Exclude buried tet vertices from surface contact without disabling their dynamics."""
+    interior = np.setdiff1d(np.arange(start, end), np.unique(faces))
+    # The triangle detector queries every particle, including volume nodes.
+    # Only the cube boundary should collide with cloth or its own surface.
+    triangles = set(range(triangle_count))
+    return {int(vertex): triangles for vertex in interior}
 
 
 def smooth(t):
@@ -132,6 +206,7 @@ class Example:
     _initial_bag_yaw = 0.0
     _initial_bag_offset = (0.0, 0.0, 0.0)
     _initial_gripper_openings = (OPEN, IDLE_OPENING)
+    _initial_head_pitch = 0.0
 
     def __init__(self, viewer, args, *, render_only=False):
         self.viewer, self.args = viewer, args
@@ -176,6 +251,7 @@ class Example:
             builder.joint_q[self.coords[f"{side}_J4"]] = sign * 1.0
             for finger in (1, 2):
                 builder.joint_q[self.coords[f"{side}_FINGER{finger}_JOINT"]] = OPEN
+        builder.joint_q[self.coords["NECK2"]] = self._initial_head_pitch
         for i in range(builder.body_count):
             builder.body_flags[i] = int(newton.BodyFlags.KINEMATIC)
         full_shapes = []
@@ -207,8 +283,11 @@ class Example:
                 self.table_geometries.append(
                     (builder.shape_body[shape], vertices, np.asarray(source.indices).reshape(-1, 3), bounds)
                 )
+            checkpoint("initial-ik.build.begin")
             self._build_ik()
+            checkpoint("initial-ik.solve.begin")
             self._solve_ik(self.home, self._initial_gripper_openings, (IDLE_PITCH, IDLE_PITCH), iterations=200)
+            checkpoint("initial-ik.solve.host-return")
             builder.joint_q[:] = self.ik_q.numpy()[0].tolist()
             self.head = next(i for i, name in enumerate(builder.body_label) if name.endswith("/head_pitch_j2_link"))
             neutral = self.ik_model.state()
@@ -242,10 +321,18 @@ class Example:
                     color=(0.22, 0.24, 0.25),
                     label="Table leg",
                 )
-        with np.load(ASSETS / "bag.npz") as data:
+        if args.bag_variant not in ("handles", "no-handles"):
+            raise ValueError(f"Unknown bag asset variant: {args.bag_variant}")
+        self.assets = ASSETS if args.bag_variant == "handles" else NO_HANDLE_ASSETS
+        with np.load(self.assets / "bag.npz") as data:
             self.rest, self.faces = data["vertices"], data["faces"]
             self.paper_count, self.paper_faces = int(data["paper_count"]), int(data["paper_faces"])
             self.bottom, self.rim = data["bottom"], data["rim"]
+            # Keep the original layout pivot when removing the protruding handles.
+            self._placement_rest = (
+                np.asarray(list(product(*data["placement_bounds"].T))) if "placement_bounds" in data else self.rest
+            )
+        self.bag_particle_count = len(self.rest)
         self.lip_chains = []
         for side in (-1, 1):
             chain = self.rim[side * self.rest[self.rim, 0] > DEPTH / 2 - 0.005]
@@ -263,12 +350,12 @@ class Example:
             vel=wp.vec3(),
             vertices=self.rest.tolist(),
             indices=self.faces.ravel().tolist(),
-            density=0.18,
-            tri_ke=5e4,
-            tri_ka=5e4,
-            tri_kd=0.2,
-            edge_ke=30.0,
-            edge_kd=1.0,
+            density=BAG_SURFACE_DENSITY,
+            tri_ke=1e5,
+            tri_ka=1e5,
+            tri_kd=0.4,
+            edge_ke=60.0,
+            edge_kd=2.0,
             particle_radius=0.0012,
         )
         for i, edge in enumerate(builder.edge_indices):
@@ -282,22 +369,28 @@ class Example:
             gusset = np.all(np.abs(hinge[:, 0]) < 1e-6) and np.all(np.abs(hinge[:, 1]) > WIDTH / 2 - 0.02)
             bottom_fold = np.all(np.abs(hinge[:, 2]) < 1e-6) or np.all(np.abs(hinge[:, 2] - HEIGHT / 9) < 1e-6)
             if points[:, 2].min() > HEIGHT - 0.04:
-                builder.edge_bending_properties[i] = (120.0, 2.0)
+                builder.edge_bending_properties[i] = (240.0, 4.0)
             elif corner or gusset or bottom_fold:
-                builder.edge_bending_properties[i] = (8.0, 0.3)
+                builder.edge_bending_properties[i] = (16.0, 0.6)
         # The folded top hem has bonded double plies, including the grasp area.
         for i, face in enumerate(self.faces[: self.paper_faces]):
             if self.rest[face, 2].min() > HEIGHT - 0.032:
                 ke, ka, kd, drag, lift = builder.tri_materials[i]
                 builder.tri_materials[i] = (2 * ke, 2 * ka, 2 * kd, drag, lift)
                 for v in face:
-                    builder.particle_mass[v] += 0.18 * builder.tri_areas[i] / 3
+                    builder.particle_mass[v] += BAG_SURFACE_DENSITY * builder.tri_areas[i] / 3
+        self.soft_cube_start = builder.particle_count
+        first_cube_tri = builder.tri_count
+        if args.soft_cube:
+            add_soft_cube(builder)
+        self.soft_cube_end = builder.particle_count
+        self.soft_cube_faces = np.asarray(builder.tri_indices[first_cube_tri:], dtype=np.int32).reshape(-1, 3)
         self.objects = []
-        snack_info = json.loads((ASSETS / "snacks.json").read_text())
-        with np.load(ASSETS / "snacks.npz") as meshes:
+        snack_info = json.loads((self.assets / "snacks.json").read_text())
+        with np.load(self.assets / "snacks.npz") as meshes:
             for kind, point, half in zip(self.kinds, self.pick, self.half, strict=True):
                 body = builder.add_body(xform=wp.transform(wp.vec3(*point), wp.quat_identity()), label=kind)
-                contact = builder.ShapeConfig(density=280, ke=4e4, kd=80, mu=1.2)
+                contact = builder.ShapeConfig(density=SNACK_DENSITY, ke=4e4, kd=80, mu=SNACK_FRICTION)
                 if kind == "can":
                     shape = builder.add_shape_cylinder(body, radius=half[0], half_height=half[2], cfg=contact)
                 else:
@@ -323,7 +416,9 @@ class Example:
         self.model.soft_contact_ke, self.model.soft_contact_kd, self.model.soft_contact_mu = 2e5, 10.0, 0.6
         self.state_0 = self.model.state()
         if not render_only:
+            checkpoint("physics-solver.build.begin")
             self._build_simulation(full_shapes)
+            checkpoint("physics-solver.build.end")
         self.graph = None
         self.peak_ik_error, self.peak_joint_speed = 0.0, 0.0
         self.peak_z = self.pick[:, 2].copy()
@@ -341,7 +436,7 @@ class Example:
         if self._initial_bag_yaw:
             yaw = wp.quat_from_axis_angle(wp.vec3(0, 0, 1), self._initial_bag_yaw)
             yaw_matrix = np.asarray(wp.quat_to_matrix(yaw)).reshape(3, 3)
-            vertices = self.rest @ matrix.T + position
+            vertices = self._placement_rest @ matrix.T + position
             center = (vertices.min(axis=0) + vertices.max(axis=0)) / 2
             vertices = (vertices - center) @ yaw_matrix.T + center
             position = yaw_matrix @ (position - center) + center
@@ -372,6 +467,8 @@ class Example:
                 "rigid_soft_enable_dat": True,
                 "particle_enable_multilevel_correction": True,
                 "particle_multilevel_operator": "galerkin",
+                # A small bread cube needs no global six-DOF coarse solve.
+                "particle_multilevel_include_tetrahedra": False,
                 "particle_multilevel_cluster_size": 8,
                 "particle_multilevel_coarse_iterations": 32,
                 "particle_multilevel_checkpoints": tuple(
@@ -389,6 +486,9 @@ class Example:
                 "particle_self_contact_radius": 0.0012,
                 "particle_self_contact_margin": 0.003,
                 "particle_topological_contact_filter_threshold": 2,
+                "particle_external_vertex_contact_filtering_map": soft_cube_contact_filter(
+                    self.soft_cube_start, self.soft_cube_end, self.soft_cube_faces, self.model.tri_count
+                ),
                 "particle_rest_shape_contact_exclusion_radius": 0.0015,
                 "particle_collision_detection_interval": 0,
                 "particle_chebyshev_spectral_radius": 0.9,
@@ -649,18 +749,28 @@ class Example:
     def _advance_physics(self):
         """Advance one physical frame with identical graph and contact handling in both demos."""
         if self.graph is None:
+            if self.frame < 3:
+                checkpoint(f"frame={self.frame} physics.uncaptured.begin")
             self._simulate()
+            if self.frame < 3:
+                checkpoint(f"frame={self.frame} physics.uncaptured.host-return")
             if self.model.device.is_cuda and not self.args.no_cuda_graph and self.args.substeps % 2 == 0:
                 saved_a, saved_b = self.model.state(), self.model.state()
                 saved_a.assign(self.state_0)
                 saved_b.assign(self.state_1)
+                checkpoint("physics.graph-capture.begin")
                 with wp.ScopedCapture() as capture:
                     self._simulate()
+                checkpoint("physics.graph-capture.host-return")
                 self.state_0.assign(saved_a)
                 self.state_1.assign(saved_b)
                 self.graph = capture.graph
         else:
+            if self.frame < 3:
+                checkpoint(f"frame={self.frame} physics.graph-launch.begin")
             wp.capture_launch(self.graph)
+            if self.frame < 3:
+                checkpoint(f"frame={self.frame} physics.graph-launch.host-return")
 
     def step(self):
         if self.sim_time >= 17.0 and self.support_target is None:
@@ -812,8 +922,14 @@ class Example:
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
-        parser.set_defaults(num_frames=3000)
+        parser.set_defaults(num_frames=3000, bag_variant="handles")
         parser.add_argument("--snacks", type=int, choices=(1, 2), default=2)
+        parser.add_argument(
+            "--soft-cube",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Add a deformable bread-sized cube beside the rigid snacks.",
+        )
         parser.add_argument("--substeps", type=int, default=6)
         parser.add_argument("--iterations", type=int, default=12)
         parser.add_argument(

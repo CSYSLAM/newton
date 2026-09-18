@@ -1,0 +1,1 @@
+Replace the current W1 bag trajectory when recording resumes after a paused physics reset, for both handled and handle-free scenes. Pause, reset, then press record to discard a failed take; pause/resume without reset continues appending.

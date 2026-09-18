@@ -7,6 +7,8 @@ Run ``./scripts/start_quest_webxr_w1_bag_packing_teleop.sh``. Each Grip
 clutches its arm and each Trigger closes its parallel gripper. Experimental
 optical mode follows both wrists and maps thumb/index spacing to jaw opening.
 Paper and snacks remain dynamic; the automatic packing trajectory is disabled.
+Pause recording, reset physics, then press record again to replace the entire
+current take. A pause/resume without reset keeps appending to the same file.
 """
 
 import argparse
@@ -25,7 +27,8 @@ from . import example_mjvbd_v2_w1_bag_packing as scene
 from ._webxr_gripper_input import GripperInput
 from ._webxr_parallel_gripper import ParallelGripperRetargeter
 from ._webxr_teleop import JsonlTrajectoryRecorder, LatestXRFrame, Pose, WebXRServer, pack_scene_geometry
-from ._webxr_w1_head import OBSERVER_VIEW_MODE, W1HeadController
+from ._webxr_w1_head import OBSERVER_VIEW_MODE, W1HeadController, head_pose_to_neck_targets
+from .support.w1_bag_diagnostics import checkpoint, diagnostics
 from .support.w1_bag_recording import SCENE_OPTIONS, scene_signature
 
 HANDS = ("left", "right")
@@ -56,9 +59,12 @@ class Example(scene.Example):
     """Drive both V030 arms and grippers while retaining physical bag/snack contact."""
 
     reset_in_place = True
+    recording_prefix = "webxr_w1_bag_packing"
+    scene_title = "W1 纸袋装零食遥操作"
     _initial_bag_yaw = np.pi / 2
     _initial_bag_offset = (0.0, 0.20, 0.0)
     _initial_gripper_openings = (scene.OPEN, scene.SNACK_OPENINGS["can"])
+    _initial_head_pitch = np.deg2rad(45.0)
 
     def __init__(self, viewer, args):
         if args.ik_iterations < 1 or args.record_flush_every < 1:
@@ -92,7 +98,7 @@ class Example(scene.Example):
             eye_position=(0.10, 0, 0),
         )
         self.inputs = {}
-        self._right_grasp_target = None
+        self._left_grasp_target = self._right_grasp_target = None
         bodies, q = self.state_0.body_q.numpy(), self.state_0.joint_q.numpy()
         for hand, body in zip(HANDS, self.ee, strict=True):
             mapper = ParallelGripperRetargeter(scene.ASSET, side=hand)
@@ -108,7 +114,7 @@ class Example(scene.Example):
                 translation_scale=args.xr_translation_scale,
                 max_translation=args.xr_max_translation,
             )
-        output = args.trajectory_output or Path("recordings") / f"webxr_w1_bag_packing_{time.time_ns()}.jsonl"
+        output = args.trajectory_output or Path("recordings") / f"{self.recording_prefix}_{time.time_ns()}.jsonl"
         self.trajectory_recorder = JsonlTrajectoryRecorder(
             output,
             {
@@ -122,11 +128,16 @@ class Example(scene.Example):
                 "robotCoordinateIndices": list(range(self.robot_coords)),
                 "robotJointLabels": list(self.ik_model.joint_label),
                 "bagTriangleIndices": self.faces.reshape(-1).tolist(),
+                "bagParticleCount": self.bag_particle_count,
+                "softCubeParticleStart": self.soft_cube_start,
+                "softCubeParticleCount": self.soft_cube_end - self.soft_cube_start,
+                "softCubeTriangleIndices": (self.soft_cube_faces - self.soft_cube_start).reshape(-1).tolist(),
                 "snackBodies": self.objects,
             },
             flush_every=args.record_flush_every,
         )
         self._bag_meshes = []
+        self._soft_cube_mesh = None
         self._static_boxes = []
         geometry = self._build_webxr_geometry() if args.webxr_server else None
         self.webxr_server = WebXRServer(
@@ -200,31 +211,33 @@ class Example(scene.Example):
                     self.trajectory_recorder.start()
         else:
             self._buttons = None
-        self.head_control.set_desired_pose(self.view_mode, None if frame is None else frame.head_pose)
         bodies, q = self.state_0.body_q.numpy(), self.state_0.joint_q.numpy()
+        self._update_head_gaze(bodies, None if frame is None else frame.head_pose)
         for hand, body in zip(HANDS, self.ee, strict=True):
             control = self.inputs[hand]
             control.update(frame, self._tcp_pose(bodies[body]), q[self.finger_indices[hand]])
             control.position = np.clip(control.position, WORKSPACE_LOWER, WORKSPACE_UPPER)
-        if (
-            frame is not None
-            and (
-                (frame.input_mode == "controllers" and "right" in frame.controllers)
-                or (frame.input_mode == "hands" and self.inputs["right"].status == "tracking")
-            )
-            and frame.visibility_state == "visible"
-        ):
-            self._update_right_grasp_limit(bodies)
+        if frame is not None and frame.visibility_state == "visible":
+            for hand in HANDS:
+                if (frame.input_mode == "controllers" and hand in frame.controllers) or (
+                    frame.input_mode == "hands" and self.inputs[hand].status == "tracking"
+                ):
+                    self._update_grasp_limit(hand, bodies)
         return frame
 
     def _update_right_grasp_limit(self, bodies) -> None:
-        """Latch a nearby bag or snack opening until the right hand releases it."""
-        control = self.inputs["right"]
+        """Update the right-hand grasp clearance."""
+        self._update_grasp_limit("right", bodies)
+
+    def _update_grasp_limit(self, hand, bodies) -> None:
+        """Keep object-specific clearance until release, including beside a bag wall."""
+        control = self.inputs[hand]
+        target = getattr(self, f"_{hand}_grasp_target", None)
         closure = control.mapper.closure(control.jaws)
         if closure <= 0.05:
-            self._right_grasp_target = None
-        elif self._right_grasp_target is None:
-            tcp = self._tcp_pose(bodies[self.ee[1]]).position
+            target = None
+        elif target is None:
+            tcp = self._tcp_pose(bodies[self.ee[HANDS.index(hand)]]).position
             snacks = bodies[self.objects]
             local = np.array(
                 [np.asarray(wp.quat_rotate_inv(wp.quat(*body[3:]), wp.vec3(*(tcp - body[:3])))) for body in snacks]
@@ -234,22 +247,42 @@ class Example(scene.Example):
             distances = np.linalg.norm(np.maximum(np.abs(local) - self.half, 0), axis=1)
             distances[np.linalg.norm(local, axis=1) > 0.12] = np.inf
             nearest = int(np.argmin(distances))
-            bag_distance = float(np.linalg.norm(self.state_0.particle_q.numpy() - tcp, axis=1).min())
-            if np.isfinite(distances[nearest]) and distances[nearest] <= bag_distance:
-                self._right_grasp_target = self.objects[nearest]
+            particles = self.state_0.particle_q.numpy()
+            bag_distance = float(np.linalg.norm(particles[: self.bag_particle_count] - tcp, axis=1).min())
+            cube_distance = np.inf
+            if self.soft_cube_end > self.soft_cube_start:
+                cube = particles[self.soft_cube_start : self.soft_cube_end]
+                cube_distance = float(np.linalg.norm(np.maximum(np.maximum(cube.min(0) - tcp, tcp - cube.max(0)), 0)))
+                if cube_distance > 0.06:
+                    cube_distance = np.inf
+            if np.isfinite(distances[nearest]) and distances[nearest] <= min(bag_distance, cube_distance):
+                target = self.objects[nearest]
+            elif np.isfinite(cube_distance) and cube_distance <= bag_distance:
+                target = "soft-cube"
             elif bag_distance <= 0.06:
-                self._right_grasp_target = "bag"
+                target = "bag"
             elif np.isfinite(distances[nearest]):
-                self._right_grasp_target = self.objects[nearest]
-        if self._right_grasp_target == "bag":
+                target = self.objects[nearest]
+        setattr(self, f"_{hand}_grasp_target", target)
+        if target == "bag" or (target is None and hand == "left"):
             minimum = scene.SUPPORT_OPENING
+        elif target == "soft-cube":
+            minimum = scene.SOFT_CUBE_OPENING
         else:
-            kind = (
-                "can" if self._right_grasp_target is None else self.kinds[self.objects.index(self._right_grasp_target)]
-            )
+            kind = "can" if target is None else self.kinds[self.objects.index(target)]
             minimum = scene.SNACK_OPENINGS[kind]
         control.mapper.lower[:] = minimum
         control.jaws = control.mapper.coordinates(closure)
+
+    def _update_head_gaze(self, bodies: np.ndarray, head_pose: Pose | None) -> None:
+        """Look down toward the measured hand midpoint and take only yaw from the headset."""
+        hands = np.array([self._tcp_pose(bodies[body]).position for body in self.ee])
+        direction = hands.mean(axis=0) - bodies[self.head, :3]
+        pitch = max(np.deg2rad(20.0), float(np.arctan2(-direction[2], np.linalg.norm(direction[:2]))))
+        yaw = float(self.head_control.targets[0])
+        if head_pose is not None:
+            yaw = float(self.head_control.neutral[0]) + head_pose_to_neck_targets(head_pose)[0]
+        self.head_control.set_desired_targets(yaw, pitch)
 
     def _solve_teleop_ik(self) -> None:
         previous = self.ik_q.numpy()[0]
@@ -280,9 +313,18 @@ class Example(scene.Example):
     def step(self) -> None:
         if not self._consume_controls():
             return
+        trace_frame = self.frame < 3 or self.frame % 120 == 0
+        if trace_frame:
+            checkpoint(f"frame={self.frame} controls.begin")
         frame = self._prepare_frame()
+        if trace_frame:
+            checkpoint(f"frame={self.frame} ik.begin")
         self._solve_teleop_ik()
+        if trace_frame:
+            checkpoint(f"frame={self.frame} physics.begin")
         self._advance_physics()
+        if trace_frame:
+            checkpoint(f"frame={self.frame} physics.host-return")
         self.frame += 1
         self.episode_frame += 1
         self.sim_time = self.frame * self.frame_dt
@@ -291,6 +333,8 @@ class Example(scene.Example):
         self.webxr_server.mark_simulation_ready()
         if self.trajectory_recorder.recording:
             joints = self.state_0.joint_q.numpy()
+            particles = self.state_0.particle_q.numpy()
+            velocities = self.state_0.particle_qd.numpy()
             self.trajectory_recorder.append(
                 {
                     "frame": self.frame,
@@ -332,12 +376,16 @@ class Example(scene.Example):
                     "jointQd": self.state_0.joint_qd.numpy().tolist(),
                     "bodyPoses": bodies.tolist(),
                     "bodyVelocities": self.state_0.body_qd.numpy().tolist(),
-                    "bagParticleQ": self.state_0.particle_q.numpy().tolist(),
-                    "bagParticleQd": self.state_0.particle_qd.numpy().tolist(),
+                    "bagParticleQ": particles[: self.bag_particle_count].tolist(),
+                    "bagParticleQd": velocities[: self.bag_particle_count].tolist(),
+                    "softCubeParticleQ": particles[self.soft_cube_start : self.soft_cube_end].tolist(),
+                    "softCubeParticleQd": velocities[self.soft_cube_start : self.soft_cube_end].tolist(),
                 }
             )
         if self.webxr_server.running:
             self._publish_scene_state(bodies)
+        if trace_frame:
+            checkpoint(f"frame={self.frame} frame.end")
 
     def reset_physics(self, *, source: str) -> None:
         """Restore robot, paper and snacks together without reallocating the solver."""
@@ -349,7 +397,8 @@ class Example(scene.Example):
         wp.copy(self.frame_start, self._initial_ik.flatten())
         wp.copy(self.frame_end, self.frame_start)
         self._hold_inputs()
-        self._right_grasp_target = None
+        self._left_grasp_target = self._right_grasp_target = None
+        self.inputs["left"].mapper.lower[:] = scene.SUPPORT_OPENING
         self.inputs["right"].mapper.lower[:] = scene.SNACK_OPENINGS["can"]
         self.head_control.reset()
         self.episode_index += 1
@@ -358,6 +407,8 @@ class Example(scene.Example):
         self.trajectory_recorder.append_event(
             {"event": "scene-reset", "episode": self.episode_index, "frame": self.frame, "source": source}
         )
+        if not self.trajectory_recorder.recording:
+            self.trajectory_recorder.restart_on_next_start()
         self._publish_scene_state(self.state_0.body_q.numpy())
 
     def _target_poses(self):
@@ -419,12 +470,15 @@ class Example(scene.Example):
                     }
                 )
         vertices = self.state_0.particle_q.numpy()
+        bag_vertices = vertices[: self.bag_particle_count]
         for indices, color in (
             (self.faces[: self.paper_faces], (0.66, 0.46, 0.25)),
             (self.faces[self.paper_faces :], (0.42, 0.32, 0.16)),
         ):
+            if not len(indices):
+                continue
             mesh = len(meshes)
-            meshes.append((vertices, _normals(vertices, indices), indices))
+            meshes.append((bag_vertices, _normals(bag_vertices, indices), indices))
             self._bag_meshes.append(mesh)
             shapes.append(
                 {
@@ -438,10 +492,36 @@ class Example(scene.Example):
                     "doubleSided": True,
                 }
             )
+        if self.soft_cube_end > self.soft_cube_start:
+            cube_vertices = vertices[self.soft_cube_start : self.soft_cube_end]
+            indices = self.soft_cube_faces - self.soft_cube_start
+            self._soft_cube_mesh = len(meshes)
+            meshes.append((cube_vertices, _normals(cube_vertices, indices), indices))
+            shapes.append(
+                {
+                    "body": -1,
+                    "role": "soft-cube",
+                    "mesh": self._soft_cube_mesh,
+                    "position": [0, 0, 0],
+                    "orientation": [0, 0, 0, 1],
+                    "scale": [1, 1, 1],
+                    "color": scene.SOFT_CUBE_COLOR,
+                    "doubleSided": True,
+                }
+            )
         return pack_scene_geometry(meshes, shapes)
 
     def _publish_scene_state(self, bodies) -> None:
-        positions = self.state_0.particle_q.numpy().reshape(-1).tolist()
+        particles = self.state_0.particle_q.numpy()
+        positions = particles[: self.bag_particle_count].reshape(-1).tolist()
+        deformable_meshes = [{"mesh": mesh, "positions": positions} for mesh in self._bag_meshes]
+        if self._soft_cube_mesh is not None:
+            deformable_meshes.append(
+                {
+                    "mesh": self._soft_cube_mesh,
+                    "positions": particles[self.soft_cube_start : self.soft_cube_end].reshape(-1).tolist(),
+                }
+            )
         self.webxr_server.publish_scene(
             {
                 "type": "scene-state",
@@ -449,8 +529,8 @@ class Example(scene.Example):
                 "sceneKind": "w1-bag-packing",
                 "sceneInfo": {
                     "kind": "w1-bag-packing",
-                    "title": "W1 纸袋装零食遥操作",
-                    "description": "双手控制 V030 二指夹: 扶起纸袋、夹取零食并放入袋中。",
+                    "title": self.scene_title,
+                    "description": "双手控制 V030 二指夹: 扶起纸袋、夹取零食和软方块装袋。",
                     "controls": [
                         ["左右 Grip", "按住移动对应手臂"],
                         ["左右 Trigger", "控制对应夹爪闭合"],
@@ -486,7 +566,7 @@ class Example(scene.Example):
                 "viewControls": {"leftThumbstickRotate": True, "firstPersonEnabled": True},
                 "bodyPoses": [[i, *pose.tolist()] for i, pose in enumerate(bodies)],
                 "staticBoxes": self._static_boxes,
-                "deformableMeshes": [{"mesh": mesh, "positions": positions} for mesh in self._bag_meshes],
+                "deformableMeshes": deformable_meshes,
             }
         )
 
@@ -534,10 +614,17 @@ class Example(scene.Example):
         parser.add_argument("--trajectory-output", type=Path, default=None)
         parser.add_argument("--record-on-connect", action=argparse.BooleanOptionalAction, default=False)
         parser.add_argument("--record-flush-every", type=int, default=60)
+        parser.add_argument(
+            "--diagnostics",
+            type=Path,
+            metavar="NEW_LOG_FILE",
+            help="Persist host checkpoints and dump Python stacks after 15 seconds without a checkpoint.",
+        )
         return parser
 
 
-if __name__ == "__main__":
+def main(example_type=Example):
+    """Run a packing variant with the shared shutdown and recording lifecycle."""
     active = []
     exit_pending = [False]
 
@@ -548,11 +635,24 @@ if __name__ == "__main__":
 
     signal.signal(signal.SIGINT, _request_exit)
     signal.signal(signal.SIGTERM, _request_exit)
-    viewer, args = newton.examples.init(Example.create_parser())
-    example = Example(viewer, args)
-    active.append(example)
-    example.exit_requested = exit_pending[0]
-    try:
-        newton.examples.run(example, args)
-    finally:
-        example.close()
+    parser = example_type.create_parser()
+    with diagnostics(parser.parse_args().diagnostics):
+        checkpoint("viewer-device.init.begin")
+        viewer, args = newton.examples.init(parser)
+        checkpoint(
+            f"scene.init.begin graph={args.graph_capture} no_cuda_graph={args.no_cuda_graph} cube={args.soft_cube}"
+        )
+        example = example_type(viewer, args)
+        active.append(example)
+        example.exit_requested = exit_pending[0]
+        checkpoint("scene.init.end")
+        try:
+            newton.examples.run(example, args)
+        finally:
+            checkpoint("scene.close.begin")
+            example.close()
+            checkpoint("scene.close.end")
+
+
+if __name__ == "__main__":
+    main()

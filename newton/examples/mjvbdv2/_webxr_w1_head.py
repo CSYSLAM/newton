@@ -126,6 +126,10 @@ class W1HeadController:
         else:
             self._desired_targets = self.neutral.copy()
 
+    def set_desired_targets(self, yaw: float, pitch: float) -> None:
+        """Set absolute neck angles while retaining joint limits and motion smoothing."""
+        self._desired_targets = np.clip(np.asarray((yaw, pitch), dtype=np.float32), self._lower, self._upper)
+
     def write_targets(self, joint_q: wp.array, frame_dt: float) -> None:
         """Advance bounded neck targets and write them after arm IK assembly."""
         maximum_step = HEAD_MAX_SPEED_RADIANS_S * float(frame_dt)

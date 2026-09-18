@@ -50,7 +50,9 @@ def _scene():
             },
         ),
         state_0=SimpleNamespace(body_q=_Array(np.zeros((2, 7))), particle_q=_Array(np.zeros((5, 3)))),
-        args=SimpleNamespace(snacks=1, robot_setback=0.03, substeps=10, iterations=18),
+        args=SimpleNamespace(
+            snacks=1, robot_setback=0.03, substeps=10, iterations=18, soft_cube=False, bag_variant="handles"
+        ),
         rest=np.zeros((5, 3), dtype=np.float32),
         frame=0,
         sim_time=0.0,
@@ -60,12 +62,31 @@ def _scene():
 class TestW1BagRecording(unittest.TestCase):
     def test_teleop_jsonl_replays_full_states_without_physics(self):
         """Restore robot, rigid bodies, cloth deformation and velocities from JSONL."""
+        self._assert_teleop_round_trip(soft_cube=False)
+
+    def test_teleop_jsonl_replays_cube_deformation_without_physics(self):
+        """Concatenate bag and cube deformations without mixing their particle ranges."""
+        self._assert_teleop_round_trip(soft_cube=True)
+
+    def test_teleop_jsonl_preserves_handle_free_asset_selection(self):
+        """Select the recorded handle-free geometry before validating particle layouts."""
+        self._assert_teleop_round_trip(soft_cube=True, bag_variant="no-handles")
+
+    def _assert_teleop_round_trip(self, *, soft_cube, bag_variant="handles"):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "teleop.jsonl"
             target = _scene()
-            fields = {"joint_q": (6,), "joint_qd": (6,), "body_qd": (2, 6), "particle_qd": (5, 3)}
+            target.args.soft_cube = soft_cube
+            target.args.bag_variant = bag_variant
+            particle_count = 8 if soft_cube else 5
+            target.state_0.particle_q = _Array(np.zeros((particle_count, 3)))
+            fields = {"joint_q": (6,), "joint_qd": (6,), "body_qd": (2, 6), "particle_qd": (particle_count, 3)}
             for name, shape in fields.items():
                 setattr(target.state_0, name, _Array(np.zeros(shape)))
+            scene_options = vars(target.args).copy()
+            if not soft_cube:
+                scene_options.pop("soft_cube")  # Legacy recordings predate the cube option.
+                scene_options.pop("bag_variant")
             recorder = JsonlTrajectoryRecorder(
                 path,
                 {
@@ -73,7 +94,7 @@ class TestW1BagRecording(unittest.TestCase):
                     "recordingKind": "full-state",
                     "frameDtSeconds": 1 / 60,
                     "sceneSignature": scene_signature(target),
-                    "sceneOptions": vars(target.args),
+                    "sceneOptions": scene_options,
                 },
             )
             recorder.start()
@@ -89,6 +110,9 @@ class TestW1BagRecording(unittest.TestCase):
                     "bodyVelocities": np.full((2, 6), frame + 5).tolist(),
                     "bagParticleQd": np.full((5, 3), frame + 6).tolist(),
                 }
+                if soft_cube:
+                    sample["softCubeParticleQ"] = np.full((3, 3), frame + 7).tolist()
+                    sample["softCubeParticleQd"] = np.full((3, 3), frame + 8).tolist()
                 samples.append(sample)
                 recorder.append(sample)
                 recorder.append_event({"event": "scene-reset"})
@@ -105,6 +129,8 @@ class TestW1BagRecording(unittest.TestCase):
             )
             with patch("builtins.print"):
                 run_replay(factory, viewer, args)
+            self.assertEqual(args.soft_cube, soft_cube)
+            self.assertEqual(args.bag_variant, bag_variant)
             self.assertEqual(len(shown), 2)
             for index, state in enumerate(shown):
                 for name, key in {
@@ -115,7 +141,10 @@ class TestW1BagRecording(unittest.TestCase):
                     "body_qd": "bodyVelocities",
                     "particle_qd": "bagParticleQd",
                 }.items():
-                    np.testing.assert_array_equal(state[name], samples[index][key])
+                    expected = samples[index][key]
+                    if soft_cube and name.startswith("particle_"):
+                        expected = expected + samples[index][key.replace("bag", "softCube")]
+                    np.testing.assert_array_equal(state[name], expected)
             target.step.assert_not_called()
             viewer.close.assert_called_once()
             with path.open("ab") as stream:

@@ -1,0 +1,1 @@
+Keep the W1 bag teleoperation robot looking down toward the midpoint of its grippers while taking only yaw from the MR headset in both views. Start and reset with a lowered head, retain bounded neck motion, and hold yaw through tracking loss.

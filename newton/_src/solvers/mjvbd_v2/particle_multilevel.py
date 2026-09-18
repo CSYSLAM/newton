@@ -1746,7 +1746,7 @@ def _build_energy_galerkin_structure(
 
 
 def _build_clusters(
-    model, target_size: int
+    model, target_size: int, *, include_tetrahedra: bool = True
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     particle_count = model.particle_count
     edges = _particle_topology_edges(model)
@@ -1763,6 +1763,8 @@ def _build_clusters(
     if model.tet_count:
         tetrahedra = np.asarray(model.tet_indices.numpy(), dtype=np.int32).reshape((-1, 4))
         tet_particle[np.unique(tetrahedra)] = True
+    if not include_tetrahedra:
+        movable &= ~tet_particle
     fine_to_coarse = np.full(particle_count, -1, dtype=np.int32)
     clusters: list[list[int]] = []
 
@@ -1967,6 +1969,7 @@ class ParticleMultilevelCorrection:
         minimum_residual_reduction: float | None,
         max_clamp_fraction: float,
         full_space: bool = False,
+        include_tetrahedra: bool = True,
     ):
         operator = _normalize_multilevel_operator(operator)
         if cluster_size < 2:
@@ -2003,7 +2006,7 @@ class ParticleMultilevelCorrection:
             coarse_neighbor_multiplicity,
             coarse_incident_edges,
             coarse_anchor_edges,
-        ) = _build_clusters(model, 1 if full_space else cluster_size)
+        ) = _build_clusters(model, 1 if full_space else cluster_size, include_tetrahedra=include_tetrahedra)
         self.full_space = full_space
         self._coupled_solver = None
         self.cluster_count = int(cluster_offsets.size - 1)

@@ -771,7 +771,14 @@ If you run the examples from a source checkout with uv, use
       <code>python -m newton.examples mjvbd_v2_webxr_w1_bag_packing</code><br>
       <a href="docs/quest_webxr_teleop.md#w1-v030-纸袋装零食">Quest setup and controls</a>
     </td>
-    <td width="33%"></td>
+    <td align="center" width="33%">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_webxr_w1_bag_packing_no_handles.py">
+        <img width="320" height="320" src="docs/images/examples/example_mjvbd_v2_webxr_w1_bag_packing_no_handles.jpg" alt="Handle-free W1 packing CPU model preview">
+      </a><br>
+      W1 handle-free bag: controllers and optical hands<br>
+      <code>python -m newton.examples mjvbd_v2_webxr_w1_bag_packing_no_handles</code><br>
+      <a href="docs/quest_webxr_teleop.md#无提手版本">Quest setup and recording</a> · CPU model preview
+    </td>
   </tr>
   <tr>
     <td align="center" width="33%">
