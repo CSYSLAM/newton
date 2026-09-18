@@ -12,12 +12,15 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
+from newton.examples.mjvbdv2._webxr_teleop import JsonlTrajectoryRecorder
 from newton.examples.mjvbdv2.support.w1_bag_recording import (
     Playback,
     RecordingReader,
     RecordingWriter,
+    TeleopRecordingReader,
     run_recording,
     run_replay,
+    scene_signature,
 )
 
 
@@ -30,6 +33,10 @@ class _Array:
 
     def assign(self, values):
         self.values = values.copy()
+
+    @property
+    def shape(self):
+        return self.values.shape
 
 
 def _scene():
@@ -51,6 +58,82 @@ def _scene():
 
 
 class TestW1BagRecording(unittest.TestCase):
+    def test_teleop_jsonl_replays_full_states_without_physics(self):
+        """Restore robot, rigid bodies, cloth deformation and velocities from JSONL."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "teleop.jsonl"
+            target = _scene()
+            fields = {"joint_q": (6,), "joint_qd": (6,), "body_qd": (2, 6), "particle_qd": (5, 3)}
+            for name, shape in fields.items():
+                setattr(target.state_0, name, _Array(np.zeros(shape)))
+            recorder = JsonlTrajectoryRecorder(
+                path,
+                {
+                    "scene": "w1-bag-packing",
+                    "recordingKind": "full-state",
+                    "frameDtSeconds": 1 / 60,
+                    "sceneSignature": scene_signature(target),
+                    "sceneOptions": vars(target.args),
+                },
+            )
+            recorder.start()
+            samples = []
+            for frame in range(2):
+                sample = {
+                    "frame": frame,
+                    "simulationTimeSeconds": frame / 60,
+                    "bodyPoses": np.full((2, 7), frame + 1).tolist(),
+                    "bagParticleQ": np.full((5, 3), frame + 2).tolist(),
+                    "jointQ": np.full(6, frame + 3).tolist(),
+                    "jointQd": np.full(6, frame + 4).tolist(),
+                    "bodyVelocities": np.full((2, 6), frame + 5).tolist(),
+                    "bagParticleQd": np.full((5, 3), frame + 6).tolist(),
+                }
+                samples.append(sample)
+                recorder.append(sample)
+                recorder.append_event({"event": "scene-reset"})
+            recorder.close()
+            shown = []
+            target.render = lambda: shown.append(
+                {name: getattr(target.state_0, name).numpy() for name in ("body_q", "particle_q", *fields)}
+            )
+            target.step = Mock(side_effect=AssertionError("Replay stepped physics"))
+            factory, viewer = Mock(), Mock()
+            factory.create_render_scene.return_value = target
+            args = SimpleNamespace(
+                replay=path, start_frame=0, loop=False, num_frames=10, unthrottled=True, viewer="null", headless=True
+            )
+            with patch("builtins.print"):
+                run_replay(factory, viewer, args)
+            self.assertEqual(len(shown), 2)
+            for index, state in enumerate(shown):
+                for name, key in {
+                    "body_q": "bodyPoses",
+                    "particle_q": "bagParticleQ",
+                    "joint_q": "jointQ",
+                    "joint_qd": "jointQd",
+                    "body_qd": "bodyVelocities",
+                    "particle_qd": "bagParticleQd",
+                }.items():
+                    np.testing.assert_array_equal(state[name], samples[index][key])
+            target.step.assert_not_called()
+            viewer.close.assert_called_once()
+            with path.open("ab") as stream:
+                stream.write(b'{"type":"frame","bodyPoses":[')
+            reader = TeleopRecordingReader(path)
+            self.assertFalse(reader.metadata["complete"])
+            self.assertEqual(reader.count, 2)
+            reader.restore(target, 1)
+            with self.assertRaises(IndexError):
+                reader.restore(target, 2)
+            target.rest[0, 0] = 0.01
+            with self.assertRaisesRegex(ValueError, "geometry"):
+                reader.validate_scene(target)
+            target.rest[0, 0] = 0
+            target.state_0.body_q = _Array(np.zeros((1, 7)))
+            with self.assertRaisesRegex(ValueError, "shape"):
+                reader.restore(target, 0)
+
     def test_exact_round_trip_and_interrupted_prefix(self):
         """Restore every visual field exactly and exclude unwritten frames after interruption."""
         with tempfile.TemporaryDirectory() as directory:

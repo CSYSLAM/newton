@@ -7,6 +7,7 @@ import hashlib
 import json
 import time
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 
@@ -124,6 +125,96 @@ class RecordingReader:
         scene.sim_time, scene.frame = float(values["sim_time"]), frame
 
 
+class TeleopRecordingReader:
+    """Index full-state JSONL recordings and load one frame at a time for replay."""
+
+    _fields: ClassVar[dict[str, str]] = {
+        "body_q": "bodyPoses",
+        "body_qd": "bodyVelocities",
+        "particle_q": "bagParticleQ",
+        "particle_qd": "bagParticleQd",
+        "joint_q": "jointQ",
+        "joint_qd": "jointQd",
+    }
+
+    def __init__(self, path):
+        self.path = Path(path).expanduser()
+        self.offsets = []
+        header, complete = None, True
+        with self.path.open("rb") as stream:
+            while True:
+                offset = stream.tell()
+                line = stream.readline()
+                if not line:
+                    break
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    if not line.endswith(b"\n"):
+                        complete = False
+                        break
+                    raise ValueError(f"Malformed trajectory record at byte {offset}") from None
+                if record.get("type") == "metadata":
+                    if header is not None or self.offsets:
+                        raise ValueError("Duplicate or misplaced trajectory metadata")
+                    header = record
+                elif record.get("type") == "frame":
+                    self.offsets.append(offset)
+        if (
+            header is None
+            or header.get("format") != "newton_webxr_trajectory_v1"
+            or header.get("scene") != "w1-bag-packing"
+            or header.get("recordingKind") != "full-state"
+        ):
+            raise ValueError("Use a full-state recording made by the updated W1 teleoperation demo")
+        if not np.isclose(header["frameDtSeconds"], 1 / 60):
+            raise ValueError("Unsupported trajectory frame rate; expected 60 Hz")
+        self.count = len(self.offsets)
+        if not self.count:
+            raise ValueError("Recording contains no frames")
+        self.metadata = {
+            "scene_signature": header["sceneSignature"],
+            "scene_options": header["sceneOptions"],
+            "complete": complete,
+        }
+
+    def _values(self, frame):
+        if not 0 <= frame < self.count:
+            raise IndexError(frame)
+        with self.path.open("rb") as stream:
+            stream.seek(self.offsets[frame])
+            record = json.loads(stream.readline())
+        values = {name: np.asarray(record[key], dtype=np.float32) for name, key in self._fields.items()}
+        values["sim_time"] = np.asarray(record["simulationTimeSeconds"], dtype=np.float64)
+        for name, value in values.items():
+            if not np.isfinite(value).all():
+                raise ValueError(f"Nonfinite {name} in frame {frame}")
+        return values
+
+    def validate_scene(self, scene):
+        """Reject mismatched assets before assigning any recorded state."""
+        if self.metadata["scene_signature"] != scene_signature(scene):
+            raise ValueError("Recording geometry differs from this scene; use the matching assets")
+        self._validate_shapes(scene, self._values(0))
+
+    def _validate_shapes(self, scene, values):
+        for name in self._fields:
+            if values[name].shape != getattr(scene.state_0, name).numpy().shape:
+                raise ValueError(f"Recording field {name} has an incompatible shape")
+        if values["sim_time"].shape != ():
+            raise ValueError("Recording timestamp must be a scalar")
+
+    def restore(self, scene, frame):
+        """Restore positions, deformations, joints and velocities without running physics."""
+        values = self._values(frame)
+        self._validate_shapes(scene, values)
+        for name in self._fields:
+            getattr(scene.state_0, name).assign(values[name])
+        scene.sim_time, scene.frame = float(values["sim_time"]), frame
+
+
 def run_recording(scene_type, viewer, args):
     """Bake full physics once, retaining a playable prefix on interruption."""
     writer, complete = None, False
@@ -200,7 +291,13 @@ class Playback:
 def run_replay(scene_type, viewer, args):
     """Render saved frames at 60 FPS, preserving camera controls and all materials."""
     try:
-        recording = RecordingReader(args.replay)
+        path = Path(args.replay).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Recording not found: {path}. Check the running teleoperation process's --trajectory-output; "
+                "resuming an existing process does not change its recording filename."
+            )
+        recording = TeleopRecordingReader(path) if path.is_file() else RecordingReader(path)
         playback = Playback(recording, start_frame=args.start_frame, loop=args.loop)
         for name in SCENE_OPTIONS:
             setattr(args, name, recording.metadata["scene_options"][name])

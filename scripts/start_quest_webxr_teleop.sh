@@ -96,6 +96,43 @@ if unit_is_alive && ! is_demo_pid "$(unit_pid)"; then
   exit 1
 fi
 
+requested_output=""
+expect_output=false
+for argument in "$@"; do
+  if [[ "${expect_output}" == true ]]; then
+    requested_output="${argument}"
+    expect_output=false
+  elif [[ "${argument}" == "--trajectory-output" ]]; then
+    expect_output=true
+  elif [[ "${argument}" == --trajectory-output=* ]]; then
+    requested_output="${argument#--trajectory-output=}"
+  fi
+done
+if [[ "${expect_output}" == true ]]; then
+  echo "错误：--trajectory-output 缺少文件路径。" >&2
+  exit 1
+fi
+if [[ -n "${requested_output}" ]] && unit_is_alive; then
+  existing_pid="$(unit_pid)"
+  existing_output=""
+  existing_arguments=()
+  mapfile -d '' -t existing_arguments < "/proc/${existing_pid}/cmdline"
+  for ((index = 0; index < ${#existing_arguments[@]}; index += 1)); do
+    if [[ "${existing_arguments[index]}" == "--trajectory-output" ]]; then
+      existing_output="${existing_arguments[index+1]:-}"
+    elif [[ "${existing_arguments[index]}" == --trajectory-output=* ]]; then
+      existing_output="${existing_arguments[index]#--trajectory-output=}"
+    fi
+  done
+  if [[ "${requested_output}" != "${existing_output}" ]]; then
+    echo "错误：PID ${existing_pid} 已在运行，恢复旧进程不会应用新的 --trajectory-output。" >&2
+    echo "当前录制路径：${existing_output:-进程启动时自动生成的默认路径}" >&2
+    echo "请求录制路径：${requested_output}" >&2
+    echo "请先运行对应场景的 stop 脚本完全结束旧进程，再用新文件名启动；仅进入待机不会生效。" >&2
+    exit 1
+  fi
+fi
+
 active_peers=()
 standby_peers=()
 running_peer_count=0

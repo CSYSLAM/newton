@@ -50,3 +50,4 @@ assets/piper_paper_bag/render_binding.npz filter=lfs diff=lfs merge=lfs -text
 assets/piper_paper_bag/preview.png filter=lfs diff=lfs merge=lfs -text
 assets/piper_paper_bag/preview_top.png filter=lfs diff=lfs merge=lfs -text
 assets/w1_paper_bag/w1_bag_and_snacks.blend filter=lfs diff=lfs merge=lfs -text
+recordings/bag_take_06.jsonl filter=lfs diff=lfs merge=lfs -text

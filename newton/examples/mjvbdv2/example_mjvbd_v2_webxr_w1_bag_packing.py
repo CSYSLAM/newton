@@ -26,6 +26,7 @@ from ._webxr_gripper_input import GripperInput
 from ._webxr_parallel_gripper import ParallelGripperRetargeter
 from ._webxr_teleop import JsonlTrajectoryRecorder, LatestXRFrame, Pose, WebXRServer, pack_scene_geometry
 from ._webxr_w1_head import OBSERVER_VIEW_MODE, W1HeadController
+from .support.w1_bag_recording import SCENE_OPTIONS, scene_signature
 
 HANDS = ("left", "right")
 WORKSPACE_LOWER = np.array((0.12, -0.72, scene.TABLE_Z + 0.015))
@@ -112,6 +113,9 @@ class Example(scene.Example):
             output,
             {
                 "scene": "w1-bag-packing",
+                "recordingKind": "full-state",
+                "sceneSignature": scene_signature(self),
+                "sceneOptions": {name: getattr(args, name) for name in SCENE_OPTIONS},
                 "robotUrdf": str(scene.ASSET),
                 "frameDtSeconds": self.frame_dt,
                 "simulationSubsteps": args.substeps,
@@ -286,6 +290,7 @@ class Example(scene.Example):
         bodies = self.state_0.body_q.numpy()
         self.webxr_server.mark_simulation_ready()
         if self.trajectory_recorder.recording:
+            joints = self.state_0.joint_q.numpy()
             self.trajectory_recorder.append(
                 {
                     "frame": self.frame,
@@ -322,8 +327,11 @@ class Example(scene.Example):
                     },
                     "targetPoses": self._target_poses(),
                     "gripperJointTargets": {side: control.jaws.tolist() for side, control in self.inputs.items()},
-                    "robotJointQ": self.state_0.joint_q.numpy()[: self.robot_coords].tolist(),
+                    "robotJointQ": joints[: self.robot_coords].tolist(),
+                    "jointQ": joints.tolist(),
+                    "jointQd": self.state_0.joint_qd.numpy().tolist(),
                     "bodyPoses": bodies.tolist(),
+                    "bodyVelocities": self.state_0.body_qd.numpy().tolist(),
                     "bagParticleQ": self.state_0.particle_q.numpy().tolist(),
                     "bagParticleQd": self.state_0.particle_qd.numpy().tolist(),
                 }

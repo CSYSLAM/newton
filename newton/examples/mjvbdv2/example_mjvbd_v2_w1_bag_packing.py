@@ -837,8 +837,8 @@ class Example:
             "--replay",
             nargs="?",
             const=str(DEFAULT_RECORDING),
-            metavar="DIRECTORY",
-            help="Play saved states without IK or physics; use the recorded scene settings.",
+            metavar="PATH",
+            help="Replay a state directory or full-state teleoperation JSONL without IK or physics.",
         )
         parser.add_argument("--loop", action="store_true", help="Loop the recording during replay.")
         parser.add_argument("--start-frame", type=int, default=0, help="First recorded frame to replay.")

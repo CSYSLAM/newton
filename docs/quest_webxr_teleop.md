@@ -66,9 +66,31 @@ GPU 查询不可用时仍会扫描 `/proc`；清理失败返回非零退出码�
 ./scripts/reload_quest_webxr_w1_bag_packing_teleop.sh
 ```
 
-停止、重载和切换场景沿用已有的待机、停泊、恢复流程。
 默认按需录制到 `recordings/webxr_w1_bag_packing_*.jsonl`，也可指定 `--trajectory-output`。
-记录包含双手原始输入、目标位姿、夹爪开度、机器人关节、纸袋粒子和零食刚体状态。
+记录包含双手原始输入、目标位姿、夹爪开度、全部关节位置和速度、机器人与零食刚体的位姿和速度，
+以及纸袋全部粒子的位置和速度。纸盒和罐子按刚体记录位姿；纸袋的变形通过粒子网格逐帧还原。
+
+先启动遥操并指定一个新的文件名：
+
+```bash
+./scripts/start_quest_webxr_w1_bag_packing_teleop.sh --trajectory-output recordings/bag_take_01.jsonl
+```
+
+按右手柄 A 或手势面板的录制按钮开始，再按一次暂停并刷盘；结束后运行停止脚本关闭文件。
+要从连接输入设备时就开始录制，启动时追加 `--record-on-connect`。已有进程需要先停止再启动，
+新的录制参数才会生效。每次录制使用新文件名，避免覆盖之前的轨迹。
+已有进程运行时指定不同的 `--trajectory-output`，启动器会报错并显示当前路径，避免录制继续写进旧文件。
+
+在自动 demo 入口回放这份完整场景录制：
+
+```bash
+uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing --replay recordings/bag_take_01.jsonl
+```
+
+回放直接恢复录制状态，不运行 IK 或物理求解，支持暂停、拖动进度条、`--loop` 和 `--start-frame`。
+录制暂停和场景复位之间按已保存帧直接切换，不补算中间物理过程。文件按帧读取，不把整份轨迹装入内存。
+强制停止留下的半行会被忽略，已完整写入的帧仍可回放。回放要求使用与录制一致的资产；
+该入口支持新版带 `full-state` 元数据的遥操录制，已有目录格式的 demo 录制继续可用。
 
 直接启动或无头验证：
 

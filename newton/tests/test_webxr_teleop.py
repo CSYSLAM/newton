@@ -784,13 +784,28 @@ class TestQuestBrowserLaunch(unittest.TestCase):
                     text=True,
                     timeout=5,
                 )
+                actions = actions_path.read_text(encoding="utf-8")
+                for output_args in (("--trajectory-output", "next.jsonl"), ("--trajectory-output=next.jsonl",)):
+                    actions_path.write_text("", encoding="utf-8")
+                    changed = subprocess.run(
+                        ["bash", str(start_script), *output_args],
+                        cwd=repo_root,
+                        env=environment,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    self.assertNotEqual(changed.returncode, 0, changed.stdout)
+                    self.assertIn("--trajectory-output", changed.stderr)
+                    self.assertNotIn("/control/resume", actions_path.read_text(encoding="utf-8"))
+                    self.assertNotIn("systemd-run", actions_path.read_text(encoding="utf-8"))
             finally:
                 demo.terminate()
                 demo.wait(timeout=5)
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("当前进程未加载这些更新", result.stderr)
-            actions = actions_path.read_text(encoding="utf-8")
             self.assertEqual(actions.count("adb shell am start"), 1)
             self.assertRegex(actions, r"http://127\.0\.0\.1:18765/\?launch=[0-9]+")
             self.assertIn("--es com.android.browser.application_id org.newton.webxr.teleop", actions)
