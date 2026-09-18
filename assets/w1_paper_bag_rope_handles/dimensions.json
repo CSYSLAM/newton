@@ -1,0 +1,17 @@
+{
+  "bag_depth_width_height_m": [
+    0.13,
+    0.32,
+    0.25
+  ],
+  "can_radius_height_m": [
+    0.0325,
+    0.117
+  ],
+  "carton_size_m": [
+    0.048,
+    0.06,
+    0.118
+  ],
+  "reference": "User video Feishu 20260916-115427, estimated scale"
+}

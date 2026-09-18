@@ -782,6 +782,18 @@ If you run the examples from a source checkout with uv, use
   </tr>
   <tr>
     <td align="center" width="33%">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_webxr_w1_bag_packing_rope_handles.py">
+        <img width="320" height="320" src="docs/images/examples/example_mjvbd_v2_webxr_w1_bag_packing_rope_handles.jpg" alt="W1 bag with downward rope handles, CPU asset preview">
+      </a><br>
+      W1 rope-handle bag: controllers and optical hands<br>
+      <code>python -m newton.examples mjvbd_v2_webxr_w1_bag_packing_rope_handles</code><br>
+      <a href="docs/quest_webxr_teleop.md#麻绳提手版本">Quest setup and recording</a> · CPU asset preview
+    </td>
+    <td width="33%"></td>
+    <td width="33%"></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
       <a href="newton/examples/mjvbdv2/example_mjvbd_v2_tshirt_fold.py">
         <img width="320" src="docs/images/examples/example_mjvbd_v2_tshirt_fold.jpg" alt="MJVBDV2 W1 T-shirt folding">
       </a>

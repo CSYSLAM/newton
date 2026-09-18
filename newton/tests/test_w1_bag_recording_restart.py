@@ -17,6 +17,7 @@ import warp as wp
 from newton.examples.mjvbdv2._webxr_teleop import JsonlTrajectoryRecorder
 from newton.examples.mjvbdv2.example_mjvbd_v2_webxr_w1_bag_packing import Example
 from newton.examples.mjvbdv2.example_mjvbd_v2_webxr_w1_bag_packing_no_handles import Example as HandleFree
+from newton.examples.mjvbdv2.example_mjvbd_v2_webxr_w1_bag_packing_rope_handles import Example as RopeHandles
 from newton.tests.test_webxr_w1_bag_packing import frame
 
 
@@ -78,7 +79,7 @@ class TestPackingRetakes(unittest.TestCase):
 
     def test_paused_reset_replaces_all_frames_on_next_record(self):
         """Retain failures until restart, then truncate all old frames and reset the sample count."""
-        for scene_type in (Example, HandleFree):
+        for scene_type in (Example, HandleFree, RopeHandles):
             for mode in ("controllers", "hands"):
                 with self.subTest(scene=scene_type.__module__, mode=mode), tempfile.TemporaryDirectory() as directory:
                     path = Path(directory) / "take.jsonl"

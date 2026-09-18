@@ -54,6 +54,7 @@ from newton.solvers import SolverMJVBDV2
 
 ASSETS = Path(__file__).resolve().parents[3] / "assets/w1_paper_bag"
 NO_HANDLE_ASSETS = ASSETS.with_name("w1_paper_bag_no_handles")
+ROPE_HANDLE_ASSETS = ASSETS.with_name("w1_paper_bag_rope_handles")
 TABLE_Z = 0.92
 TABLE_CENTER = np.array((0.66, -0.01, TABLE_Z - 0.022))
 TABLE_HALF = np.array((0.30, 0.66, 0.022))
@@ -203,6 +204,7 @@ def count_handle_crossings(positions, triangles, edges):
 
 
 class Example:
+    _paper_stiffness_scale = 1.0
     _initial_bag_yaw = 0.0
     _initial_bag_offset = (0.0, 0.0, 0.0)
     _initial_gripper_openings = (OPEN, IDLE_OPENING)
@@ -321,9 +323,10 @@ class Example:
                     color=(0.22, 0.24, 0.25),
                     label="Table leg",
                 )
-        if args.bag_variant not in ("handles", "no-handles"):
+        variants = {"handles": ASSETS, "no-handles": NO_HANDLE_ASSETS, "rope-handles": ROPE_HANDLE_ASSETS}
+        if args.bag_variant not in variants:
             raise ValueError(f"Unknown bag asset variant: {args.bag_variant}")
-        self.assets = ASSETS if args.bag_variant == "handles" else NO_HANDLE_ASSETS
+        self.assets = variants[args.bag_variant]
         with np.load(self.assets / "bag.npz") as data:
             self.rest, self.faces = data["vertices"], data["faces"]
             self.paper_count, self.paper_faces = int(data["paper_count"]), int(data["paper_faces"])
@@ -372,6 +375,8 @@ class Example:
                 builder.edge_bending_properties[i] = (240.0, 4.0)
             elif corner or gusset or bottom_fold:
                 builder.edge_bending_properties[i] = (16.0, 0.6)
+            ke, kd = builder.edge_bending_properties[i]
+            builder.edge_bending_properties[i] = (ke * self._paper_stiffness_scale, kd)
         # The folded top hem has bonded double plies, including the grasp area.
         for i, face in enumerate(self.faces[: self.paper_faces]):
             if self.rest[face, 2].min() > HEIGHT - 0.032:
@@ -379,6 +384,14 @@ class Example:
                 builder.tri_materials[i] = (2 * ke, 2 * ka, 2 * kd, drag, lift)
                 for v in face:
                     builder.particle_mass[v] += BAG_SURFACE_DENSITY * builder.tri_areas[i] / 3
+            ke, ka, kd, drag, lift = builder.tri_materials[i]
+            builder.tri_materials[i] = (
+                ke * self._paper_stiffness_scale,
+                ka * self._paper_stiffness_scale,
+                kd,
+                drag,
+                lift,
+            )
         self.soft_cube_start = builder.particle_count
         first_cube_tri = builder.tri_count
         if args.soft_cube:

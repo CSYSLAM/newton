@@ -18,6 +18,7 @@ uv run --extra examples -m newton.examples mjvbd_v2_conveyor_sorting --help
 | W1 V030 paper bag and snack packing | `mjvbd_v2_w1_bag_packing` | [example_mjvbd_v2_w1_bag_packing.py](example_mjvbd_v2_w1_bag_packing.py) |
 | Quest W1 paper bag packing (controllers / optical hands) | `mjvbd_v2_webxr_w1_bag_packing` | [example_mjvbd_v2_webxr_w1_bag_packing.py](example_mjvbd_v2_webxr_w1_bag_packing.py) |
 | Quest W1 handle-free bag packing (controllers / optical hands) | `mjvbd_v2_webxr_w1_bag_packing_no_handles` | [example_mjvbd_v2_webxr_w1_bag_packing_no_handles.py](example_mjvbd_v2_webxr_w1_bag_packing_no_handles.py) |
+| Quest W1 rope-handle bag packing (controllers / optical hands) | `mjvbd_v2_webxr_w1_bag_packing_rope_handles` | [example_mjvbd_v2_webxr_w1_bag_packing_rope_handles.py](example_mjvbd_v2_webxr_w1_bag_packing_rope_handles.py) |
 | W1 T-shirt folding | `mjvbd_v2_tshirt_fold` | [example_mjvbd_v2_tshirt_fold.py](example_mjvbd_v2_tshirt_fold.py) |
 | W1 tablecloth placement | `mjvbd_v2_tablecloth_place` | [example_mjvbd_v2_tablecloth_place.py](example_mjvbd_v2_tablecloth_place.py) |
 | Dynamic W1 T-shirt folding | `mjvbd_v2_tshirt_fold_dynamic` | [example_mjvbd_v2_tshirt_fold_dynamic.py](example_mjvbd_v2_tshirt_fold_dynamic.py) |
@@ -255,6 +256,21 @@ recorded asset; old recordings retain handles. See the
 [handle-free asset guide](../../../assets/w1_paper_bag_no_handles/README.md).
 
 ![Handle-free W1 packing CPU model preview](../../../docs/images/examples/example_mjvbd_v2_webxr_w1_bag_packing_no_handles.jpg)
+
+The separate rope-handle variant keeps the same packing scene, using two dark,
+rounded 9 mm handles initially pointing toward the bag bottom, away from its
+mouth. It runs on port 8775 and records its asset choice for replay:
+
+```bash
+./scripts/start_quest_webxr_w1_bag_packing_rope_handles_teleop.sh --trajectory-output recordings/bag_rope_01.jsonl
+uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing --replay recordings/bag_rope_01.jsonl --loop
+```
+
+Controller A and the optical-hand record button behave as in the other versions.
+Pause, reset physics, then record again to replace a failed take. See the
+[rope asset guide](../../../assets/w1_paper_bag_rope_handles/README.md).
+
+![W1 rope-handle bag CPU asset preview](../../../docs/images/examples/example_mjvbd_v2_webxr_w1_bag_packing_rope_handles.jpg)
 
 | Previous command | Current command |
 | --- | --- |

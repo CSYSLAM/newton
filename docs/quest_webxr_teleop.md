@@ -152,6 +152,35 @@ uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing --replay reco
 
 旧录制仍使用原有提手资产。回放恢复记录的状态，不重新计算物理。
 
+### 麻绳提手版本
+
+第三个独立入口使用 `assets/w1_paper_bag_rope_handles/`，保留原提手版和无提手版。
+两侧各一根约 9 mm 粗的深棕色圆绳提手，带浅螺旋起伏。初始 U 形绳圈朝袋底，
+与袋口相反；这里的方向相对袋子自身，袋子横放时也保持该朝向。
+绳子与袋面共享连接顶点，参与形变和接触。袋身相比另外两个版本往机器人左侧（+Y）移 8 cm，
+由麻绳版类中的 `_initial_bag_offset = (0.0, 0.28, 0.0)` 控制。
+麻绳版 `_paper_stiffness_scale = 1.5` 将袋身拉伸、面积和弯曲刚度提高为原来的 1.5 倍，包含袋口与折痕。
+提手刚度、质量、阻尼、接触参数和另外两个版本不变。机器人、零食、软体方块和控制方式沿用原场景。
+
+```bash
+./scripts/start_quest_webxr_w1_bag_packing_rope_handles_teleop.sh --trajectory-output recordings/bag_rope_01.jsonl
+```
+
+Quest 地址为 `http://127.0.0.1:8775/`。按右手柄 **A** 或手势面板录制按钮开始/暂停。
+失败时按 **A 暂停 → Reset → A 重录**，最后一步会清空该文件已有轨迹并重新写入。
+
+```bash
+./scripts/stop_quest_webxr_w1_bag_packing_rope_handles_teleop.sh
+./scripts/reload_quest_webxr_w1_bag_packing_rope_handles_teleop.sh
+```
+
+默认录制文件前缀为 `recordings/webxr_w1_bag_packing_rope_handles_`。
+回放仍使用原 demo 入口，会按元数据自动选择麻绳提手资产：
+
+```bash
+uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing --replay recordings/bag_rope_01.jsonl --loop
+```
+
 以下命令都在 Newton 仓库根目录执行：
 
 ```bash

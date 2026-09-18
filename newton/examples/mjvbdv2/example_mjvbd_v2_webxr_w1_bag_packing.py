@@ -61,6 +61,7 @@ class Example(scene.Example):
     reset_in_place = True
     recording_prefix = "webxr_w1_bag_packing"
     scene_title = "W1 纸袋装零食遥操作"
+    handle_color = (0.42, 0.32, 0.16)
     _initial_bag_yaw = np.pi / 2
     _initial_bag_offset = (0.0, 0.20, 0.0)
     _initial_gripper_openings = (scene.OPEN, scene.SNACK_OPENINGS["can"])
@@ -473,7 +474,7 @@ class Example(scene.Example):
         bag_vertices = vertices[: self.bag_particle_count]
         for indices, color in (
             (self.faces[: self.paper_faces], (0.66, 0.46, 0.25)),
-            (self.faces[self.paper_faces :], (0.42, 0.32, 0.16)),
+            (self.faces[self.paper_faces :], self.handle_color),
         ):
             if not len(indices):
                 continue

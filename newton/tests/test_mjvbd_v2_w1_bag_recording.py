@@ -72,6 +72,10 @@ class TestW1BagRecording(unittest.TestCase):
         """Select the recorded handle-free geometry before validating particle layouts."""
         self._assert_teleop_round_trip(soft_cube=True, bag_variant="no-handles")
 
+    def test_teleop_jsonl_preserves_rope_handle_asset_selection(self):
+        """Select the independent rope asset when replaying a complete teleoperation state."""
+        self._assert_teleop_round_trip(soft_cube=True, bag_variant="rope-handles")
+
     def _assert_teleop_round_trip(self, *, soft_cube, bag_variant="handles"):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "teleop.jsonl"

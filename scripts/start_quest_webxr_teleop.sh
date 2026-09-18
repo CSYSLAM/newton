@@ -28,6 +28,9 @@ fi
 if [[ ! -v NEWTON_WEBXR_PEERS && "${unit_name}" != "newton-quest-webxr-w1-bag-packing-no-handles.service" ]]; then
   peer_specs+=("newton-quest-webxr-w1-bag-packing-no-handles.service:8774")
 fi
+if [[ ! -v NEWTON_WEBXR_PEERS && "${unit_name}" != "newton-quest-webxr-w1-bag-packing-rope-handles.service" ]]; then
+  peer_specs+=("newton-quest-webxr-w1-bag-packing-rope-handles.service:8775")
+fi
 host="${NEWTON_WEBXR_HOST:-127.0.0.1}"
 port="${NEWTON_WEBXR_PORT:-8765}"
 device="${NEWTON_WEBXR_DEVICE:-cuda:0}"
