@@ -346,6 +346,10 @@ class Example:
                 "particle_edge_contact_buffer_size": 64,
                 "rigid_body_particle_contact_buffer_size": 8192,
                 "particle_enable_truncation_cache": True,
+                # The pouch has one pneumatic cavity. Reuse per-face volume
+                # contributions instead of recomputing the complete cavity
+                # volume for every particle color on every VBD iteration.
+                "pneumatic_enable_incremental_volume": True,
             },
             collision_options={
                 "soft_contact_max": 65536,
