@@ -1,0 +1,1 @@
+Add a standalone W1 PVC packing inspection demo that shares the teleoperation scene's geometry, initial robot pose, materials and contact solver settings without creating WebXR or recording resources. Both entries default to six substeps, sixteen iterations and a handle stiffness multiplier of one.

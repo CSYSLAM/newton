@@ -1,0 +1,1 @@
+Reduce W1 shrimp-pouch teleoperation overhead by removing extra Cartesian motion checks, using optional fast JSON encoding, and sharing particle readback for recording and Quest updates. Add frame-stage timing and optional coarse-solve controls while retaining the default solver budget and complete recorded frames.

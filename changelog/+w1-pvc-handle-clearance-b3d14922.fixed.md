@@ -1,0 +1,1 @@
+Keep a graspable PVC handle segment above the table by stiffening shell bending and reducing panel mesh density in the W1 PVC scenes. Retain flexible handles, unpinned gravity-driven motion, and playback of previous PVC recordings.

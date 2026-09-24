@@ -179,6 +179,13 @@ class TeleopRecordingReader:
             "scene_options": header["sceneOptions"],
             "complete": complete,
         }
+        if "pvcBagAsset" in header:
+            self.metadata["pvc_bag_asset"] = header["pvcBagAsset"]
+        if "softBagAsset" in header:
+            self.metadata["soft_bag_asset"] = header["softBagAsset"]
+        if "groceryAssets" in header:
+            self.metadata["grocery_assets"] = header["groceryAssets"]
+            self.metadata["table_top_meters"] = header["tableTopMeters"]
 
     def _values(self, frame):
         if not 0 <= frame < self.count:
@@ -187,7 +194,7 @@ class TeleopRecordingReader:
             stream.seek(self.offsets[frame])
             record = json.loads(stream.readline())
         values = {name: np.asarray(record[key], dtype=np.float32) for name, key in self._fields.items()}
-        if self.metadata["scene_options"].get("soft_cube", False):
+        if self.metadata["scene_options"].get("soft_cube", False) or "soft_bag_asset" in self.metadata:
             for name, key in (("particle_q", "softCubeParticleQ"), ("particle_qd", "softCubeParticleQd")):
                 cube = np.asarray(record[key], dtype=np.float32)
                 if cube.ndim != 2 or cube.shape[1] != 3:
@@ -294,28 +301,82 @@ class Playback:
         return False
 
 
+def load_replay_scene(scene_type, viewer, args):
+    """Build and validate the recorded scene without constructing physics or IK."""
+    path = Path(args.replay).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Recording not found: {path}. Check the running teleoperation process's --trajectory-output; "
+            "resuming an existing process does not change its recording filename."
+        )
+    recording = TeleopRecordingReader(path) if path.is_file() else RecordingReader(path)
+    playback = Playback(recording, start_frame=args.start_frame, loop=args.loop)
+    defaults = {"soft_cube": False, "bag_variant": "handles"}
+    for name in SCENE_OPTIONS:
+        # Older recordings use the original handled bag and may predate the cube.
+        value = (
+            recording.metadata["scene_options"].get(name, defaults[name])
+            if name in defaults
+            else recording.metadata["scene_options"][name]
+        )
+        setattr(args, name, value)
+    if "grocery_assets" in recording.metadata:
+        from newton.examples.mjvbdv2.example_mjvbd_v2_webxr_w1_bag_packing_rope_handles import (  # noqa: PLC0415
+            Example as GroceryScene,
+        )
+
+        assets = recording.metadata["grocery_assets"]
+        roots = {Path(asset["usd"]).expanduser().resolve().parent.parent for asset in assets}
+        if len(roots) != 1:
+            raise ValueError("Recorded grocery assets must share one bundle root")
+        for asset in assets:
+            source = Path(asset["usd"]).expanduser()
+            if hashlib.sha256(source.read_bytes()).hexdigest() != asset["sha256"]:
+                raise ValueError(f"Grocery asset changed since recording: {source}")
+        args.grocery_assets = roots.pop()
+        args.replay_grocery_names = [asset["label"] for asset in assets]
+        args.replay_grocery_scales = [asset.get("scale", 1.0) for asset in assets]
+        args.replay_table_height = recording.metadata["table_top_meters"]
+        scene_type = GroceryScene
+    if "soft_bag_asset" in recording.metadata:
+        from newton.examples.mjvbdv2.example_mjvbd_v2_webxr_w1_bag_packing_rope_shrimp import (  # noqa: PLC0415
+            Example as ShrimpScene,
+        )
+
+        asset = recording.metadata["soft_bag_asset"]
+        if asset["kind"] != "oishi-shrimp-v3":
+            raise ValueError("Unsupported soft pouch recording")
+        args.shrimp_assets = Path(asset["usd"]).expanduser().resolve().parent
+        args.shrimp_mass = asset.get("massKg", 0.025)
+        for name, digest in asset["files"].items():
+            if hashlib.sha256((args.shrimp_assets / name).read_bytes()).hexdigest() != digest:
+                raise ValueError(f"Soft pouch asset changed since recording: {name}")
+        scene_type = ShrimpScene
+    if "pvc_bag_asset" in recording.metadata:
+        from newton.examples.mjvbdv2.example_mjvbd_v2_webxr_w1_bag_packing_pvc import (  # noqa: PLC0415
+            Example as PVCScene,
+        )
+
+        asset = recording.metadata["pvc_bag_asset"]
+        if asset["kind"] != "clear-pvc-v1" or asset["proxyVersion"] not in (1, 2):
+            raise ValueError("Unsupported PVC bag recording")
+        args.pvc_assets = Path(asset["directory"]).expanduser().resolve()
+        args.pvc_handle_stiffness = asset["handleStiffnessScale"]
+        args.pvc_proxy_version = asset["proxyVersion"]
+        for name, digest in asset["files"].items():
+            if hashlib.sha256((args.pvc_assets / name).read_bytes()).hexdigest() != digest:
+                raise ValueError(f"PVC bag asset changed since recording: {name}")
+        scene_type = PVCScene
+    scene = scene_type.create_render_scene(viewer, args)
+    recording.validate_scene(scene)
+    return scene, playback
+
+
 def run_replay(scene_type, viewer, args):
     """Render saved frames at 60 FPS, preserving camera controls and all materials."""
     try:
-        path = Path(args.replay).expanduser()
-        if not path.exists():
-            raise FileNotFoundError(
-                f"Recording not found: {path}. Check the running teleoperation process's --trajectory-output; "
-                "resuming an existing process does not change its recording filename."
-            )
-        recording = TeleopRecordingReader(path) if path.is_file() else RecordingReader(path)
-        playback = Playback(recording, start_frame=args.start_frame, loop=args.loop)
-        defaults = {"soft_cube": False, "bag_variant": "handles"}
-        for name in SCENE_OPTIONS:
-            # Older recordings use the original handled bag and may predate the cube.
-            value = (
-                recording.metadata["scene_options"].get(name, defaults[name])
-                if name in defaults
-                else recording.metadata["scene_options"][name]
-            )
-            setattr(args, name, value)
-        scene = scene_type.create_render_scene(viewer, args)
-        recording.validate_scene(scene)
+        scene, playback = load_replay_scene(scene_type, viewer, args)
+        recording = playback.recording
         if hasattr(viewer, "register_ui_callback"):
             viewer.register_ui_callback(playback.gui, position="side")
         if hasattr(viewer, "hide_loading_splash"):

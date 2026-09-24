@@ -1,0 +1,1 @@
+Limit both grippers' closing speed and reduce paper grasp clearance in the shrimp-pouch teleoperation scene; use a 10 g pouch and stronger flat paper panels while retaining the original folds and rope material.

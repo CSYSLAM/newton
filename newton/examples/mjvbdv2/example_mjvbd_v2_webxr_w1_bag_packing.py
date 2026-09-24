@@ -61,11 +61,23 @@ class Example(scene.Example):
     reset_in_place = True
     recording_prefix = "webxr_w1_bag_packing"
     scene_title = "W1 纸袋装零食遥操作"
+    scene_description = "双手控制 V030 二指夹: 扶起纸袋、夹取零食和软方块装袋。"
+    bag_color = (0.66, 0.46, 0.25)
+    bag_opacity = 1.0
+    handle_opacity = 1.0
     handle_color = (0.42, 0.32, 0.16)
     _initial_bag_yaw = np.pi / 2
     _initial_bag_offset = (0.0, 0.20, 0.0)
     _initial_gripper_openings = (scene.OPEN, scene.SNACK_OPENINGS["can"])
     _initial_head_pitch = np.deg2rad(45.0)
+    _gripper_open_limit = scene.OPEN
+    snack_openings = scene.SNACK_OPENINGS
+    _deformable_grasp_opening = scene.SOFT_CUBE_OPENING
+    _paper_grasp_opening = scene.SUPPORT_OPENING
+    _deformable_color = scene.SOFT_CUBE_COLOR
+    _deformable_role = "soft-cube"
+    _json_dumps = None
+    _profile_frame = None
 
     def __init__(self, viewer, args):
         if args.ik_iterations < 1 or args.record_flush_every < 1:
@@ -103,9 +115,9 @@ class Example(scene.Example):
         bodies, q = self.state_0.body_q.numpy(), self.state_0.joint_q.numpy()
         for hand, body in zip(HANDS, self.ee, strict=True):
             mapper = ParallelGripperRetargeter(scene.ASSET, side=hand)
-            minimum = scene.SUPPORT_OPENING if hand == "left" else scene.SNACK_OPENINGS["can"]
+            minimum = self._paper_grasp_opening if hand == "left" else scene.SNACK_OPENINGS["can"]
             mapper.lower = np.maximum(mapper.lower, minimum)
-            mapper.upper = np.minimum(mapper.upper, scene.OPEN)
+            mapper.upper = np.minimum(mapper.upper, self._gripper_open_limit)
             mapper.reset(q[self.finger_indices[hand]])
             self.inputs[hand] = GripperInput(
                 hand,
@@ -134,8 +146,10 @@ class Example(scene.Example):
                 "softCubeParticleCount": self.soft_cube_end - self.soft_cube_start,
                 "softCubeTriangleIndices": (self.soft_cube_faces - self.soft_cube_start).reshape(-1).tolist(),
                 "snackBodies": self.objects,
+                **self._recording_extras(),
             },
             flush_every=args.record_flush_every,
+            json_dumps=self._json_dumps,
         )
         self._bag_meshes = []
         self._soft_cube_mesh = None
@@ -147,6 +161,7 @@ class Example(scene.Example):
             port=args.webxr_port,
             geometry_payload=geometry,
             require_simulation_ready=True,
+            json_dumps=self._json_dumps,
         )
         self._resource_finalizer = weakref.finalize(self, _close, self.webxr_server, self.trajectory_recorder)
         self._publish_scene_state(bodies)
@@ -217,7 +232,11 @@ class Example(scene.Example):
         for hand, body in zip(HANDS, self.ee, strict=True):
             control = self.inputs[hand]
             control.update(frame, self._tcp_pose(bodies[body]), q[self.finger_indices[hand]])
-            control.position = np.clip(control.position, WORKSPACE_LOWER, WORKSPACE_UPPER)
+            control.position = np.clip(
+                control.position,
+                WORKSPACE_LOWER + np.array((0, 0, self.table_z - scene.TABLE_Z)),
+                WORKSPACE_UPPER + np.array((0, 0, self.table_z - scene.TABLE_Z)),
+            )
         if frame is not None and frame.visibility_state == "visible":
             for hand in HANDS:
                 if (frame.input_mode == "controllers" and hand in frame.controllers) or (
@@ -266,12 +285,12 @@ class Example(scene.Example):
                 target = self.objects[nearest]
         setattr(self, f"_{hand}_grasp_target", target)
         if target == "bag" or (target is None and hand == "left"):
-            minimum = scene.SUPPORT_OPENING
+            minimum = self._paper_grasp_opening
         elif target == "soft-cube":
-            minimum = scene.SOFT_CUBE_OPENING
+            minimum = self._deformable_grasp_opening
         else:
             kind = "can" if target is None else self.kinds[self.objects.index(target)]
-            minimum = scene.SNACK_OPENINGS[kind]
+            minimum = scene.SNACK_OPENINGS["can"] if target is None else self.snack_openings[kind]
         control.mapper.lower[:] = minimum
         control.jaws = control.mapper.coordinates(closure)
 
@@ -297,6 +316,14 @@ class Example(scene.Example):
         solved = self.ik_q.numpy()[0]
         if not np.isfinite(solved).all():
             solved = previous.copy()
+        q = self._limit_joint_targets(previous, solved)
+        self.frame_start.assign(previous)
+        self.frame_end.assign(np.clip(q, self.lower, self.upper))
+        self.head_control.write_targets(self.frame_end, self.frame_dt)
+        wp.copy(self.ik_q.flatten(), self.frame_end)
+
+    def _limit_joint_targets(self, previous, solved):
+        """Apply the scene's arm and jaw speed policy before joint angle limits."""
         q = previous.copy()
         indices = self.arm_indices
         q[indices] += np.clip(
@@ -306,21 +333,23 @@ class Example(scene.Example):
             indices = self.finger_indices[hand]
             step = self.args.gripper_speed * self.frame_dt
             q[indices] += np.clip(control.jaws - previous[indices], -step, step)
-        self.frame_start.assign(previous)
-        self.frame_end.assign(np.clip(q, self.lower, self.upper))
-        self.head_control.write_targets(self.frame_end, self.frame_dt)
-        wp.copy(self.ik_q.flatten(), self.frame_end)
+        return q
 
     def step(self) -> None:
         if not self._consume_controls():
             return
+        timings = [time.perf_counter()] if self._profile_frame is not None else None
         trace_frame = self.frame < 3 or self.frame % 120 == 0
         if trace_frame:
             checkpoint(f"frame={self.frame} controls.begin")
         frame = self._prepare_frame()
+        if timings is not None:
+            timings.append(time.perf_counter())
         if trace_frame:
             checkpoint(f"frame={self.frame} ik.begin")
         self._solve_teleop_ik()
+        if timings is not None:
+            timings.append(time.perf_counter())
         if trace_frame:
             checkpoint(f"frame={self.frame} physics.begin")
         self._advance_physics()
@@ -331,7 +360,10 @@ class Example(scene.Example):
         self.sim_time = self.frame * self.frame_dt
         # This read also completes the first GPU frame before advertising readiness.
         bodies = self.state_0.body_q.numpy()
+        if timings is not None:
+            timings.append(time.perf_counter())
         self.webxr_server.mark_simulation_ready()
+        particles = None
         if self.trajectory_recorder.recording:
             joints = self.state_0.joint_q.numpy()
             particles = self.state_0.particle_q.numpy()
@@ -383,8 +415,13 @@ class Example(scene.Example):
                     "softCubeParticleQd": velocities[self.soft_cube_start : self.soft_cube_end].tolist(),
                 }
             )
+        if timings is not None:
+            timings.append(time.perf_counter())
         if self.webxr_server.running:
-            self._publish_scene_state(bodies)
+            self._publish_scene_state(bodies, particles=particles)
+        if timings is not None:
+            timings.append(time.perf_counter())
+            self._profile_frame(timings)
         if trace_frame:
             checkpoint(f"frame={self.frame} frame.end")
 
@@ -399,7 +436,7 @@ class Example(scene.Example):
         wp.copy(self.frame_end, self.frame_start)
         self._hold_inputs()
         self._left_grasp_target = self._right_grasp_target = None
-        self.inputs["left"].mapper.lower[:] = scene.SUPPORT_OPENING
+        self.inputs["left"].mapper.lower[:] = self._paper_grasp_opening
         self.inputs["right"].mapper.lower[:] = scene.SNACK_OPENINGS["can"]
         self.head_control.reset()
         self.episode_index += 1
@@ -411,6 +448,10 @@ class Example(scene.Example):
         if not self.trajectory_recorder.recording:
             self.trajectory_recorder.restart_on_next_start()
         self._publish_scene_state(self.state_0.body_q.numpy())
+
+    def _recording_extras(self):
+        """Return variant-specific metadata needed to align external render assets."""
+        return {}
 
     def _target_poses(self):
         return {
@@ -472,9 +513,9 @@ class Example(scene.Example):
                 )
         vertices = self.state_0.particle_q.numpy()
         bag_vertices = vertices[: self.bag_particle_count]
-        for indices, color in (
-            (self.faces[: self.paper_faces], (0.66, 0.46, 0.25)),
-            (self.faces[self.paper_faces :], self.handle_color),
+        for indices, color, opacity in (
+            (self.faces[: self.paper_faces], self.bag_color, self.bag_opacity),
+            (self.faces[self.paper_faces :], self.handle_color, self.handle_opacity),
         ):
             if not len(indices):
                 continue
@@ -490,6 +531,7 @@ class Example(scene.Example):
                     "orientation": [0, 0, 0, 1],
                     "scale": [1, 1, 1],
                     "color": color,
+                    "opacity": opacity,
                     "doubleSided": True,
                 }
             )
@@ -501,19 +543,20 @@ class Example(scene.Example):
             shapes.append(
                 {
                     "body": -1,
-                    "role": "soft-cube",
+                    "role": self._deformable_role,
                     "mesh": self._soft_cube_mesh,
                     "position": [0, 0, 0],
                     "orientation": [0, 0, 0, 1],
                     "scale": [1, 1, 1],
-                    "color": scene.SOFT_CUBE_COLOR,
+                    "color": self._deformable_color,
                     "doubleSided": True,
                 }
             )
         return pack_scene_geometry(meshes, shapes)
 
-    def _publish_scene_state(self, bodies) -> None:
-        particles = self.state_0.particle_q.numpy()
+    def _publish_scene_state(self, bodies, *, particles=None) -> None:
+        if particles is None:
+            particles = self.state_0.particle_q.numpy()
         positions = particles[: self.bag_particle_count].reshape(-1).tolist()
         deformable_meshes = [{"mesh": mesh, "positions": positions} for mesh in self._bag_meshes]
         if self._soft_cube_mesh is not None:
@@ -531,7 +574,7 @@ class Example(scene.Example):
                 "sceneInfo": {
                     "kind": "w1-bag-packing",
                     "title": self.scene_title,
-                    "description": "双手控制 V030 二指夹: 扶起纸袋、夹取零食和软方块装袋。",
+                    "description": self.scene_description,
                     "controls": [
                         ["左右 Grip", "按住移动对应手臂"],
                         ["左右 Trigger", "控制对应夹爪闭合"],
@@ -598,9 +641,9 @@ class Example(scene.Example):
         """Validate a user-driven run without imposing the automatic trajectory."""
         self.test_post_step()
 
-    @staticmethod
-    def create_parser():
-        parser = scene.Example.create_parser()
+    @classmethod
+    def create_parser(cls):
+        parser = super().create_parser()
         parser.set_defaults(num_frames=600)
         parser.add_argument("--graph-capture", action=argparse.BooleanOptionalAction, default=True)
         parser.add_argument("--ik-iterations", type=int, default=24)

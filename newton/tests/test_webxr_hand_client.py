@@ -16,6 +16,42 @@ _ROOT = Path(__file__).resolve().parents[2]
 
 
 class TestWebXRHandClient(unittest.TestCase):
+    def test_translucent_bag_keeps_opaque_draw_defaults(self):
+        """Render transparent film after solid props and restore GL depth/blend state."""
+        script = r"""
+const fs = require("fs"), vm = require("vm"), assert = require("assert");
+const context = {document:{querySelector:()=>({addEventListener(){},setAttribute(){},classList:{toggle(){}}})},
+  console, assert, Date, Math, Float32Array, Uint16Array, Uint32Array, WeakMap};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync(process.argv[1],"utf8").replace(/initialize\(\);\s*$/,""),context);
+vm.runInContext(`
+  const identity = modelMatrix([0,0,0],[0,0,0,1],[1,1,1]);
+  sceneGeometry = {shapes:[
+    {body:-1,mesh:0,role:"bag",color:[1,1,1],localMatrix:identity,opacity:0.32},
+    {body:-1,mesh:1,role:"snack",color:[1,0,0],localMatrix:identity},
+  ]};
+  const list = buildSceneDrawList({});
+  assert.deepEqual(list.map(s=>s.mesh),[1,0]);
+  assert.deepEqual(list.map(s=>s.opacity),[1,0.32]);
+  const draws = [];
+  let alpha = null, depth = true, blending = false;
+  const glMock = new Proxy({
+    getShaderParameter:()=>true,getProgramParameter:()=>true,getUniformLocation:(_,name)=>name,
+    getAttribLocation:()=>0,getExtension:()=>null,
+    uniform1f:(_,value)=>{alpha=value;},depthMask:value=>{depth=value;},
+    enable:key=>{if(key==="BLEND")blending=true;},disable:key=>{if(key==="BLEND")blending=false;},
+    drawArrays:()=>draws.push([alpha,depth,blending]),
+  },{get:(obj,key)=>key in obj?obj[key]:key===key.toUpperCase()?key:()=>({})});
+  const testRenderer = createRenderer(glMock);
+  const geometry = {vertexBuffer:{},count:3};
+  testRenderer.drawGeometry(identity,[1,1,1],geometry,true,0.32);
+  assert.equal(depth,true);assert.equal(blending,false);
+  testRenderer.drawGeometry(identity,[1,0,0],geometry);
+  assert.deepEqual(draws,[[0.32,false,true],[1,true,false]]);
+`,context);
+"""
+        subprocess.run(["node", "-e", script, str(_ROOT / "newton/examples/assets/webxr_teleop/app.js")], check=True)
+
     def test_controller_mode_hides_and_disables_hand_panel(self):
         """Hide the hand-only panel and reject its ray clicks while using controllers."""
         script = r"""

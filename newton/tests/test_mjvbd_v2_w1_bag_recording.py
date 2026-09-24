@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 from newton.examples.mjvbdv2._webxr_teleop import JsonlTrajectoryRecorder
+from newton.examples.mjvbdv2.example_mjvbd_v2_w1_bag_packing_replay import Example as ReplayExample
 from newton.examples.mjvbdv2.support.w1_bag_recording import (
     Playback,
     RecordingReader,
@@ -310,6 +311,82 @@ class TestW1BagRecording(unittest.TestCase):
             self.assertEqual(reader.count, 2)
             self.assertFalse(reader.metadata["complete"])
             viewer.close.assert_called_once()
+
+    def test_standalone_replay_matches_original_and_loops(self):
+        """Preserve exact endpoint states and loop order through the standalone demo."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "clip"
+            source = _scene()
+            writer = RecordingWriter(path, source, 3)
+            for frame in range(3):
+                source.sim_time = frame / 60
+                source.state_0.body_q.assign(np.full((2, 7), frame, dtype=np.float32))
+                source.state_0.particle_q.assign(np.full((5, 3), frame + 10, dtype=np.float32))
+                writer.append(source)
+            writer.close(complete=True)
+            for loop in (False, True):
+                with self.subTest(loop=loop):
+                    shown = []
+                    target = _scene()
+                    target.frame_dt = 1 / 60
+                    target.render = lambda target=target, shown=shown: shown.append(
+                        (target.sim_time, target.state_0.body_q.numpy(), target.state_0.particle_q.numpy())
+                    )
+                    target.step = Mock(side_effect=AssertionError("Replay stepped physics"))
+                    args = ReplayExample.create_parser().parse_args(
+                        ["--replay", str(path), "--viewer", "null", "--num-frames", "5", "--start-frame", "1"]
+                    )
+                    args.loop = loop
+                    factory = Mock()
+                    factory.create_render_scene.return_value = target
+                    args.unthrottled = True
+                    with patch("builtins.print"):
+                        run_replay(factory, Mock(), args)
+                    original = shown.copy()
+                    shown.clear()
+                    with (
+                        patch("newton.examples.mjvbdv2.example_mjvbd_v2_w1_bag_packing_replay.BagScene", factory),
+                        patch("builtins.print"),
+                    ):
+                        demo = ReplayExample(Mock(), args)
+                        while not demo.exit_requested:
+                            demo.step()
+                            demo.render()
+                        demo.test_final()
+                    self.assertEqual(len(shown), 5 if loop else 2)
+                    for expected, actual in zip(original, shown, strict=True):
+                        for a, b in zip(expected, actual, strict=True):
+                            np.testing.assert_array_equal(a, b)
+                    target.step.assert_not_called()
+
+    def test_standalone_replay_seeks_while_paused(self):
+        """Display a newly selected frame without advancing paused playback."""
+        target = _scene()
+        target.frame_dt = 1 / 60
+        target.render = Mock()
+        reader = Mock(count=4, metadata={"complete": True})
+        playback = Playback(reader, loop=True)
+        args = ReplayExample.create_parser().parse_args([])
+        with (
+            patch(
+                "newton.examples.mjvbdv2.example_mjvbd_v2_w1_bag_packing_replay.load_replay_scene",
+                return_value=(target, playback),
+            ),
+            patch("builtins.print"),
+        ):
+            demo = ReplayExample(Mock(), args)
+        playback.paused, playback.frame = True, 3
+        demo.step()
+        demo.render()
+        reader.restore.assert_called_with(target, 3)
+        self.assertEqual(playback.frame, 3)
+        self.assertFalse(demo.exit_requested)
+        playback.paused = False
+        demo.render()  # A globally paused viewer does not call step().
+        self.assertEqual(playback.frame, 3)
+        demo.step()
+        demo.render()
+        self.assertEqual(playback.frame, 0)
 
 
 if __name__ == "__main__":

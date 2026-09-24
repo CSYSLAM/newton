@@ -5,18 +5,32 @@
 
 import json
 import struct
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
 
+import newton
 from newton.examples.mjvbdv2 import example_mjvbd_v2_w1_bag_packing as packing
+from newton.examples.mjvbdv2._webxr_teleop import JsonlTrajectoryRecorder
 from newton.examples.mjvbdv2.example_mjvbd_v2_webxr_w1_bag_packing import Example as Original
 from newton.examples.mjvbdv2.example_mjvbd_v2_webxr_w1_bag_packing_rope_handles import Example
-from newton.examples.mjvbdv2.support.w1_bag_recording import scene_signature
+from newton.examples.mjvbdv2.support.w1_bag_recording import (
+    SCENE_OPTIONS,
+    TeleopRecordingReader,
+    load_replay_scene,
+    scene_signature,
+)
 from newton.viewer import ViewerNull
 
 
+@unittest.skipUnless(
+    (Path.home() / "下载/scale_aligned_usd_minimal_20260918/toy/toy.usd").is_file(),
+    "Requires the scale-aligned grocery USD bundle",
+)
 class TestRopeHandlePacking(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -63,46 +77,70 @@ class TestRopeHandlePacking(unittest.TestCase):
         particles = rope.state_0.particle_q.numpy()[: rope.bag_particle_count]
         self.assertGreater(float(particles[:, 2].min()), packing.TABLE_Z)
 
-    def test_preserve_existing_scene_parameters_and_layout(self):
-        """Shift and stiffen only the rope bag while preserving other objects and contacts."""
+    def test_table_height_and_vertical_robot_adjustment(self):
+        """Match the measured Blender tabletop while preserving upper-body XY and orientation."""
         original, rope = self.scenes
-        a, b = vars(original.args).copy(), vars(rope.args).copy()
-        for key in ("bag_variant", "webxr_port"):
-            a.pop(key)
-            b.pop(key)
-        self.assertEqual(a, b)
-        self.assertEqual(rope.args.bag_variant, "rope-handles")
-        self.assertEqual(rope.args.webxr_port, 8775)
-        self.assertEqual(Original.handle_color, (0.42, 0.32, 0.16))
+        delta = rope.table_z - packing.TABLE_Z
+        self.assertAlmostEqual(rope.table_z, 0.9297508001327515)
+        table = next(i for i, label in enumerate(rope.model.shape_label) if label == "Video worktable")
+        top = rope.model.shape_transform.numpy()[table, 2] + rope.model.shape_scale.numpy()[table, 2]
+        self.assertAlmostEqual(float(top), rope.table_z, places=6)
+        for example in self.scenes:
+            newton.eval_fk(example.model, example.model.joint_q, example.model.joint_qd, example.state_0)
+        old, new = original.state_0.body_q.numpy(), rope.state_0.body_q.numpy()
+        # The same arm coordinates must produce a pure vertical translation.
+        for body in rope.ee:
+            np.testing.assert_allclose(new[body, :3] - old[body, :3], (0, 0, delta), atol=2e-6)
+            np.testing.assert_allclose(new[body, 3:], old[body, 3:], atol=2e-6)
+        np.testing.assert_allclose(new[0], old[0], atol=1e-7)
         np.testing.assert_allclose(
-            original.state_0.particle_q.numpy()[: original.paper_count] + np.array((0.0, 0.08, 0.0)),
+            original.state_0.particle_q.numpy()[: original.paper_count] + np.array((0, 0.08, delta)),
             rope.state_0.particle_q.numpy()[: rope.paper_count],
             atol=1e-6,
         )
-        for name in (
-            "body_mass",
-            "body_inertia",
-            "shape_material_ke",
-            "shape_material_kd",
-            "shape_material_mu",
-            "shape_transform",
-            "shape_scale",
-            "shape_margin",
-            "shape_gap",
-            "tet_materials",
-        ):
-            np.testing.assert_array_equal(getattr(original.model, name).numpy(), getattr(rope.model, name).numpy())
-        paper_materials = original.model.tri_materials.numpy()[: original.paper_faces].copy()
-        paper_materials[:, :2] *= 1.5
-        np.testing.assert_array_equal(paper_materials, rope.model.tri_materials.numpy()[: rope.paper_faces])
-        for name in ("particle_mass", "particle_q", "particle_radius"):
-            np.testing.assert_array_equal(
-                getattr(original.model, name).numpy()[original.soft_cube_start :],
-                getattr(rope.model, name).numpy()[rope.soft_cube_start :],
+        materials = original.model.tri_materials.numpy()[: original.paper_faces].copy()
+        materials[:, :2] *= 1.5
+        np.testing.assert_array_equal(materials, rope.model.tri_materials.numpy()[: rope.paper_faces])
+
+    def test_grocery_geometry_mass_and_recording_alignment(self):
+        """Scale visuals, collisions and mass together while preserving USD alignment."""
+        rope = self.scenes[1]
+        self.assertEqual(rope.kinds, ("toy", "soda", "biscuit"))
+        self.assertEqual(rope.soft_cube_start, rope.soft_cube_end)
+        np.testing.assert_allclose(
+            rope.model.body_mass.numpy()[rope.objects], np.array((0.045, 0.345, 0.045)) * 0.75**3, rtol=1e-5
+        )
+        np.testing.assert_allclose(
+            rope.half * 2,
+            np.array(
+                (
+                    (0.07541053, 0.07541053, 0.11936057),
+                    (0.08468434, 0.08468434, 0.13388267),
+                    (0.11388972, 0.09274235, 0.15),
+                )
             )
-        for name in ("step", "reset_physics", "_build_simulation", "_update_grasp_limit"):
-            self.assertIs(getattr(Original, name), getattr(Example, name))
-        self.assertNotEqual(scene_signature(original), scene_signature(rope))
+            * 0.75,
+            atol=1e-7,
+        )
+        np.testing.assert_allclose(rope.pick[:, 2] - rope.half[:, 2], rope.table_z + 0.002)
+        self.assertFalse(np.any(rope.model.body_flags.numpy()[rope.objects] & int(newton.BodyFlags.KINEMATIC)))
+        for i, asset in enumerate(rope.groceries):
+            vertices = np.concatenate([part["mesh"].vertices for part in asset["parts"]])
+            np.testing.assert_allclose(np.ptp(vertices, axis=0), 2 * rope.half[i], atol=1e-7)
+            self.assertGreater(2 * rope._gripper_open_limit - 0.001402, min(2 * rope.half[i, :2]))
+            self.assertLess(rope.snack_openings[asset["name"]], rope._gripper_open_limit)
+            np.testing.assert_allclose(
+                rope.pick[i, :2] - rope.half[i, :2] >= (packing.TABLE_CENTER - packing.TABLE_HALF)[:2], True
+            )
+        metadata = rope._recording_extras()
+        self.assertEqual(len(metadata["groceryAssets"]), 3)
+        for asset in metadata["groceryAssets"]:
+            self.assertEqual(rope.model.body_label[asset["body"]], asset["label"])
+            self.assertEqual(len(asset["sha256"]), 64)
+            self.assertEqual(np.asarray(asset["sourceToBody"]).shape, (4, 4))
+            self.assertEqual(asset["scale"], 0.75)
+            np.testing.assert_allclose(np.asarray(asset["sourceToBody"])[:3, :3], np.eye(3) * 0.75)
+        self.assertNotEqual(scene_signature(self.scenes[0]), scene_signature(rope))
 
     def test_export_dark_rope_as_deformable_mesh(self):
         """Export complete round geometry with a separate dark rope material."""
@@ -116,6 +154,49 @@ class TestRopeHandlePacking(unittest.TestCase):
         self.assertEqual(len(bags), 2)
         self.assertEqual(bags[1]["color"], list(Example.handle_color))
         self.assertEqual(header["meshes"][bags[1]["mesh"]]["indexCount"], 3 * (len(rope.faces) - rope.paper_faces))
+
+    def test_replay_selects_grocery_geometry_without_teleoperation(self):
+        """Restore a grocery recording through the shared entry without physics or servers."""
+        rope = self.scenes[1]
+        with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):
+            path = Path(directory) / "groceries.jsonl"
+            recorder = JsonlTrajectoryRecorder(
+                path,
+                {
+                    "scene": "w1-bag-packing",
+                    "recordingKind": "full-state",
+                    "frameDtSeconds": 1 / 60,
+                    "sceneSignature": scene_signature(rope),
+                    "sceneOptions": {name: getattr(rope.args, name) for name in SCENE_OPTIONS},
+                    **rope._recording_extras(),
+                },
+            )
+            recorder.start()
+            recorder.append(
+                {
+                    "simulationTimeSeconds": 0,
+                    **{
+                        key: getattr(rope.state_0, field).numpy().tolist()
+                        for field, key in TeleopRecordingReader._fields.items()
+                    },
+                }
+            )
+            recorder.close()
+            args = packing.Example.create_parser().parse_args(["--replay", str(path)])
+            # Recording choices must win even after the live demo's defaults change.
+            with (
+                patch.object(Example, "_grocery_names", ("toy", "soda", "glue")),
+                patch.object(Example, "_grocery_scale", 1.0),
+            ):
+                rendered, playback = load_replay_scene(packing.Example, ViewerNull(), args)
+            self.assertEqual(rendered.kinds, rope.kinds)
+            np.testing.assert_allclose(rendered.half, rope.half)
+            self.assertEqual(rendered.table_z, rope.table_z)
+            self.assertFalse(hasattr(rendered, "solver"))
+            self.assertFalse(hasattr(rendered, "webxr_server"))
+            playback.recording.restore(rendered, 0)
+            rendered.render()
+            np.testing.assert_array_equal(rendered.state_0.body_q.numpy(), rope.state_0.body_q.numpy())
 
 
 if __name__ == "__main__":

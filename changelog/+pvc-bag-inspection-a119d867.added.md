@@ -1,0 +1,1 @@
+Add a standalone PVC bag example that pinches the upper handle of a lying bag with two physical jaws, lifts it under gravity, then drops two dynamic blocks from a retracting tray, with manual inspection, opacity controls, and reset.

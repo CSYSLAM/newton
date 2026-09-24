@@ -1,0 +1,1 @@
+Use elastic bending without plastic rest-angle evolution in the W1 shrimp-pouch teleoperation demo, removing per-substep plasticity work while retaining the pressure cavity and authored elastic properties.

@@ -1,0 +1,1 @@
+Keep the standalone W1 PVC packing demo's robot targets at the solved initial IK pose on startup and reset. Previously, the first physics step used the pre-IK joint targets, causing the arms to jump and potentially disturb the bag.

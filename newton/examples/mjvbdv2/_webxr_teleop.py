@@ -17,7 +17,7 @@ import math
 import struct
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -702,7 +702,14 @@ class RelativePoseRetargeter:
 class JsonlTrajectoryRecorder:
     """Write replayable teleoperation samples incrementally as JSON Lines."""
 
-    def __init__(self, path: Path, metadata: Mapping[str, Any], *, flush_every: int = 60) -> None:
+    def __init__(
+        self,
+        path: Path,
+        metadata: Mapping[str, Any],
+        *,
+        flush_every: int = 60,
+        json_dumps: Callable[[Any], str] | None = None,
+    ) -> None:
         if flush_every < 1:
             raise ValueError("flush_every must be at least one")
         self.path = Path(path).expanduser()
@@ -712,6 +719,7 @@ class JsonlTrajectoryRecorder:
         self.sample_count = 0
         self._file = None
         self._restart_pending = False
+        self._json_dumps = json_dumps or (lambda payload: json.dumps(payload, separators=(",", ":")))
 
     def start(self) -> None:
         """Open the output lazily and begin accepting samples."""
@@ -721,7 +729,7 @@ class JsonlTrajectoryRecorder:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._file = self.path.open("w", encoding="utf-8")
             header = {"type": "metadata", "format": "newton_webxr_trajectory_v1", **self.metadata}
-            self._file.write(json.dumps(header, separators=(",", ":")) + "\n")
+            self._file.write(self._json_dumps(header) + "\n")
             self._file.flush()
         if self._restart_pending:
             self.sample_count = 0
@@ -753,7 +761,7 @@ class JsonlTrajectoryRecorder:
         if not self.recording:
             return False
         assert self._file is not None
-        self._file.write(json.dumps({"type": "frame", **sample}, separators=(",", ":")) + "\n")
+        self._file.write(self._json_dumps({"type": "frame", **sample}) + "\n")
         self.sample_count += 1
         if self.sample_count % self.flush_every == 0:
             self._file.flush()
@@ -763,7 +771,7 @@ class JsonlTrajectoryRecorder:
         """Append and flush an episode event once the trajectory file exists."""
         if self._file is None:
             return False
-        self._file.write(json.dumps({"type": "event", **event}, separators=(",", ":")) + "\n")
+        self._file.write(self._json_dumps({"type": "event", **event}) + "\n")
         self._file.flush()
         return True
 
@@ -788,6 +796,7 @@ class WebXRServer:
         assets_dir: Path | None = None,
         geometry_payload: bytes | None = None,
         require_simulation_ready: bool = False,
+        json_dumps: Callable[[Any], str] | None = None,
     ) -> None:
         if not 0 < int(port) < 65536:
             raise ValueError("port must be between 1 and 65535")
@@ -800,6 +809,7 @@ class WebXRServer:
             else Path(__file__).resolve().parents[1] / "assets" / "webxr_teleop"
         )
         self.geometry_payload = None if geometry_payload is None else bytes(geometry_payload)
+        self._json_dumps = json_dumps or (lambda payload: json.dumps(payload, separators=(",", ":")))
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stop_event: asyncio.Event | None = None
@@ -1043,7 +1053,7 @@ class WebXRServer:
         await socket.send_json({"type": "server-hello", "protocolVersion": PROTOCOL_VERSION})
         scene = self.scene_snapshot()
         if scene is not None:
-            await socket.send_str(json.dumps(scene, separators=(",", ":")))
+            await socket.send_str(self._json_dumps(scene))
         try:
             async for message in socket:
                 if message.type != ws_message_type.TEXT:
@@ -1089,7 +1099,7 @@ class WebXRServer:
             sockets = tuple(socket for socket in self._sockets if not socket.closed)
             if scene is None or not sockets:
                 continue
-            encoded = json.dumps(scene, separators=(",", ":"))
+            encoded = self._json_dumps(scene)
             await asyncio.gather(*(socket.send_str(encoded) for socket in sockets), return_exceptions=True)
 
 

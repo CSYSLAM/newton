@@ -789,7 +789,41 @@ If you run the examples from a source checkout with uv, use
       <code>python -m newton.examples mjvbd_v2_webxr_w1_bag_packing_rope_handles</code><br>
       <a href="docs/quest_webxr_teleop.md#麻绳提手版本">Quest setup and recording</a> · CPU asset preview
     </td>
-    <td width="33%"></td>
+    <td align="center" width="33%">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_webxr_w1_bag_packing_rope_shrimp.py">
+        <img width="320" height="320" src="docs/images/examples/example_mjvbd_v2_webxr_w1_bag_packing_rope_shrimp.jpg" alt="W1 rope bag with water bottle and deformable shrimp pouch">
+      </a><br>
+      W1 rope bag: water bottle and pneumatic shrimp pouch<br>
+      <code>python -m newton.examples mjvbd_v2_webxr_w1_bag_packing_rope_shrimp</code><br>
+      <a href="docs/quest_webxr_teleop.md#麻绳提手与虾片软包装版本">Quest setup and recording</a>
+    </td>
+    <td align="center" width="33%">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_webxr_w1_bag_packing_pvc.py">
+        <img width="320" height="320" src="docs/images/examples/example_mjvbd_v2_webxr_w1_bag_packing_pvc.jpg" alt="Clear PVC bag with soda and glue, CPU mesh preview">
+      </a><br>
+      W1 clear PVC bag: soda and glue<br>
+      <code>python -m newton.examples mjvbd_v2_webxr_w1_bag_packing_pvc</code><br>
+      <a href="docs/quest_webxr_teleop.md#pvc-塑料袋版本">Quest setup and recording</a> · CPU mesh preview
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_pvc_bag.py">
+        <img width="320" height="320" src="docs/images/examples/example_mjvbd_v2_pvc_bag.jpg" alt="Standalone elastic PVC bag and stiff handles, CPU mesh preview">
+      </a><br>
+      <a href="docs/pvc_bag_demo.md">PVC bag: lift from lying under gravity and load</a><br>
+      <code>python -m newton.examples mjvbd_v2_pvc_bag</code><br>
+      Add <code>--no-task</code> for manual inspection; right-drag to pull.<br>
+      CPU mesh preview
+    </td>
+    <td align="center" width="33%">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_w1_bag_packing_pvc.py">
+        <img width="320" height="320" src="docs/images/examples/example_mjvbd_v2_webxr_w1_bag_packing_pvc.jpg" alt="Shared W1 PVC scene with soda and glue, CPU mesh preview">
+      </a><br>
+      W1 PVC packing: standalone physics inspection<br>
+      <code>python -m newton.examples mjvbd_v2_w1_bag_packing_pvc</code><br>
+      <a href="docs/quest_webxr_teleop.md#pvc-塑料袋版本">Shared scene and physics settings</a> · CPU mesh preview
+    </td>
     <td width="33%"></td>
   </tr>
   <tr>
@@ -1311,6 +1345,24 @@ until it starts packing snacks. Arm joints retain a 10-degree margin from their
 limits, and the head follows the operating hand. The Blender-authored paper bag
 and snacks remain dynamic throughout. See the
 [reference, asset, and validation notes](assets/w1_paper_bag/README.md).
+
+### W1 handle-free bag packing replay (experimental)
+
+<img src="docs/images/examples/example_mjvbd_v2_w1_bag_packing_replay.jpg" width="320" height="320" alt="W1 handle-free bag packing replay scene">
+
+```bash
+uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing_replay
+# Select another full-state recording, or play once from a saved frame:
+uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing_replay --replay recordings/bag_no_handles_05.jsonl --no-loop --start-frame 600
+```
+
+The standalone replay defaults to the local `recordings/bag_no_handles_05.jsonl` file
+and loops at 60 FPS. Supply that recording locally; it is not bundled with the
+example. This uses the same scene, materials, camera, and exact state restoration
+as `mjvbd_v2_w1_bag_packing --replay recordings/bag_no_handles_05.jsonl --loop`.
+Robot poses, snacks, paper bag deformation, and the soft cube come from the
+recording, without running physics or IK. The sidebar supports pause, seek,
+restart, and looping; `--unthrottled` removes the rendering frame rate limit.
 
 ## Project Governance, Legal, and Members
 

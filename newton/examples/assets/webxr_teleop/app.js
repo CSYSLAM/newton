@@ -462,9 +462,10 @@ function createRenderer(context) {
   const fragmentShader = compileShader(context, context.FRAGMENT_SHADER, `
     precision mediump float;
     uniform vec3 color;
+    uniform float opacity;
     varying float light;
     void main() {
-      gl_FragColor = vec4(color * light, 1.0);
+      gl_FragColor = vec4(color * light, opacity);
     }
   `);
   const program = context.createProgram();
@@ -480,6 +481,7 @@ function createRenderer(context) {
   const modelLocation = context.getUniformLocation(program, "model");
   const viewProjectionLocation = context.getUniformLocation(program, "viewProjection");
   const colorLocation = context.getUniformLocation(program, "color");
+  const opacityLocation = context.getUniformLocation(program, "opacity");
   const uint32Indices = context.getExtension("OES_element_index_uint");
 
   function createArrayGeometry(vertices) {
@@ -555,25 +557,35 @@ function createRenderer(context) {
       context.useProgram(program);
       context.uniformMatrix4fv(viewProjectionLocation, false, viewProjection);
     },
-    drawGeometry(matrix, color, geometry, doubleSided = false) {
+    drawGeometry(matrix, color, geometry, doubleSided = false, opacity = 1.0) {
       setBackfaceCulling(!doubleSided);
       bindGeometry(geometry);
       context.uniformMatrix4fv(modelLocation, false, matrix);
       context.uniform3fv(colorLocation, color);
+      context.uniform1f(opacityLocation, opacity);
+      if (opacity < 1.0) {
+        context.enable(context.BLEND);
+        context.blendFunc(context.SRC_ALPHA, context.ONE_MINUS_SRC_ALPHA);
+        context.depthMask(false);
+      }
       if (geometry.indexBuffer) {
         context.drawElements(context.TRIANGLES, geometry.count, geometry.indexType, 0);
       } else {
         context.drawArrays(context.TRIANGLES, 0, geometry.count);
+      }
+      if (opacity < 1.0) {
+        context.depthMask(true);
+        context.disable(context.BLEND);
       }
     },
     drawNewton(position, quaternion, scale, color) {
       const matrix = multiplyMat4(sceneFromNewton, modelMatrix(position, quaternion, scale));
       this.drawGeometry(matrix, color, cube);
     },
-    drawSceneMesh(matrix, color, meshIndex, doubleSided = false) {
+    drawSceneMesh(matrix, color, meshIndex, doubleSided = false, opacity = 1.0) {
       const geometry = sceneMeshes[meshIndex];
       if (geometry) {
-        this.drawGeometry(matrix, color, geometry, doubleSided);
+        this.drawGeometry(matrix, color, geometry, doubleSided, opacity);
       }
     },
   };
@@ -857,14 +869,17 @@ function buildSceneDrawList(scene) {
       mesh: shape.mesh,
       // The role fallback keeps geometry packed before doubleSided was added usable.
       doubleSided: Boolean(shape.doubleSided || shape.role === "bag"),
+      opacity: Math.max(0, Math.min(1, shape.opacity ?? 1)),
     });
   }
+  // Draw all opaque meshes before translucent bag surfaces.
+  drawList.sort((a, b) => Number(a.opacity < 1) - Number(b.opacity < 1));
   return drawList;
 }
 
 function drawSceneMeshes() {
   for (const shape of sceneDrawList) {
-    renderer.drawSceneMesh(shape.matrix, shape.color, shape.mesh, shape.doubleSided);
+    renderer.drawSceneMesh(shape.matrix, shape.color, shape.mesh, shape.doubleSided, shape.opacity);
   }
 }
 

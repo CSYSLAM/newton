@@ -1,0 +1,1 @@
+Use paper-bag panel, fold, and rim material settings for the standalone PVC film, and preserve stiff molded handles with local reinforcement instead of a cage spanning the bag interior. Lift vertically so gravity controls the hanging pose.

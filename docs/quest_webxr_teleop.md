@@ -5,6 +5,10 @@
 原来的 USB 启动脚本名称不变；直接调用旧模块或命令的用户请参考
 [名称迁移表](../newton/examples/mjvbdv2/README.md#quest-webxr-teleoperation)。
 
+当前 PVC 袋遥操请看 [PVC 塑料袋版本](#pvc-塑料袋版本)：包含启动、录制和回放命令。
+该版本双臂移动不额外限速，左右夹爪的闭合、张开均按每指 35 mm/s 限速，
+可用 `--gripper-speed 0.035` 调整。下面原纸袋版本的限速参数不适用于 PVC 版本。
+
 ## W1 V030 纸袋装零食
 
 若启动时整机卡死并需要强制重启，先按[整机卡死排查说明](quest_webxr_w1_crash_diagnosis.md)保存日志。
@@ -160,10 +164,21 @@ uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing --replay reco
 绳子与袋面共享连接顶点，参与形变和接触。袋身相比另外两个版本往机器人左侧（+Y）移 8 cm，
 由麻绳版类中的 `_initial_bag_offset = (0.0, 0.28, 0.0)` 控制。
 麻绳版 `_paper_stiffness_scale = 1.5` 将袋身拉伸、面积和弯曲刚度提高为原来的 1.5 倍，包含袋口与折痕。
-提手刚度、质量、阻尼、接触参数和另外两个版本不变。机器人、零食、软体方块和控制方式沿用原场景。
+提手刚度、质量、阻尼和接触参数保持不变。桌面上表面为 Blender 选中 `Desk` 的
+`0.9297508001327515 m`，比旧桌面高约 9.75 mm。踝、膝、髋分别为约
+`22.9791° / -45.9582° / 22.9791°`，底座不动，上身与双手竖直抬升同样距离。
+双手朝向、相对桌面高度和遥操方式保持不变。
+
+旧的两件零食和软方块替换为 `toy`、`soda`、`biscuit` 三个动态刚体，统一缩放到源 USD 尺寸的 75%。
+默认读取 `~/下载/scale_aligned_usd_minimal_20260918`，可用 `--grocery-assets /path/to/bundle`
+指定其他位置。USD 视觉网格和碰撞外壳同步缩放，质量按体积缩放以保持密度；遥操中用纯色显示，
+玩具透明包装不显示，碰撞外壳保留。
+夹爪最大开度保持每指 50 mm（URDF 上限），抓取限位按缩小后的物品尺寸更新。
+胶水瓶已换回绿色六角饼干盒；玩具约 5.66 × 5.66 × 8.95 cm，汽水罐约直径 6.35 cm、高 10.04 cm，
+饼干盒约 8.54 × 6.96 × 11.25 cm。
 
 ```bash
-./scripts/start_quest_webxr_w1_bag_packing_rope_handles_teleop.sh --trajectory-output recordings/bag_rope_01.jsonl
+./scripts/start_quest_webxr_w1_bag_packing_rope_handles_teleop.sh --trajectory-output recordings/bag_rope_groceries_01.jsonl
 ```
 
 Quest 地址为 `http://127.0.0.1:8775/`。按右手柄 **A** 或手势面板录制按钮开始/暂停。
@@ -175,11 +190,100 @@ Quest 地址为 `http://127.0.0.1:8775/`。按右手柄 **A** 或手势面板录
 ```
 
 默认录制文件前缀为 `recordings/webxr_w1_bag_packing_rope_handles_`。
-回放仍使用原 demo 入口，会按元数据自动选择麻绳提手资产：
+新录制包含 `tableTopMeters` 与 `groceryAssets`（USD 路径、SHA256、缩放比例、刚体编号、`sourceToBody` 矩阵），
+用于后续将原始贴图资产对齐至记录的刚体姿态。矩阵使用列向量约定：
+`world_vertex = body_pose @ sourceToBody @ usd_stage_vertex`。Newton 回放会按录制信息选择物品和缩放比例，并检查源 USD 的 SHA256。
+未带 `scale` 字段的旧录制仍使用 1:1 原尺寸，保留其胶水瓶等原物品。
+现有 COPY3 回放资产包仍需后续单独对齐。新录制的循环回放命令：
+
+```bash
+uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing_replay --replay recordings/bag_rope_groceries_02.jsonl --loop
+```
+
+旧录制仍可使用原入口：
 
 ```bash
 uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing --replay recordings/bag_rope_01.jsonl --loop
 ```
+
+### 麻绳提手与虾片软包装版本
+
+独立入口 `mjvbd_v2_webxr_w1_bag_packing_rope_shrimp` 沿用麻绳纸袋、桌面高度和 W1 膝关节姿态。
+原来的玩具、汽水、饼干三资产入口保持原样。新场景放置两件物品：
+
+- `water_bottle`：来自 `~/下载/scale_aligned_usd_minimal_20260918`，缩放为 75%，约高 16.4 cm、直径 5.2 cm。
+  原 USD 的透明瓶身在 Newton 遥操中显示为不透明浅蓝色，保留完整轮廓；记录的原资产和贴图对齐不受影响。
+- 虾片包：来自 `~/下载/oishi_softbag_usd_v3_20260922/oishi_shrimp_softbag`，保持 110 × 120 × 35 mm 原尺寸，
+  此场景将质量从源资产的 25 g 调为 10 g（可用 `--shrimp-mass` 指定千克数），降低落入纸盒时的冲击。
+  使用原资产的 980 个薄膜粒子、封口和气腔，改为纯弹性：保留弹性弯曲、拉伸和阻尼，
+  不再更新塑性静止角或积累永久折痕。全部粒子自由运动，遥操中显示为红色。
+
+在 Newton 仓库根目录启动：
+
+```bash
+./scripts/start_quest_webxr_w1_bag_packing_rope_shrimp_teleop.sh --trajectory-output recordings/bag_rope_shrimp_01.jsonl
+```
+
+Quest 地址为 `http://127.0.0.1:8776/`。录制仍为 **A 开始/暂停**，重录为 **A 暂停 → Reset → A 重录**。
+虾片包向机器人侧桌沿悬出约 20 mm，便于把夹爪旋转为上下夹持，从薄边伸入后夹起。
+该软包需要比刚体更小的闭合间距，接近软包时会自动切换抓取限位；不要横跨整个包宽去夹。
+可用 `--grocery-assets` 和 `--shrimp-assets` 指定两份资产目录。
+默认每帧 6 个子步、16 次迭代，保留表面计算缓存和自接触几何缓存。
+直接复用原麻绳纸袋的接触与收敛配置：包含刚体—软体防穿透、1.5 mm 初始近邻接触排除，
+以及原有多级修正幅度和 Chebyshev 参数。不能再用虾片包接触参数覆盖全场景，
+或通过加大整体形变修正提速；这会让纸袋折叠面互相排斥、改变启动后的袋形。
+源文件不改写；网格、薄膜刚度、气腔参数和完整形变录制保持不变，在加载时等比例缩放粒子质量。
+不执行源配置中的塑性演化；直接复用基础纸袋的弹性步进、CUDA Graph 和重置路径，
+移除每子步的塑性核调用，以及塑性静止角和刚度的备份、恢复开销。
+录制和 Quest 状态消息优先使用 examples 环境已有的 `msgspec`（BSD-3-Clause，随 `viser` 安装）编码，
+缺少该库时自动回退标准 JSON；仍记录每一帧完整数据，不降精度、不抽帧。
+使用本机已有录制的 8 帧进行 CPU 编码对照，标准 JSON 单帧中位耗时约 3.9 ms，快速编码约 0.43 ms；
+这是编码环节的测量，不是整场景 FPS。录制和 Quest 发布复用同一次粒子读取。
+已移除额外的夹指运动 FK 检查、限速核和软体距离查询。
+此版本纸盒平面壁板的抗弯刚度提高 4 倍、弯曲阻尼提高 2 倍，折痕、顶部折边和麻绳保持原值；
+初始网格位置与朝向沿用三资产版，启动后的形态保留回归检查。
+抓纸袋时双手每指闭合限位为 1.5 mm，内侧垫间隙约 1.6 mm。
+两臂直接跟随 IK 结果，不再施加额外速度限制。
+左右二指夹都仅在闭合时使用 `--gripper-speed` 限速，默认每指 0.08 m/s，便于缓慢抓住纸盒；张开不限制速度。
+仍保留关节角度范围、遥操工作空间和夹持开度限制；此版本的双臂移动不使用 `--arm-speed` 限速。
+虾片包闭合限位为每指 2.2 mm，对应 W1 内侧垫之间约 3 mm，避免恢复防穿透后拉扯封口。
+回归测试对比两版纸袋的启动形状，同时检查软包保形、夹取、搬运、松爪落桌与重置。
+此前约 21 帧/秒的激进设置已撤回。此前 25 g 版本在本机 RTX 5090 D v2 无窗口且开启录制约 13–14 帧/秒，
+静置体积约为原体积的 88%。本次 10 g、纯弹性、壁板加强和双夹爪闭合限速版本尚未完成 GPU 联合验证，
+需实机确认启动袋形、夹持、落盒及帧率；现有测试要求落桌后最后一秒的平均体积不低于原体积的 80%。
+
+```bash
+./scripts/stop_quest_webxr_w1_bag_packing_rope_shrimp_teleop.sh
+./scripts/reload_quest_webxr_w1_bag_packing_rope_shrimp_teleop.sh
+uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing_replay --replay recordings/bag_rope_shrimp_01.jsonl --loop
+```
+
+若需要进一步降低物理求解工作量，可显式选择下面的实时配置；已有服务在运行时把 `start_` 换成 `reload_`：
+
+```bash
+./scripts/start_quest_webxr_w1_bag_packing_rope_shrimp_teleop.sh \
+  --trajectory-output recordings/bag_rope_shrimp_02.jsonl \
+  --substeps 4 --iterations 12 --coarse-iterations 8 --coarse-passes 2
+```
+
+该配置将每帧细层求解从 96 轮降为 48 轮，粗层 PCG 迭代总次数从 576 降为 64，
+保留材料、气腔、自接触和刚软接触规则。这是工作量变化，不能等同于 FPS 提升比例；
+减少求解次数会影响收敛和接触精度，需要实机检查初始袋形、夹持和落盒。
+未指定以上参数时仍使用原来的 6 子步、16 次细层迭代、每子步 3 次粗层修正且各 32 次 PCG 迭代。
+启动日志会打印实际设置。默认每 60 个运行帧输出 `[W1 performance]`，包含墙钟 FPS、输入、
+IK 提交、物理与 GPU 等待、录制及发布耗时；后者利用已有状态读取计时，不增加 GPU 同步点。
+`physics+GPU-wait` 也包含此前尚未完成的设备工作，不是单独物理核的 GPU 计时。
+可用 `--profile-every 0` 关闭统计。查看日志：
+
+```bash
+tail -f ~/.local/state/newton-webxr-w1-bag-packing-rope-shrimp-teleop/latest.log
+```
+
+录制包含 W1 关节、水瓶刚体姿态、纸袋及虾片包的逐帧粒子位置/速度。
+`softBagAsset` 保存虾片包源文件校验值、实际 `massKg`、`materialModel: elastic`、粒子范围和高模绑定文件；
+缺少 `massKg` 的旧录制按原来的 25 g 加载。为兼容已有记录格式，
+其形变沿用 `softCubeParticleQ` / `softCubeParticleQd` 字段，并由该元数据标明实际资产。
+Newton 回放会检查资产版本并直接恢复完整形变。源资产的高模、UV、贴图和表面绑定均保留，供后续 DexSim 对齐使用。
 
 以下命令都在 Newton 仓库根目录执行：
 
@@ -656,3 +760,83 @@ NEWTON_WEBXR_VIEWER=gl ./scripts/start_quest_webxr_teleop.sh
 ```
 
 当前机器曾发生过显示/计算负载下的整机卡死，因此日常遥操不要启用这个选项。
+
+## PVC 塑料袋版本
+
+独立入口沿用麻绳纸袋场景的桌高、机器人姿态和袋口朝向，替换为
+`~/下载/clear_plastic_bag` 的 PVC 袋，右侧放置原 USD 资产里的汽水罐 `soda`
+和胶水 `glue`（均为 75% 尺寸）。袋子保留源尺寸：袋身约 22 × 12 × 35 cm，
+含提手总高约 49.5 cm。因为尺寸不同，仅垂直调整落桌高度，袋口 XY 对齐原纸袋。
+初始大面朝下平躺于桌面，袋口水平朝向右侧的饮料罐和胶水（世界 −Y）；复位恢复此姿态。
+PVC 遥操版以 `bag_rope_shrimp_02` 的纸盒材料为基础，加硬袋身抗弯以保留夹取间隙：
+默认 6 个子步、每子步 16 次局部迭代、提手倍率 10。
+当前普通 demo 的配置也是遥操启动和复位使用的初始场景：PVC 袋平躺、袋口朝向
+汽水罐和胶水，袋身抗弯刚度 1440，提手倍率 10。两种入口共用场景构建和材料设置，
+无需另行复制资产或附加参数；启动后袋子继续自由受重力和接触影响。
+用户测试发现，原纸盒 CUDA 加速配置会让 PVC 袋从平躺缓慢翻起；此前 CPU 检查并未覆盖
+这些 CUDA 专用路径，具体出错环节尚未通过 GPU 隔离确认。现在默认 `--pvc-solver reference`，
+关闭粗层校正、tile 求解、表面/截断缓存及 VBD CUDA fast path，使两种设备使用相同的基础
+局部求解流程，保留重力、自碰撞和刚柔接触，不增加弹簧或固定粒子。
+用户反馈该配置不再翻起，但原材料下袋口会塌陷；当前袋身加硬及网格调整仅在 CPU 验证，
+仍需用户在 GPU 实测，性能可能低于原加速配置。
+显式使用 `--pvc-solver paper` 可恢复原 Galerkin 粗层及缓存配置，仅用于复现和比较。
+两种模式都不引入虾片包的气动设置。
+
+```bash
+cd /home/oem/code/repos/newton
+./scripts/start_quest_webxr_w1_bag_packing_pvc_teleop.sh \
+  --trajectory-output recordings/bag_pvc_01.jsonl
+```
+
+`--substeps 6 --iterations 16 --pvc-handle-stiffness 10` 已是遥操版默认参数，
+正常启动无需重复填写；显式传入其他值时才会覆盖默认设置。
+
+服务使用独立的 8777 端口，启动脚本会打印 Quest 的 HTTPS 地址。
+双臂移动不额外限速，两侧夹爪闭合和张开均限速，每指默认 35 mm/s，
+可通过 `--gripper-speed` 调整（单位 m/s）。按 A 或面板录制按钮开始/暂停保存。
+
+```bash
+./scripts/stop_quest_webxr_w1_bag_packing_pvc_teleop.sh
+uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing_replay \
+  --replay recordings/bag_pvc_01.jsonl --loop
+```
+
+独立普通 demo（不创建遥操输入、WebXR 服务或轨迹录制）：
+
+```bash
+uv run --extra examples -m newton.examples mjvbd_v2_w1_bag_packing_pvc
+```
+
+此入口直接复用遥操版的 W1、桌子、PVC 袋、汽水罐和胶水，以及初始位姿、材料、
+碰撞和求解设置，默认同样为 6/16/10。机器人保持初始姿态，袋子和物体自由受重力、
+接触及查看器拖拽力影响；不会执行自动夹取或装袋动作。通过查看器暂停、单步或复位。
+可用 `--substeps`、`--iterations`、`--pvc-handle-stiffness` 覆盖物理默认值。
+这是与旧 `mjvbd_v2_pvc_bag` 方块提拉任务分开的入口。
+
+物理网格从原资产采样，保留皱褶，袋底与提手焊接在同一开放表面上。新版只降低袋身
+网格密度，让有限次局部迭代更容易把桌面支撑传到袋口；提手仍为每根 41 圈、每圈 6 点，
+保留手指接触所需的细网格。共 729 粒子、1,440 三角形，不直接求解 476,580 面高模。
+录制的 `proxyVersion` 为 2，旧版 2,045 粒子轨迹仍按版本 1 重建回放。
+遥操版使用纸盒的基础面密度
+0.54 kg/m²，袋口顶部 32 mm 内的完整三角形按双层处理，包括质量和膜材料；
+普通袋面拉伸/面积刚度为 1.5e5，双层袋口为 3e5，膜阻尼分别为 0.4/0.8。
+袋身（含折痕和袋口）抗弯刚度统一为 1440、弯曲阻尼为 4，保留源几何的静止折角。
+不再沿用纸盒折痕处的软铰链参数 24；普通面板及袋口原值为 360。
+提手和焊接处默认拉伸/面积刚度为 1e6、膜阻尼 0.4、抗弯刚度 300、弯曲阻尼 0.1。
+不添加截面、U 形或根部支撑弹簧，仅使用连通表面的膜材料和抗弯约束。
+质量随该代理的面积计算，不再使用之前约 109 g 的 PVC 密度方案。
+所有粒子动态参与重力与接触，夹起单侧提手时允许袋身侧倾。
+无固定粒子、无抓取吸附、无塑性累计。参数是实验性手感调节，
+不是经实测标定的 PVC 材料。默认 `--pvc-handle-stiffness 10` 将提手及焊接处的膜和抗弯刚度
+提高到纸盒提手基准的十倍（上一版倍率 2 的五倍）；传入 `2` 可恢复上一版提手参数，
+袋身参数不随该倍率改变。
+允许提手中段自然垂到桌面，支撑目标是袋口保持高度，
+使提手至少有一段可供夹取，而非整根悬空。CPU 回归检查自由静置 3 秒后，仍有连续至少
+2 cm 的提手段高于桌面 4 cm，同时袋子不翻起；这不等同于验证机器人实际夹取成功。
+相同系数不保证不同尺寸和拓扑的袋子具有相同支撑效果，
+也不代表硬 PVC 提手已经标定。旧 `mjvbd_v2_pvc_bag` 方块提拉 demo 仍保留自己的材料设置。
+
+Newton 窗口显示低粗糙度半透明袋身，Quest 使用轻量透明混合；当前显示物理代理，
+不是原 GLB 的折射高模渲染。录制头保存原 GLB/PLY 的哈希、源坐标变换、代理初始顶点、
+拓扑及材料配置，逐帧保存完整变形，供后续高模绑定和 DexSim 渲染使用。
+可用 `--pvc-assets` 和 `--grocery-assets` 指定源目录。

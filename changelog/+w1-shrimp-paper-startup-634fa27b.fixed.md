@@ -1,0 +1,1 @@
+Restore the original rope bag's startup shape in the shrimp-pouch teleoperation scene by sharing its contact filtering, rigid-soft nonpenetration and convergence settings; retain solver caches and use the pouch's tested gripper gap.
