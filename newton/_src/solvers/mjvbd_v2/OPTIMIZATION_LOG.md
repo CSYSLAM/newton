@@ -4921,3 +4921,46 @@ mass scale 4 alone (2.41 mm), and mass scale 10 or 30, which crush the rigid
 block out of the grasp. The solver keeps `mass_scale=1` because the working
 range is scene-dependent. Method, probe, raw results, and limits are in
 `docs/lab/mjvbd_two_way_grasp_jitter_2026-10-08/`.
+
+### 2026-10-08: cut rigid-iteration overhead found while profiling two-way coupling
+
+Measure only the captured physics graph: warm an example up, then replay
+`example.graph` 60 times, synchronize, and keep the best of three reps. Example
+frame time is not usable here: the W1 scenes spend about 8-9 ms of a 22 ms
+frame in per-frame IK and `.numpy()` readbacks outside the graph, which hides
+GPU changes. Warp's per-kernel timing also inflates small kernels about 2.7x
+and attributed fake cost to `solve_rigid_body`; use it only to rank deltas.
+
+Two-way coupling costs about 1.6-1.9 ms of GPU physics per frame over one-way
+in free motion on the squeeze grasp (about 15%): roughly 0.65 ms for MuJoCo's
+contact pipeline and 1.0 ms for coupling bookkeeping (stash, rewind, filter,
+harvest, blend, force injection, and their memsets, about 11 small nodes per
+substep). In contact phases the extra cost is mostly genuine contact work,
+because one-way fingers pass through objects.
+
+Two retained changes in the private full VBD, both for every rigid scene:
+
+- Clear the five per-body rigid accumulators with one kernel instead of five
+  memsets each rigid iteration, about 480 fewer graph nodes per frame in the
+  squeeze grasp. Free-motion two-way 15.19 -> 13.62 ms, one-way 13.25 -> 11.35
+  ms. Results are bitwise unaffected.
+- Return the inertial target from `solve_rigid_body` for a body with no
+  adjacent joints and all-zero contact terms. This is the exact minimizer;
+  the 6x6 path only approximated it with a regularized small-angle step.
+  Three paired free-motion runs: -0.40, -0.60, -0.47 ms. No change in the
+  contact-heavy hold phase.
+
+Combined GPU physics per frame (RTX 5060 Ti, single measurement per scene,
+best of three replays): squeeze grasp two-way 16.98 -> 15.23 ms (-10%),
+pick-and-place two-way 10.51 -> 8.52 ms (-19%), plug-socket two-way 10.67 ->
+7.97 ms (-25%), kinematic W1 pick-and-place 5.95 -> 4.19 ms (-30%). All 48
+previously passing MJVBDV2 test files pass; the same four pre-existing failures
+remain. The four two-way examples and the kinematic pick-and-place and
+plug-socket examples pass.
+
+Not pursued: fusing the coupling bookkeeping (estimated 0.3 ms, needs a
+specialized proxy step loop), filtering MuJoCo contacts that cannot matter
+(at most 0.65 ms), and moving the W1 demos' IK into the graph (the largest
+demo-level lever, outside the solver). Contact-free trunk proxies still
+receive up to a few newtons of residual feedback, about 0.1% of gravity at
+their 100-330 kg proxy inertia; the early exit does not change it.

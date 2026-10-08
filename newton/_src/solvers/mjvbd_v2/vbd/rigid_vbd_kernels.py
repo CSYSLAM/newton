@@ -3808,6 +3808,21 @@ def solve_rigid_body(
         body_q_new[body_index] = q_current
         return
 
+    # A body with no adjacent joints and no contact terms this iteration only
+    # has inertia, whose exact minimizer is the inertial target. Contact blocks
+    # are PSD, so zero diagonal-block traces imply zero off-diagonal blocks.
+    # This skips the 6x6 solve for untouched bodies, such as two-way coupling
+    # link proxies away from objects.
+    if (
+        get_body_num_adjacent_joints(adjacency, body_index) == 0
+        and wp.trace(external_hessian_ll[body_index]) == 0.0
+        and wp.trace(external_hessian_aa[body_index]) == 0.0
+        and wp.length_sq(external_forces[body_index]) == 0.0
+        and wp.length_sq(external_torques[body_index]) == 0.0
+    ):
+        body_q_new[body_index] = body_inertia_q[body_index]
+        return
+
     # Inertial force and Hessian
     dt_sqr_reciprocal = 1.0 / (dt * dt)
 

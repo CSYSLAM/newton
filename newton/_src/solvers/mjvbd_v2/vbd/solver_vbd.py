@@ -120,6 +120,23 @@ _BODY_PARTICLE_DENSE_CONTACT_THRESHOLD = 128
 _BODY_PARTICLE_DENSE_MIN_BUFFER_SIZE = 512
 
 
+@wp.kernel(enable_backward=False)
+def _zero_body_accumulators_kernel(
+    body_forces: wp.array[wp.vec3],
+    body_torques: wp.array[wp.vec3],
+    body_hessian_ll: wp.array[wp.mat33],
+    body_hessian_al: wp.array[wp.mat33],
+    body_hessian_aa: wp.array[wp.mat33],
+):
+    """Clear the five per-body rigid accumulators in one launch."""
+    body = wp.tid()
+    body_forces[body] = wp.vec3()
+    body_torques[body] = wp.vec3()
+    body_hessian_ll[body] = wp.mat33()
+    body_hessian_al[body] = wp.mat33()
+    body_hessian_aa[body] = wp.mat33()
+
+
 def _get_pneumatic_counts(model: Model) -> tuple[int, int]:
     """Return optional cavity and face counts without loading pneumatic modules."""
     return (
@@ -4670,11 +4687,20 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         # The fused kernel overwrites all five accumulators for each solved body.
         if self._coupled_fusion is None:
-            self.body_torques.zero_()
-            self.body_forces.zero_()
-            self.body_hessian_aa.zero_()
-            self.body_hessian_al.zero_()
-            self.body_hessian_ll.zero_()
+            # One launch instead of five memsets: this runs every rigid
+            # iteration, where graph replay is bound by node count.
+            wp.launch(
+                _zero_body_accumulators_kernel,
+                dim=model.body_count,
+                inputs=[
+                    self.body_forces,
+                    self.body_torques,
+                    self.body_hessian_ll,
+                    self.body_hessian_al,
+                    self.body_hessian_aa,
+                ],
+                device=self.device,
+            )
 
         body_color_groups = model.body_color_groups
         body_colors = model.body_colors

@@ -1,0 +1,1 @@
+Speed up ``SolverMJVBDV2`` rigid-body iterations by clearing per-body accumulators in one launch and skipping the solve for bodies with no joints or contacts, reducing GPU physics time by 10-30% in the W1 examples.
