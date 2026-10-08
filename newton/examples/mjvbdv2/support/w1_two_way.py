@@ -144,6 +144,9 @@ class W1TwoWayScene:
             joint_mode="dynamic",
             contact_mode="full",
             coupling=args.coupling,
+            coupling_options=None
+            if args.coupling != "two_way"
+            else {"proxy_relaxation": args.proxy_relaxation, "mass_scale": args.proxy_mass_scale},
             vbd_options={
                 "iterations": args.iterations,
                 "friction_epsilon": 1.0e-4,
@@ -223,6 +226,7 @@ class W1TwoWayScene:
         ke = self.model.joint_target_ke.numpy().copy()
         kd = self.model.joint_target_kd.numpy().copy()
         armature = self.model.joint_armature.numpy().copy()
+        damping = self.model.joint_damping.numpy().copy()
         qd_start = self.model.joint_qd_start.numpy()
         for joint, label in enumerate(self.model.joint_label[: self.robot_joints]):
             begin, end = int(qd_start[joint]), int(qd_start[joint + 1])
@@ -231,6 +235,7 @@ class W1TwoWayScene:
             if "FINGER" in label.rsplit("/", 1)[-1]:
                 ke[begin:end], kd[begin:end] = self.args.finger_kp, self.args.finger_kd
                 armature[begin:end] = np.maximum(armature[begin:end], self.args.finger_armature)
+                damping[begin:end] = np.maximum(damping[begin:end], self.args.finger_damping)
             else:
                 ke[begin:end], kd[begin:end] = self.args.arm_kp, self.args.arm_kd
             mode[begin:end] = int(newton.JointTargetMode.POSITION_VELOCITY)
@@ -238,6 +243,7 @@ class W1TwoWayScene:
         self.model.joint_target_ke.assign(ke)
         self.model.joint_target_kd.assign(kd)
         self.model.joint_armature.assign(armature)
+        self.model.joint_damping.assign(damping)
 
     def _build_ik(self):
         self.ik_q = wp.clone(self.ik_model.joint_q).reshape((1, -1))
@@ -357,6 +363,19 @@ class W1TwoWayScene:
         parser.add_argument("--finger-kd", type=float, default=20.0, help="Finger drive damping [N*s/m].")
         parser.add_argument(
             "--finger-armature", type=float, default=0.3, help="Reflected finger gear inertia [kg] for stable feedback."
+        )
+        parser.add_argument(
+            "--finger-damping",
+            type=float,
+            default=50.0,
+            help="Passive finger joint damping [N*s/m]; unlike drive damping it acts while the effort limit clips.",
+        )
+        parser.add_argument("--proxy-relaxation", type=float, default=0.5, help="Two-way feedback relaxation.")
+        parser.add_argument(
+            "--proxy-mass-scale",
+            type=float,
+            default=4.0,
+            help="Scale of the MuJoCo effective inertia given to the VBD link proxies.",
         )
         parser.add_argument("--no-cuda-graph", action="store_true")
         return parser

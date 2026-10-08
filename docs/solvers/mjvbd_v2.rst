@@ -176,6 +176,19 @@ loop with the keys documented on :class:`~newton.solvers.SolverMJVBDV2`; the
 default staggered transfer with ``proxy_relaxation=0.5`` was the most robust in
 the shipped scenes.
 
+A gripper squeezing a soft body needs two more settings to hold still. A
+drive commanded past the contact saturates at its effort limit, and MuJoCo
+clips the drive's damping term with it, so nothing damps the finger bouncing
+on the elastic object while the lagged feedback slowly pumps that mode.
+Add passive joint damping (``model.joint_damping``), which acts outside the
+effort limit like gearbox friction, and give the VBD proxies a moderate
+``coupling_options={"mass_scale": ...}`` so the light finger proxy is not
+thrown off the stiff particle contacts within a substep. In the W1 squeeze
+grasp, 50 N*s/m of finger damping and ``mass_scale=4`` reduce the soft-side
+finger oscillation from 8.9 mm to 0.6 mm peak to peak. Keep the mass scale
+moderate: at ``10`` and above, the proxy is heavy enough to crush a light rigid
+block out of the grasp.
+
 The ``mjvbd_v2_w1_table_push``, ``mjvbd_v2_w1_squeeze_grasp``, and
 ``mjvbd_v2_w1_pick_place_two_way`` examples demonstrate the mode. Each accepts
 ``--coupling one_way`` for comparison.

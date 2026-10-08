@@ -151,6 +151,21 @@ sequenceDiagram
 代价是不能模拟“重物反作用让机器人手臂偏转”或“软体接触唤醒休眠机器人”。需要这种物理时，
 应使用 Newton 原生双向 Proxy/ADMM 耦合，而不是偷偷改变 MJVBDV2 的语义。
 
+### 3.4 可选双向耦合
+
+上述单向合同仍是默认行为。`SolverMJVBDV2(..., joint_mode="dynamic", coupling="two_way")`
+是显式开启的双向模式：VBD 中的连杆 proxy 携带 MuJoCo 有效惯量，proxy 的动量变化作为
+body wrench 在下一个子步回传给 MuJoCo；MuJoCo 自身接触保持开启，负责连杆与桌面、地面等
+静态形状的接触。该反馈是显式的、滞后一个子步，因此刚性接触需要约 1/600 s 的子步，轻质连杆
+需要关节 armature。
+
+力饱和的夹爪抓软体时，驱动阻尼会随力矩上限一起被截断，手指可能以约 15 Hz 抖动。W1 示例
+采用被动关节阻尼（50 N*s/m）加 `mass_scale=4` 的 proxy 惯量，把抖动从 8.9 mm 降到
+0.6 mm 峰峰值。`mass_scale` 是数值耦合参数，可用范围依场景而定（10 以上会把轻刚体挤出
+夹爪），因此求解器默认值保持为 1。完整测量与被否决的方案见
+`docs/lab/mjvbd_two_way_grasp_jitter_2026-10-08/README.md`，用法见
+[MJVBDV2 用户文档](../../../../docs/solvers/mjvbd_v2.rst)。
+
 ## 4. 所有权：每个动态自由度只有一个写入者
 
 `resolve_ownership()` 在构造时生成不可变分区：

@@ -1,0 +1,258 @@
+{
+  "baseline_commit": "8896857f",
+  "gpu": "NVIDIA GeForce RTX 5060 Ti",
+  "scene": "mjvbd_v2_w1_squeeze_grasp, 10 substeps per 60 Hz frame, 12 VBD iterations",
+  "window_s": [
+    4.6,
+    7.3
+  ],
+  "probe": "jitter_probe.py (per-substep finger-1 opening)",
+  "runs": [
+    {
+      "args": "--finger-damping 0 --proxy-mass-scale 1",
+      "rigid": {
+        "mean_mm": 24.55,
+        "peak_to_peak_mm": 0.24,
+        "std_mm": 0.04,
+        "reversals_per_s": 165.3
+      },
+      "soft": {
+        "mean_mm": 26.01,
+        "peak_to_peak_mm": 8.88,
+        "std_mm": 1.83,
+        "reversals_per_s": 26.1
+      },
+      "verdict": "baseline: 15 Hz limit cycle"
+    },
+    {
+      "args": "--finger-damping 20 --proxy-mass-scale 1",
+      "rigid": {
+        "mean_mm": 24.58,
+        "peak_to_peak_mm": 0.23,
+        "std_mm": 0.04,
+        "reversals_per_s": 171.2
+      },
+      "soft": {
+        "mean_mm": 27.25,
+        "peak_to_peak_mm": 5.01,
+        "std_mm": 1.52,
+        "reversals_per_s": 35.0
+      },
+      "verdict": "partial"
+    },
+    {
+      "args": "--finger-damping 50 --proxy-mass-scale 1",
+      "rigid": {
+        "mean_mm": 24.57,
+        "peak_to_peak_mm": 0.22,
+        "std_mm": 0.04,
+        "reversals_per_s": 147.2
+      },
+      "soft": {
+        "mean_mm": 27.3,
+        "peak_to_peak_mm": 3.13,
+        "std_mm": 0.83,
+        "reversals_per_s": 40.1
+      },
+      "verdict": "partial, plateaus"
+    },
+    {
+      "args": "--finger-damping 100 --proxy-mass-scale 1",
+      "rigid": {
+        "mean_mm": 24.57,
+        "peak_to_peak_mm": 0.21,
+        "std_mm": 0.04,
+        "reversals_per_s": 142.1
+      },
+      "soft": {
+        "mean_mm": 27.12,
+        "peak_to_peak_mm": 3.06,
+        "std_mm": 0.84,
+        "reversals_per_s": 34.2
+      },
+      "verdict": "partial, plateaus"
+    },
+    {
+      "args": "--finger-damping 0 --proxy-mass-scale 1 --proxy-relaxation 1.0",
+      "rigid": {
+        "mean_mm": 24.54,
+        "peak_to_peak_mm": 0.22,
+        "std_mm": 0.04,
+        "reversals_per_s": 181.5
+      },
+      "soft": {
+        "mean_mm": 26.6,
+        "peak_to_peak_mm": 6.94,
+        "std_mm": 1.67,
+        "reversals_per_s": 39.8
+      },
+      "verdict": "rejected: still oscillates"
+    },
+    {
+      "args": "--finger-damping 0 --proxy-mass-scale 1 --proxy-relaxation 0.25",
+      "rigid": {
+        "mean_mm": 34.99,
+        "peak_to_peak_mm": 42.38,
+        "std_mm": 8.05,
+        "reversals_per_s": 60.0
+      },
+      "soft": {
+        "mean_mm": 3.07,
+        "peak_to_peak_mm": 157.3,
+        "std_mm": 17.37,
+        "reversals_per_s": 162.3
+      },
+      "verdict": "rejected: unstable"
+    },
+    {
+      "args": "--finger-damping 0 --proxy-mass-scale 4",
+      "rigid": {
+        "mean_mm": 24.63,
+        "peak_to_peak_mm": 0.22,
+        "std_mm": 0.04,
+        "reversals_per_s": 214.2
+      },
+      "soft": {
+        "mean_mm": 25.35,
+        "peak_to_peak_mm": 2.41,
+        "std_mm": 0.55,
+        "reversals_per_s": 33.9
+      },
+      "verdict": "partial"
+    },
+    {
+      "args": "--finger-damping 0 --proxy-mass-scale 10",
+      "rigid": {
+        "mean_mm": 0.05,
+        "peak_to_peak_mm": 1.58,
+        "std_mm": 0.18,
+        "reversals_per_s": 90.9
+      },
+      "soft": {
+        "mean_mm": 0.44,
+        "peak_to_peak_mm": 12.92,
+        "std_mm": 1.46,
+        "reversals_per_s": 94.2
+      },
+      "verdict": "rejected: fingers close through both objects"
+    },
+    {
+      "args": "--finger-damping 0 --proxy-mass-scale 30",
+      "rigid": {
+        "mean_mm": 0.02,
+        "peak_to_peak_mm": 3.54,
+        "std_mm": 0.18,
+        "reversals_per_s": 98.7
+      },
+      "soft": {
+        "mean_mm": 25.28,
+        "peak_to_peak_mm": 0.62,
+        "std_mm": 0.09,
+        "reversals_per_s": 28.7
+      },
+      "verdict": "rejected: rigid block crushed out"
+    },
+    {
+      "args": "--finger-damping 50 --proxy-mass-scale 10",
+      "rigid": {
+        "mean_mm": 24.64,
+        "peak_to_peak_mm": 0.23,
+        "std_mm": 0.04,
+        "reversals_per_s": 357.1
+      },
+      "soft": {
+        "mean_mm": 25.35,
+        "peak_to_peak_mm": 0.2,
+        "std_mm": 0.03,
+        "reversals_per_s": 100.5
+      },
+      "verdict": "works, but next to the mass-scale-10 failure"
+    },
+    {
+      "args": "--finger-damping 50 --proxy-mass-scale 10 --proxy-relaxation 1.0",
+      "rigid": {
+        "mean_mm": 11.02,
+        "peak_to_peak_mm": 25.43,
+        "std_mm": 11.99,
+        "reversals_per_s": 229.3
+      },
+      "soft": {
+        "mean_mm": 25.2,
+        "peak_to_peak_mm": 0.61,
+        "std_mm": 0.19,
+        "reversals_per_s": 138.8
+      },
+      "verdict": "rejected: rigid grip collapses"
+    },
+    {
+      "args": "--finger-damping 50 --proxy-mass-scale 4 (accepted default, run 1)",
+      "rigid": {
+        "mean_mm": 24.63,
+        "peak_to_peak_mm": 0.22,
+        "std_mm": 0.04,
+        "reversals_per_s": 145.0
+      },
+      "soft": {
+        "mean_mm": 25.5,
+        "peak_to_peak_mm": 0.6,
+        "std_mm": 0.09,
+        "reversals_per_s": 84.7
+      },
+      "verdict": "accepted"
+    },
+    {
+      "args": "--finger-damping 50 --proxy-mass-scale 4 (accepted default, run 2)",
+      "rigid": {
+        "mean_mm": 24.62,
+        "peak_to_peak_mm": 0.23,
+        "std_mm": 0.04,
+        "reversals_per_s": 146.9
+      },
+      "soft": {
+        "mean_mm": 25.5,
+        "peak_to_peak_mm": 0.65,
+        "std_mm": 0.1,
+        "reversals_per_s": 77.3
+      },
+      "verdict": "accepted"
+    },
+    {
+      "args": "--finger-damping 50 --proxy-mass-scale 4 (jitter_probe.py check)",
+      "rigid": {
+        "mean_mm": 24.63,
+        "peak_to_peak_mm": 0.21,
+        "std_mm": 0.04,
+        "reversals_per_s": 238.9
+      },
+      "soft": {
+        "mean_mm": 25.5,
+        "peak_to_peak_mm": 0.62,
+        "std_mm": 0.11,
+        "reversals_per_s": 74.0
+      },
+      "verdict": "accepted"
+    }
+  ],
+  "example_steady_check": {
+    "window_s": [
+      6.0,
+      7.3
+    ],
+    "sampling": "per frame",
+    "threshold_mm": 0.5,
+    "old_settings_mm": {
+      "run_1": [
+        0.07,
+        1.48
+      ],
+      "run_2": [
+        0.05,
+        2.78
+      ]
+    },
+    "new_defaults_mm": [
+      0.06,
+      0.01
+    ]
+  }
+}

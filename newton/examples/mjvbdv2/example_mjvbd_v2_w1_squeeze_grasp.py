@@ -32,6 +32,9 @@ SOFT_CELLS = (5, 5, 6)
 GRASP_HEIGHT = 0.06
 LIFT = 0.15
 HOLD = (4.4, 7.4)
+# Lifted and stationary: the grip should not visibly pulse.
+STEADY = (6.0, 7.3)
+STEADY_P2P = 0.0005
 
 
 class Example(W1TwoWayScene):
@@ -71,6 +74,7 @@ class Example(W1TwoWayScene):
         )
         self.soft_end = builder.particle_count
         self.hold_fingers = []
+        self.steady_fingers = []
         self.peak_lift = np.zeros(2)
         self.lowest_particle = np.inf
 
@@ -119,6 +123,8 @@ class Example(W1TwoWayScene):
         fingers = self.finger_q()
         if HOLD[0] <= self.sim_time <= HOLD[1]:
             self.hold_fingers.append(fingers)
+        if STEADY[0] <= self.sim_time <= STEADY[1]:
+            self.steady_fingers.append(fingers)
         if self.frame % 60 == 0:
             width = float(np.ptp(particles[:, 1]))
             print(
@@ -150,6 +156,9 @@ class Example(W1TwoWayScene):
             raise AssertionError(f"The right fingers did not indent the soft cube: {soft.mean()}")
         if soft.min() < 0.01:
             raise AssertionError(f"The right fingers crushed the soft cube: {soft.min()}")
+        steady = np.ptp(np.asarray(self.steady_fingers), axis=0)
+        if np.any(steady > STEADY_P2P):
+            raise AssertionError(f"The held grip pulses: finger peak-to-peak {steady * 1e3} mm")
         if np.any(self.peak_lift < LIFT - 0.03):
             raise AssertionError(f"Both objects must be lifted: {self.peak_lift}")
         if self.peak_free_tcp_error > 0.01:
@@ -161,6 +170,7 @@ class Example(W1TwoWayScene):
             raise AssertionError("The soft cube did not recover its width after release")
         print(
             f"[W1SqueezeGrasp] PASS: rigid fingers held at {rigid.min() * 1e3:.1f} mm, "
+            f"held-grip jitter {np.round(steady * 1e3, 2).tolist()} mm, "
             f"soft cube indented {(SOFT_SIZE[1] / 2 - soft.mean()) * 1e3:.1f} mm per side; "
             "both objects lifted and released.",
             flush=True,

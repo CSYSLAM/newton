@@ -4900,3 +4900,24 @@ and representative renders are retained under the ignored directory
 `newton/tests/outputs/self_detection_interval_20260910/`, with `README.md` as
 the entry point. This investigation changes only the optimization log in Git;
 previously staged default-deadband changes remain intact. No commit or push.
+
+### 2026-10-08: steady the two-way soft-cube grasp
+
+With opt-in `coupling="two_way"` (commit 8896857f), the W1 squeeze-grasp
+gripper on the soft cube pulsed at about 15 Hz while holding it aloft:
+8.88 mm peak to peak per substep, against 0.24 mm on the rigid block. The
+finger drive is commanded fully shut and saturates at its 10 N effort limit,
+which also clips its damping term, so the finger bounces undamped on the
+cube's elastic stiffness. The one-substep feedback lag and the light VBD
+finger proxy (thrown off stiff particle contacts within a substep) keep
+feeding the mode.
+
+Accepted for the W1 two-way scenes: 50 N*s/m of passive finger joint damping,
+which acts outside the effort limit, and VBD proxies with four times the
+MuJoCo effective inertia. Soft-side jitter falls to 0.60-0.65 mm (three runs)
+with the rigid side unchanged and no runtime cost. Rejected: damping alone
+(plateaus near 3 mm), relaxation 1.0 (6.94 mm), relaxation 0.25 (unstable),
+mass scale 4 alone (2.41 mm), and mass scale 10 or 30, which crush the rigid
+block out of the grasp. The solver keeps `mass_scale=1` because the working
+range is scene-dependent. Method, probe, raw results, and limits are in
+`docs/lab/mjvbd_two_way_grasp_jitter_2026-10-08/`.

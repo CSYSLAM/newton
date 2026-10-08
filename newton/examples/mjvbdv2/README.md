@@ -93,7 +93,11 @@ MuJoCo resolves the links against the worktop. Shared setup lives in
 
 Two-way feedback reaches MuJoCo one substep later, so these scenes keep 10
 substeps per frame and give each 25 g finger 0.3 kg of reflected gear inertia
-(`--finger-armature`).
+(`--finger-armature`). Fingers squeezing past contact saturate their 10 N
+effort limit, which also clips the drive damping, so the fingers get 50 N*s/m
+of passive joint damping (`--finger-damping`) and the VBD proxies carry four
+times the MuJoCo effective inertia (`--proxy-mass-scale`). Together these keep
+the soft-cube grip steady instead of pulsing at about 15 Hz.
 
 ### Conveyor sorting
 
