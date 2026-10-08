@@ -255,6 +255,11 @@ class Example:
         "RIGHT_HAND_THUMB2": 1.4,
     }
 
+    # Hooks for the two-way variant, which drives a fixed-base robot dynamically.
+    floating_robot = True
+    expected_backend = "vbd_kinematic_full"
+    plug_to_grip = PLUG_TO_GRIP
+
     def __init__(self, viewer, args):
         self.viewer = viewer
         self.args = args
@@ -300,32 +305,10 @@ class Example:
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_1)
 
-        self.solver = SolverMJVBDV2(
-            self.model,
-            mujoco_articulations=self.robot_articulations,
-            joint_mode="kinematic",
-            contact_mode="full",
-            vbd_options={
-                "iterations": self.vbd_iterations,
-                "rigid_avbd_contact_alpha": RIGID_CONTACT_ALPHA,
-                "rigid_contact_history": True,
-                "rigid_contact_stick_motion_eps": 0.0,
-                "rigid_contact_stick_freeze_translation_eps": 0.0,
-                "rigid_contact_stick_freeze_angular_eps": 0.0,
-                "rigid_body_contact_buffer_size": RIGID_BODY_CONTACT_BUFFER_SIZE,
-                "particle_enable_self_contact": False,
-                "friction_epsilon": 1.0e-4,
-            },
-            collision_options={
-                "broad_phase": "nxn",
-                "contact_matching": "latest",
-                "rigid_contact_max": RIGID_CONTACT_MAX,
-                "include_static_kinematic_pairs": False,
-            },
-        )
-        if self.solver.features.backend != "vbd_kinematic_full":
+        self.solver = self._create_solver()
+        if self.solver.features.backend != self.expected_backend:
             raise RuntimeError(
-                "Rigid plug/socket insertion requires the vbd_kinematic_full backend, "
+                f"Rigid plug/socket insertion requires the {self.expected_backend} backend, "
                 f"got {self.solver.features.backend}"
             )
 
@@ -343,6 +326,43 @@ class Example:
         self.use_graph = bool(args.graph_capture) and self.device.is_cuda
         self.graph = None
 
+    def _vbd_options(self) -> dict:
+        return {
+            "iterations": self.vbd_iterations,
+            "rigid_avbd_contact_alpha": RIGID_CONTACT_ALPHA,
+            "rigid_contact_history": True,
+            "rigid_contact_stick_motion_eps": 0.0,
+            "rigid_contact_stick_freeze_translation_eps": 0.0,
+            "rigid_contact_stick_freeze_angular_eps": 0.0,
+            "rigid_body_contact_buffer_size": RIGID_BODY_CONTACT_BUFFER_SIZE,
+            "particle_enable_self_contact": False,
+            "friction_epsilon": 1.0e-4,
+        }
+
+    def _collision_options(self) -> dict:
+        return {
+            "broad_phase": "nxn",
+            "contact_matching": "latest",
+            "rigid_contact_max": RIGID_CONTACT_MAX,
+            "include_static_kinematic_pairs": False,
+        }
+
+    def _create_solver(self) -> SolverMJVBDV2:
+        """Create the kinematic-robot full-VBD solver."""
+        return SolverMJVBDV2(
+            self.model,
+            mujoco_articulations=self.robot_articulations,
+            joint_mode="kinematic",
+            contact_mode="full",
+            vbd_options=self._vbd_options(),
+            collision_options=self._collision_options(),
+        )
+
+    def _configure_robot_bodies(self, builder: newton.ModelBuilder) -> None:
+        """Mark the W1 links as externally prescribed colliders."""
+        for body in range(self.robot_body_end):
+            builder.body_flags[body] = int(newton.BodyFlags.KINEMATIC)
+
     def _build_scene(self) -> None:
         """Build the robot, dynamic plug, socket, and support table."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81))
@@ -358,7 +378,7 @@ class Example:
         builder.add_urdf(
             str(self.robot_urdf),
             xform=wp.transform(ROBOT_BASE_POSITION, ROBOT_BASE_ROTATION),
-            floating=True,
+            floating=self.floating_robot,
             enable_self_collisions=False,
             collapse_fixed_joints=True,
             parse_visuals_as_colliders=False,
@@ -369,8 +389,7 @@ class Example:
             raise RuntimeError(f"Expected one W1 articulation, got {self.robot_articulations}")
         self.robot_body_end = builder.body_count
         self.robot_shape_end = builder.shape_count
-        for body in range(self.robot_body_end):
-            builder.body_flags[body] = int(newton.BodyFlags.KINEMATIC)
+        self._configure_robot_bodies(builder)
         self._set_builder_posture(builder)
         self._decompose_hand_collision_meshes(builder)
         self.robot_shape_end = builder.shape_count
@@ -593,6 +612,7 @@ class Example:
         index_tip = wp.transform_point(wp.transform(*body_q[index_body]), RIGHT_INDEX_TIP_OFFSET)
         fingertip_midpoint = 0.5 * (thumb_tip + index_tip)
         hand_offset = wp.transform_point(wp.transform_inverse(hand_tf), fingertip_midpoint)
+        self.hand_target_offset = hand_offset
 
         self.position_objective = ik.IKObjectivePosition(
             hand_body,
@@ -729,7 +749,7 @@ class Example:
 
     def test_final(self) -> None:
         """Verify realtime IK dispatch and, for long runs, physical insertion."""
-        if self.solver.features.backend != "vbd_kinematic_full":
+        if self.solver.features.backend != self.expected_backend:
             raise ValueError(f"Unexpected MJVBDV2 backend: {self.solver.features.backend}")
         if hasattr(self, "cached_joint_targets"):
             raise ValueError("Realtime plug/socket unexpectedly created a trajectory cache")
@@ -766,10 +786,10 @@ class Example:
     def _sample_controller(self, time_seconds: float) -> tuple[wp.vec3, float, str]:
         """Return continuous fingertip and pinch targets without replay."""
         hand_top = PLUG_REST_POSITION + HAND_TOP_OFFSET
-        hand_grip = PLUG_REST_POSITION + PLUG_TO_GRIP
-        hand_forward = PLUG_FORWARD_POSITION + PLUG_TO_GRIP
+        hand_grip = PLUG_REST_POSITION + self.plug_to_grip
+        hand_forward = PLUG_FORWARD_POSITION + self.plug_to_grip
         hand_aligned = hand_forward + HAND_CARRY_CORRECTION
-        hand_inserted = PLUG_INSERTED_POSITION + PLUG_TO_GRIP + HAND_CARRY_CORRECTION
+        hand_inserted = PLUG_INSERTED_POSITION + self.plug_to_grip + HAND_CARRY_CORRECTION
 
         if time_seconds < SETTLE_SECONDS:
             return HAND_STANDBY_POSITION, 0.0, "settle"

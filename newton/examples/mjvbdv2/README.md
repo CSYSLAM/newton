@@ -25,6 +25,7 @@ uv run --extra examples -m newton.examples mjvbd_v2_conveyor_sorting --help
 | Bimanual nut and bolt | `mjvbd_v2_nut_bolt` | [example_mjvbd_v2_nut_bolt.py](example_mjvbd_v2_nut_bolt.py) |
 | Cloth twist | `mjvbd_v2_cloth_twist` | [example_mjvbd_v2_cloth_twist.py](example_mjvbd_v2_cloth_twist.py) |
 | W1 plug insertion | `mjvbd_v2_plug_socket` | [example_mjvbd_v2_plug_socket.py](example_mjvbd_v2_plug_socket.py) |
+| W1 two-way plug insertion | `mjvbd_v2_plug_socket_two_way` | [example_mjvbd_v2_plug_socket_two_way.py](example_mjvbd_v2_plug_socket_two_way.py) |
 | W1 chair pushing | `mjvbd_v2_push_chair` | [example_mjvbd_v2_push_chair.py](example_mjvbd_v2_push_chair.py) |
 | W1 bag transfer from a rod | `mjvbd_v2_bag_rod` | [example_mjvbd_v2_bag_rod.py](example_mjvbd_v2_bag_rod.py) |
 | Soft-body gear crusher | `mjvbd_v2_gear_crusher` | [example_mjvbd_v2_gear_crusher.py](example_mjvbd_v2_gear_crusher.py) |
@@ -91,7 +92,36 @@ MuJoCo resolves the links against the worktop. Shared setup lives in
   instead of dropped over a rim, which a friction grip cannot release
   symmetrically enough to keep a tall block upright.
 
-Two-way feedback reaches MuJoCo one substep later, so these scenes keep 10
+### W1 two-way plug insertion
+
+```bash
+uv run --extra examples -m newton.examples mjvbd_v2_plug_socket_two_way
+uv run --extra examples -m newton.examples mjvbd_v2_plug_socket_two_way --viewer null --test
+```
+
+The `mjvbd_v2_plug_socket` task on a fixed-base, gravity-compensated W1 V021
+driven by realtime IK joint targets with `coupling="two_way"`. Three changes
+were needed beyond switching the solver, each because the kinematic demo relied
+on the hand moving through contact:
+
+- The pinch is an anvil and a presser: the thumb holds the authored angle with
+  a 10 N*m limit, and the index closes toward 0.75 rad with a 3 N*m limit, so
+  contact stops it near 0.36 rad. The URDF gives the hand joints zero effort,
+  so the example sets these limits. At 1 N*m the plug slips in the pinch and
+  stalls against the socket face.
+- The hand pinches through the plug's center of mass instead of 1.5 cm
+  forward of it. Two fingertip contacts resist almost no torque about the
+  pinch axis, so the forward grip let the lifted plug swing about 90 degrees.
+- After the lift, the controller reads the plug's pose in the hand once, like
+  an in-hand pose estimate, and aims the hand so that the plug reaches the
+  socket axis. The kinematic demo's fixed carry and wrist corrections were
+  tuned for a prescribed grasp and over-rotate a physically held plug.
+
+The plug is never moved directly. Test mode keeps the kinematic demo's
+insertion checks after release and retraction, and also requires a 10 cm
+lift and an index finger stopped by contact.
+
+
 substeps per frame and give each 25 g finger 0.3 kg of reflected gear inertia
 (`--finger-armature`). Fingers squeezing past contact saturate their 10 N
 effort limit, which also clips the drive damping, so the fingers get 50 N*s/m

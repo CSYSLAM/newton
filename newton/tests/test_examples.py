@@ -695,6 +695,13 @@ add_example_test(
 )
 add_example_test(
     TestRobotExamples,
+    name="mjvbdv2.example_mjvbd_v2_plug_socket_two_way",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 780},
+    use_viewer=True,
+)
+add_example_test(
+    TestRobotExamples,
     name="mjvbdv2.example_mjvbd_v2_w1_table_push",
     devices=cuda_test_devices,
     test_options={"num-frames": 720},

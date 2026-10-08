@@ -1227,14 +1227,25 @@ and snacks remain dynamic throughout. See the
     <td align="center"><code>python -m newton.examples mjvbd_v2_w1_squeeze_grasp</code><br>W1 squeeze grasp</td>
     <td align="center"><code>python -m newton.examples mjvbd_v2_w1_pick_place_two_way</code><br>W1 two-way pick and place</td>
   </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_plug_socket_two_way.py">
+        <img width="320" src="docs/images/examples/example_mjvbd_v2_plug_socket_two_way.jpg" alt="A plug retained in its socket after a dynamic W1 hand inserts it">
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_plug_socket_two_way</code><br>W1 two-way plug insertion</td>
+  </tr>
 </table>
 
 With `coupling="two_way"`, VBD contact wrenches act back on the dynamic MuJoCo
 robot and MuJoCo resolves the links against static shapes. The grippers stall on
 a worktop and a slab instead of diving through them, shut fingers stop on a
 rigid block and indent a soft cube, and the pick-and-place blocks are held only
-by finger effort and friction. Each scene accepts `--coupling one_way` for
-comparison. See the [MJVBDV2 demo notes](newton/examples/mjvbdv2/README.md).
+by finger effort and friction. The two-way plug insertion pinches with a
+force-limited index finger and aims the hand from the plug's measured pose in
+the hand. Each W1 V030 scene accepts `--coupling one_way` for comparison. See the [MJVBDV2 demo notes](newton/examples/mjvbdv2/README.md).
 
 ## Project Governance, Legal, and Members
 
