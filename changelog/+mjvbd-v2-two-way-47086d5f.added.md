@@ -1,0 +1,1 @@
+Add opt-in two-way coupling to ``SolverMJVBDV2`` with ``coupling="two_way"``: VBD contact wrenches drive the dynamic MuJoCo robot, MuJoCo resolves robot contacts with static shapes such as tables, and the W1 table push, squeeze grasp, and two-way pick-and-place examples demonstrate it.

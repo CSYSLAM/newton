@@ -15,6 +15,9 @@ uv run --extra examples -m newton.examples mjvbd_v2_conveyor_sorting --help
 | Scene | Command name | Module |
 | --- | --- | --- |
 | W1 V030 two-gripper pick and place | `mjvbd_v2_w1_pick_place` | [example_mjvbd_v2_w1_pick_place.py](example_mjvbd_v2_w1_pick_place.py) |
+| W1 V030 two-way pick and place | `mjvbd_v2_w1_pick_place_two_way` | [example_mjvbd_v2_w1_pick_place_two_way.py](example_mjvbd_v2_w1_pick_place_two_way.py) |
+| W1 V030 two-way squeeze grasp | `mjvbd_v2_w1_squeeze_grasp` | [example_mjvbd_v2_w1_squeeze_grasp.py](example_mjvbd_v2_w1_squeeze_grasp.py) |
+| W1 V030 two-way table push | `mjvbd_v2_w1_table_push` | [example_mjvbd_v2_w1_table_push.py](example_mjvbd_v2_w1_table_push.py) |
 | W1 V030 paper bag and snack packing | `mjvbd_v2_w1_bag_packing` | [example_mjvbd_v2_w1_bag_packing.py](example_mjvbd_v2_w1_bag_packing.py) |
 | W1 T-shirt folding | `mjvbd_v2_tshirt_fold` | [example_mjvbd_v2_tshirt_fold.py](example_mjvbd_v2_tshirt_fold.py) |
 | W1 tablecloth placement | `mjvbd_v2_tablecloth_place` | [example_mjvbd_v2_tablecloth_place.py](example_mjvbd_v2_tablecloth_place.py) |
@@ -57,6 +60,40 @@ Test mode checks both lifts, finite states, TCP tracking, joint velocity,
 and each released block's full bounds and resting height inside its bin.
 Use `--no-cuda-graph` to run without graph capture.
 See [asset provenance and physical assumptions](assets/w1_v030/README.md).
+
+### W1 V030 two-way coupling
+
+```bash
+uv run --extra examples -m newton.examples mjvbd_v2_w1_table_push
+uv run --extra examples -m newton.examples mjvbd_v2_w1_squeeze_grasp
+uv run --extra examples -m newton.examples mjvbd_v2_w1_pick_place_two_way
+uv run --extra examples -m newton.examples mjvbd_v2_w1_squeeze_grasp --coupling one_way
+```
+
+These scenes use `SolverMJVBDV2(..., joint_mode="dynamic", coupling="two_way")`.
+Per-frame IK writes `control.joint_target_q`, MuJoCo PD drives with passive
+gravity compensation track it, VBD contact wrenches act back on the robot, and
+MuJoCo resolves the links against the worktop. Shared setup lives in
+[`support/w1_two_way.py`](support/w1_two_way.py). Every scene accepts
+`--coupling one_way` to show the same commands without feedback.
+
+- `mjvbd_v2_w1_table_push`: downward-pointing shut grippers dive toward targets
+  8 cm below a 1 m worktop. The left one stalls on the bare worktop through a
+  MuJoCo contact; the right one stalls on a dense VBD slab. Both then follow the
+  targets back up. The worktop is raised so the targets stay within reach.
+- `mjvbd_v2_w1_squeeze_grasp`: the finger targets go fully closed on a rigid
+  block and a tetrahedral cube. The fingers stop on the block faces and indent
+  the cube until its elastic force balances the 10 N finger effort, then lift,
+  lower, and release both objects.
+- `mjvbd_v2_w1_pick_place_two_way`: the pick-and-place task held only by finger
+  effort and friction. The grasp point is raised and moved back to center the
+  finger pads, and blocks are set down in trays that are open toward the robot
+  instead of dropped over a rim, which a friction grip cannot release
+  symmetrically enough to keep a tall block upright.
+
+Two-way feedback reaches MuJoCo one substep later, so these scenes keep 10
+substeps per frame and give each 25 g finger 0.3 kg of reflected gear inertia
+(`--finger-armature`).
 
 ### Conveyor sorting
 

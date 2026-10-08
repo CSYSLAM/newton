@@ -33,7 +33,7 @@ from .mujoco.solver_mujoco import SolverMuJoCo
 from .ownership import MJVBDV2Ownership, resolve_ownership
 from .soft_contact_pipeline import MJVBDSoftContactPipeline
 from .solver_mjvbd_v2 import SolverMJVBDV2 as _SolverMJVBDV2Coupled
-from .solver_mjvbd_v2 import _resolve_vbd_options, _SolverMJVBDV2Pneumatic
+from .solver_mjvbd_v2 import _resolve_coupling_options, _resolve_vbd_options, _SolverMJVBDV2Pneumatic
 from .vbd.solver_vbd import SolverVBD, _get_pneumatic_counts
 from .vbd_soft.solver_vbd import SolverVBD as SolverVBDSoft
 
@@ -403,7 +403,7 @@ class _KinematicFullVBDBackend(SolverBase):
 
 
 class SolverMJVBDV2(SolverBase):
-    """Couple selected articulations one-way to VBD/AVBD objects.
+    """Couple selected articulations to VBD/AVBD objects.
 
     .. experimental::
         SolverMJVBDV2's public API and behavior may change without prior notice.
@@ -411,9 +411,15 @@ class SolverMJVBDV2(SolverBase):
     MuJoCo owns the selected articulation joints and link bodies. Every
     unselected free rigid body and every particle are owned by VBD, so cloth,
     tetrahedral soft bodies, springs, pneumatic shells, and VBD rigid bodies
-    interact in one VBD/AVBD solve. In dynamic coupled scenes, MuJoCo link poses
-    become zero-inverse-mass moving colliders for VBD. Contact impulses from VBD
-    do not feed back into MuJoCo.
+    interact in one VBD/AVBD solve. In dynamic coupled scenes with the default
+    ``coupling="one_way"``, MuJoCo link poses become zero-inverse-mass moving
+    colliders for VBD, contact impulses from VBD do not feed back into MuJoCo,
+    and MuJoCo computes no contacts. With ``coupling="two_way"``, VBD sees the
+    links as proxies carrying MuJoCo effective inertia, harvested VBD contact
+    wrenches drive MuJoCo on the next step, and MuJoCo resolves link contacts
+    against static world shapes such as tables and the ground. A link driven
+    toward a ``joint_target_q`` inside an object then stops at the contact
+    instead of pushing through it.
 
     The solver inspects the resolved ownership and model topology at
     construction and selects one of six specialized backends. Joint-free scenes
@@ -439,6 +445,21 @@ class SolverMJVBDV2(SolverBase):
         contact_mode: Use ``"soft"`` for sparse particle-shape contacts,
             ``"full"`` for the complete collision pipeline, or ``"auto"`` to
             choose full contact only when VBD owns dynamic rigid bodies.
+        coupling: ``"one_way"`` keeps MuJoCo unaffected by VBD. ``"two_way"``
+            returns VBD contact wrenches to MuJoCo and enables MuJoCo contacts
+            between the selected links and static world shapes. Two-way
+            coupling requires ``joint_mode="dynamic"``, always uses the full
+            VBD rigid integration path, and does not support full-surface
+            rigid-soft contacts. Only the dynamic ``coupled`` backend has a
+            MuJoCo/VBD interface; other dynamic backends accept the value
+            unchanged.
+        coupling_options: Two-way proxy overrides. Supported keys are
+            ``mass_scale`` (default ``1.0``), ``mode`` (``"lagged"`` or
+            ``"staggered"``, default ``"staggered"``), ``proxy_relaxation``
+            (default ``0.5``), ``proxy_relaxation_mode`` (``"fixed"`` or
+            ``"aitken"``), ``proxy_relaxation_min``, ``proxy_relaxation_max``,
+            and ``iterations`` (default ``1``), with the meanings documented
+            on ``SolverCoupledProxy.Proxy``.
         vbd_preset: Optional high-level VBD policy. ``"surface-fast"`` selects
             the CUDA surface schedule with an experimental 5e-6 m displacement
             deadband per substep, and falls back to 20 ordinary
@@ -466,7 +487,9 @@ class SolverMJVBDV2(SolverBase):
             slow motion and can undo small contact corrections. It does not
             change the iteration budget or skip force/contact evaluation.
         mujoco_options: Keyword arguments forwarded to the private MuJoCo
-            implementation when the selected backend uses MuJoCo.
+            implementation when the selected backend uses MuJoCo. Two-way
+            coupling defaults ``disable_contacts`` to ``False``; pass ``True``
+            to keep MuJoCo contact-free.
         collision_options: Keyword arguments forwarded to the selected contact
             pipeline. Soft-only paths accept ``soft_contact_margin``.
 
@@ -478,7 +501,7 @@ class SolverMJVBDV2(SolverBase):
     Note:
         MuJoCo sleeping is supported only by the articulation-only
         ``pure_mujoco`` backend. It is rejected by the dynamic coupled backend
-        because one-way VBD contacts cannot wake a MuJoCo articulation.
+        because VBD contacts cannot wake a MuJoCo articulation.
     """
 
     @dataclass(frozen=True)
@@ -517,6 +540,7 @@ class SolverMJVBDV2(SolverBase):
         tetrahedron_solve_enabled: bool
         spring_solve_enabled: bool
         pneumatic_solve_enabled: bool
+        two_way_coupling_enabled: bool
 
     def __init__(
         self,
@@ -526,6 +550,8 @@ class SolverMJVBDV2(SolverBase):
         mujoco_joints: Sequence[int] | None = None,
         joint_mode: Literal["dynamic", "kinematic"] = "dynamic",
         contact_mode: Literal["auto", "soft", "full"] = "auto",
+        coupling: Literal["one_way", "two_way"] = "one_way",
+        coupling_options: Mapping[str, object] | None = None,
         vbd_preset: Literal["surface-fast"] | None = None,
         vbd_options: Mapping[str, object] | None = None,
         mujoco_options: Mapping[str, object] | None = None,
@@ -536,6 +562,13 @@ class SolverMJVBDV2(SolverBase):
             raise ValueError("joint_mode must be 'dynamic' or 'kinematic'")
         if contact_mode not in ("auto", "soft", "full"):
             raise ValueError("contact_mode must be 'auto', 'soft', or 'full'")
+        _resolve_coupling_options(coupling, coupling_options)
+        if coupling == "two_way" and joint_mode != "dynamic":
+            raise ValueError(
+                "coupling='two_way' requires joint_mode='dynamic' so MuJoCo can respond to VBD contact "
+                "wrenches; drive the robot through control.joint_target_q instead of prescribing joint_q"
+            )
+        two_way = coupling == "two_way"
 
         self.ownership = resolve_ownership(
             model,
@@ -556,7 +589,7 @@ class SolverMJVBDV2(SolverBase):
             vbd_preset,
             vbd_options,
             use_external_rigid_surface_path=(
-                not self.ownership.has_vbd_dynamic_bodies and contact_mode in ("auto", "soft")
+                not self.ownership.has_vbd_dynamic_bodies and contact_mode in ("auto", "soft") and not two_way
             ),
         )
         self.vbd_preset = vbd_preset
@@ -624,6 +657,8 @@ class SolverMJVBDV2(SolverBase):
                 mujoco_joints=mujoco_joints,
                 joint_mode=joint_mode,
                 contact_mode=contact_mode,
+                coupling=coupling,
+                coupling_options=coupling_options,
                 vbd_options=resolved_vbd_options,
                 mujoco_options=mujoco_options,
                 collision_options=collision_options,
@@ -651,6 +686,7 @@ class SolverMJVBDV2(SolverBase):
             tetrahedron_solve_enabled=model.tet_count > 0,
             spring_solve_enabled=model.spring_count > 0,
             pneumatic_solve_enabled=pneumatic_cavity_count > 0,
+            two_way_coupling_enabled=backend_name == "coupled" and two_way,
         )
 
     @classmethod

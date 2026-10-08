@@ -695,6 +695,27 @@ add_example_test(
 )
 add_example_test(
     TestRobotExamples,
+    name="mjvbdv2.example_mjvbd_v2_w1_table_push",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 720},
+    use_viewer=True,
+)
+add_example_test(
+    TestRobotExamples,
+    name="mjvbdv2.example_mjvbd_v2_w1_squeeze_grasp",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 720},
+    use_viewer=True,
+)
+add_example_test(
+    TestRobotExamples,
+    name="mjvbdv2.example_mjvbd_v2_w1_pick_place_two_way",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 900},
+    use_viewer=True,
+)
+add_example_test(
+    TestRobotExamples,
     name="robot.example_robot_cartpole",
     devices=test_devices,
     test_options={"usd_required": True, "num-frames": 100},

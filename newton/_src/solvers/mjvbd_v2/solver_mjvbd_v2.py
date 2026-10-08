@@ -115,13 +115,54 @@ def _copy_pneumatic_state_kernel(
     destination_clamp_flags[destination_index] = source_clamp_flags[source_index]
 
 
+_TWO_WAY_COUPLING_DEFAULTS: dict[str, object] = {
+    "mass_scale": 1.0,
+    "mode": "staggered",
+    "proxy_relaxation": 0.5,
+    "proxy_relaxation_mode": "fixed",
+    "proxy_relaxation_min": 0.1,
+    "proxy_relaxation_max": 1.0,
+    "iterations": 1,
+}
+
+
+def _resolve_coupling_options(
+    coupling: Literal["one_way", "two_way"],
+    overrides: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Validate the MuJoCo/VBD feedback policy and fill two-way defaults."""
+    if coupling not in ("one_way", "two_way"):
+        raise ValueError("coupling must be 'one_way' or 'two_way'")
+    if coupling == "one_way":
+        if overrides:
+            raise ValueError("coupling_options are only used with coupling='two_way'")
+        return {}
+    options = dict(_TWO_WAY_COUPLING_DEFAULTS)
+    unknown = sorted(set(overrides or {}) - set(options))
+    if unknown:
+        raise ValueError(f"Unsupported coupling_options keys {unknown}; expected a subset of {sorted(options)}")
+    options.update(overrides or {})
+    return options
+
+
 class _OneWayCoupledProxy(SolverCoupledProxy):
-    """Proxy composition whose source never receives destination feedback."""
+    """Proxy composition whose source optionally never receives destination feedback.
+
+    Subclasses set ``_two_way`` before construction. When it is false, MuJoCo
+    links become zero-inverse-mass VBD colliders and all feedback is zeroed.
+    When it is true, the shared proxy path installs MuJoCo effective inertia on
+    the VBD proxies and returns harvested contact wrenches to MuJoCo.
+    """
+
+    _two_way: bool = False
 
     def _proxy_feedback_enabled(self) -> bool:
-        return False
+        return self._two_way
 
     def _apply_proxy_body_effective_masses(self) -> None:
+        if self._two_way:
+            super()._apply_proxy_body_effective_masses()
+            return
         for mapping in self._proxy_mappings:
             if mapping.proxy_ids_local is None or mapping.proxy_ids_local.shape[0] == 0:
                 continue
@@ -130,17 +171,23 @@ class _OneWayCoupledProxy(SolverCoupledProxy):
             destination.solver.notify_model_changed(ModelFlags.BODY_INERTIAL_PROPERTIES)
 
     def _blend_proxy_feedback(self, proxy) -> None:
+        if self._two_way:
+            super()._blend_proxy_feedback(proxy)
+            return
         proxy.coupling_forces.zero_()
         if proxy.coupling_forces_previous is not None:
             proxy.coupling_forces_previous.zero_()
 
 
 class SolverMJVBDV2(_OneWayCoupledProxy):
-    """One-way MuJoCo-joint to VBD, with full coupling among VBD objects.
+    """MuJoCo-joint to VBD coupling, with full coupling among VBD objects.
 
-    MuJoCo owns only the selected articulation bodies and joints. Those link
-    bodies are synchronized into VBD as zero-inverse-mass moving colliders.
-    Every remaining rigid body and every particle are owned by VBD.
+    MuJoCo owns only the selected articulation bodies and joints. Every
+    remaining rigid body and every particle are owned by VBD. With
+    ``coupling="one_way"`` the link bodies are synchronized into VBD as
+    zero-inverse-mass moving colliders. With ``coupling="two_way"`` they become
+    VBD proxies with MuJoCo effective inertia, VBD contact wrenches are returned
+    to MuJoCo, and MuJoCo resolves link contacts against static world shapes.
     """
 
     def __init__(
@@ -151,11 +198,13 @@ class SolverMJVBDV2(_OneWayCoupledProxy):
         mujoco_joints: Sequence[int] | None = None,
         joint_mode: Literal["dynamic", "kinematic"] = "dynamic",
         contact_mode: Literal["auto", "soft", "full"] = "auto",
+        coupling: Literal["one_way", "two_way"] = "one_way",
+        coupling_options: Mapping[str, object] | None = None,
         vbd_options: Mapping[str, object] | None = None,
         mujoco_options: Mapping[str, object] | None = None,
         collision_options: Mapping[str, object] | None = None,
     ) -> None:
-        """Create the specialized one-way MuJoCo/VBD solver.
+        """Create the specialized MuJoCo/VBD solver.
 
         Args:
             model: Simulation model.
@@ -163,6 +212,8 @@ class SolverMJVBDV2(_OneWayCoupledProxy):
             mujoco_joints: Joints owned by MuJoCo.
             joint_mode: Whether MuJoCo joints are dynamic or kinematic.
             contact_mode: Particle/rigid contact pipeline selection.
+            coupling: ``"one_way"`` or ``"two_way"`` MuJoCo/VBD feedback.
+            coupling_options: Two-way proxy overrides, see :data:`_TWO_WAY_COUPLING_DEFAULTS`.
             vbd_options: Options forwarded by the public MJVBDV2 dispatcher. The full VBD backend accepts
                 experimental ``enable_cuda_fast_path=True`` for instance-local CUDA scheduling. The matching
                 collision option enables cooperative SDF queries; neither option changes physical parameters.
@@ -173,6 +224,16 @@ class SolverMJVBDV2(_OneWayCoupledProxy):
             raise ValueError("joint_mode must be 'dynamic' or 'kinematic'")
         if contact_mode not in ("auto", "soft", "full"):
             raise ValueError("contact_mode must be 'auto', 'soft', or 'full'")
+        resolved_coupling = _resolve_coupling_options(coupling, coupling_options)
+        two_way = coupling == "two_way"
+        if two_way and joint_mode != "dynamic":
+            raise ValueError(
+                "coupling='two_way' requires joint_mode='dynamic' so MuJoCo can respond to VBD contact "
+                "wrenches; drive the robot through control.joint_target_q instead of prescribing joint_q"
+            )
+        # Read by the feedback hooks during SolverCoupledProxy construction.
+        self._two_way = two_way
+        self.coupling = coupling
 
         ownership = resolve_ownership(
             model,
@@ -195,31 +256,44 @@ class SolverMJVBDV2(_OneWayCoupledProxy):
             requested_sleeping = False if sleeping_attribute is None else bool(sleeping_attribute.numpy()[0])
         if requested_sleeping:
             raise ValueError(
-                "enable_sleeping=True is unsupported by the one-way coupled MJVBDV2 backend because "
+                "enable_sleeping=True is unsupported by the coupled MJVBDV2 backend because "
                 "VBD contacts cannot wake MuJoCo bodies"
             )
         mujoco_kwargs["enable_sleeping"] = False
-        requested_disable_contacts = mujoco_kwargs.pop("disable_contacts", True)
-        if requested_disable_contacts is not True:
-            raise ValueError("MJVBDV2 requires mujoco_options['disable_contacts']=True")
+        # One-way coupling leaves MuJoCo contact-free so it cannot duplicate
+        # VBD contacts. Two-way coupling keeps MuJoCo contacts by default: the
+        # MuJoCo view holds only the selected links and static world shapes,
+        # so it resolves link-vs-world and self contacts that VBD never
+        # returns as feedback.
+        requested_disable_contacts = mujoco_kwargs.pop("disable_contacts", not two_way)
+        if not two_way and requested_disable_contacts is not True:
+            raise ValueError("One-way MJVBDV2 requires mujoco_options['disable_contacts']=True")
         requested_mujoco_contacts = mujoco_kwargs.pop("use_mujoco_contacts", True)
         if requested_mujoco_contacts is not True:
             raise ValueError("MJVBDV2 currently requires mujoco_options['use_mujoco_contacts']=True")
-        mujoco_kwargs["disable_contacts"] = True
+        mujoco_kwargs["disable_contacts"] = bool(requested_disable_contacts)
         mujoco_kwargs["use_mujoco_contacts"] = True
 
         vbd_kwargs = dict(vbd_options or {})
-        external_rigid = not ownership.has_vbd_dynamic_bodies
+        # Two-way proxies need VBD-integrated bodies: the proxy is displaced by
+        # contact inside the VBD solve, and the contact-force harvest uses the
+        # AVBD rigid history.
+        external_rigid = not ownership.has_vbd_dynamic_bodies and not two_way
         requested_external = vbd_kwargs.pop("integrate_with_external_rigid_solver", external_rigid)
         if bool(requested_external) != external_rigid:
             required = "True" if external_rigid else "False"
             raise ValueError(
-                "MJVBDV2 selects the VBD rigid integration mode from entity ownership; "
+                "MJVBDV2 selects the VBD rigid integration mode from entity ownership and coupling; "
                 f"integrate_with_external_rigid_solver must be {required} for this model"
             )
         vbd_kwargs["integrate_with_external_rigid_solver"] = external_rigid
         vbd_kwargs["external_rigid_state_from_input"] = external_rigid
-        vbd_kwargs["one_way_proxy_bodies"] = True
+        vbd_kwargs["one_way_proxy_bodies"] = not two_way
+        if two_way:
+            # Penalty contacts are separated by the end of the VBD solve, so
+            # re-evaluating them there reports almost no force on light links
+            # such as gripper fingers. The proxy momentum change does not.
+            vbd_kwargs.setdefault("proxy_body_feedback", "momentum")
         pneumatic_cavity_count, _ = _get_pneumatic_counts(model)
         vbd_solver_type = SolverVBDSoft if external_rigid and pneumatic_cavity_count == 0 else SolverVBD
         if vbd_solver_type is not SolverVBDSoft and vbd_kwargs.pop("particle_displacement_threshold", 0.0) != 0.0:
@@ -233,6 +307,11 @@ class SolverMJVBDV2(_OneWayCoupledProxy):
             raise ValueError("collision_options['soft_contact_margin'] must be non-negative")
         if self.contact_mode == "soft" and collision_kwargs.get("enable_rigid_soft_full_surface_contact", False):
             raise ValueError("contact_mode='soft' does not support full-surface rigid-soft contacts")
+        if two_way and collision_kwargs.get("enable_rigid_soft_full_surface_contact", False):
+            raise ValueError(
+                "coupling='two_way' does not support full-surface rigid-soft contacts because edge/face "
+                "contact forces are not harvested onto MuJoCo proxies"
+            )
 
         def configure_mujoco_view(view) -> None:
             if joint_mode != "kinematic" or view.body_count == 0:
@@ -264,21 +343,26 @@ class SolverMJVBDV2(_OneWayCoupledProxy):
                 particles=ownership.vbd_particles,
             ),
         ]
-        coupling = SolverCoupledProxy.Config(
+        if two_way:
+            proxy_kwargs = {key: value for key, value in resolved_coupling.items() if key != "iterations"}
+            iterations = int(resolved_coupling["iterations"])
+        else:
+            proxy_kwargs = {"mode": "staggered", "proxy_relaxation": 0.0}
+            iterations = 1
+        proxy_config = SolverCoupledProxy.Config(
             proxies=[
                 SolverCoupledProxy.Proxy(
                     source="mujoco",
                     destination="vbd",
                     bodies=ownership.mujoco_bodies,
-                    mode="staggered",
-                    proxy_relaxation=0.0,
                     collision_pipeline=make_collision_pipeline,
                     collide_interval=1,
+                    **proxy_kwargs,
                 )
             ],
-            iterations=1,
+            iterations=iterations,
         )
-        super().__init__(model=model, entries=entries, coupling=coupling)
+        super().__init__(model=model, entries=entries, coupling=proxy_config)
 
     @classmethod
     def register_custom_attributes(cls, builder: ModelBuilder) -> None:

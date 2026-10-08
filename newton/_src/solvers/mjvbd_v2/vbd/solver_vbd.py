@@ -252,6 +252,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         integrate_with_external_rigid_solver: bool = False,
         external_rigid_state_from_input: bool = False,
         one_way_proxy_bodies: bool = False,
+        proxy_body_feedback: Literal["contact", "momentum"] = "contact",
         # Particle parameters
         particle_enable_self_contact: bool = False,
         particle_self_contact_radius: float = 0.2,
@@ -349,6 +350,11 @@ class SolverVBD(SolverBase, CouplingInterface):
             external_rigid_state_from_input: Copy external rigid poses and velocities from ``state_in`` to
                 ``state_out`` before particle iterations. Used by MJVBDV2 after proxy synchronization.
             one_way_proxy_bodies: Treat proxy bodies as one-way colliders and suppress harvested feedback.
+            proxy_body_feedback: How proxy-body feedback is harvested when ``one_way_proxy_bodies`` is False.
+                ``"contact"`` re-evaluates contact forces at the solved pose, which underestimates penalty
+                contacts that the solve has already separated. ``"momentum"`` discards proxy-static and
+                proxy-proxy rigid contacts before the solve and reports the proxy momentum change, so it
+                captures every rigid, particle, and surface contact impulse on the proxy.
 
             Particle parameters:
 
@@ -653,6 +659,9 @@ class SolverVBD(SolverBase, CouplingInterface):
         self.integrate_with_external_rigid_solver = integrate_with_external_rigid_solver
         self.external_rigid_state_from_input = bool(external_rigid_state_from_input)
         self.one_way_proxy_bodies = bool(one_way_proxy_bodies)
+        if proxy_body_feedback not in ("contact", "momentum"):
+            raise ValueError("proxy_body_feedback must be 'contact' or 'momentum'")
+        self.proxy_body_feedback = proxy_body_feedback
         self._external_body_q_prev = (
             wp.clone(model.body_q, device=self.device)
             if self.integrate_with_external_rigid_solver and self.external_rigid_state_from_input
@@ -2105,6 +2114,15 @@ class SolverVBD(SolverBase, CouplingInterface):
         contacts_freshly_detected: bool = False,
     ) -> Contacts | None:
         """Update rigid history cadence for proxy contacts."""
+        if self.proxy_body_feedback == "momentum" and not self.one_way_proxy_bodies:
+            # Momentum feedback reports every impulse the proxy receives, so
+            # contacts with static shapes and other proxies (owned by the
+            # source solver) must not act on the proxy here.
+            contacts = super().coupling_prepare_proxy_contacts(
+                state, contacts, contacts_freshly_detected=contacts_freshly_detected
+            )
+            self.set_rigid_history_update(bool(contacts_freshly_detected))
+            return contacts
         # Full-surface (edge/face) rigid-soft contacts are not yet harvested onto proxy particles:
         # the proxy contact-force kernels consume only per-particle records (particle >= 0), so a soft
         # edge/face contact's reaction on a proxy-coupled rigid body would be silently dropped. Fail
@@ -2153,7 +2171,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         if self.one_way_proxy_bodies:
             out_body_f.zero_()
             return
-        if not self._coupling_has_rigid_avbd_state:
+        if self.proxy_body_feedback == "momentum" or not self._coupling_has_rigid_avbd_state:
             super().coupling_harvest_proxy_wrenches(
                 body_local_to_proxy_global,
                 out_body_f,

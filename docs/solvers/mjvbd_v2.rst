@@ -14,7 +14,7 @@ those branches.
    :class:`~newton.solvers.SolverMJVBDV2`'s public API and behavior may
    change without prior notice.
 
-The dynamic mixed path is deliberately one-way:
+By default the dynamic mixed path is one-way:
 
 .. code-block:: text
 
@@ -25,8 +25,8 @@ The dynamic mixed path is deliberately one-way:
 
 VBD contact impulses do not feed back into MuJoCo. This is useful for a robot
 driving deformable or VBD rigid objects when the object's reaction is not
-intended to change the robot trajectory. Use a different coupling design when
-two-way reaction forces are required.
+intended to change the robot trajectory. Pass ``coupling="two_way"`` when
+contacts must stop or push the robot; see `Two-way coupling`_.
 
 Quick start
 -----------
@@ -111,7 +111,8 @@ The selected backend is exposed as ``solver.features.backend``:
      - Full VBD/AVBD with selected links as kinematic colliders.
    * - ``coupled``
      - Dynamic selected joints plus particles or dynamic VBD rigid bodies.
-     - MuJoCo, one-way link synchronization, then VBD/AVBD.
+     - MuJoCo, link synchronization, then VBD/AVBD; ``coupling="two_way"``
+       also returns VBD contact wrenches to MuJoCo.
 
 ``solver.features`` also reports entity and element counts and which MuJoCo,
 rigid, particle, cloth, bending, tetrahedral, spring, and pneumatic branches
@@ -121,8 +122,8 @@ Dynamic and kinematic joints
 ----------------------------
 
 With ``joint_mode="dynamic"``, selected joints are integrated by MuJoCo. A
-mixed scene then uses their newly computed link transforms as zero-inverse-mass
-moving colliders in VBD.
+mixed scene then uses their newly computed link transforms as moving colliders
+in VBD, with zero inverse mass under the default one-way coupling.
 
 With ``joint_mode="kinematic"``, the application supplies the selected joint
 and link state. MJVBDV2 does not construct MuJoCo:
@@ -135,6 +136,49 @@ and link state. MJVBDV2 does not construct MuJoCo:
 
 Do not pass ``mujoco_options`` to a kinematic backend. MJVBDV2 rejects options
 that would be ignored.
+
+Two-way coupling
+----------------
+
+With ``coupling="two_way"`` and ``joint_mode="dynamic"``, the robot reacts to
+what it touches, as in MuJoCo. Drive it through ``control.joint_target_q``
+rather than writing ``joint_q``; a target inside an object or below a table
+then becomes an actuator force that contact balances:
+
+.. code-block:: python
+
+   solver = newton.solvers.SolverMJVBDV2(
+       model,
+       joint_mode="dynamic",
+       contact_mode="full",
+       coupling="two_way",
+   )
+   assert solver.features.two_way_coupling_enabled
+
+Two-way coupling changes three things in the ``coupled`` backend:
+
+- VBD sees the selected links as proxies that carry MuJoCo's effective
+  inertia, so a finger is pushed back by an object instead of crushing it.
+- The proxies' momentum change in VBD is returned to MuJoCo as body wrenches on
+  the next substep. VBD integrates the proxy bodies itself, so particle-only
+  scenes use the full VBD implementation instead of the external-rigid
+  surface path and its ``vbd_preset="surface-fast"`` schedule.
+- MuJoCo resolves contacts between the selected links and static shapes, such
+  as a table or the ground, which are not returned through VBD. Pass
+  ``mujoco_options={"disable_contacts": True}`` to keep MuJoCo contact-free.
+
+The feedback is explicit, so it is stable only while a link's effective mass
+is large relative to the contact stiffness times the squared substep. For stiff
+contacts (``ke`` around ``2e4`` N/m), use substeps of about 1/600 s and give
+light links reflected gear inertia through joint ``armature``; the W1 V030
+examples use ``0.3`` on each 25 g finger. ``coupling_options`` tunes the proxy
+loop with the keys documented on :class:`~newton.solvers.SolverMJVBDV2`; the
+default staggered transfer with ``proxy_relaxation=0.5`` was the most robust in
+the shipped scenes.
+
+The ``mjvbd_v2_w1_table_push``, ``mjvbd_v2_w1_squeeze_grasp``, and
+``mjvbd_v2_w1_pick_place_two_way`` examples demonstrate the mode. Each accepts
+``--coupling one_way`` for comparison.
 
 Contact modes
 -------------
@@ -236,14 +280,17 @@ then capture a fixed step. The warm-up ensures that contact history and other
 lazy capacity cannot grow inside the graph.
 
 MuJoCo sleeping may be enabled only when ``features.backend`` is
-``"pure_mujoco"``. The dynamic coupled path rejects sleeping because VBD has no
-feedback channel with which to wake MuJoCo bodies.
+``"pure_mujoco"``. The dynamic coupled path rejects sleeping because VBD
+contacts cannot wake MuJoCo bodies.
 
 Limitations
 -----------
 
-- Dynamic mixed coupling is strictly MuJoCo-to-VBD; it has no reaction force
-  from VBD to the selected articulation.
+- With the default ``coupling="one_way"``, dynamic mixed coupling is strictly
+  MuJoCo-to-VBD and the selected links ignore static shapes.
+- Two-way feedback is explicit and arrives one substep late; it requires
+  ``joint_mode="dynamic"`` and does not support full-surface rigid-soft
+  contacts.
 - Sleeping is unavailable in the coupled backend.
 - ``contact_mode="soft"`` does not solve dynamic VBD rigid-body contacts or
   full-surface rigid-soft contacts.

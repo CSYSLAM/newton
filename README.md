@@ -1202,6 +1202,40 @@ limits, and the head follows the operating hand. The Blender-authored paper bag
 and snacks remain dynamic throughout. See the
 [reference, asset, and validation notes](assets/w1_paper_bag/README.md).
 
+### W1 two-way coupling (MJVBDV2, experimental)
+
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_w1_table_push.py">
+        <img width="320" src="docs/images/examples/example_mjvbd_v2_w1_table_push.jpg" alt="W1 grippers pushing down on a worktop and a slab">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_w1_squeeze_grasp.py">
+        <img width="320" src="docs/images/examples/example_mjvbd_v2_w1_squeeze_grasp.jpg" alt="W1 grippers holding a rigid block and a soft cube">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="newton/examples/mjvbdv2/example_mjvbd_v2_w1_pick_place_two_way.py">
+        <img width="320" src="docs/images/examples/example_mjvbd_v2_w1_pick_place_two_way.jpg" alt="W1 carrying two blocks to open trays">
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_w1_table_push</code><br>W1 table push</td>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_w1_squeeze_grasp</code><br>W1 squeeze grasp</td>
+    <td align="center"><code>python -m newton.examples mjvbd_v2_w1_pick_place_two_way</code><br>W1 two-way pick and place</td>
+  </tr>
+</table>
+
+With `coupling="two_way"`, VBD contact wrenches act back on the dynamic MuJoCo
+robot and MuJoCo resolves the links against static shapes. The grippers stall on
+a worktop and a slab instead of diving through them, shut fingers stop on a
+rigid block and indent a soft cube, and the pick-and-place blocks are held only
+by finger effort and friction. Each scene accepts `--coupling one_way` for
+comparison. See the [MJVBDV2 demo notes](newton/examples/mjvbdv2/README.md).
+
 ## Project Governance, Legal, and Members
 
 Please see the [newton-governance repository](https://github.com/newton-physics/newton-governance) for more information about project governance.
