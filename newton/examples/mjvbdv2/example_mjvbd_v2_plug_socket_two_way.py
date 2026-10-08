@@ -38,6 +38,47 @@ from newton.examples.mjvbdv2.example_mjvbd_v2_plug_socket import (
 from newton.solvers import SolverMJVBDV2
 
 
+@wp.kernel
+def _write_ik_inputs(
+    position: wp.vec3,
+    rotation: wp.vec4,
+    grasp_alpha: float,
+    position_buffer: wp.array[wp.vec3],
+    rotation_buffer: wp.array[wp.vec4],
+    grasp_buffer: wp.array[float],
+):
+    """Store this frame's sampled IK target and pinch blend on the device."""
+    position_buffer[0] = position
+    rotation_buffer[0] = rotation
+    grasp_buffer[0] = grasp_alpha
+
+
+@wp.kernel
+def _unpack_ik_inputs(
+    position_buffer: wp.array[wp.vec3],
+    rotation_buffer: wp.array[wp.vec4],
+    target_positions: wp.array[wp.vec3],
+    target_rotations: wp.array[wp.vec4],
+):
+    """Feed the stored target to the IK objectives inside the frame graph."""
+    target_positions[0] = position_buffer[0]
+    target_rotations[0] = rotation_buffer[0]
+
+
+@wp.kernel
+def _write_hand_targets(
+    indices: wp.array[wp.int32],
+    open_values: wp.array[float],
+    grasp_values: wp.array[float],
+    grasp_buffer: wp.array[float],
+    q: wp.array[float],
+):
+    """Blend the hand between open and grasp targets with the stored blend."""
+    i = wp.tid()
+    alpha = grasp_buffer[0]
+    q[indices[i]] = open_values[i] * (1.0 - alpha) + grasp_values[i] * alpha
+
+
 class Example(kinematic.Example):
     """Run the plug/socket insertion on a dynamic, two-way coupled W1."""
 
@@ -211,24 +252,66 @@ class Example(kinematic.Example):
         )
 
     def _prepare_frame(self) -> None:
-        """Solve IK and advance the per-frame joint-target interval."""
+        """Sample this frame's IK target on the host; the frame graph solves it."""
         target, grasp_alpha, self.phase = self._sample_controller(self.sim_time)
         rotation = self._sample_hand_rotation(self.sim_time)
         planned = self._sample_insertion(self.sim_time)
         if planned is not None:
             target, rotation = planned
         self.last_target, self.last_rotation = target, rotation
-        self._set_ik_target(target, rotation)
+        self.target_position = np.asarray(target, dtype=np.float32)
+        if not hasattr(self, "_ik_position_buffer"):
+            self._ik_position_buffer = wp.zeros(1, dtype=wp.vec3, device=self.device)
+            self._ik_rotation_buffer = wp.zeros(1, dtype=wp.vec4, device=self.device)
+            self._grasp_buffer = wp.zeros(1, dtype=float, device=self.device)
+        wp.launch(
+            _write_ik_inputs,
+            1,
+            [
+                wp.vec3(target),
+                self._quat_vector(rotation),
+                float(grasp_alpha),
+                self._ik_position_buffer,
+                self._ik_rotation_buffer,
+                self._grasp_buffer,
+            ],
+            device=self.device,
+        )
+
+    def _solve_frame_ik(self) -> None:
+        """Solve the stored IK target and assemble this frame's joint targets on the device."""
+        wp.launch(
+            _unpack_ik_inputs,
+            1,
+            [
+                self._ik_position_buffer,
+                self._ik_rotation_buffer,
+                self.position_objective.target_positions,
+                self.rotation_objective.target_rotations,
+            ],
+            device=self.device,
+        )
         self.ik_solver.step(self.ik_q, self.ik_q, iterations=self.ik_iterations)
         self._restore_locked_ik_q()
-        self.target_position = np.asarray(target, dtype=np.float32)
-
         wp.copy(self.frame_q_start, self.frame_q_end)
         self._copy_ik_to_scene(self.frame_q_end)
-        self._write_hand_pose(grasp_alpha, self.frame_q_end)
+        wp.launch(
+            _write_hand_targets,
+            self.hand_q_indices.shape[0],
+            [self.hand_q_indices, self.hand_q_open, self.hand_q_grasp, self._grasp_buffer, self.frame_q_end],
+            device=self.device,
+        )
+
+    def _capture_simulation_graph(self) -> None:
+        """Capture IK and physics together, preserving the IK and target buffers."""
+        backups = [wp.clone(array) for array in (self.ik_q, self.frame_q_start, self.frame_q_end)]
+        super()._capture_simulation_graph()
+        for array, backup in zip((self.ik_q, self.frame_q_start, self.frame_q_end), backups, strict=True):
+            array.assign(backup)
 
     def _simulate_substeps(self) -> None:
-        """Interpolate drive targets; MuJoCo integrates the robot."""
+        """Solve this frame's IK, then interpolate drive targets while MuJoCo integrates the robot."""
+        self._solve_frame_ik()
         for substep in range(self.sim_substeps):
             alpha = (substep + 1) / self.sim_substeps
             wp.launch(

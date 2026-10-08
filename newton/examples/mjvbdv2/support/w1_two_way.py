@@ -50,6 +50,50 @@ def _interpolate_targets(
         target_qd[qd_start[j]] = (end[i] - start[i]) * inv_frame_dt
 
 
+@wp.kernel
+def _write_frame_inputs(
+    left: wp.vec3,
+    right: wp.vec3,
+    finger: float,
+    tcp_targets: wp.array[wp.vec3],
+    finger_target: wp.array[float],
+):
+    """Store this frame's sampled targets in persistent device buffers."""
+    tcp_targets[0] = left
+    tcp_targets[1] = right
+    finger_target[0] = finger
+
+
+@wp.kernel
+def _unpack_tcp_targets(
+    tcp_targets: wp.array[wp.vec3],
+    left_objective: wp.array[wp.vec3],
+    right_objective: wp.array[wp.vec3],
+):
+    """Feed the stored TCP targets to the two IK position objectives."""
+    left_objective[0] = tcp_targets[0]
+    right_objective[0] = tcp_targets[1]
+
+
+@wp.kernel
+def _finish_ik_frame(
+    ik_q: wp.array2d[float],
+    lower: wp.array[float],
+    upper: wp.array[float],
+    finger_coords: wp.array[int],
+    finger_target: wp.array[float],
+    frame_end: wp.array[float],
+):
+    """Clamp the IK solution to joint limits, apply the finger command, and store the frame target."""
+    i = wp.tid()
+    value = wp.clamp(ik_q[0, i], lower[i], upper[i])
+    for k in range(finger_coords.shape[0]):
+        if finger_coords[k] == i:
+            value = finger_target[0]
+    ik_q[0, i] = value
+    frame_end[i] = value
+
+
 def smoothstep(points, time):
     """Interpolate ``(time, value...)`` keyframes with a quintic ease."""
     for a, b in pairwise(points):
@@ -80,26 +124,33 @@ class W1TwoWayScene:
         self.sim_dt = self.frame_dt / args.substeps
         self.peak_free_tcp_error = 0.0
 
+        # IK keeps the URDF's fixed links so the gripper-base end effectors
+        # exist. The simulated robot collapses them into their parents: the
+        # movable-joint coordinates are identical, shapes keep their poses,
+        # and MuJoCo's per-level tree passes run 13 instead of 22 levels deep.
+        ik_builder = newton.ModelBuilder()
+        ik_builder.add_urdf(str(ASSET), floating=False, enable_self_collisions=False, collapse_fixed_joints=False)
         builder = newton.ModelBuilder()
         SolverMJVBDV2.register_custom_attributes(builder)
         builder.rigid_gap = 0.002
-        builder.add_urdf(str(ASSET), floating=False, enable_self_collisions=False, collapse_fixed_joints=False)
+        builder.add_urdf(str(ASSET), floating=False, enable_self_collisions=False, collapse_fixed_joints=True)
         self.robot_joints = builder.joint_count
         self.robot_bodies = builder.body_count
-        self.coords = {
-            name.rsplit("/", 1)[-1]: builder.joint_q_start[j]
-            for j, name in enumerate(builder.joint_label)
-            if builder.joint_type[j] != newton.JointType.FIXED
-        }
-        self.ee = [next(i for i, n in enumerate(builder.body_label) if n.endswith(f"/{s}_gripper_base")) for s in SIDES]
+        self.coords = self._movable_coordinates(builder)
+        if self._movable_coordinates(ik_builder) != self.coords:
+            raise RuntimeError("Collapsing fixed W1 joints changed the joint-coordinate layout")
+        self.ee = [
+            next(i for i, n in enumerate(ik_builder.body_label) if n.endswith(f"/{s}_gripper_base")) for s in SIDES
+        ]
         self.finger_coords = [
             [self.coords[f"{side}_FINGER{finger}_JOINT"] for finger in (1, 2)] for side in ("LEFT", "RIGHT")
         ]
-        for side, sign in (("LEFT", -1), ("RIGHT", 1)):
-            builder.joint_q[self.coords[f"{side}_J2"]] = sign * 0.9
-            builder.joint_q[self.coords[f"{side}_J4"]] = sign * 1.0
-            for coord in self.finger_coords[SIDES.index(side.lower())]:
-                builder.joint_q[coord] = FINGER_OPEN
+        for target in (builder, ik_builder):
+            for side, sign in (("LEFT", -1), ("RIGHT", 1)):
+                target.joint_q[self.coords[f"{side}_J2"]] = sign * 0.9
+                target.joint_q[self.coords[f"{side}_J4"]] = sign * 1.0
+                for coord in self.finger_coords[SIDES.index(side.lower())]:
+                    target.joint_q[coord] = FINGER_OPEN
         # MuJoCo cancels link weight passively, like a gravity-compensated
         # controller, so the PD drives only correct tracking error.
         gravcomp = builder.custom_attributes["mujoco:gravcomp"]
@@ -112,7 +163,8 @@ class W1TwoWayScene:
             builder.shape_material_ke[shape] = 2.0e4
             builder.shape_material_kd[shape] = 100.0
 
-        self.ik_model = builder.finalize()
+        self.ik_model = ik_builder.finalize()
+        self._map_tcp_to_scene(builder)
         self.home = self.initial_targets() + self.home_offset
         self._build_ik()
         self._solve_ik(self.home, FINGER_OPEN, iterations=150)
@@ -136,8 +188,15 @@ class W1TwoWayScene:
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.state_1.assign(self.state_0)
         wp.copy(self.control.joint_target_q, self.model.joint_q)
-        self.frame_start = wp.clone(self.ik_model.joint_q)
-        self.frame_end = wp.clone(self.ik_model.joint_q)
+        # Per-frame IK runs inside the captured frame graph; the host only
+        # writes the sampled targets into these buffers.
+        self.frame_end = wp.clone(self.ik_q.flatten())
+        self.frame_start = wp.clone(self.frame_end)
+        self.tcp_targets = wp.zeros(2, dtype=wp.vec3, device=self.model.device)
+        self.finger_target = wp.zeros(1, dtype=float, device=self.model.device)
+        self.finger_coord_array = wp.array(
+            [coord for coords in self.finger_coords for coord in coords], dtype=int, device=self.model.device
+        )
         self.solver = SolverMJVBDV2(
             self.model,
             mujoco_articulations=(0,),
@@ -207,7 +266,40 @@ class W1TwoWayScene:
         )
 
     def tcp_positions(self, body_q: np.ndarray) -> np.ndarray:
-        return np.array([np.asarray(wp.transform_point(wp.transform(*body_q[body]), TCP)) for body in self.ee])
+        """World TCP positions of the simulated grippers."""
+        return np.array(
+            [
+                np.asarray(wp.transform_point(wp.transform(*body_q[body]), offset))
+                for body, offset in zip(self.scene_ee, self.scene_tcp, strict=True)
+            ]
+        )
+
+    @staticmethod
+    def _movable_coordinates(builder: newton.ModelBuilder) -> dict[str, int]:
+        return {
+            name.rsplit("/", 1)[-1]: builder.joint_q_start[j]
+            for j, name in enumerate(builder.joint_label)
+            if builder.joint_type[j] != newton.JointType.FIXED
+        }
+
+    def _map_tcp_to_scene(self, scene: newton.ModelBuilder) -> None:
+        """Express each TCP in the simulated link that its gripper base collapses into."""
+        model = self.ik_model
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        body_q = state.body_q.numpy()
+        joint_type = model.joint_type.numpy()
+        parent_joint = {int(child): joint for joint, child in enumerate(model.joint_child.numpy())}
+        joint_parent = model.joint_parent.numpy()
+        self.scene_ee, self.scene_tcp = [], []
+        for gripper in self.ee:
+            body = gripper
+            while int(joint_type[parent_joint[body]]) == int(newton.JointType.FIXED):
+                body = int(joint_parent[parent_joint[body]])
+            label = model.body_label[body]
+            self.scene_ee.append(scene.body_label.index(label))
+            tcp_world = wp.transform_point(wp.transform(*body_q[gripper]), TCP)
+            self.scene_tcp.append(wp.transform_point(wp.transform_inverse(wp.transform(*body_q[body])), tcp_world))
 
     def finger_q(self) -> np.ndarray:
         """Finger-1 opening [m] of the left and right grippers."""
@@ -283,6 +375,32 @@ class W1TwoWayScene:
         self.ik_q.assign(q.reshape(1, -1))
         return q
 
+    def _solve_frame_ik(self):
+        """Solve this frame's IK target on the device; the previous target starts the interval."""
+        wp.copy(self.frame_start, self.frame_end)
+        wp.launch(
+            _unpack_tcp_targets,
+            1,
+            [self.tcp_targets, self.positions[0].target_positions, self.positions[1].target_positions],
+        )
+        self.ik_solver.step(self.ik_q, self.ik_q, iterations=12)
+        wp.launch(
+            _finish_ik_frame,
+            self.frame_end.shape[0],
+            [
+                self.ik_q,
+                self.ik_model.joint_limit_lower,
+                self.ik_model.joint_limit_upper,
+                self.finger_coord_array,
+                self.finger_target,
+                self.frame_end,
+            ],
+        )
+
+    def _simulate_frame(self):
+        self._solve_frame_ik()
+        self._simulate()
+
     def _simulate(self):
         for substep in range(self.args.substeps):
             wp.launch(
@@ -306,20 +424,24 @@ class W1TwoWayScene:
 
     def step(self):
         targets, finger_target = self.plan(self.sim_time + self.frame_dt)
-        start = self.ik_q.numpy()[0].copy()
-        end = self._solve_ik(targets, finger_target)
-        self.frame_start.assign(start)
-        self.frame_end.assign(end)
+        wp.launch(
+            _write_frame_inputs,
+            1,
+            [wp.vec3(*targets[0]), wp.vec3(*targets[1]), float(finger_target), self.tcp_targets, self.finger_target],
+        )
         if self.graph is None:
-            self._simulate()
+            self._simulate_frame()
             if self.model.device.is_cuda and not self.args.no_cuda_graph:
-                saved_0, saved_1 = self.model.state(), self.model.state()
-                saved_0.assign(self.state_0)
-                saved_1.assign(self.state_1)
+                saved = [self.model.state(), self.model.state()]
+                saved[0].assign(self.state_0)
+                saved[1].assign(self.state_1)
+                saved_ik = [wp.clone(a) for a in (self.ik_q, self.frame_start, self.frame_end)]
                 with wp.ScopedCapture() as capture:
-                    self._simulate()
-                self.state_0.assign(saved_0)
-                self.state_1.assign(saved_1)
+                    self._simulate_frame()
+                self.state_0.assign(saved[0])
+                self.state_1.assign(saved[1])
+                for array, backup in zip((self.ik_q, self.frame_start, self.frame_end), saved_ik, strict=True):
+                    array.assign(backup)
                 self.graph = capture.graph
         else:
             wp.capture_launch(self.graph)

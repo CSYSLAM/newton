@@ -4964,3 +4964,40 @@ specialized proxy step loop), filtering MuJoCo contacts that cannot matter
 demo-level lever, outside the solver). Contact-free trunk proxies still
 receive up to a few newtons of residual feedback, about 0.1% of gravity at
 their 100-330 kg proxy inertia; the early exit does not change it.
+
+### 2026-10-08: move two-way demo IK into the frame graph and collapse fixed W1 links
+
+After the rigid-iteration work, the coupling machinery is about 2.4% of the
+GPU launches in the two-way pick-and-place; MuJoCo is 42%. Splitting an
+example frame with synchronized timers showed that per-frame IK, not physics,
+dominated the two-way demos: 6.92 ms IK versus 7.53 ms physics in
+pick-and-place, and about 22 ms versus 7.9 ms in plug-socket. The IK did
+little GPU work but launched 150-400 small kernels eagerly from Python and
+read results back with `.numpy()` for clamping and finger writes.
+
+The W1 support module and the two-way plug-socket example now write only the
+sampled targets into device buffers on the host. One captured frame graph
+unpacks them into the IK objectives, runs the fixed-iteration IK, clamps to
+joint limits, writes the finger or hand targets, and then runs the substeps,
+following the dynamic T-shirt example. The kinematic plug-socket example is
+unchanged.
+
+The W1 V030 two-way scenes also load the simulated robot with fixed joints
+collapsed: 44 -> 24 bodies and tree depth 21 -> 12, so MuJoCo's per-level
+`_subtree_com_acc`, `_crb_accumulate`, and `_cfrc_backward` passes launch 13
+instead of 22 times per substep. IK keeps an uncollapsed model for the
+gripper-base end effectors; the movable-coordinate layout is identical and
+checked, and TCPs are re-expressed in the merged wrist links. Graph-only
+physics drops about 1 ms per frame (6-14%) in every phase of the three W1
+demos.
+
+End-to-end frame time including host work (RTX 5060 Ti): table push 15.48 ->
+8.96 ms (64.6 -> 111.5 fps), squeeze grasp 24.26 -> 16.75 ms (41.2 -> 59.7
+fps), two-way pick-and-place 15.76 -> 9.38 ms (63.4 -> 106.6 fps),
+plug-socket 30.11 -> 18.43 ms (33.2 -> 54.2 fps). All four examples pass with
+and without graph capture with unchanged task metrics, and the two-way unit
+tests pass.
+
+Not pursued: fewer rigid-color launches per iteration, the remaining
+per-substep memsets, and MuJoCo/VBD state-copy kernels (a few percent each),
+and fewer plug-socket IK iterations (32), which would change IK accuracy.
