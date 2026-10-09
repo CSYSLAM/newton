@@ -1,0 +1,1 @@
+Speed up `SolverVBD` rigid contact accumulation by giving each body one warp of contact threads instead of four, and stop the full-surface face-contact SDF search once its Frank-Wolfe duality gap converges. Results change only by floating-point summation order and sub-micrometre search tolerance; no migration is needed.

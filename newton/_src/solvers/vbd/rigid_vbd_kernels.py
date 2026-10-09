@@ -64,8 +64,11 @@ _USE_SMALL_ANGLE_APPROX = wp.constant(True)
 _DAHL_KAPPADOT_DEADBAND = wp.constant(1.0e-6)
 """Deadband threshold for hysteresis direction selection"""
 
-_NUM_CONTACT_THREADS_PER_BODY = wp.constant(4)
-"""Threads per body for contact accumulation using strided iteration"""
+_NUM_CONTACT_THREADS_PER_BODY = wp.constant(32)
+"""Threads per body for contact accumulation using strided iteration.
+
+One warp per body: a grasped or stacked body with a hundred-plus contacts otherwise
+walks them serially, and bodies with few contacts exit after one strided pass."""
 
 # DER bend-twist strain measure tolerances (curvature binormal + Bishop transport).
 _ROD_KB_FOLD_EPS = wp.constant(1.0e-12)

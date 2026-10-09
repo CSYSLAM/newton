@@ -44,6 +44,8 @@ from .types import Axis, GeoType
 SDF_EDGE_ITERS = 24
 SDF_FACE_ITERS = 24
 SDF_LS_ITERS = 16
+# Frank-Wolfe duality-gap tolerance [m] for the face search, far below any contact margin.
+_SDF_FACE_GAP_TOL = wp.constant(1.0e-6)
 
 
 @wp.func
@@ -191,8 +193,10 @@ def optimize_face_sdf(
     """argmin phi over the soft triangle by Frank-Wolfe on the barycentric simplex (Macklin sec. 3).
 
     Each step picks the simplex vertex minimizing the linearized objective ``grad . corner`` (eq. 4)
-    and line-searches phi toward it with :func:`optimize_edge_sdf`. Fixed ``n_iter`` / ``ls_iter``
-    iterations -> graph-capturable. Returns ``(bary, x_local, phi, grad)``.
+    and line-searches phi toward it with :func:`optimize_edge_sdf`. At most ``n_iter`` steps of
+    ``ls_iter`` line-search iterations (graph-capturable); a step stops early once the Frank-Wolfe
+    duality gap ``grad . (x - s)`` drops below ``_SDF_FACE_GAP_TOL``, where no simplex vertex can lower
+    the linearized distance further. Returns ``(bary, x_local, phi, grad)``.
     """
     # Start at the centroid (interior). A corner start can strand Frank-Wolfe on a simplex edge
     # for non-smooth fields (e.g. a box-corner ridge), because the analytic gradient is single-axis
@@ -212,6 +216,8 @@ def optimize_face_sdf(
         elif dc <= da and dc <= db:
             s = wp.vec3(0.0, 0.0, 1.0)
         target = s[0] * a + s[1] * b + s[2] * c
+        if wp.dot(grad, x - target) <= _SDF_FACE_GAP_TOL:
+            break
         gamma, _lx, _lphi, _lgrad = optimize_edge_sdf(
             geo, scale, x, target, shape_sdf_index, texture_sdf_table, ls_iter
         )
