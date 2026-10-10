@@ -4972,10 +4972,36 @@ def step_body_body_contact_C0_lambda(
         contact_lambda[i] = wp.vec3(0.0)
 
 
+# Full-surface rigid-soft contact samples a shape's penalty over the soft surface at three kinds of
+# points: every vertex within the gap, and the deepest point of every edge and triangle within it.
+# Each record then stands for the surface area its feature owns in the 7-point triangle quadrature
+# that is exact for cubics: weight 1/20 of a triangle's area per corner, 2/15 per edge midpoint,
+# 9/20 at its centroid. Normalized by a vertex's lumped area (1/3 of each incident triangle),
+# a vertex record weighs 3/20 on any mesh; on a regular mesh (2 triangles and 3 edges per vertex),
+# an edge record weighs 2/15 and a triangle record 9/40. A flat patch in contact then carries
+# exactly the stiffness of per-vertex contact (3/20 + 3 * 2/15 + 2 * 9/40 = 1), instead of counting
+# the same contact up to six times, while a shape pressing between vertices is still resisted.
+_FULL_SURFACE_VERTEX_WEIGHT = wp.constant(3.0 / 20.0)
+_FULL_SURFACE_EDGE_WEIGHT = wp.constant(2.0 / 15.0)
+_FULL_SURFACE_FACE_WEIGHT = wp.constant(9.0 / 40.0)
+
+
+@wp.func
+def _full_surface_quadrature_weight(corners: wp.vec3i):
+    """Quadrature weight of a full-surface soft-contact record from its -1-padded corner ids."""
+    if corners[2] >= 0:
+        return _FULL_SURFACE_FACE_WEIGHT
+    if corners[1] >= 0:
+        return _FULL_SURFACE_EDGE_WEIGHT
+    return _FULL_SURFACE_VERTEX_WEIGHT
+
+
 @wp.kernel
 def init_body_particle_contacts(
     body_particle_contact_count: wp.array[int],
     body_particle_contact_shape: wp.array[int],
+    body_particle_contact_corners: wp.array[wp.vec3i],
+    shape_full_surface: wp.array[wp.int32],
     soft_contact_ke: float,
     soft_contact_kd: float,
     soft_contact_mu: float,
@@ -5011,6 +5037,12 @@ def init_body_particle_contacts(
         shape_material_kd[shape_idx],
         shape_material_mu[shape_idx],
     )
+
+    if shape_full_surface.shape[0] > 0:
+        if shape_full_surface[shape_idx] != 0:
+            weight = _full_surface_quadrature_weight(body_particle_contact_corners[i])
+            avg_ke *= weight
+            avg_kd *= weight
 
     body_particle_contact_material_ke[i] = avg_ke
     body_particle_contact_material_kd[i] = avg_kd
@@ -5471,19 +5503,21 @@ def _evaluate_body_body_contact_slot(
 ):
     """Evaluate one active body-body contact slot at the given poses.
 
-    Shared by the contact force reporting kernels. Returns ``(body0, body1, point0_world,
-    point1_world, force_0, torque_0, force_1)``: the bodies of shape 0 and shape 1 (``-1`` for a
-    static shape, or both ``-1`` for an invalid slot), the offset-shifted world-space surface
-    points, the force on body 0 with its torque about body 0's COM (the world origin for a static
-    shape), and the force on body 1 -- as the solve applies them through
+    Shared by the contact force reporting kernels and the particle translation correction. Returns
+    ``(body0, body1, point0_world, point1_world, force_0, torque_0, force_1, h_ll_0, h_ll_1)``: the
+    bodies of shape 0 and shape 1 (``-1`` for a static shape, or both ``-1`` for an invalid slot),
+    the offset-shifted world-space surface points, the force on body 0 with its torque about body
+    0's COM (the world origin for a static shape), the force on body 1, and each body's linear
+    Hessian block -- as the solve applies them through
     :func:`evaluate_rigid_contact_from_collision`. Invalid slots return zeros; separated or
     inactive contacts return zero forces with valid bodies and points.
     """
     zero = wp.vec3(0.0)
     s0 = rigid_contact_shape0[contact_idx]
     s1 = rigid_contact_shape1[contact_idx]
+    zero_h = wp.mat33(0.0)
     if s0 < 0 or s1 < 0:
-        return wp.int32(-1), wp.int32(-1), zero, zero, zero, zero, zero
+        return wp.int32(-1), wp.int32(-1), zero, zero, zero, zero, zero, zero_h, zero_h
 
     b0 = shape_body[s0]
     b1 = shape_body[s1]
@@ -5529,7 +5563,7 @@ def _evaluate_body_body_contact_slot(
     normal_primal_k, lambda_n_eff = _material_force_terms(normal_solve_weight, material_k, lam_n, contact_compliant_alm)
     f_n_check = normal_primal_k * C_eff + lambda_n_eff
     if (C_n <= _SMALL_LENGTH_EPS or f_n_check <= 0.0) and lam_n <= 0.0:
-        return b0, b1, point0_world, point1_world, zero, zero, zero
+        return b0, b1, point0_world, point1_world, zero, zero, zero, zero_h, zero_h
 
     contact_kd = contact_material_kd[contact_idx]
     contact_mu = contact_material_mu[contact_idx]
@@ -5541,12 +5575,12 @@ def _evaluate_body_body_contact_slot(
     (
         force_0,
         torque_0,
-        _h_ll_0,
+        h_ll_0,
         _h_al_0,
         _h_aa_0,
         force_1,
         _torque_1,
-        _h_ll_1,
+        h_ll_1,
         _h_al_1,
         _h_aa_1,
     ) = evaluate_rigid_contact_from_collision(
@@ -5575,7 +5609,7 @@ def _evaluate_body_body_contact_slot(
         friction_c0,
     )
 
-    return b0, b1, point0_world, point1_world, force_0, torque_0, force_1
+    return b0, b1, point0_world, point1_world, force_0, torque_0, force_1, h_ll_0, h_ll_1
 
 
 @functools.cache
@@ -5635,7 +5669,7 @@ def create_compute_rigid_contact_forces():
             out_force_on_body1[contact_idx] = wp.vec3(0.0)
             return
 
-        b0, b1, point0_world, point1_world, _force_0, _torque_0, force_1 = _evaluate_body_body_contact_slot(
+        b0, b1, point0_world, point1_world, _force_0, _torque_0, force_1, _h0, _h1 = _evaluate_body_body_contact_slot(
             contact_idx,
             dt,
             rigid_contact_shape0,
@@ -5729,7 +5763,7 @@ def compute_body_body_contact_forces(
         contact_force[contact_idx] = wp.spatial_vector()
         return
 
-    _b0, _b1, _point0_world, _point1_world, force_0, torque_0, _force_1 = _evaluate_body_body_contact_slot(
+    _b0, _b1, _point0_world, _point1_world, force_0, torque_0, _force_1, _h0, _h1 = _evaluate_body_body_contact_slot(
         contact_idx,
         dt,
         rigid_contact_shape0,

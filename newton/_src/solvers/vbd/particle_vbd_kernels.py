@@ -20,6 +20,7 @@ from newton._src.math import orthonormal_basis
 from newton._src.solvers.vbd.rigid_vbd_kernels import (
     _eval_body_particle_contact,
     _eval_soft_ef_contact,
+    _evaluate_body_body_contact_slot,
     _reset_world_selected,
     dat_separation_epsilon,
     evaluate_body_particle_attachment_particle_force_hessian,
@@ -1403,6 +1404,70 @@ def reset_particle_state(
         particle_q[tid] = model_particle_q[tid]
     if particle_qd:
         particle_qd[tid] = model_particle_qd[tid]
+
+
+@wp.func
+def _hinge_dihedral_angle(pos: wp.array[wp.vec3], edge_indices: wp.array2d[wp.int32], edge: int):
+    """Signed dihedral angle [rad] of a bending hinge, as in the bending energy; ``(0, False)`` if degenerate."""
+    x0 = pos[edge_indices[edge, 0]]
+    x1 = pos[edge_indices[edge, 1]]
+    x2 = pos[edge_indices[edge, 2]]
+    x3 = pos[edge_indices[edge, 3]]
+    n1 = wp.cross(x2 - x0, x3 - x0)
+    n2 = wp.cross(x3 - x1, x2 - x1)
+    e = x3 - x2
+    n1_norm = wp.length(n1)
+    n2_norm = wp.length(n2)
+    e_norm = wp.length(e)
+    if n1_norm < 1.0e-6 or n2_norm < 1.0e-6 or e_norm < 1.0e-6:
+        return 0.0, False
+    n1_hat = n1 / n1_norm
+    n2_hat = n2 / n2_norm
+    sin_theta = wp.dot(wp.cross(n1_hat, n2_hat), e / e_norm)
+    cos_theta = wp.dot(n1_hat, n2_hat)
+    return wp.atan2(sin_theta, cos_theta), True
+
+
+@wp.kernel
+def update_plastic_bending_rest_angles(
+    pos: wp.array[wp.vec3],
+    edge_indices: wp.array2d[wp.int32],
+    yield_angle: float,
+    edge_rest_angle: wp.array[float],
+):
+    """Set each hinge bent past its yield angle (perfect plasticity).
+
+    A hinge whose dihedral angle departs from its rest angle by more than ``yield_angle`` keeps
+    the excess as permanent set: its rest angle moves to stay ``yield_angle`` behind the current
+    angle, so a sheet creases where it is folded hard and springs back where it is only flexed.
+    """
+    edge = wp.tid()
+    if edge_indices[edge, 0] < 0 or edge_indices[edge, 1] < 0:
+        return
+    theta, valid = _hinge_dihedral_angle(pos, edge_indices, edge)
+    if not valid:
+        return
+    rest = edge_rest_angle[edge]
+    if theta - rest > yield_angle:
+        edge_rest_angle[edge] = theta - yield_angle
+    elif theta - rest < -yield_angle:
+        edge_rest_angle[edge] = theta + yield_angle
+
+
+@wp.kernel
+def reset_plastic_bending_rest_angles(
+    world_mask: wp.array[wp.bool],
+    reset_all: bool,
+    world_count: int,
+    particle_world: wp.array[wp.int32],
+    edge_indices: wp.array2d[wp.int32],
+    model_edge_rest_angle: wp.array[float],
+    edge_rest_angle: wp.array[float],
+):
+    """Restore the model rest angles of hinges in the selected worlds."""
+    edge = wp.tid()
+    if _reset_world_selected(particle_world[edge_indices[edge, 2]], world_mask, reset_all, world_count):
+        edge_rest_angle[edge] = model_edge_rest_angle[edge]
 
 
 @wp.kernel
@@ -3049,3 +3114,530 @@ def accumulate_contact_force_and_hessian(
             )
             wp.atomic_add(particle_forces, particle_idx, body_contact_force)
             wp.atomic_add(particle_hessians, particle_idx, body_contact_hessian)
+
+
+# ---------------------------------------------------------------------------------------------
+# Translation coarse correction
+#
+# VBD updates one vertex at a time, so the slowest error mode of a connected soft body is its
+# rigid translation: a light, stiff shell supported or gripped at a few vertices needs many
+# iterations before the rest of the body follows. The kernels below take one Newton step of the
+# step energy restricted to a uniform translation of each connected component (a Galerkin coarse
+# space). Internal elastic, bending and damping forces cancel under a uniform translation and so do
+# their projected Hessians; only inertia (which carries gravity and external particle forces),
+# body contacts with friction, and body attachments contribute. Restricted to a translation these
+# terms are convex, so the step decreases the same energy the vertex sweeps minimize.
+# ---------------------------------------------------------------------------------------------
+
+
+# Sentinel of ``body_aggregate`` for a body that translates with no soft component.
+TRANSLATION_NO_AGGREGATE = wp.constant(1 << 30)
+
+
+@wp.func
+def _body_translation_aggregate(body: int, body_aggregate: wp.array[wp.int32]):
+    """Soft component whose translation a body joins, or -1."""
+    if body < 0 or body_aggregate.shape[0] == 0:
+        return -1
+    aggregate = body_aggregate[body]
+    if aggregate >= TRANSLATION_NO_AGGREGATE:
+        return -1
+    return aggregate
+
+
+@wp.func
+def _soft_record_gap(
+    tid: int,
+    particle_q: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    soft_contact_indices: wp.array[wp.vec3i],
+    soft_contact_barycentric: wp.array[wp.vec3],
+    soft_contact_shape: wp.array[wp.int32],
+    soft_contact_body_pos: wp.array[wp.vec3],
+    soft_contact_normal: wp.array[wp.vec3],
+    shape_body: wp.array[wp.int32],
+    shape_margin: wp.array[float],
+    body_q: wp.array[wp.transform],
+):
+    """Signed gap [m] of a rigid-soft record at the current iterate; negative when penetrating."""
+    corners = soft_contact_indices[tid]
+    shape_index = soft_contact_shape[tid]
+    body_index = shape_body[shape_index]
+    X_wb = wp.transform_identity()
+    if body_index >= 0:
+        X_wb = body_q[body_index]
+    bary = soft_contact_barycentric[tid]
+    x = bary[0] * particle_q[corners[0]]
+    radius = particle_radius[corners[0]]
+    if corners[1] >= 0:
+        x += bary[1] * particle_q[corners[1]]
+        radius = wp.max(radius, particle_radius[corners[1]])
+    if corners[2] >= 0:
+        x += bary[2] * particle_q[corners[2]]
+        radius = wp.max(radius, particle_radius[corners[2]])
+    margin = shape_margin[shape_index] if shape_margin.shape[0] > 0 else 0.0
+    n = soft_contact_normal[tid]
+    return wp.dot(n, x - wp.transform_point(X_wb, soft_contact_body_pos[tid])) - radius - margin
+
+
+@wp.func
+def _rigid_record_gap(
+    contact_index: int,
+    rigid_contact_point0: wp.array[wp.vec3],
+    rigid_contact_point1: wp.array[wp.vec3],
+    rigid_contact_normal: wp.array[wp.vec3],
+    rigid_contact_margin0: wp.array[float],
+    rigid_contact_margin1: wp.array[float],
+    b0: int,
+    b1: int,
+    body_q: wp.array[wp.transform],
+):
+    """Signed separation [m] of a body-body record along its normal; negative when penetrating."""
+    p0 = rigid_contact_point0[contact_index]
+    p1 = rigid_contact_point1[contact_index]
+    if b0 >= 0:
+        p0 = wp.transform_point(body_q[b0], p0)
+    if b1 >= 0:
+        p1 = wp.transform_point(body_q[b1], p1)
+    return (
+        wp.dot(rigid_contact_normal[contact_index], p1 - p0)
+        - rigid_contact_margin0[contact_index]
+        - rigid_contact_margin1[contact_index]
+    )
+
+
+@wp.kernel
+def assign_translation_aggregates(
+    particle_q: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    soft_contact_indices: wp.array[wp.vec3i],
+    soft_contact_barycentric: wp.array[wp.vec3],
+    soft_contact_count: wp.array[wp.int32],
+    soft_contact_max: int,
+    soft_contact_shape: wp.array[wp.int32],
+    soft_contact_body_pos: wp.array[wp.vec3],
+    soft_contact_normal: wp.array[wp.vec3],
+    shape_body: wp.array[wp.int32],
+    shape_margin: wp.array[float],
+    body_q: wp.array[wp.transform],
+    body_aggregable: wp.array[wp.int32],
+    body_inv_mass_effective: wp.array[float],
+    particle_component: wp.array[wp.int32],
+    body_aggregate: wp.array[wp.int32],
+):
+    """Join each free body to the translation of a soft component it is touching.
+
+    A light body resting on a soft body must follow the soft body's coarse translation; held fixed,
+    it either blocks the step or is struck by it. Only touching records count: a body merely near
+    the soft body is not bound to it, and the step is instead limited by its gap. A body touching
+    several components joins the lowest-numbered one and meets the others through its contacts.
+    """
+    tid = wp.tid()
+    if tid >= soft_contact_count[0] or tid >= soft_contact_max:
+        return
+    shape_index = soft_contact_shape[tid]
+    if shape_index < 0:
+        return
+    body = shape_body[shape_index]
+    if body < 0 or body_aggregable[body] == 0 or body_inv_mass_effective[body] <= 0.0:
+        return
+    component = particle_component[soft_contact_indices[tid][0]]
+    if component < 0:
+        return
+    gap = _soft_record_gap(
+        tid,
+        particle_q,
+        particle_radius,
+        soft_contact_indices,
+        soft_contact_barycentric,
+        soft_contact_shape,
+        soft_contact_body_pos,
+        soft_contact_normal,
+        shape_body,
+        shape_margin,
+        body_q,
+    )
+    if gap <= 0.0:
+        wp.atomic_min(body_aggregate, body, component)
+
+
+@wp.kernel
+def propagate_translation_aggregates(
+    rigid_contact_count: wp.array[int],
+    rigid_contact_shape0: wp.array[int],
+    rigid_contact_shape1: wp.array[int],
+    rigid_contact_point0: wp.array[wp.vec3],
+    rigid_contact_point1: wp.array[wp.vec3],
+    rigid_contact_normal: wp.array[wp.vec3],
+    rigid_contact_margin0: wp.array[float],
+    rigid_contact_margin1: wp.array[float],
+    shape_body: wp.array[wp.int32],
+    body_q: wp.array[wp.transform],
+    body_aggregable: wp.array[wp.int32],
+    body_inv_mass_effective: wp.array[float],
+    body_aggregate: wp.array[wp.int32],
+):
+    """One round of spreading aggregates across touching free bodies.
+
+    A pile resting on a soft body moves with it as one island: a body touching an aggregated body
+    joins its aggregate, so the bodies above it do not block the soft body's translation.
+    """
+    contact_index = wp.tid()
+    if contact_index >= rigid_contact_count[0]:
+        return
+    s0 = rigid_contact_shape0[contact_index]
+    s1 = rigid_contact_shape1[contact_index]
+    if s0 < 0 or s1 < 0:
+        return
+    b0 = shape_body[s0]
+    b1 = shape_body[s1]
+    if b0 < 0 or b1 < 0 or body_aggregable[b0] == 0 or body_aggregable[b1] == 0:
+        return
+    if body_inv_mass_effective[b0] <= 0.0 or body_inv_mass_effective[b1] <= 0.0:
+        return
+    label = wp.min(body_aggregate[b0], body_aggregate[b1])
+    if label >= TRANSLATION_NO_AGGREGATE:
+        return
+    gap = _rigid_record_gap(
+        contact_index,
+        rigid_contact_point0,
+        rigid_contact_point1,
+        rigid_contact_normal,
+        rigid_contact_margin0,
+        rigid_contact_margin1,
+        b0,
+        b1,
+        body_q,
+    )
+    if gap <= 0.0:
+        wp.atomic_min(body_aggregate, b0, label)
+        wp.atomic_min(body_aggregate, b1, label)
+
+
+@wp.kernel
+def accumulate_translation_body_inertia(
+    dt: float,
+    body_q: wp.array[wp.transform],
+    body_inertia_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    body_mass: wp.array[float],
+    body_aggregate: wp.array[wp.int32],
+    component_force: wp.array[wp.vec3],
+    component_hessian: wp.array[wp.mat33],
+):
+    """Accumulate the inertial residual and mass of each aggregated body on its component's translation."""
+    body = wp.tid()
+    aggregate = _body_translation_aggregate(body, body_aggregate)
+    if aggregate < 0:
+        return
+    mass_dt2 = body_mass[body] / (dt * dt)
+    com = body_com[body]
+    offset = wp.transform_point(body_inertia_q[body], com) - wp.transform_point(body_q[body], com)
+    wp.atomic_add(component_force, aggregate, mass_dt2 * offset)
+    wp.atomic_add(component_hessian, aggregate, mass_dt2 * wp.identity(n=3, dtype=float))
+
+
+@wp.kernel
+def accumulate_translation_inertia(
+    dt: float,
+    pos: wp.array[wp.vec3],
+    inertia: wp.array[wp.vec3],
+    particle_mass: wp.array[float],
+    particle_inv_mass: wp.array[float],
+    particle_flags: wp.array[wp.int32],
+    particle_component: wp.array[wp.int32],
+    component_force: wp.array[wp.vec3],
+    component_hessian: wp.array[wp.mat33],
+    component_blocked: wp.array[wp.int32],
+):
+    """Accumulate the inertial residual and mass matrix of each component's translation mode."""
+    i = wp.tid()
+    component = particle_component[i]
+    if component < 0:
+        return
+    if not (particle_flags[i] & ParticleFlags.ACTIVE) or particle_inv_mass[i] == 0.0:
+        # A pinned particle cannot follow a uniform translation of its component.
+        component_blocked[component] = 1
+        return
+    mass_dt2 = particle_mass[i] / (dt * dt)
+    wp.atomic_add(component_force, component, mass_dt2 * (inertia[i] - pos[i]))
+    wp.atomic_add(component_hessian, component, mass_dt2 * wp.identity(n=3, dtype=float))
+
+
+@wp.kernel
+def accumulate_translation_body_contacts(
+    dt: float,
+    pos_anchor: wp.array[wp.vec3],
+    pos: wp.array[wp.vec3],
+    friction_epsilon: float,
+    rigid_body_particle_contact_use_log_barrier: bool,
+    particle_radius: wp.array[float],
+    body_particle_contact_indices: wp.array[wp.vec3i],
+    body_particle_contact_count: wp.array[int],
+    body_particle_contact_max: int,
+    body_particle_contact_penalty_k: wp.array[float],
+    body_particle_contact_material_kd: wp.array[float],
+    body_particle_contact_material_mu: wp.array[float],
+    shape_body: wp.array[int],
+    body_q: wp.array[wp.transform],
+    body_q_prev: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    contact_shape: wp.array[int],
+    contact_body_pos: wp.array[wp.vec3],
+    contact_body_vel: wp.array[wp.vec3],
+    contact_normal: wp.array[wp.vec3],
+    shape_margin: wp.array[float],
+    contact_barycentric: wp.array[wp.vec3],
+    particle_component: wp.array[wp.int32],
+    body_aggregate: wp.array[wp.int32],
+    component_force: wp.array[wp.vec3],
+    component_hessian: wp.array[wp.mat33],
+):
+    """Accumulate body-contact force and Hessian on each component's translation mode.
+
+    A uniform translation moves an edge/face record's barycentric point by the same amount, so the
+    record contributes its full contact-point force and Hessian (the barycentric weights sum to one).
+    A record whose body joined the same aggregate is internal to the translation and contributes
+    nothing; one whose body joined another aggregate adds the reaction to that aggregate.
+    """
+    contact_index = wp.tid()
+    if contact_index >= wp.min(body_particle_contact_max, body_particle_contact_count[0]):
+        return
+    corners = body_particle_contact_indices[contact_index]
+    if corners[0] < 0:
+        return
+    component = particle_component[corners[0]]
+    if component < 0:
+        return
+    body_component = _body_translation_aggregate(shape_body[contact_shape[contact_index]], body_aggregate)
+    if body_component == component:
+        return
+    contact_ke = body_particle_contact_penalty_k[contact_index]
+    contact_kd = body_particle_contact_material_kd[contact_index]
+    contact_mu = body_particle_contact_material_mu[contact_index]
+    if corners[1] < 0:
+        force, hessian = _eval_body_particle_contact(
+            corners[0],
+            pos[corners[0]],
+            pos_anchor[corners[0]],
+            contact_index,
+            contact_ke,
+            contact_kd,
+            contact_mu,
+            friction_epsilon,
+            particle_radius,
+            shape_body,
+            body_q,
+            body_q_prev,
+            body_qd,
+            body_com,
+            contact_shape,
+            contact_body_pos,
+            contact_body_vel,
+            contact_normal,
+            shape_margin,
+            dt,
+            rigid_body_particle_contact_use_log_barrier,
+        )
+    else:
+        force, hessian, _contact_point = _eval_soft_ef_contact(
+            contact_index,
+            corners,
+            contact_barycentric[contact_index],
+            pos,
+            pos_anchor,
+            particle_radius,
+            contact_ke,
+            contact_kd,
+            contact_mu,
+            friction_epsilon,
+            shape_body,
+            body_q,
+            body_q_prev,
+            body_qd,
+            body_com,
+            contact_shape,
+            contact_body_pos,
+            contact_body_vel,
+            contact_normal,
+            shape_margin,
+            dt,
+            rigid_body_particle_contact_use_log_barrier,
+        )
+    wp.atomic_add(component_force, component, force)
+    wp.atomic_add(component_hessian, component, hessian)
+    if body_component >= 0:
+        wp.atomic_add(component_force, body_component, -force)
+        wp.atomic_add(component_hessian, body_component, hessian)
+
+
+@wp.kernel
+def accumulate_translation_body_body_contacts(
+    dt: float,
+    rigid_contact_count: wp.array[int],
+    rigid_contact_shape0: wp.array[int],
+    rigid_contact_shape1: wp.array[int],
+    rigid_contact_point0: wp.array[wp.vec3],
+    rigid_contact_point1: wp.array[wp.vec3],
+    rigid_contact_surface_velocity: wp.array[wp.vec3],
+    rigid_contact_offset0: wp.array[wp.vec3],
+    rigid_contact_offset1: wp.array[wp.vec3],
+    rigid_contact_normal: wp.array[wp.vec3],
+    rigid_contact_margin0: wp.array[float],
+    rigid_contact_margin1: wp.array[float],
+    shape_body: wp.array[wp.int32],
+    body_q: wp.array[wp.transform],
+    body_q_prev: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    contact_penalty_k: wp.array[float],
+    contact_normal_rho: wp.array[float],
+    contact_material_ke: wp.array[float],
+    contact_material_kd: wp.array[float],
+    contact_material_mu: wp.array[float],
+    contact_tangent_rho: wp.array[float],
+    contact_lambda: wp.array[wp.vec3],
+    contact_C0: wp.array[wp.vec3],
+    stab_alpha: float,
+    legacy_hard_contacts: int,
+    contact_compliant_alm: int,
+    friction_epsilon: float,
+    body_aggregate: wp.array[wp.int32],
+    component_force: wp.array[wp.vec3],
+    component_hessian: wp.array[wp.mat33],
+):
+    """Accumulate the body-body contacts of aggregated bodies on their components' translations."""
+    contact_index = wp.tid()
+    if contact_index >= rigid_contact_count[0]:
+        return
+    s0 = rigid_contact_shape0[contact_index]
+    s1 = rigid_contact_shape1[contact_index]
+    if s0 < 0 or s1 < 0:
+        return
+    a0 = _body_translation_aggregate(shape_body[s0], body_aggregate)
+    a1 = _body_translation_aggregate(shape_body[s1], body_aggregate)
+    if a0 == a1:
+        return
+    _b0, _b1, _p0, _p1, force_0, _torque_0, force_1, h_0, h_1 = _evaluate_body_body_contact_slot(
+        contact_index,
+        dt,
+        rigid_contact_shape0,
+        rigid_contact_shape1,
+        rigid_contact_point0,
+        rigid_contact_point1,
+        rigid_contact_surface_velocity,
+        rigid_contact_offset0,
+        rigid_contact_offset1,
+        rigid_contact_normal,
+        rigid_contact_margin0,
+        rigid_contact_margin1,
+        shape_body,
+        body_q,
+        body_q_prev,
+        body_com,
+        contact_penalty_k,
+        contact_normal_rho,
+        contact_material_ke,
+        contact_material_kd,
+        contact_material_mu,
+        contact_tangent_rho,
+        contact_lambda,
+        contact_C0,
+        stab_alpha,
+        legacy_hard_contacts,
+        contact_compliant_alm,
+        friction_epsilon,
+    )
+    if a0 >= 0:
+        wp.atomic_add(component_force, a0, force_0)
+        wp.atomic_add(component_hessian, a0, h_0)
+    if a1 >= 0:
+        wp.atomic_add(component_force, a1, force_1)
+        wp.atomic_add(component_hessian, a1, h_1)
+
+
+@wp.kernel
+def accumulate_translation_attachments(
+    dt: float,
+    pos_anchor: wp.array[wp.vec3],
+    pos: wp.array[wp.vec3],
+    body_q: wp.array[wp.transform],
+    body_q_prev: wp.array[wp.transform],
+    attachment_body: wp.array[int],
+    attachment_particle: wp.array[int],
+    attachment_body_point: wp.array[wp.vec3],
+    attachment_stiffness: wp.array[float],
+    attachment_damping: wp.array[float],
+    attachment_enabled: wp.array[bool],
+    particle_component: wp.array[wp.int32],
+    component_force: wp.array[wp.vec3],
+    component_hessian: wp.array[wp.mat33],
+):
+    """Accumulate body-particle attachment force and Hessian on each component's translation mode."""
+    attachment = wp.tid()
+    if not attachment_enabled[attachment]:
+        return
+    particle = attachment_particle[attachment]
+    component = particle_component[particle]
+    if component < 0:
+        return
+    body = attachment_body[attachment]
+    force, hessian = evaluate_body_particle_attachment_particle_force_hessian(
+        pos[particle],
+        pos_anchor[particle],
+        body_q[body],
+        body_q_prev[body],
+        attachment_body_point[attachment],
+        attachment_stiffness[attachment],
+        attachment_damping[attachment],
+        dt,
+    )
+    wp.atomic_add(component_force, component, force)
+    wp.atomic_add(component_hessian, component, hessian)
+
+
+@wp.kernel
+def solve_translation_correction(
+    component_force: wp.array[wp.vec3],
+    component_hessian: wp.array[wp.mat33],
+    component_blocked: wp.array[wp.int32],
+    component_step: wp.array[wp.vec3],
+):
+    """Newton translation of each component; zero for a blocked or singular one."""
+    component = wp.tid()
+    h = component_hessian[component]
+    if component_blocked[component] != 0 or wp.abs(wp.determinant(h)) <= 1.0e-12:
+        component_step[component] = wp.vec3(0.0)
+        return
+    component_step[component] = wp.inverse(h) * component_force[component]
+
+
+@wp.kernel
+def apply_translation_correction(
+    particle_component: wp.array[wp.int32],
+    component_step: wp.array[wp.vec3],
+    particle_displacements: wp.array[wp.vec3],
+):
+    """Add each component's translation to its particles' displacements."""
+    i = wp.tid()
+    component = particle_component[i]
+    if component < 0:
+        return
+    particle_displacements[i] = particle_displacements[i] + component_step[component]
+
+
+@wp.kernel
+def apply_translation_correction_bodies(
+    body_aggregate: wp.array[wp.int32],
+    component_step: wp.array[wp.vec3],
+    body_q: wp.array[wp.transform],
+):
+    """Translate each aggregated body with its component."""
+    body = wp.tid()
+    aggregate = _body_translation_aggregate(body, body_aggregate)
+    if aggregate < 0:
+        return
+    pose = body_q[body]
+    body_q[body] = wp.transform(
+        wp.transform_get_translation(pose) + component_step[aggregate], wp.transform_get_rotation(pose)
+    )

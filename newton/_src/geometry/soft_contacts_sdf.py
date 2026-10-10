@@ -673,3 +673,194 @@ def launch_soft_ef_contacts(
             outputs=outputs,
             device=device,
         )
+
+
+# Warm-started refinement of existing records (see refine_soft_contacts). Contacts move little
+# between solver iterations, so a few Frank-Wolfe steps from the previous minimizer suffice, and
+# the duality-gap test usually exits after a single SDF evaluation.
+SDF_REFINE_ITERS = 4
+SDF_REFINE_LS_ITERS = 12
+
+_INV_GOLDEN = wp.constant(0.6180339887498949)
+
+
+@wp.func
+def refine_simplex_sdf(
+    geo: wp.int32,
+    scale: wp.vec3,
+    a: wp.vec3,
+    b: wp.vec3,
+    c: wp.vec3,
+    corner_count: wp.int32,
+    bary_start: wp.vec3,
+    shape_sdf_index: wp.int32,
+    texture_sdf_table: wp.array[TextureSDFData],
+    n_iter: wp.int32,
+    ls_iter: wp.int32,
+):
+    """argmin phi over a point, segment, or triangle (``corner_count`` 1, 2, 3), warm-started at ``bary_start``.
+
+    Frank-Wolfe on the barycentric simplex, as :func:`optimize_face_sdf`, with each step's
+    golden-section line search folded into the same loop, so the shape's distance field is
+    evaluated at a single call site: inlining it at every step of the nested searches makes the
+    kernel slow to compile. Each pass of the loop evaluates one point, either the current iterate
+    (where the duality gap decides whether to stop) or the next line-search probe. Returns
+    ``(bary, x_local, phi, grad)`` at the final iterate.
+    """
+    bary = bary_start
+    if corner_count == 1:
+        bary = wp.vec3(1.0, 0.0, 0.0)
+    phi = float(0.0)
+    grad = wp.vec3(0.0)
+    steps = int(0)
+    searching = int(0)
+    # Line-search state on the segment from the iterate to the chosen simplex vertex.
+    target = wp.vec3(0.0)
+    start = wp.vec3(0.0)
+    end = wp.vec3(0.0)
+    lo = float(0.0)
+    hi = float(1.0)
+    tc = float(0.0)
+    td = float(0.0)
+    fc = float(0.0)
+    fd = float(0.0)
+    probe = int(0)
+    for _k in range(n_iter * (ls_iter + 3) + 1):
+        x = bary[0] * a + bary[1] * b + bary[2] * c
+        point = x
+        if searching != 0:
+            t = tc
+            if probe == 1 or (probe >= 2 and fc >= fd):
+                t = td
+            point = (1.0 - t) * start + t * end
+        _phi_l, phi_k, grad_k = eval_shape_sdf(geo, scale, point, shape_sdf_index, texture_sdf_table)
+        if searching == 0:
+            phi = phi_k
+            grad = grad_k
+            if corner_count == 1 or steps >= n_iter:
+                break
+            # Frank-Wolfe vertex: argmin_k grad . corner_k over the record's corners.
+            da = wp.dot(grad, a)
+            db = wp.dot(grad, b)
+            target = wp.vec3(1.0, 0.0, 0.0)
+            best = da
+            if db < best:
+                target = wp.vec3(0.0, 1.0, 0.0)
+                best = db
+            if corner_count == 3:
+                if wp.dot(grad, c) < best:
+                    target = wp.vec3(0.0, 0.0, 1.0)
+            vertex = target[0] * a + target[1] * b + target[2] * c
+            if wp.dot(grad, x - vertex) <= _SDF_FACE_GAP_TOL:
+                break
+            start = x
+            end = vertex
+            lo = 0.0
+            hi = 1.0
+            tc = hi - (hi - lo) * _INV_GOLDEN
+            td = lo + (hi - lo) * _INV_GOLDEN
+            probe = 0
+            searching = 1
+        else:
+            if probe == 0:
+                fc = phi_k
+            elif probe == 1:
+                fd = phi_k
+            elif fc < fd:
+                # The probe just evaluated was the new lower point.
+                fc = phi_k
+            else:
+                fd = phi_k
+            probe += 1
+            if probe >= ls_iter + 2:
+                gamma = 0.5 * (lo + hi)
+                bary = (1.0 - gamma) * bary + gamma * target
+                steps += 1
+                searching = int(0)
+            elif probe >= 2:
+                # Shrink the bracket; the next pass evaluates the point that moved. The moved
+                # point's value is a placeholder ordered to select it, overwritten on evaluation.
+                if fc < fd:
+                    hi = td
+                    td = tc
+                    fd = fc
+                    tc = hi - (hi - lo) * _INV_GOLDEN
+                    fc = fd - 1.0
+                else:
+                    lo = tc
+                    tc = td
+                    fc = fd
+                    td = lo + (hi - lo) * _INV_GOLDEN
+                    fd = fc - 1.0
+    x = bary[0] * a + bary[1] * b + bary[2] * c
+    return bary, x, phi, grad
+
+
+@wp.kernel
+def refine_soft_contacts(
+    soft_contact_count: wp.array[wp.int32],
+    soft_contact_indices: wp.array[wp.vec3i],
+    soft_contact_shape: wp.array[wp.int32],
+    shape_refinable: wp.array[wp.int32],
+    particle_q: wp.array[wp.vec3],
+    shape_body: wp.array[wp.int32],
+    shape_type: wp.array[wp.int32],
+    shape_transform: wp.array[wp.transform],
+    shape_scale: wp.array[wp.vec3],
+    body_q: wp.array[wp.transform],
+    shape_sdf_index: wp.array[wp.int32],
+    texture_sdf_table: wp.array[TextureSDFData],
+    n_iter: wp.int32,
+    ls_iter: wp.int32,
+    # In/out: the record geometry, re-solved at the current configuration.
+    soft_contact_barycentric: wp.array[wp.vec3],
+    soft_contact_body_pos: wp.array[wp.vec3],
+    soft_contact_normal: wp.array[wp.vec3],
+):
+    """Move each rigid-soft record's contact point to the closest feature pair of the current configuration.
+
+    A record linearizes the rigid surface by its tangent plane at the point found at detection. Held
+    fixed while the bodies move, that point lags behind a rolling or sliding contact: a convex body
+    rolling over a soft surface keeps being pushed from behind its center, and a rotating body drags
+    its anchor out of the contact. Each re-detection then resets the lag, so the solve gains energy.
+    Re-solving the record's geometry at the current iterate -- the closest rigid surface point to a
+    particle, and the deepest point along an edge or over a triangle, warm-started from the previous
+    one -- makes the contact a fixed function of the configuration, as in closest-point barrier
+    methods. Records of shapes without an evaluable SDF (``shape_refinable == 0``) are left as
+    detected.
+    """
+    tid = wp.tid()
+    if tid >= soft_contact_count[0] or tid >= soft_contact_indices.shape[0]:
+        return
+    shape_index = soft_contact_shape[tid]
+    if shape_index < 0 or shape_refinable[shape_index] == 0:
+        return
+
+    X_bs, X_ws, X_sw = _shape_frames(shape_body, body_q, shape_transform, shape_index)
+    corners = soft_contact_indices[tid]
+    a = wp.transform_point(X_sw, particle_q[corners[0]])
+    b = a
+    c = a
+    corner_count = int(1)
+    if corners[1] >= 0:
+        b = wp.transform_point(X_sw, particle_q[corners[1]])
+        corner_count = 2
+    if corners[2] >= 0:
+        c = wp.transform_point(X_sw, particle_q[corners[2]])
+        corner_count = 3
+    bary, x, phi, grad = refine_simplex_sdf(
+        shape_type[shape_index],
+        shape_scale[shape_index],
+        a,
+        b,
+        c,
+        corner_count,
+        soft_contact_barycentric[tid],
+        shape_sdf_index[shape_index],
+        texture_sdf_table,
+        n_iter,
+        ls_iter,
+    )
+    soft_contact_barycentric[tid] = bary
+    soft_contact_body_pos[tid] = wp.transform_point(X_bs, x - phi * grad)
+    soft_contact_normal[tid] = wp.transform_vector(X_ws, grad)

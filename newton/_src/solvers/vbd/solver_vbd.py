@@ -12,6 +12,7 @@ import warp as wp
 
 from ...core.types import override
 from ...geometry import ParticleFlags
+from ...geometry.soft_contacts_sdf import SDF_REFINE_ITERS, SDF_REFINE_LS_ITERS, refine_soft_contacts
 from ...geometry.tri_mesh_collision import (
     TriMeshCollisionDetector,
     TriMeshCollisionInfo,
@@ -41,21 +42,34 @@ from . import particle_vbd_kernels, rigid_vbd_kernels, vbd_coupling_kernels
 from .particle_vbd_kernels import (
     NUM_THREADS_PER_COLLISION_PRIMITIVE,
     TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+    TRANSLATION_NO_AGGREGATE,
     # Topological filtering helper functions
     accumulate_body_particle_attachment_force_and_hessian,
     accumulate_self_contact_force_and_hessian,
     accumulate_spring_force_and_hessian,
+    accumulate_translation_attachments,
+    accumulate_translation_body_body_contacts,
+    accumulate_translation_body_contacts,
+    accumulate_translation_body_inertia,
+    accumulate_translation_inertia,
     # Planar DAT (Divide and Truncate) kernels
     apply_planar_truncation_parallel_by_collision,
+    apply_translation_correction,
+    apply_translation_correction_bodies,
     apply_truncation_ts,
+    assign_translation_aggregates,
     build_particle_body_contact_adjacency_active,
     # Solver kernels (particle VBD)
     forward_step,
     gather_particle_body_contact_force_and_hessian,
     make_solve_elasticity_tile,
+    propagate_translation_aggregates,
     reset_particle_state,
+    reset_plastic_bending_rest_angles,
     scatter_particle_body_contact_force_and_hessian,
     solve_elasticity,
+    solve_translation_correction,
+    update_plastic_bending_rest_angles,
     update_velocity,
 )
 from .rigid_vbd_kernels import (
@@ -161,6 +175,11 @@ def _rigid_lambda_retention(alpha: float, gamma: float, use_compliant_alm: bool)
     residual. The legacy path keeps its historical ``alpha * gamma`` policy.
     """
     return gamma if use_compliant_alm else alpha * gamma
+
+
+# Label-propagation rounds that spread a soft body's translation aggregate through the free
+# bodies piled on it; each round reaches one body deeper.
+_TRANSLATION_ISLAND_ROUNDS = 8
 
 
 class SolverVBD(SolverBase, CouplingInterface):
@@ -365,6 +384,8 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_collision_detection_interval: int | None = None,
         particle_edge_parallel_epsilon: float = 1e-5,
         particle_enable_tile_solve: bool = True,
+        particle_enable_translation_correction: bool = False,
+        particle_bending_yield_angle: float | None = None,
         particle_topological_contact_filter_threshold: int = 2,
         particle_rest_shape_contact_exclusion_radius: float = 0.0,
         particle_external_vertex_contact_filtering_map: dict | None = None,
@@ -453,6 +474,25 @@ class SolverVBD(SolverBase, CouplingInterface):
                 The tiled kernel is specialized once at construction from the model's element
                 materials (e.g. a tetrahedra-only model compiles without triangle/edge code paths);
                 rebuild the solver after changing triangle or edge stiffness.
+            particle_enable_translation_correction: Whether to follow every particle iteration with a
+                coarse Newton step that translates each connected soft body as a whole. Vertex sweeps
+                propagate a support or grip slowly through a light, stiff body (for example a thin
+                shell held at a few vertices), so its rigid translation is the slowest error mode.
+                The step minimizes the same step energy restricted to a uniform translation of each
+                component: internal elastic, bending and damping terms cancel, leaving inertia, body
+                contacts with friction, and body attachments, which are convex in the translation.
+                Free dynamic bodies touching a component, and those piled on them, translate with it
+                as one island, so a light body resting on a soft body follows its correction instead
+                of being struck by it. Components with an inactive or zero-mass particle are left to
+                the vertex sweeps.
+                Particle self-contact between different components is not part of the coarse step;
+                the penetration-free truncation still applies to its result.
+            particle_bending_yield_angle: Hinge yield angle [rad] for plastic bending, or ``None`` for
+                purely elastic bending. After each step, a bending hinge whose dihedral angle departs
+                from its rest angle by more than this keeps the excess as permanent set (perfect
+                plasticity), so a sheet such as paper creases where it is folded hard and springs back
+                where it is only flexed. The solver owns the evolving rest angles; ``model.edge_rest_angle``
+                is not modified, and :meth:`reset` restores it for particles it resets.
             particle_topological_contact_filter_threshold: Maximum topological distance (measured in rings) under which candidate
                 self-contacts are discarded. Set to a higher value to tolerate contacts between more closely connected mesh
                 elements. Only used when `particle_enable_self_contact` is `True`. Note that setting this to a value larger than 3 will
@@ -940,6 +980,14 @@ class SolverVBD(SolverBase, CouplingInterface):
         self._integrates_rigid_bodies = integrates_rigid_bodies
 
         # Initialize particle system
+        self._translation_correction = particle_enable_translation_correction and model.particle_count > 0
+        if particle_bending_yield_angle is not None and particle_bending_yield_angle < 0.0:
+            raise ValueError(f"particle_bending_yield_angle must be >= 0, got {particle_bending_yield_angle}")
+        self.particle_bending_yield_angle = particle_bending_yield_angle
+        # Evolving hinge rest angles under plastic bending; the model's otherwise.
+        self.edge_rest_angle = model.edge_rest_angle
+        if particle_bending_yield_angle is not None and model.edge_count > 0:
+            self.edge_rest_angle = wp.clone(model.edge_rest_angle)
         self._init_particle_system(
             model,
             particle_enable_self_contact,
@@ -1114,6 +1162,85 @@ class SolverVBD(SolverBase, CouplingInterface):
         self.pos_prev_collision_detection = wp.zeros_like(model.particle_q, device=self.device)
         self.particle_displacements = wp.zeros(self.model.particle_count, dtype=wp.vec3, device=self.device)
         self.truncation_ts = wp.zeros(self.model.particle_count, dtype=float, device=self.device)
+
+        if self._translation_correction:
+            self._init_translation_components()
+
+    def _init_translation_components(self):
+        """Label the connected soft bodies whose translation the coarse correction solves."""
+        model = self.model
+        parent = np.arange(model.particle_count)
+
+        def find(i):
+            root = i
+            while parent[root] != root:
+                root = parent[root]
+            while parent[i] != root:
+                parent[i], i = root, parent[i]
+            return root
+
+        def union_rows(rows):
+            for row in rows:
+                members = row[row >= 0]
+                for other in members[1:]:
+                    a, b = find(int(members[0])), find(int(other))
+                    if a != b:
+                        parent[b] = a
+
+        for array, width in (
+            (model.tri_indices, 3),
+            (model.edge_indices, 4),
+            (model.tet_indices, 4),
+            (model.spring_indices, 2),
+        ):
+            if array is not None and array.size:
+                union_rows(array.numpy().reshape(-1, width))
+        roots = np.array([find(i) for i in range(model.particle_count)])
+        _, labels, sizes = np.unique(roots, return_inverse=True, return_counts=True)
+        # A single particle's own vertex update already solves its translation.
+        multi = sizes > 1
+        index = np.full(len(sizes), -1, dtype=np.int32)
+        index[multi] = np.arange(int(multi.sum()), dtype=np.int32)
+        component = index[labels]
+        count = int(multi.sum())
+        self._translation_component_count = count
+        self._translation_particle_component = wp.array(component, dtype=wp.int32, device=self.device)
+        self._translation_force = wp.zeros(max(count, 1), dtype=wp.vec3, device=self.device)
+        self._translation_hessian = wp.zeros(max(count, 1), dtype=wp.mat33, device=self.device)
+        self._translation_blocked = wp.zeros(max(count, 1), dtype=wp.int32, device=self.device)
+        self._translation_step = wp.zeros(max(count, 1), dtype=wp.vec3, device=self.device)
+        # Built on the first correction, once the rigid configuration is known.
+        self._translation_body_aggregable = None
+        self._translation_body_aggregate = wp.zeros(0, dtype=wp.int32, device=self.device)
+
+    def _init_translation_aggregation(self):
+        """Mark the bodies that may join a soft component's translation.
+
+        Only dynamic bodies integrated by this solver and constrained by nothing but contact
+        qualify: a body held by a joint or a particle attachment cannot follow the translation of
+        whatever it touches.
+        """
+        model = self.model
+        self._translation_body_aggregable = wp.zeros(0, dtype=wp.int32, device=self.device)
+        if model.body_count == 0 or not self._integrates_rigid_bodies:
+            return
+        # Kinematic bodies are excluded per launch from the effective inverse mass, which follows
+        # runtime changes of the kinematic flag.
+        aggregable = model.body_inv_mass.numpy() > 0.0
+        if model.joint_count > 0:
+            joint_type = model.joint_type.numpy()
+            constrained = joint_type != int(JointType.FREE)
+            for bodies in (model.joint_parent.numpy(), model.joint_child.numpy()):
+                held = bodies[constrained & (bodies >= 0)]
+                aggregable[held] = False
+        if model.attachment_body_particle_count > 0:
+            aggregable[model.attachment_body_particle_body.numpy()] = False
+        if not aggregable.any():
+            return
+        self._translation_body_aggregable = wp.array(aggregable.astype(np.int32), dtype=wp.int32, device=self.device)
+        self._translation_body_aggregate = wp.full(
+            model.body_count, int(TRANSLATION_NO_AGGREGATE), dtype=wp.int32, device=self.device
+        )
 
     def _init_rigid_system(
         self,
@@ -1356,6 +1483,9 @@ class SolverVBD(SolverBase, CouplingInterface):
         # Body-particle interaction shared state.
         # -------------------------------------------------------------
         self.body_particle_contact_penalty_k = wp.zeros(0, dtype=float, device=self.device)
+        self._empty_shape_mask = wp.zeros(0, dtype=wp.int32, device=self.device)
+        self._empty_aggregate = wp.zeros(0, dtype=wp.int32, device=self.device)
+        self._full_surface_mask = None
         self.body_particle_contact_material_ke = wp.zeros(0, dtype=float, device=self.device)
         self.body_particle_contact_material_kd = wp.zeros(0, dtype=float, device=self.device)
         self.body_particle_contact_material_mu = wp.zeros(0, dtype=float, device=self.device)
@@ -2577,6 +2707,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             self._mid_step_detection(
                 state_in, state_out, contacts, dt, rigid_due=rigid_due, soft_due=soft_due, preserve_history=True
             )
+            self._refine_rigid_soft_contacts(state_in, state_out, contacts)
             self._solve_rigid_body_iteration(state_in, state_out, control, contacts, dt)
             self._solve_particle_iteration(state_in, state_out, contacts, dt)
 
@@ -2731,6 +2862,21 @@ class SolverVBD(SolverBase, CouplingInterface):
                         model.particle_qd,
                     ],
                     outputs=[particle_q, particle_qd],
+                    device=self.device,
+                )
+            if particle_q is not None and self.edge_rest_angle is not model.edge_rest_angle:
+                wp.launch(
+                    kernel=reset_plastic_bending_rest_angles,
+                    dim=model.edge_count,
+                    inputs=[
+                        world_mask,
+                        world_mask is None,
+                        model.world_count,
+                        model.particle_world,
+                        model.edge_indices,
+                        model.edge_rest_angle,
+                    ],
+                    outputs=[self.edge_rest_angle],
                     device=self.device,
                 )
 
@@ -3349,6 +3495,57 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self._contact_history_reset_mask.zero_()
                     self._contact_history_reset_pending.zero_()
 
+    def _refine_rigid_soft_contacts(self, state_in: State, state_out: State, contacts: Contacts | None) -> None:
+        """Re-solve each full-surface rigid-soft record's contact point at the current iterate.
+
+        Full-surface records sample a shape at the deepest point of each soft edge and triangle,
+        which moves with the shape; see ``refine_soft_contacts``. Per-particle records sample the
+        particles themselves and keep their detected tangent plane.
+        """
+        model = self.model
+        if contacts is None or contacts.soft_contact_max == 0 or model.particle_count == 0:
+            return
+        refinable = self._full_surface_shape_mask(contacts)
+        if refinable.shape[0] == 0:
+            return
+        body_q = state_out.body_q if self.integrate_with_external_rigid_solver else state_in.body_q
+        wp.launch(
+            refine_soft_contacts,
+            dim=contacts.soft_contact_max,
+            inputs=[
+                contacts.soft_contact_count,
+                contacts.soft_contact_indices,
+                contacts.soft_contact_shape,
+                refinable,
+                state_in.particle_q,
+                model.shape_body,
+                model.shape_type,
+                model.shape_transform,
+                model.shape_scale,
+                body_q,
+                model._shape_sdf_index,
+                model._texture_sdf_data,
+                SDF_REFINE_ITERS,
+                SDF_REFINE_LS_ITERS,
+            ],
+            outputs=[contacts.soft_contact_barycentric, contacts.soft_contact_body_pos, contacts.soft_contact_normal],
+            device=self.device,
+        )
+
+    def _full_surface_shape_mask(self, contacts: Contacts) -> wp.array:
+        """Per-shape flag of shapes whose soft contacts carry full-surface edge/face records.
+
+        Empty when ``contacts`` holds per-particle contacts only; their records keep unit weight.
+        """
+        if not contacts._enable_rigid_soft_full_surface_contact or self.model.shape_count == 0:
+            return self._empty_shape_mask
+        if self._full_surface_mask is None:
+            from ...sim.collide import _full_surface_capable_shape_mask  # noqa: PLC0415
+
+            mask = _full_surface_capable_shape_mask(self.model).astype(np.int32)
+            self._full_surface_mask = wp.array(mask, dtype=wp.int32, device=self.device)
+        return self._full_surface_mask
+
     def _refresh_body_particle_contact_state(self, contacts: Contacts | None, refresh: bool) -> None:
         """Rebuild body-particle contact lists and material state when needed."""
         model = self.model
@@ -3407,6 +3604,8 @@ class SolverVBD(SolverBase, CouplingInterface):
             inputs=[
                 contacts.soft_contact_count,
                 contacts.soft_contact_shape,
+                contacts.soft_contact_indices,
+                self._full_surface_shape_mask(contacts),
                 model.soft_contact_ke,
                 model.soft_contact_kd,
                 model.soft_contact_mu,
@@ -3905,7 +4104,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         self.model.tri_materials,
                         self.model.tri_areas,
                         self.model.edge_indices,
-                        self.model.edge_rest_angle,
+                        self.edge_rest_angle,
                         self.model.edge_rest_length,
                         self.model.edge_bending_properties,
                         self.model.tet_indices,
@@ -3937,7 +4136,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         self.model.tri_materials,
                         self.model.tri_areas,
                         self.model.edge_indices,
-                        self.model.edge_rest_angle,
+                        self.edge_rest_angle,
                         self.model.edge_rest_length,
                         self.model.edge_bending_properties,
                         self.model.tet_indices,
@@ -3954,7 +4153,225 @@ class SolverVBD(SolverBase, CouplingInterface):
                 )
             self._penetration_free_truncation(state_in, contacts)
 
+        if self._translation_correction and self._translation_component_count > 0:
+            self._solve_translation_correction(
+                state_in, contacts, dt, body_q_for_particles, body_q_prev_for_particles, body_qd_for_particles
+            )
+            self._penetration_free_truncation(state_in, contacts)
+
         wp.copy(state_out.particle_q, state_in.particle_q)
+
+    def _solve_translation_correction(
+        self,
+        state_in: State,
+        contacts: Contacts | None,
+        dt: float,
+        body_q: wp.array | None,
+        body_q_prev: wp.array | None,
+        body_qd: wp.array | None,
+    ):
+        """Newton step of the step energy over a uniform translation of each connected soft body."""
+        model = self.model
+        self._translation_force.zero_()
+        self._translation_hessian.zero_()
+        self._translation_blocked.zero_()
+        if self._translation_body_aggregable is None:
+            self._init_translation_aggregation()
+        aggregate = self._translation_body_aggregate
+        aggregating = aggregate.shape[0] > 0 and contacts is not None and contacts.soft_contact_max > 0
+        if aggregating:
+            aggregate.fill_(int(TRANSLATION_NO_AGGREGATE))
+            wp.launch(
+                kernel=assign_translation_aggregates,
+                dim=contacts.soft_contact_max,
+                inputs=[
+                    state_in.particle_q,
+                    model.particle_radius,
+                    contacts.soft_contact_indices,
+                    contacts.soft_contact_barycentric,
+                    contacts.soft_contact_count,
+                    contacts.soft_contact_max,
+                    contacts.soft_contact_shape,
+                    contacts.soft_contact_body_pos,
+                    contacts.soft_contact_normal,
+                    model.shape_body,
+                    model.shape_margin,
+                    body_q,
+                    self._translation_body_aggregable,
+                    self.body_inv_mass_effective,
+                    self._translation_particle_component,
+                ],
+                outputs=[aggregate],
+                device=self.device,
+            )
+            if contacts.rigid_contact_max > 0:
+                # Fixed rounds keep the launch sequence graph-capturable; each round reaches one
+                # body deeper into a pile.
+                for _round in range(_TRANSLATION_ISLAND_ROUNDS):
+                    wp.launch(
+                        kernel=propagate_translation_aggregates,
+                        dim=contacts.rigid_contact_max,
+                        inputs=[
+                            contacts.rigid_contact_count,
+                            contacts.rigid_contact_shape0,
+                            contacts.rigid_contact_shape1,
+                            contacts.rigid_contact_point0,
+                            contacts.rigid_contact_point1,
+                            contacts.rigid_contact_normal,
+                            contacts.rigid_contact_margin0,
+                            contacts.rigid_contact_margin1,
+                            model.shape_body,
+                            body_q,
+                            self._translation_body_aggregable,
+                            self.body_inv_mass_effective,
+                        ],
+                        outputs=[aggregate],
+                        device=self.device,
+                    )
+            wp.launch(
+                kernel=accumulate_translation_body_inertia,
+                dim=model.body_count,
+                inputs=[dt, body_q, self.body_inertia_q, model.body_com, model.body_mass, aggregate],
+                outputs=[self._translation_force, self._translation_hessian],
+                device=self.device,
+            )
+        else:
+            aggregate = self._empty_aggregate
+        wp.launch(
+            kernel=accumulate_translation_inertia,
+            dim=model.particle_count,
+            inputs=[
+                dt,
+                state_in.particle_q,
+                self.inertia,
+                model.particle_mass,
+                model.particle_inv_mass,
+                model.particle_flags,
+                self._translation_particle_component,
+            ],
+            outputs=[self._translation_force, self._translation_hessian, self._translation_blocked],
+            device=self.device,
+        )
+        if contacts is not None and contacts.soft_contact_max > 0:
+            wp.launch(
+                kernel=accumulate_translation_body_contacts,
+                dim=contacts.soft_contact_max,
+                inputs=[
+                    dt,
+                    self.particle_q_prev,
+                    state_in.particle_q,
+                    self.friction_epsilon,
+                    self.rigid_soft_contact_use_log_barrier,
+                    model.particle_radius,
+                    contacts.soft_contact_indices,
+                    contacts.soft_contact_count,
+                    contacts.soft_contact_max,
+                    self.body_particle_contact_penalty_k,
+                    self.body_particle_contact_material_kd,
+                    self.body_particle_contact_material_mu,
+                    model.shape_body,
+                    body_q,
+                    body_q_prev,
+                    body_qd,
+                    model.body_com,
+                    contacts.soft_contact_shape,
+                    contacts.soft_contact_body_pos,
+                    contacts.soft_contact_body_vel,
+                    contacts.soft_contact_normal,
+                    model.shape_margin,
+                    contacts.soft_contact_barycentric,
+                    self._translation_particle_component,
+                    aggregate,
+                ],
+                outputs=[self._translation_force, self._translation_hessian],
+                device=self.device,
+            )
+        rigid_contacts = (
+            aggregating
+            and contacts.rigid_contact_max > 0
+            and self.body_body_contact_penalty_k.shape[0] >= contacts.rigid_contact_max
+        )
+        if rigid_contacts:
+            wp.launch(
+                kernel=accumulate_translation_body_body_contacts,
+                dim=contacts.rigid_contact_max,
+                inputs=[
+                    dt,
+                    contacts.rigid_contact_count,
+                    contacts.rigid_contact_shape0,
+                    contacts.rigid_contact_shape1,
+                    contacts.rigid_contact_point0,
+                    contacts.rigid_contact_point1,
+                    contacts.rigid_contact_surface_velocity,
+                    contacts.rigid_contact_offset0,
+                    contacts.rigid_contact_offset1,
+                    contacts.rigid_contact_normal,
+                    contacts.rigid_contact_margin0,
+                    contacts.rigid_contact_margin1,
+                    model.shape_body,
+                    body_q,
+                    body_q_prev,
+                    model.body_com,
+                    self.body_body_contact_penalty_k,
+                    self.body_body_contact_normal_rho,
+                    self.body_body_contact_material_ke,
+                    self.body_body_contact_material_kd,
+                    self.body_body_contact_material_mu,
+                    self.body_body_contact_tangent_rho,
+                    self.body_body_contact_lambda,
+                    self.body_body_contact_C0,
+                    self.rigid_contact_alpha,
+                    self.rigid_contact_hard,
+                    self.rigid_compliant_alm,
+                    float(self.friction_epsilon),
+                    aggregate,
+                ],
+                outputs=[self._translation_force, self._translation_hessian],
+                device=self.device,
+            )
+        if model.attachment_body_particle_count > 0:
+            wp.launch(
+                kernel=accumulate_translation_attachments,
+                dim=model.attachment_body_particle_count,
+                inputs=[
+                    dt,
+                    self.particle_q_prev,
+                    state_in.particle_q,
+                    body_q,
+                    body_q_prev,
+                    model.attachment_body_particle_body,
+                    model.attachment_body_particle_particle,
+                    model.attachment_body_particle_body_point,
+                    model.attachment_body_particle_stiffness,
+                    model.attachment_body_particle_damping,
+                    model.attachment_body_particle_enabled,
+                    self._translation_particle_component,
+                ],
+                outputs=[self._translation_force, self._translation_hessian],
+                device=self.device,
+            )
+        wp.launch(
+            kernel=solve_translation_correction,
+            dim=self._translation_component_count,
+            inputs=[self._translation_force, self._translation_hessian, self._translation_blocked],
+            outputs=[self._translation_step],
+            device=self.device,
+        )
+        wp.launch(
+            kernel=apply_translation_correction,
+            dim=model.particle_count,
+            inputs=[self._translation_particle_component, self._translation_step],
+            outputs=[self.particle_displacements],
+            device=self.device,
+        )
+        if aggregating:
+            wp.launch(
+                kernel=apply_translation_correction_bodies,
+                dim=model.body_count,
+                inputs=[aggregate, self._translation_step],
+                outputs=[body_q],
+                device=self.device,
+            )
 
     def _solve_rigid_body_iteration(
         self,
@@ -4609,6 +5026,14 @@ class SolverVBD(SolverBase, CouplingInterface):
             dim=self.model.particle_count,
             device=self.device,
         )
+        if self.edge_rest_angle is not self.model.edge_rest_angle:
+            wp.launch(
+                kernel=update_plastic_bending_rest_angles,
+                dim=self.model.edge_count,
+                inputs=[state_out.particle_q, self.model.edge_indices, float(self.particle_bending_yield_angle)],
+                outputs=[self.edge_rest_angle],
+                device=self.device,
+            )
 
     def _finalize_rigid_bodies(self, state_in: State, state_out: State, dt: float):
         """Finalize rigid body velocities and Dahl friction state after VBD iterations (post-iteration phase).

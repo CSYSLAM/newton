@@ -18,6 +18,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.sim.collide import _full_surface_capable_shape_mask
 from newton.sensors import SensorContact
 from newton.solvers import SolverObservableFlags
 from newton.tests.unittest_utils import (
@@ -77,7 +78,9 @@ def _expected_soft_contact_wrenches(
     """Evaluate the documented body-particle contact law in NumPy for every active soft contact.
 
     Reproduces the law from model data alone: the mixed contact material (arithmetic-mean ke/kd,
-    geometric-mean mu of the global soft material and the shape material) at full stiffness, absolute
+    geometric-mean mu of the global soft material and the shape material) at full stiffness, scaled for
+    full-surface records by the quadrature weight of the record's feature (vertex 3/20, edge 2/15,
+    triangle 9/40), absolute
     damping while the contact point approaches the surface, and regularized isotropic Coulomb friction
     on the slip between the barycentric soft point and the shape surface over the step. Returns the
     force on the shape's body and its torque about the body COM (world origin for static shapes) as an
@@ -101,6 +104,10 @@ def _expected_soft_contact_wrenches(
 
     particle_q = np.asarray(particle_q, dtype=np.float64)
     particle_q_prev = np.asarray(particle_q_prev, dtype=np.float64)
+    full_surface = np.zeros(model.shape_count, dtype=bool)
+    if contacts._enable_rigid_soft_full_surface_contact:
+        full_surface = _full_surface_capable_shape_mask(model)
+    feature_weight = (3.0 / 20.0, 2.0 / 15.0, 9.0 / 40.0)
 
     expected = np.zeros((count, 6))
     for i in range(count):
@@ -136,6 +143,9 @@ def _expected_soft_contact_wrenches(
 
         ke = 0.5 * (float(model.soft_contact_ke) + float(shape_ke[shape]))
         kd = 0.5 * (float(model.soft_contact_kd) + float(shape_kd[shape]))
+        if full_surface[shape]:
+            ke *= feature_weight[len(corners) - 1]
+            kd *= feature_weight[len(corners) - 1]
         mu = np.sqrt(float(model.soft_contact_mu) * float(shape_mu[shape]))
 
         f_n = ke * penetration

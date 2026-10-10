@@ -6297,6 +6297,9 @@ def _run_face_section2(device, shape_margin):
         inputs=[
             contacts.soft_contact_count,
             contacts.soft_contact_shape,
+            contacts.soft_contact_indices,
+            # Empty full-surface mask: unit record weight, so the face record carries the bare law.
+            wp.zeros(0, dtype=wp.int32, device=device),
             model.soft_contact_ke,
             model.soft_contact_kd,
             model.soft_contact_mu,
