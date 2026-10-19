@@ -5,10 +5,11 @@
 
 from __future__ import annotations
 
+import numpy as np
 import warp as wp
 
 from newton._src.core.reset import reset_world_selected
-from newton._src.sim import ModelFlags, StateFlags
+from newton._src.sim import BodyFlags, ModelFlags, StateFlags
 from newton._src.solvers.mjmpm.base import SolverBase
 from newton._src.solvers.mjmpm.collision.pipeline import CollisionPipeline
 from newton._src.solvers.mjmpm.coupling.interface import CouplingInterface
@@ -71,6 +72,7 @@ class Environment(SolverBase, CouplingInterface):
             and (config.grid_type == "fixed" or self.material._sparse_rebuildable)
         )
         self.detector = CollisionPipeline(model, broad_phase="nxn", soft_contact_max=0)
+        self._exclude_proxy_pairs()
         self.contacts = self.detector.contacts()
         self.contact_impulses = wp.zeros(self.contacts.rigid_contact_max, dtype=wp.vec3, device=model.device)
         self._init_contact_buffers()
@@ -78,6 +80,49 @@ class Environment(SolverBase, CouplingInterface):
         self.material_impulses = wp.zeros_like(self.rigid_impulses)
         self.work = model.state()
         self._all_worlds = wp.full(model.world_count + 1, True, dtype=wp.bool, device=model.device)
+
+    def _exclude_proxy_pairs(self):
+        """Skip shape pairs whose contacts the rigid solve always discards.
+
+        MuJoCo owns articulation self-contact and articulation-static contact,
+        so the environment never solves proxy-proxy or proxy-static pairs.
+        Proxy flags are fixed at construction, unlike kinematic flags, so
+        those pairs are excluded from broad-phase candidates up front.
+        """
+        model = self.model
+        if model.shape_count == 0 or model.body_count == 0:
+            return
+        shape_body = model.shape_body.numpy()
+        shape_world = model.shape_world.numpy()
+        proxy_body = (model.body_flags.numpy() & int(BodyFlags.PROXY)) != 0
+        proxy = np.flatnonzero((shape_body >= 0) & proxy_body[np.maximum(shape_body, 0)])
+        if proxy.shape[0] == 0:
+            return
+        static = np.flatnonzero(shape_body < 0)
+        global_static = static[shape_world[static] < 0]
+        global_proxy = proxy[shape_world[proxy] < 0]
+        chunks = []
+        # Pair shapes world by world so the candidate list stays linear in the world count.
+        for world in np.unique(shape_world[proxy]):
+            if world < 0:
+                world_proxy = global_proxy
+                others = np.concatenate((proxy, static))
+            else:
+                world_proxy = proxy[shape_world[proxy] == world]
+                others = np.concatenate(
+                    (world_proxy, global_proxy, static[shape_world[static] == world], global_static)
+                )
+            a = np.repeat(world_proxy, others.shape[0])
+            b = np.tile(others, world_proxy.shape[0])
+            keep = a != b
+            chunks.append(np.stack((np.minimum(a, b), np.maximum(a, b)), axis=1)[keep])
+        pairs = np.concatenate(chunks)
+        existing = model.shape_collision_filter_pairs_array()
+        if existing.shape[0]:
+            pairs = np.concatenate((pairs, np.asarray(existing, dtype=pairs.dtype).reshape(-1, 2)))
+        pairs = np.unique(pairs.astype(np.int32), axis=0)
+        self.detector.shape_pairs_excluded = wp.array(pairs, dtype=wp.vec2i, device=model.device)
+        self.detector.shape_pairs_excluded_count = pairs.shape[0]
 
     def _init_contact_buffers(self):
         """Allocate the per-world contact solve workspace."""

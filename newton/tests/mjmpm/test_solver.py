@@ -567,6 +567,47 @@ class TestMJMPMArticulation(unittest.TestCase):
         momentum = float(two_way.joint_qd.numpy()[0] + two_way.body_qd.numpy()[free, 0])
         self.assertAlmostEqual(momentum, 1.0, delta=0.005)
 
+    def test_proxy_static_pairs_are_not_detected(self):
+        """Exclude articulation-static pairs from environment detection without changing the motion."""
+        builder = newton.ModelBuilder()
+        SolverMJMPM.register_custom_attributes(builder)
+        cfg = newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.5)
+        pose = wp.transform(wp.vec3(0.0, 0.0, 0.1), wp.quat_identity())
+        link = builder.add_link(xform=pose, mass=1.0, inertia=wp.mat33(np.eye(3)))
+        link_shape = builder.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+        joint = builder.add_joint_prismatic(parent=-1, child=link, axis=(1.0, 0.0, 0.0), parent_xform=pose)
+        builder.add_articulation([joint])
+        builder.joint_qd[0] = 0.5
+        free = _box(builder, (0.205, 0.0, 0.1))
+        ground = builder.add_ground_plane()
+        model = builder.finalize(device="cpu")
+        results = []
+        for filtered in (True, False):
+            solver = SolverMJMPM(model, mujoco_options={"use_mujoco_cpu": True})
+            env = solver.environment
+            if not filtered:
+                original = model.shape_collision_filter_pairs_array()
+                env.detector.shape_pairs_excluded = wp.array(original, dtype=wp.vec2i, device="cpu")
+                env.detector.shape_pairs_excluded_count = original.shape[0]
+            state = model.state()
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+            pairs = set()
+            peak_push = 0.0
+            for _ in range(60):
+                solver.step(state, state, None, None, 0.002)
+                peak_push = max(peak_push, float(state.body_qd.numpy()[free, 0]))
+                count = int(env.contacts.rigid_contact_count.numpy()[0])
+                shape0 = env.contacts.rigid_contact_shape0.numpy()[:count]
+                shape1 = env.contacts.rigid_contact_shape1.numpy()[:count]
+                pairs |= {(int(min(a, b)), int(max(a, b))) for a, b in zip(shape0, shape1, strict=True)}
+            results.append((pairs, peak_push, state.body_q.numpy(), state.body_qd.numpy(), state.joint_qd.numpy()))
+        static_pair = (min(link_shape, ground), max(link_shape, ground))
+        self.assertNotIn(static_pair, results[0][0])
+        self.assertIn(static_pair, results[1][0])
+        self.assertGreater(results[0][1], 0.05)
+        for expected, actual in zip(results[1][2:], results[0][2:], strict=True):
+            np.testing.assert_allclose(actual, expected, atol=1.0e-6)
+
     def test_material_impulses_push_articulation(self):
         """Return MPM grid impulses to a prismatic joint while preserving one-way behavior."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
