@@ -51,6 +51,7 @@ Newton Physics
 
    Overview <solvers/index>
    MuJoCo <solvers/mujoco>
+   MJMPM (experimental) <solvers/mjmpm>
    Kamino <solvers/kamino>
    VBD <solvers/vbd>
 

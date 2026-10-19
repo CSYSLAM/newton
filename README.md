@@ -579,6 +579,32 @@ If you run the examples from a source checkout with uv, use
   </tr>
   <tr>
     <td align="center" width="33%">
+      <a href="newton/examples/mpm/example_mjmpm_press.py">
+        <img width="320" src="docs/images/examples/example_mjmpm_press.jpg" alt="Independent MuJoCo–MPM Press">
+      </a>
+    </td>
+    <td colspan="2">
+      <b>Independent MuJoCo–MPM press (experimental)</b><br>
+      A gravity-compensated MuJoCo press holds, compresses an MPM elastic block, then retracts.<br>
+      <code>python -m newton.examples mjmpm_press</code><br>
+      <code>python -m newton.examples mjmpm_press --coupling one_way</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="newton/examples/mjmpm/example_mjmpm_w1_squeeze_grasp.py">
+        <img width="320" src="docs/images/examples/example_mjmpm_w1_squeeze_grasp.jpg" alt="Dynamic W1 MJMPM Squeeze Grasp">
+      </a>
+    </td>
+    <td colspan="2">
+      <b>Dynamic W1 MuJoCo–MPM squeeze and grasp (experimental)</b><br>
+      A force-driven W1 robot grasps a rigid block and an elastic MPM cube, lifts both, then releases them.<br>
+      <code>python -m newton.examples mjmpm_w1_squeeze_grasp</code><br>
+      <code>python -m newton.examples mjmpm_w1_squeeze_grasp --coupling one_way</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
       <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mpm/example_mpm_granular.py">
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mpm_granular.jpg" alt="MPM Granular">
       </a>

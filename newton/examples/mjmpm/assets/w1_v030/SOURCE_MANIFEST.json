@@ -1,0 +1,258 @@
+{
+  "revision": "2af3c8c0b496394de88e287c1efbd617c8b6eb12",
+  "source": "newton/examples/mjvbdv2/assets/w1_v030/",
+  "files": [
+    {
+      "path": "w1-030/robot.urdf",
+      "sha256": "5a800a7811c2d6d8012e7f0a09c55509e84b7b48bf3658bc7b73ac2d66c1e558"
+    },
+    {
+      "path": "w1-030/collision/chassis/base_link.obj",
+      "sha256": "06b425daa3c87dd1437a8d9af0c6d38df5459c5cd4e2623e6de58eefb9144629"
+    },
+    {
+      "path": "w1-030/collision/head/head_pitch_j2_link.obj",
+      "sha256": "f4fea8be793f1d816b8ed892de7903200eb69eb9ebffa17814e439d30a805288"
+    },
+    {
+      "path": "w1-030/collision/head/head_yaw_j1_link.obj",
+      "sha256": "20d6803ee6e8df23c1cff298c761d3c7da4ec03de3721ba14a4087b663c7139b"
+    },
+    {
+      "path": "w1-030/collision/left_arm/elbow_pitch_l_j3_link.obj",
+      "sha256": "360261087e1baaee2129bd49fb717989c2d952cf180d1a50b2f9de8f09890196"
+    },
+    {
+      "path": "w1-030/collision/left_arm/elbow_yaw_l_j4_link.obj",
+      "sha256": "d245168a9c99b8b0abf6a21d8780b5b09f27cd9b869335f3d345da76da26995a"
+    },
+    {
+      "path": "w1-030/collision/left_arm/shoulder_pitch_l_j1_link.obj",
+      "sha256": "ae03647240ba9c6f1932b9762b6a0e8b91c78f1f227b01a555bcc8d5e07d3a7e"
+    },
+    {
+      "path": "w1-030/collision/left_arm/shoulder_roll_l_j2_link.obj",
+      "sha256": "60d13ca8a6e78ee8bdd5d8879a3827f3b34e213095251256a46202b57a7bb1b9"
+    },
+    {
+      "path": "w1-030/collision/left_arm/wrist_pitch_l_j5_link.obj",
+      "sha256": "9643d88323158f89422781e9807663ddcd6c90a1311270654390d70919f56873"
+    },
+    {
+      "path": "w1-030/collision/left_arm/wrist_roll_l_j7_link.obj",
+      "sha256": "54227f653cf20f5a9589b2d669d4669d1746c2aecd9ed8c911ee281a55958306"
+    },
+    {
+      "path": "w1-030/collision/left_arm/wrist_yaw_l_j6_link.obj",
+      "sha256": "c07ed5a8e617b873093b8ed20ef0e92fe741d08b3c354071843d853953080a7a"
+    },
+    {
+      "path": "w1-030/collision/left_hand/gripper_base_v100_acd.obj",
+      "sha256": "f048466991e252651527e54ac55df064dd8bad79cc523f27c4dd54d156a08218"
+    },
+    {
+      "path": "w1-030/collision/left_hand/link7_acd.obj",
+      "sha256": "2fede0234360b9aff2f3fb37579f724c8c48491b9ee952561f322ce20fe8bcea"
+    },
+    {
+      "path": "w1-030/collision/left_hand/link8_acd.obj",
+      "sha256": "535ee180965a84f4a64a043be20b05271762bfb2103a9de4b770e45bf5239d37"
+    },
+    {
+      "path": "w1-030/collision/left_hand/sl_scaled.obj",
+      "sha256": "93759d8f739b5bcb378eb1a53df03cd81f893ae1a73f49f8656830c971218e40"
+    },
+    {
+      "path": "w1-030/collision/right_arm/elbow_pitch_r_j3_link.obj",
+      "sha256": "0a7aeb9c8ae0bf2cc8e9feddc81870bcce6b857eefd526654699d9a894a3ea13"
+    },
+    {
+      "path": "w1-030/collision/right_arm/elbow_yaw_r_j4_link.obj",
+      "sha256": "0b3c6f1deb425bb836278aad1af2663c0810b4885517bd6f96e545ab49b28cd5"
+    },
+    {
+      "path": "w1-030/collision/right_arm/shoulder_pitch_r_j1_link.obj",
+      "sha256": "6f7f7f280c3354860559dc5ae6907ed2f802dd7885613aa89e6209c1200c5969"
+    },
+    {
+      "path": "w1-030/collision/right_arm/shoulder_roll_r_j2_link.obj",
+      "sha256": "ec58a34d4af2e899591c53159eb0fd34622f9666716fd02ca2cb4968785930dc"
+    },
+    {
+      "path": "w1-030/collision/right_arm/wrist_pitch_r_j5_link.obj",
+      "sha256": "79d27c3fcbbeb3355a12855211c124e91d355bd63c8491979149372cef374e91"
+    },
+    {
+      "path": "w1-030/collision/right_arm/wrist_roll_r_j7_link.obj",
+      "sha256": "f6f26ac50f3a9ba2f30ebe9202a2da3f3e0f6ba5d4366a3dee9e4ebbe8718dc3"
+    },
+    {
+      "path": "w1-030/collision/right_arm/wrist_yaw_r_j6_link.obj",
+      "sha256": "affb3d9db6b7ab1e602e3529428c3e48f980e668a0b2845417c7dcaf79551311"
+    },
+    {
+      "path": "w1-030/collision/right_hand/gripper_base_v100_acd.obj",
+      "sha256": "f048466991e252651527e54ac55df064dd8bad79cc523f27c4dd54d156a08218"
+    },
+    {
+      "path": "w1-030/collision/right_hand/link7_acd.obj",
+      "sha256": "2fede0234360b9aff2f3fb37579f724c8c48491b9ee952561f322ce20fe8bcea"
+    },
+    {
+      "path": "w1-030/collision/right_hand/link8_acd.obj",
+      "sha256": "535ee180965a84f4a64a043be20b05271762bfb2103a9de4b770e45bf5239d37"
+    },
+    {
+      "path": "w1-030/collision/right_hand/sl_scaled.obj",
+      "sha256": "93759d8f739b5bcb378eb1a53df03cd81f893ae1a73f49f8656830c971218e40"
+    },
+    {
+      "path": "w1-030/collision/torso/ankle_pitch_link.obj",
+      "sha256": "9431c7ea8dbea960060da7a6aacbba247a1a972380cc773a62172d99663a15af"
+    },
+    {
+      "path": "w1-030/collision/torso/buttock_pitch_link.obj",
+      "sha256": "015274a173474a55a984cad6c5b2270e68ea13543154c5b4d33afb5be67c4057"
+    },
+    {
+      "path": "w1-030/collision/torso/knee_pitch_link.obj",
+      "sha256": "bb771afac835bbd6eeabc663f4fd8d462c634b2ba55ee32ace8be981aa919317"
+    },
+    {
+      "path": "w1-030/collision/torso/waist_yaw_link.obj",
+      "sha256": "3b8775b1501472b831c9d2c71d1c71a6c6141fc461471417067190e0e44886ed"
+    },
+    {
+      "path": "w1-030/visual/chassis/base_link.glb",
+      "sha256": "222eb0fe076a2b2693b2bb168d718a2b1418f83fcf0af5eaccd7239f5f990cf0"
+    },
+    {
+      "path": "w1-030/visual/head/head_pitch_j2_link.glb",
+      "sha256": "1419a0a9d1536342eb9fe09e0df71500bbf8c0fb144fb66e4f9188edb8493798"
+    },
+    {
+      "path": "w1-030/visual/head/head_yaw_j1_link.glb",
+      "sha256": "73b55b47b32754413d2c04c867b10727185d4f057d20d52f3b9a3cae414b313f"
+    },
+    {
+      "path": "w1-030/visual/left_arm/elbow_pitch_l_j3_link.glb",
+      "sha256": "bdac39304072161e1860da7c4110dbe048e771cd784492a7c90c3ec9adf9589a"
+    },
+    {
+      "path": "w1-030/visual/left_arm/elbow_yaw_l_j4_link.glb",
+      "sha256": "86ea63225738979705b110e52f42bb133de21514fe78684ad7792a1f5d274cef"
+    },
+    {
+      "path": "w1-030/visual/left_arm/shoulder_pitch_l_j1_link.glb",
+      "sha256": "2595e0f14275f173bd4822d21ad2e5484e862de7e3a254a8c008ce0704beeded"
+    },
+    {
+      "path": "w1-030/visual/left_arm/shoulder_roll_l_j2_link.glb",
+      "sha256": "efc3d3a3875964c01e8bf84f1d66082be43969f3cbd4cadfae8aae0439662a4e"
+    },
+    {
+      "path": "w1-030/visual/left_arm/wrist_pitch_l_j5_link.glb",
+      "sha256": "62e8af2e68b25d18829a6c68270a0d6f49f94cade703937dfe5d353447b5ea9b"
+    },
+    {
+      "path": "w1-030/visual/left_arm/wrist_roll_l_j7_link.glb",
+      "sha256": "6672f35fd6d52dc553da8a7da97bef117cdb26ae31931e161436321982ba4c8f"
+    },
+    {
+      "path": "w1-030/visual/left_arm/wrist_yaw_l_j6_link.glb",
+      "sha256": "cbc0d47fcb3eb98a18642cf2355d6ed13baf0b6628ad24ec76c35d292f3e7958"
+    },
+    {
+      "path": "w1-030/visual/left_hand/RealSense_D405.dae",
+      "sha256": "9bee4688070f34d11148cc2f5e29a3f9c706e0efa6093142b3b768667ee85c59"
+    },
+    {
+      "path": "w1-030/visual/left_hand/gripper_base_v100_no_adapter.dae",
+      "sha256": "abc51738ac7f2f801713c58e6179ef2db31d088fc81566bcf031eb71df820499"
+    },
+    {
+      "path": "w1-030/visual/left_hand/link7.dae",
+      "sha256": "bb9c7f49774eb28fc91f5a835f2475ccd0329b7e4d6af1daf0295482fdbb415e"
+    },
+    {
+      "path": "w1-030/visual/left_hand/link8.dae",
+      "sha256": "7176483ac817902a41589b2008d664b1ac79dd77f3f9d80d61bf87b3bc8ea498"
+    },
+    {
+      "path": "w1-030/visual/left_hand/sl_scaled.dae",
+      "sha256": "ce8a7eec610eff50d06dfccfcb7e220a2af64661b62b0a96b5858c45102351aa"
+    },
+    {
+      "path": "w1-030/visual/left_hand/stand.dae",
+      "sha256": "6f6581ba40dc5807e1eb9277cebf2e274ea18cdc5c124957926ef56ed747400f"
+    },
+    {
+      "path": "w1-030/visual/right_arm/elbow_pitch_r_j3_link.glb",
+      "sha256": "89fc682793b735eab2fe7f6a0a9d23cec3b15e967fd4aeb1a29b5a833a51ffad"
+    },
+    {
+      "path": "w1-030/visual/right_arm/elbow_yaw_r_j4_link.glb",
+      "sha256": "56def379461f4ff3c415d535360566475a115ef5f4918bf2344620927d4c0f6e"
+    },
+    {
+      "path": "w1-030/visual/right_arm/shoulder_pitch_r_j1_link.glb",
+      "sha256": "fa44e4b1e81ad3f2d7a32b69007b0d9f0d61df2e688635440308e07f264332e8"
+    },
+    {
+      "path": "w1-030/visual/right_arm/shoulder_roll_r_j2_link.glb",
+      "sha256": "c7bd1648a1dab7a0dc73545b937a6b6f3d2e7ebf47cb0150c8bd28079077605e"
+    },
+    {
+      "path": "w1-030/visual/right_arm/wrist_pitch_r_j5_link.glb",
+      "sha256": "65597b5b5bfb6a911bdab6b9b5b05863ed5cc9144ae2e52b42e262df349f50ae"
+    },
+    {
+      "path": "w1-030/visual/right_arm/wrist_roll_r_j7_link.glb",
+      "sha256": "c6c76cb753579dc4397a7585ef63a8862492816177fddd7f81761c80d42675ab"
+    },
+    {
+      "path": "w1-030/visual/right_arm/wrist_yaw_r_j6_link.glb",
+      "sha256": "1d3507a30de8f84f6ef4a609f730f3046caffb6de49d169901c9b896b8d5d50d"
+    },
+    {
+      "path": "w1-030/visual/right_hand/RealSense_D405.dae",
+      "sha256": "9bee4688070f34d11148cc2f5e29a3f9c706e0efa6093142b3b768667ee85c59"
+    },
+    {
+      "path": "w1-030/visual/right_hand/gripper_base_v100_no_adapter.dae",
+      "sha256": "abc51738ac7f2f801713c58e6179ef2db31d088fc81566bcf031eb71df820499"
+    },
+    {
+      "path": "w1-030/visual/right_hand/link7.dae",
+      "sha256": "bb9c7f49774eb28fc91f5a835f2475ccd0329b7e4d6af1daf0295482fdbb415e"
+    },
+    {
+      "path": "w1-030/visual/right_hand/link8.dae",
+      "sha256": "7176483ac817902a41589b2008d664b1ac79dd77f3f9d80d61bf87b3bc8ea498"
+    },
+    {
+      "path": "w1-030/visual/right_hand/sl_scaled.dae",
+      "sha256": "ce8a7eec610eff50d06dfccfcb7e220a2af64661b62b0a96b5858c45102351aa"
+    },
+    {
+      "path": "w1-030/visual/right_hand/stand.dae",
+      "sha256": "6f6581ba40dc5807e1eb9277cebf2e274ea18cdc5c124957926ef56ed747400f"
+    },
+    {
+      "path": "w1-030/visual/torso/ankle_pitch_link.glb",
+      "sha256": "92b2b48da5358c6e8e202db3ad12e5059d53ac2be8a1ff5dec6bf5dab7a69c66"
+    },
+    {
+      "path": "w1-030/visual/torso/buttock_pitch_link.glb",
+      "sha256": "fc9598cd67b9f57c0c34fbb2c6986a71f14cb3aa9cc136ed4caa98d5287a83ef"
+    },
+    {
+      "path": "w1-030/visual/torso/knee_pitch_link.glb",
+      "sha256": "37c96b47b3576c0e4bcd6026d79ae143dd408adcbc71978ebb2d5e9f46628d94"
+    },
+    {
+      "path": "w1-030/visual/torso/waist_yaw_link.glb",
+      "sha256": "dfb98763f7e2ee821096534fb0b9933b337f2fca308c524e3eff7ba216bc1d13"
+    }
+  ]
+}

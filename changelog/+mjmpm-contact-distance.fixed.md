@@ -1,0 +1,1 @@
+Prevent material contact forces across visible gaps in the experimental MJMPM solver by sampling contacts at particle surfaces instead of activating empty grid nodes. Add contact-clearance validation to the press example.

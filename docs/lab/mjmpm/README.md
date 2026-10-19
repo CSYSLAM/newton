@@ -1,0 +1,136 @@
+# MJMPM：P0 审计与 P1 首批实现
+
+日期：2026-10-19。实现分支：`feature/mjmpm-independent`。
+
+## 版本与代码边界
+
+- 工作基线：`e50f0d0e5807c3b1b9ee0848c18eee25e77673e7`。
+- MJVBD v2 参考：`2af3c8c0b496394de88e287c1efbd617c8b6eb12`。
+- Python 3.12.13、Warp 1.18.0、MuJoCo/MuJoCo Warp 3.14.0。
+- CPU：Intel64 Family 6 Model 198；GPU：RTX 5060 Ti，8 GiB。
+
+`SOURCE_MANIFEST.json` 记录迁入的 30 个源文件及原始 SHA-256。独立求解器目录包含私有基础类、MuJoCo 适配、MPM、碰撞编排和耦合代码，以及新增的环境刚体模块。共享求解器实现保持不变；仅在公共导出表中增加 `SolverMJMPM`。
+
+共享部分包括 Newton 数据合同、数学与几何基础算法、Warp FEM/稀疏矩阵和第三方 MuJoCo 引擎。碰撞编排已私有化，底层通用几何 broad/narrow phase 仍使用 Newton 基础设施。私有代码不导入共享求解器；静态审计结果与实际数值结果见 [validation.json](validation.json)。审计只检查明确的 Python 导入边界，不等同于对任意动态反射的形式化证明。
+
+## 已实现路径
+
+- 无 articulation：仅构造 MPM 环境，自由刚体由该侧积分。
+- 有 articulation：私有 MuJoCo 拥有完整关节树；独立 free joint 仍归 MPM。
+- 刚体采用质量、惯量和刚性位姿；私有刚体参考接触求解支持法向冲量和滑动摩擦。
+- 刚体—材料冲量直接从 MPM 网格提取；机器人—环境刚体和机器人—材料反力返回 MuJoCo。
+- 单向模式保持机器人不受环境反力影响；双向模式为显式滞后反馈。
+- 更新环境自由刚体的 free-joint 坐标；支持刚体状态的按 world 重置。
+- 固定容量网格的关节/环境刚体/材料 CUDA Graph 回放与普通 GPU 执行做数值对照。
+
+## P0 状态审计
+
+| 类别 | 必须在同一步重算中恢复或明确处理的状态 |
+| --- | --- |
+| 真实状态 | 关节 `joint_q/joint_qd`；环境刚体 `body_q/body_qd`；粒子 `particle_q/particle_qd` |
+| 材料历史 | `mpm.particle_qd_grad`、`particle_elastic_strain`、`particle_stress`、`particle_Jp` |
+| 上一步缓存 | `LastStepData.ws_impulse_field`、`ws_stress_field`、`body_q_prev` |
+| 网格与接触 | geometry/space partition、粒子到单元映射、活动容量、碰撞体栅格化数据 |
+| 刚体与接口 | 刚体接触累积冲量、材料到刚体冲量、代理反馈及其松弛历史 |
+| MuJoCo 内部 | `qpos/qvel`、外力、驱动状态、约束 warm-start 与派生惯性数据 |
+
+本轮仅使用单轮代理耦合，没有将已有的同一区间重算功能直接开放为 P2。仅复制 `State` 不能证明上述历史已恢复。
+
+本地 MuJoCo Warp 提供 `smooth.factor_m/solve_m` 及 `support.jac` 作为 P3 候选接口。当前只核对到接口存在，尚未验证接触 Jacobian、关节约束投影响应、批量矩阵自由算子或它们的 Graph 合同。现有 `body_invweight0` 估计继续只用于 P1 代理惯量。
+
+## 数值验证阈值
+
+以下是小场景验收阈值，不构成任意模型的精度保证：
+
+| 场景 | 阈值/检查 |
+| --- | --- |
+| 10 步刚体落体 | 与半隐式离散解的高度差不超过 2e-6 m |
+| 刚体旋转 | 角速度误差不超过 1e-5 rad/s，姿态确实改变 |
+| 两刚体碰撞 | 线动量绝对误差不超过 2e-6 kg·m/s |
+| 刚体—材料接触 | 线动量绝对误差不超过 2e-4 kg·m/s，并有可测刚体运动 |
+| 刚体落地/堆叠 | 最终高度误差不超过 4 mm，残余速度范数小于 0.02 |
+| 关节与环境刚体 | 双向关节减速、环境刚体加速；接触后动量误差小于 0.005 kg·m/s |
+| 材料推动关节 | 单向关节保持静止，双向速度超过 0.001 m/s |
+| 私有/原始 MPM | 位置/速度绝对容差 1e-7，材料历史绝对容差 1e-6，实际产生非零应力 |
+| 耦合材料历史 | 原地更新与双状态交换均与独立 MPM 对照；父状态与子求解器输出逐元素一致 |
+| 接触前材料高度 | 重力开启、压板悬停 1 秒后，粒子中心高度跨度大于初始值的 90%，压板接触冲量为零 |
+| GPU 普通/Graph | 位姿和速度绝对容差 2e-6；材料历史 rtol=1e-4、atol=2e-5，应力绝对容差 0.005 Pa（浮点原子归约误差） |
+| 按 world 重置 | 被选择刚体回到初态，其他 world 位姿逐元素保持 |
+
+闭合系统动量测试显式设 `air_drag=0`。材料基线使用 50 次 Jacobi 迭代，与原始 CPU 实现的批次大小匹配；接触回归使用更小预算，覆盖私有循环的修复。
+
+## 本轮发现并处理的问题
+
+1. Warp/FEM 在共享与私有实现同进程运行时会因相同 struct key 复用不兼容的生成函数。私有 `MaterialParameters`、`Collider`、`ContactWriterData` 使用独立名字，数值对照能在同一进程运行。
+2. 迁入的 CPU 流变循环按批次数向下取整；Jacobi 少于 50 次时可能一轮也不执行。私有版本改为执行尾批次，低预算材料碰撞回归在修复前失败。原始共享文件未修改。
+3. 固定网格未设置正的活动单元容量时，外层 Graph 捕获会触发设备到主机读取。新增捕获前的明确配置检查，测试使用固定容量与 warm-up。
+4. MuJoCo 连杆已积分陀螺运动，代理的速度回退只处理接口力，避免在 MPM 环境再次施加陀螺项。
+5. 常规耦合步原先只分发、汇总位置和速度，遗漏了注册的材料历史；导致每步弹性形变、应力和 APIC 梯度被重置，黄色弹性块在压板接触前持续塌陷。私有耦合器现在按视图索引传入历史，再按真实所有权回写，代理行不覆盖拥有者。新增回归在修复前因弹性历史丢失失败，修复后通过；覆盖原地更新、双状态交换和实际耦合路径的 GPU Graph。
+6. 原 S2 网格接触会约束位于材料外部的节点，导致可见表面相隔约 44 mm 时压板就受到材料冲量。当前环境默认改用粒子接触基函数，PIC 接触以实际粒子半径确定表面。两种网格分辨率、20/60 mm 空隙的回归在修复前失败；修复后空隙内冲量为零，接触后正常传力。显式选择 S2 等网格接触基函数仍保留原先的网格近似。
+
+## 复现
+
+```powershell
+uv run --no-sync python scripts/audit_mjmpm.py --run-tests
+uv run --no-sync python scripts/diagnose_mjmpm_press_contact.py --screenshots
+uv run --no-sync python -m newton.examples mjmpm_press --viewer null --num-frames 3 --test --quiet
+uv run --no-sync python -m newton.examples mjmpm_press
+```
+
+最初压块示例完成了 GPU 上 120 帧、2 秒物理时间的运行。随后根据观察反馈移除了辅助落体方块，为压板增加自重补偿，并将动作改为悬停 1 秒、下压 3 秒、保压 1 秒、抬起 3 秒。增加了空中悬停回归：旧版 0.1 秒下沉约 0.034 m，修复后位移要求小于 1e-4 m，且没有材料接触冲量。真实渲染截图为 320×320 JPEG。
+
+此前 540 帧验证只检查压板悬停、有限值和材料不穿地，漏掉了材料持续塌陷；该结果不能作为材料稳定性的证据。修复材料历史后重新运行了 GPU 上 540 帧、9 秒物理时间的完整周期，采样已覆盖更新至 [press_cycle.json](press_cycle.json)。重力和材料参数保持不变：
+
+| 时刻 | 粒子中心高度跨度 | 压板材料接触冲量 |
+| --- | --- | --- |
+| 初始 | 0.150 m | 0 |
+| 悬停 1 秒 | 0.146303 m（原先漏传历史约 0.060112 m） | 0 |
+| 保压结束 5 秒 | 0.141730 m | 非零 |
+| 抬起后 9 秒 | 0.146639 m | 0 |
+
+材料历史修复时使用 S2 接触做过独立原始 MPM 对照，其高度、形变和应力一致。该迁移基线记录保留在 [material_rest_shared.json](material_rest_shared.json)、[material_rest_private.json](material_rest_private.json) 和 [material_rest_coupled_after.json](material_rest_coupled_after.json)，不代表粒子表面接触修复后的默认配置。当前默认配置及完整周期见 [contact_validation.json](contact_validation.json)，塑性体积比始终为 1。高度使用粒子中心最大、最小 z 的差，不含渲染球半径；接触间隙则明确计入粒子半径和压板半厚度。
+
+接触距离检查覆盖完整 540 帧：约 3.000 秒时表面间隙为 5.4 mm，压板冲量为零；约 3.033 秒首次受力，数值重叠约 0.32 mm；保压阶段重叠约 0.069 mm。有超过 2 mm 空隙的帧不允许出现材料冲量，实测为零。所有冲量范数大于 1e-6 的采样帧，其表面间隙均小于零。`pic27` 为接触空间每单元容量，实测最多 8 个粒子；普通执行默认使用动态容量 `pic`。压板接触修复时 13 项测试通过；加入 W1 配套回归后，当前共 15 项测试通过，含 CPU 和 CUDA Graph。
+
+真实渲染截图：[接触前悬停](material_rest_fixed.jpg)、[下压接近](material_approach_fixed.jpg)、[首次接触](material_first_contact_fixed.jpg)、[保压](material_pressed_fixed.jpg)、[抬起后恢复](material_recovered_fixed.jpg)。
+
+测试总耗时见 JSON，包含 Python/后端调用，不是纯 GPU 性能数据；首次 kernel 编译耗时另计，不能据此宣称实时。
+
+## 动态 W1 双手挤压抓取
+
+例子：[example_mjmpm_w1_squeeze_grasp.py](../../../newton/examples/mjmpm/example_mjmpm_w1_squeeze_grasp.py)。资产和动作参考 `FAST_MJVBDV2` 的 W1 squeeze/grasp；63 个 URDF/网格文件逐项 SHA-256 与参考分支一致。来源清单位于资产目录，未复制其他机器人或超市场景资产。
+
+- MuJoCo：完整 W1 关节树及 24 个连杆，机器人采用动力学积分，IK 只产生驱动目标。
+- MPM 环境：1 个自由刚体块和 288 个弹性材料粒子；不添加抓取绑定或抓取阶段物体位姿重置。
+- 保留桌面高度 0.86 m、抓取位置、0.15 m 抬升轨迹、物体外形尺寸、密度和机器人驱动参数，包括每根手指 10 N 力限。
+- 材料用原场景的 Lamé 参数换算，`E=16285.714 Pa`、`nu=0.35714286`、密度 `250 kg/m³`；采用 0.015 m 网格、P1d 应变基和 50 次 Gauss–Seidel 迭代。每帧 10 个子步。
+- 原例使用柔性刚体接触；新例设置 `rigid_contact_hard=False`，用形状原有的 `ke=20000 N/m`、`kd=100 N·s/m` 做隐式弹簧/阻尼求解。硬接触仍是求解器默认选项。
+
+默认双向模式完成 GPU CUDA Graph 下 720 帧、12 秒的完整周期，详细数据见 [w1_grasp.json](w1_grasp.json)。另用标准例子入口的 `--viewer null --test` 完整运行，通过了新增的动态所有权、材料历史有限值和释放后形状检查。
+
+| 检查 | 实测 |
+| --- | --- |
+| 刚体块最大离桌高度 | 0.14937 m |
+| 弹性块最大离桌高度 | 0.14498 m |
+| 保持阶段手指峰峰值（左/右） | 0.0697 / 0.0020 mm |
+| 无接触阶段最大 TCP 误差 | 0.461 mm |
+| 6.5 秒手指行程（左/右） | 24.59 / 22.85 mm，指令均为完全闭合 |
+| 释放后离桌误差（刚体/材料最低点） | 约 -0.013 / -0.054 mm |
+| 释放后材料宽度 | 63.07 mm，初始 60 mm |
+
+单向对照同样完成 720 帧，见 [w1_grasp_one_way.json](w1_grasp_one_way.json)。6.5 秒时两个夹爪行程都接近零，刚体块未被正常抬起；材料被强制边界显著挤散。该模式仅检查有限值和所有权，不作为正确抓取的验收结果。
+
+本场景暴露并修复了两个求解器缺口：零质量网格节点在 `air_drag=0` 时除零；刚体接触只支持硬约束，不能复现参考例的柔性抓取。新增回归分别验证网格面对齐时的有限自由落体和依靠指定接触刚度承重的静态压陷。15 项回归测试全部通过，相比之前 13 项测试增加约 3 秒运行时间；大机器人场景通过例子测试单独验收。
+
+```powershell
+uv run --no-sync python -m newton.examples mjmpm_w1_squeeze_grasp
+uv run --no-sync python -m newton.examples mjmpm_w1_squeeze_grasp --viewer null --test
+uv run --no-sync python scripts/diagnose_mjmpm_w1_grasp.py --screenshots
+uv run --no-sync python scripts/diagnose_mjmpm_w1_grasp.py --coupling one_way --output docs/lab/mjmpm/w1_grasp_one_way.json
+```
+
+截图：[初态](w1_grasp_0001.jpg)、[接近](w1_grasp_0168.jpg)、[夹持](w1_grasp_0240.jpg)、[抬起保持](w1_grasp_0390.jpg)、[释放后](w1_grasp_0720.jpg)。首次网格碰撞内核编译耗时较长；缓存后的记录包含约 6 秒构造和约 45 秒完整仿真运行时间，并非实时性能承诺。
+
+## 后续阶段
+
+P1 为小场景参考实现：刚体接触尚未优化，未覆盖完整摩擦模型、CCD、复杂多指抓取和所有 reset/多 world 材料组合。P2 的历史恢复、接口残差与终态一致性，以及 P3 完整关节响应，仍按计划推进，尚未实现。

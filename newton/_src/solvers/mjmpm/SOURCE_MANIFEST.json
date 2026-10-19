@@ -1,0 +1,155 @@
+{
+  "revision": "e50f0d0e5807c3b1b9ee0848c18eee25e77673e7",
+  "files": [
+    {
+      "source": "newton/_src/sim/collide.py",
+      "destination": "newton/_src/solvers/mjmpm/collision/pipeline.py",
+      "sha256": "8a01ec24131928bd7b145b24362ac92a2ca16b2b423ae72b5f1229bd54fec7cd"
+    },
+    {
+      "source": "newton/_src/solvers/coupled/interface.py",
+      "destination": "newton/_src/solvers/mjmpm/coupling/interface.py",
+      "sha256": "fb841c0031338ee9771009da4b8fa7efdca2dba10833651f117e315e0ab61a7b"
+    },
+    {
+      "source": "newton/_src/solvers/coupled/model_view.py",
+      "destination": "newton/_src/solvers/mjmpm/coupling/model_view.py",
+      "sha256": "5b180173e4455d5b9c62075e65fadbf1054f76632183776bf00c1a40ecfb25d0"
+    },
+    {
+      "source": "newton/_src/solvers/coupled/proxy_utils.py",
+      "destination": "newton/_src/solvers/mjmpm/coupling/proxy_utils.py",
+      "sha256": "7dee8dcc751cec7032ae7c275771fd9bddd8461e4c4d3447310c40c9dbfd61e3"
+    },
+    {
+      "source": "newton/_src/solvers/coupled/solver_coupled.py",
+      "destination": "newton/_src/solvers/mjmpm/coupling/solver_coupled.py",
+      "sha256": "a2e06fb5731d8e4b43494c811b7df5bdc684f9c53021b71c63cc311648f4da9c"
+    },
+    {
+      "source": "newton/_src/solvers/coupled/solver_coupled_proxy.py",
+      "destination": "newton/_src/solvers/mjmpm/coupling/solver_coupled_proxy.py",
+      "sha256": "46792cee9b54a8eb4aff23d405840391dfe4ec8d1ef58153120184318083c61f"
+    },
+    {
+      "source": "newton/_src/solvers/implicit_mpm/__init__.py",
+      "destination": "newton/_src/solvers/mjmpm/mpm/__init__.py",
+      "sha256": "e2e7fa8b3f1053247bc0d47b654cee9a795a5a0c80d7e6e8cff18c2927d3d915"
+    },
+    {
+      "source": "newton/_src/solvers/implicit_mpm/contact_solver_kernels.py",
+      "destination": "newton/_src/solvers/mjmpm/mpm/contact_solver_kernels.py",
+      "sha256": "c2f8ccb28fd5938c89ab556c55b1dd8f9c5fe885f17e39a24032674a186934a9"
+    },
+    {
+      "source": "newton/_src/solvers/implicit_mpm/implicit_mpm_model.py",
+      "destination": "newton/_src/solvers/mjmpm/mpm/implicit_mpm_model.py",
+      "sha256": "fcfccb442d6f5bc3b1e90defdf4bfe5ddb52117b9f29ea82294a26297d55d34d"
+    },
+    {
+      "source": "newton/_src/solvers/implicit_mpm/implicit_mpm_solver_kernels.py",
+      "destination": "newton/_src/solvers/mjmpm/mpm/implicit_mpm_solver_kernels.py",
+      "sha256": "2209141b01507d1047e9403acda6945f4cf6e4c65798d675ed0c5aec0438a642"
+    },
+    {
+      "source": "newton/_src/solvers/implicit_mpm/particle_surface_colliders.py",
+      "destination": "newton/_src/solvers/mjmpm/mpm/particle_surface_colliders.py",
+      "sha256": "09e4dfe15aa2f00b1d195b6151ae8cee4b50b379080f1d824b6bbeffaed536aa"
+    },
+    {
+      "source": "newton/_src/solvers/implicit_mpm/rasterized_collisions.py",
+      "destination": "newton/_src/solvers/mjmpm/mpm/rasterized_collisions.py",
+      "sha256": "d0798260837e4f5bbe011eea46e9a50b5b6f97e4e44fb7371d58b513c57ff490"
+    },
+    {
+      "source": "newton/_src/solvers/implicit_mpm/render_grains.py",
+      "destination": "newton/_src/solvers/mjmpm/mpm/render_grains.py",
+      "sha256": "a41d7932a762e52599f29b8d604280607abb2354d62fb2e158548d86ef96d364"
+    },
+    {
+      "source": "newton/_src/solvers/implicit_mpm/rheology_solver_kernels.py",
+      "destination": "newton/_src/solvers/mjmpm/mpm/rheology_solver_kernels.py",
+      "sha256": "1225643d9b9487de661bdda8349533fcba10db96957f187c7161e72a62866293"
+    },
+    {
+      "source": "newton/_src/solvers/implicit_mpm/solve_rheology.py",
+      "destination": "newton/_src/solvers/mjmpm/mpm/solve_rheology.py",
+      "sha256": "3e15d6111b5f4798480044fc4ab449eca8db6f5b8ab052e33cbd87a9f682fca3"
+    },
+    {
+      "source": "newton/_src/solvers/implicit_mpm/solver_implicit_mpm.py",
+      "destination": "newton/_src/solvers/mjmpm/mpm/solver_implicit_mpm.py",
+      "sha256": "d60f4cc255c46fcc73e629bfdcdf385898e9505a8714d8d59c879e8b7126fd64"
+    },
+    {
+      "source": "newton/_src/solvers/mujoco/__init__.py",
+      "destination": "newton/_src/solvers/mjmpm/mujoco/__init__.py",
+      "sha256": "ee4d72eebe6a0720a41890f0237946684b0bdd8333ca26a4d873d2b690236a2a"
+    },
+    {
+      "source": "newton/_src/solvers/mujoco/_authoring.py",
+      "destination": "newton/_src/solvers/mjmpm/mujoco/_authoring.py",
+      "sha256": "b1a3eb934bb3f447685a864b9950c1bd5855e213f337e206607f3bb77d013346"
+    },
+    {
+      "source": "newton/_src/solvers/mujoco/actuators.py",
+      "destination": "newton/_src/solvers/mjmpm/mujoco/actuators.py",
+      "sha256": "519f48631e5f40af4409368d8ea933211797c276d13eebd8c6e4f4c3557c8d8a"
+    },
+    {
+      "source": "newton/_src/solvers/mujoco/collision_masks.py",
+      "destination": "newton/_src/solvers/mjmpm/mujoco/collision_masks.py",
+      "sha256": "9d983542115f5e4722fe89d3a3e8657095912eb69d05c18ca12cef815a5f4d9b"
+    },
+    {
+      "source": "newton/_src/solvers/mujoco/constants.py",
+      "destination": "newton/_src/solvers/mjmpm/mujoco/constants.py",
+      "sha256": "272292bfb24b0dda111d920d79c1e1d01d584ea625b4eeb05f6676f512a1816d"
+    },
+    {
+      "source": "newton/_src/solvers/mujoco/contacts.py",
+      "destination": "newton/_src/solvers/mjmpm/mujoco/contacts.py",
+      "sha256": "9d0f8eda0de5608cf3fa2b4c209fc1b701b66ac6909db5d335e0ad1d14c9dae8"
+    },
+    {
+      "source": "newton/_src/solvers/mujoco/enums.py",
+      "destination": "newton/_src/solvers/mjmpm/mujoco/enums.py",
+      "sha256": "fe29044154ced68b3a6268be058b6fc1ab2fcb67374165228cca9ea79c4e0e0e"
+    },
+    {
+      "source": "newton/_src/solvers/mujoco/equality.py",
+      "destination": "newton/_src/solvers/mjmpm/mujoco/equality.py",
+      "sha256": "3a20e6c2b1ba8fd21d5844584a9d322d20c68197a18719606b118ecdef99c10a"
+    },
+    {
+      "source": "newton/_src/solvers/mujoco/kernels.py",
+      "destination": "newton/_src/solvers/mjmpm/mujoco/kernels.py",
+      "sha256": "234e41860b06474b228000bbe247b2f655ac06f6b9d6264a765919bdee2ccab4"
+    },
+    {
+      "source": "newton/_src/solvers/mujoco/solver_mujoco.py",
+      "destination": "newton/_src/solvers/mjmpm/mujoco/solver_mujoco.py",
+      "sha256": "c90276aa49a265ce6955a2e26cd4bca719c6add5f8fee955f4419f37d9e21e74"
+    },
+    {
+      "source": "newton/_src/solvers/mujoco/speculative.py",
+      "destination": "newton/_src/solvers/mjmpm/mujoco/speculative.py",
+      "sha256": "a2db77170cfe9f5d10e6fa44fefa2b6b0a94bd7b04df8e14c82914360120ed59"
+    },
+    {
+      "source": "newton/_src/solvers/mujoco/tendons.py",
+      "destination": "newton/_src/solvers/mjmpm/mujoco/tendons.py",
+      "sha256": "4fa954969d7fc5e959e1a3ae4f40eff4265e534f7bcbcffc2b6ec36ea7c19ca3"
+    },
+    {
+      "source": "newton/_src/solvers/mujoco/utils.py",
+      "destination": "newton/_src/solvers/mjmpm/mujoco/utils.py",
+      "sha256": "5bf3fdb23117ad615b40645bb33f9b923889df67ee88fadc0f3b0b4ab68eb921"
+    },
+    {
+      "source": "newton/_src/solvers/solver.py",
+      "destination": "newton/_src/solvers/mjmpm/base.py",
+      "sha256": "b9dcbf8513b276a34e581e91b2e7bd4964eec290853143d1c0385b203fcacd9d"
+    }
+  ]
+}
