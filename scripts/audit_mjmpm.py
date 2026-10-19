@@ -49,8 +49,14 @@ def main() -> None:
                 if module == "newton.solvers":
                     violations.append(f"{path.relative_to(ROOT)}:{node.lineno}: public solver import")
     manifest = json.loads((PRIVATE / "SOURCE_MANIFEST.json").read_text(encoding="utf-8"))
+
+    def line_ending_hashes(path: Path) -> set[str]:
+        # The manifest may come from a CRLF (Windows) or LF checkout of the same sources.
+        lf = path.read_bytes().replace(b"\r\n", b"\n")
+        return {hashlib.sha256(lf).hexdigest(), hashlib.sha256(lf.replace(b"\n", b"\r\n")).hexdigest()}
+
     original_sources_unchanged = all(
-        hashlib.sha256((ROOT / item["source"]).read_bytes()).hexdigest() == item["sha256"] for item in manifest["files"]
+        item["sha256"] in line_ending_hashes(ROOT / item["source"]) for item in manifest["files"]
     )
     report = {
         "base_revision": manifest["revision"],
