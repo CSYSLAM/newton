@@ -221,7 +221,6 @@ class W1MJMPMScene:
                 "voxel_size": args.voxel_size,
                 "grid_padding": 20,
                 "max_active_cell_count": 512,
-                "collider_basis": "pic27",
                 "strain_basis": args.strain_basis,
                 "max_iterations": args.iterations,
                 "solver": args.mpm_solver,

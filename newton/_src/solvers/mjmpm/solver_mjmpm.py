@@ -42,9 +42,11 @@ class SolverMJMPM(SolverBase):
         mujoco_joints: Complete joint trees assigned to MuJoCo; inferred if omitted.
         coupling: Whether articulation contacts receive environment feedback.
         mpm_options: Private implicit MPM configuration fields. The environment
-            defaults to particle-based contact (``collider_basis="pic"``).
-            Graph capture requires an explicit per-cell particle capacity,
-            for example ``collider_basis="pic27"``, in addition to fixed grid capacity.
+            defaults to particle-based contact (``collider_basis="pic"``),
+            whose per-cell capacity is sized at construction and grown by
+            uncaptured steps. Graph capture
+            requires a positive ``max_active_cell_count`` with a fixed or
+            rebuildable sparse grid; see :meth:`check_capacity_status`.
         mujoco_options: Private MuJoCo backend configuration fields.
         rigid_iterations: Projected rigid contact sweeps per step.
         rigid_contact_hard: Use hard rigid contact constraints. If False, use
@@ -174,14 +176,27 @@ class SolverMJMPM(SolverBase):
         self.validate_observables(observables, contacts)
         if self.model.device.is_capturing and not self.environment.capture_ready:
             raise ValueError(
-                "MPM graph capture requires grid_type='fixed', positive max_active_cell_count, "
-                "and bounded particle bases (for example collider_basis='pic27')"
+                "MPM graph capture requires a positive max_active_cell_count with grid_type='fixed' "
+                "or a rebuildable sparse grid (grid_padding=0)"
             )
         self.backend.step(state_in, state_out, control, None, dt)
         if self._environment_articulations.shape[0]:
             eval_ik(
                 self.model, state_out, state_out.joint_q, state_out.joint_qd, indices=self._environment_articulations
             )
+
+    def check_capacity_status(self):
+        """Raise if graph replay exceeded a reserved MPM capacity.
+
+        Captured steps cannot grow the sparse-grid or per-cell particle
+        capacities sized during uncaptured warm-up steps. Call this outside
+        capture after replay; it synchronizes the device.
+
+        Raises:
+            RuntimeError: If a sparse-grid rebuild failed or a grid cell held
+                more particles than the particle basis capacity.
+        """
+        self.environment.check_capacity_status()
 
     def reset(self, state, world_mask=None, flags=None):
         """Reset selected worlds and their coupling/material history."""

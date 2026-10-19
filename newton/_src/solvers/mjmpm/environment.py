@@ -65,12 +65,10 @@ class Environment(SolverBase, CouplingInterface):
         if config.collider_velocity_mode != "forward":
             raise ValueError("MJMPM currently requires collider_velocity_mode='forward'")
         self.material = SolverImplicitMPM(model, config=config) if model.particle_count else None
-        bounded_point_bases = all(
-            not basis.startswith("pic") or (basis[3:].isdigit() and int(basis[3:]) > 0)
-            for basis in (config.collider_basis, config.strain_basis)
-        )
+        # Plain "pic" bases adapt their capacity during uncaptured steps.
         self.capture_ready = self.material is None or (
-            config.grid_type == "fixed" and config.max_active_cell_count > 0 and bounded_point_bases
+            self.material.max_active_cell_count > 0
+            and (config.grid_type == "fixed" or self.material._sparse_rebuildable)
         )
         self.detector = CollisionPipeline(model, broad_phase="nxn", soft_contact_max=0)
         self.contacts = self.detector.contacts()
@@ -233,6 +231,12 @@ class Environment(SolverBase, CouplingInterface):
             ],
             device=model.device,
         )
+
+    def check_capacity_status(self):
+        """Raise if a captured step exceeded a sparse-grid or particle-basis capacity."""
+        if self.material is not None:
+            self.material.check_sparse_grid_rebuild_status()
+            self.material.check_point_basis_capacity()
 
     def notify_model_changed(self, flags):
         if self.material is not None:

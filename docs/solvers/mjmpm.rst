@@ -38,7 +38,7 @@ Quick start
    solver = SolverMJMPM(
        model,
        coupling=SolverMJMPM.Coupling.TWO_WAY,
-       mpm_options={"grid_type": "fixed", "max_active_cell_count": 256, "collider_basis": "pic27"},
+       mpm_options={"grid_type": "fixed", "max_active_cell_count": 256},
    )
    state = model.state()
    control = model.control()
@@ -104,11 +104,16 @@ This avoids constraining empty grid nodes above the material surface. Explicit
 grid collider bases such as ``S2`` retain the migrated grid contact behavior,
 whose contact location depends on grid resolution and support.
 
-For CUDA Graph capture, select a bounded particle basis such as ``pic27``.
-Its suffix must cover the maximum number of particles in any cell throughout
-the simulation. Unbounded ``pic`` queries the cell occupancy on the host and
-is therefore intended for ordinary stepping. The press validation records
-the maximum observed cell occupancy alongside contact clearance and impulses.
+A plain ``pic`` basis reads the maximum cell occupancy on the host at
+construction and during uncaptured steps, and grows a per-cell capacity, a
+multiple of 8 with at least one particle of headroom, so every particle remains
+a contact sample. Captured steps reuse the capacity reached before capture. An explicit ``picN``
+basis fixes the capacity to ``N`` in every step. Both cases record the
+observed occupancy on the device: call
+:meth:`~newton.solvers.SolverMJMPM.check_capacity_status` after graph replay
+to detect cells whose extra particles were ignored. The press validation
+records the maximum observed cell occupancy alongside contact clearance and
+impulses.
 
 Current limits
 --------------
@@ -126,11 +131,12 @@ Current limits
 - Material support follows the private implicit MPM implementation. Air drag
   defaults to its existing value; set ``air_drag=0`` for closed-system momentum
   tests.
-- CUDA Graph capture requires a fixed grid, a positive
-  ``max_active_cell_count``, sufficient fixed capacity, memory pools, and a
-  successful uncaptured warm-up. Particle bases also require an explicit
-  per-cell capacity. Graph validation covers a small coupled scene containing
-  an articulation, a free rigid body, and elastic particles.
+- CUDA Graph capture requires a positive ``max_active_cell_count`` with a
+  fixed grid or a rebuildable sparse grid (``grid_padding=0``), memory pools,
+  and a successful uncaptured warm-up. Captured steps cannot grow reserved
+  capacities; check them with ``check_capacity_status()`` after replay.
+  Graph validation covers a small coupled scene containing an articulation,
+  a free rigid body, and elastic particles.
 
 Validation
 ----------

@@ -410,6 +410,26 @@ class TestMJMPMMaterial(unittest.TestCase):
         for actual, expected in zip(culled, exhaustive, strict=True):
             np.testing.assert_array_equal(actual, expected)
 
+    def test_point_basis_capacity_reports_crowded_cells(self):
+        """Grow a plain particle basis to cover crowded cells and flag an explicit basis that cannot."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        SolverMJMPM.register_custom_attributes(builder)
+        # Eight particles share each 0.1 m cell.
+        _particles(builder)
+        model = builder.finalize(device="cpu")
+        adaptive = SolverMJMPM(model, mpm_options=_options())
+        explicit = SolverMJMPM(model, mpm_options={**_options(), "collider_basis": "pic4"})
+        # Construction sizes the capacity from the initial particles.
+        self.assertEqual(adaptive.environment.material.point_basis_capacity(), 16)
+        for solver in (adaptive, explicit):
+            state = model.state()
+            solver.step(state, state, None, None, 0.005)
+        material = adaptive.environment.material
+        self.assertEqual(material.point_basis_capacity(), 16)
+        adaptive.check_capacity_status()
+        with self.assertRaisesRegex(RuntimeError, "held 8 particles"):
+            explicit.check_capacity_status()
+
 
 class TestMJMPMArticulation(unittest.TestCase):
     def test_material_contact_starts_at_particle_surface(self):
@@ -586,6 +606,11 @@ class TestMJMPMArticulation(unittest.TestCase):
 class TestMJMPMCUDA(unittest.TestCase):
     def test_fixed_grid_graph_matches_eager(self):
         """Replay coupled articulation/rigid/material stepping in a fixed-grid CUDA graph."""
+        for collider_basis in ("pic8", "pic"):
+            with self.subTest(collider_basis=collider_basis):
+                self._check_graph_matches_eager(collider_basis)
+
+    def _check_graph_matches_eager(self, collider_basis):
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         SolverMJMPM.register_custom_attributes(builder)
         pose = wp.transform(wp.vec3(5.0, 0.0, 0.0), wp.quat_identity())
@@ -606,7 +631,7 @@ class TestMJMPMCUDA(unittest.TestCase):
             "voxel_size": 0.05,
             "grid_padding": 3,
             "max_active_cell_count": 64,
-            "collider_basis": "pic8",
+            "collider_basis": collider_basis,
         }
         eager = SolverMJMPM(model, mpm_options=options)
         captured = SolverMJMPM(model, mpm_options=options)
@@ -621,6 +646,7 @@ class TestMJMPMCUDA(unittest.TestCase):
         for _ in range(8):
             eager.step(a, a, None, None, 0.005)
             wp.capture_launch(capture.graph)
+        captured.check_capacity_status()
         np.testing.assert_allclose(a.body_q.numpy(), b.body_q.numpy(), atol=2.0e-6)
         np.testing.assert_allclose(a.body_qd.numpy(), b.body_qd.numpy(), atol=2.0e-6)
         np.testing.assert_allclose(a.particle_q.numpy(), b.particle_q.numpy(), atol=2.0e-6)

@@ -1,0 +1,1 @@
+Allow CUDA graph capture of the experimental MJMPM solver with its default particle contact basis and with rebuildable sparse grids; uncaptured steps size the per-cell particle capacity, and `SolverMJMPM.check_capacity_status()` reports capacity overflow after replay.

@@ -211,6 +211,17 @@ def _make_grid_basis_space(grid: fem.Geometry, basis_str: str, family: fem.Polyn
     )
 
 
+@wp.kernel
+def _record_max_cell_particles(cell_particle_offsets: wp.array[int], max_count: wp.array[int]):
+    cell = wp.tid()
+    wp.atomic_max(max_count, 0, cell_particle_offsets[cell + 1] - cell_particle_offsets[cell])
+
+
+def _round_point_capacity(max_points_per_cell: int) -> int:
+    """Return a multiple of 8 that leaves at least one point of headroom."""
+    return 8 * ((max_points_per_cell + 8) // 8)
+
+
 def _make_pic_basis_space(pic: fem.PicQuadrature, basis_str: str):
     try:
         max_points_per_cell = int(basis_str[3:])
@@ -1496,6 +1507,11 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         self.gimp = config.integration_scheme == "gimp"
         self.collider_normal_from_sdf_gradient = config.collider_normal_from_sdf_gradient
         self.collider_basis = config.collider_basis
+        # Plain "pic" bases size their per-cell capacity from the particles.
+        # Eager steps grow a rounded capacity so captured steps can reuse it.
+        self._point_capacity = 0
+        self._point_bases_bounded = any(basis[:3] == "pic" for basis in (self.strain_basis, self.collider_basis))
+        self._max_cell_points = wp.zeros(1, dtype=int, device=self.model.device) if self._point_bases_bounded else None
 
         if config.collider_velocity_mode not in ("forward", "backward"):
             raise ValueError(f"Invalid collider velocity mode: {config.collider_velocity_mode}")
@@ -1861,6 +1877,8 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         # partially reset.
         if world_mask is None:
             self._clear_sparse_grid_rebuild_status()
+            if self._max_cell_points is not None:
+                self._max_cell_points.zero_()
         elif self._grid_status is not None:
             wp.launch(
                 _clear_sparse_grid_rebuild_status_masked,
@@ -2654,6 +2672,66 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
         return partition
 
+    def _resolve_point_bases(self, pic: fem.PicQuadrature) -> tuple[str, str]:
+        """Bound plain ``"pic"`` bases by a capacity reusable under graph capture.
+
+        Construction and eager steps read the current maximum particle count
+        per cell and grow the capacity when needed, so they keep every
+        particle node exactly as an unbounded basis does. Captured steps reuse
+        the latest eager capacity. Every bounded step records the observed maximum on the
+        device for :meth:`check_point_basis_capacity`.
+        """
+        bases = (self.strain_basis, self.collider_basis)
+        if not self._point_bases_bounded:
+            return bases
+        wp.launch(
+            _record_max_cell_particles,
+            dim=pic.cell_particle_offsets.shape[0] - 1,
+            inputs=[pic.cell_particle_offsets, self._max_cell_points],
+            device=self.model.device,
+        )
+        if "pic" not in bases:
+            return bases
+        if self.model.device.is_capturing:
+            if self._point_capacity <= 0:
+                raise RuntimeError("Plain 'pic' bases must be sized by an uncaptured step before graph capture")
+        else:
+            needed = pic.max_points_per_element()
+            if needed >= self._point_capacity:
+                self._point_capacity = _round_point_capacity(needed)
+        bounded = f"pic{self._point_capacity}"
+        return tuple(bounded if basis == "pic" else basis for basis in bases)
+
+    def point_basis_capacity(self) -> int:
+        """Per-cell particle capacity of bounded point bases (0 before the first adaptive step)."""
+        capacities = [int(b[3:]) for b in (self.strain_basis, self.collider_basis) if b[:3] == "pic" and b != "pic"]
+        if "pic" in (self.strain_basis, self.collider_basis):
+            capacities.append(self._point_capacity)
+        return min(capacities) if capacities else 0
+
+    def check_point_basis_capacity(self) -> None:
+        """Raise if a bounded particle basis dropped particles in a crowded cell.
+
+        Call this outside graph capture after replay; it synchronizes the
+        device. Explicit ``"picN"`` bases ignore particles beyond ``N`` in a
+        cell, as do captured steps of an adaptive ``"pic"`` basis.
+
+        Raises:
+            RuntimeError: If called during capture, or if a cell held more
+                particles than the basis capacity.
+        """
+        if self._max_cell_points is None:
+            return
+        if self.model.device.is_capturing:
+            raise RuntimeError("Cannot inspect particle basis capacity during graph capture")
+        observed = int(self._max_cell_points.numpy()[0])
+        capacity = self.point_basis_capacity()
+        if capacity > 0 and observed > capacity:
+            raise RuntimeError(
+                f"A grid cell held {observed} particles, exceeding the particle basis capacity {capacity}; "
+                "choose a larger 'picN' suffix or step uncaptured until the occupancy peaks"
+            )
+
     def _rebuild_scratchpad(self, pic: fem.PicQuadrature):
         """(Re)create function spaces and allocate per-step temporaries.
 
@@ -2668,11 +2746,12 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         scratch = self._scratchpad
 
         with self._timer("Scratchpad"):
+            strain_basis, collider_basis = self._resolve_point_bases(pic)
             scratch.rebuild_function_spaces(
                 pic,
-                strain_basis_str=self.strain_basis,
+                strain_basis_str=strain_basis,
                 velocity_basis_str=self.velocity_basis,
-                collider_basis_str=self.collider_basis,
+                collider_basis_str=collider_basis,
                 max_cell_count=self.max_active_cell_count,
                 environment_first=self._separate_worlds,
                 temporary_store=self.temporary_store,

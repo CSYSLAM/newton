@@ -157,6 +157,8 @@ class Example(W1MJMPMScene):
 
     def test_final(self):
         self.test_post_step()
+        # Captured frames cannot grow the MPM capacities sized before capture.
+        self.solver.check_capacity_status()
         if self.solver.ownership.mujoco_bodies != tuple(range(self.robot_bodies)):
             raise AssertionError("MuJoCo must own the complete dynamic W1 articulation")
         if self.solver.ownership.mpm_bodies != (self.block,):
