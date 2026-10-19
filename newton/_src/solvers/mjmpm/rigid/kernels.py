@@ -75,6 +75,38 @@ def impulse_mass(mass_inv: float, inv: wp.mat33, radius: wp.vec3, direction: wp.
     return mass_inv + wp.dot(angular, inv * angular)
 
 
+@wp.func
+def mobility_response(
+    mobility: wp.array3d[float],
+    world: int,
+    row_link: int,
+    column_link: int,
+    wrench: wp.spatial_vector,
+):
+    """Twist change ``(v_com, omega)`` of one link for an impulse wrench ``(force, torque)`` on another."""
+    response = wp.spatial_vector(wp.vec3(0.0), wp.vec3(0.0))
+    for r in range(6):
+        value = float(0.0)
+        for c in range(6):
+            value += mobility[world, 6 * row_link + r, 6 * column_link + c] * wrench[c]
+        response[r] = value
+    return response
+
+
+@wp.func
+def mobility_point_mass(
+    mobility: wp.array3d[float],
+    world: int,
+    link: int,
+    radius: wp.vec3,
+    direction: wp.vec3,
+):
+    """Inverse effective mass of a link point along ``direction``."""
+    unit = wp.spatial_vector(direction, wp.cross(radius, direction))
+    twist = mobility_response(mobility, world, link, link, unit)
+    return wp.dot(direction, point_velocity(twist, radius))
+
+
 @wp.kernel(enable_backward=False)
 def solve_contacts(
     count: wp.array[int],
@@ -248,6 +280,9 @@ def prepare_contacts(
     inertia_inv: wp.array[wp.mat33],
     world_count: int,
     single_bucket: bool,
+    link_slot: wp.array[int],
+    link_count: int,
+    mobility: wp.array3d[float],
     dt: float,
     out_bodies: wp.array[wp.vec2i],
     out_ra: wp.array[wp.vec3],
@@ -327,7 +362,17 @@ def prepare_contacts(
         response = wp.max(kd + dt * ke, 1.0e-12)
         softness = 1.0 / (dt * response)
         target = -ke * d / response
-    denom = impulse_mass(ma, ia, ra, n) + impulse_mass(mb, ib, rb, n)
+    denom = float(0.0)
+    if a >= 0 and link_slot and link_slot[a] >= 0:
+        slot = link_slot[a]
+        denom += mobility_point_mass(mobility, slot // link_count, slot % link_count, ra, n)
+    else:
+        denom += impulse_mass(ma, ia, ra, n)
+    if b >= 0 and link_slot and link_slot[b] >= 0:
+        slot = link_slot[b]
+        denom += mobility_point_mass(mobility, slot // link_count, slot % link_count, rb, n)
+    else:
+        denom += impulse_mass(mb, ib, rb, n)
     out_bodies[c] = wp.vec2i(a, b)
     out_ra[c] = ra
     out_rb[c] = rb
@@ -370,6 +415,67 @@ def single_bucket_range(count: wp.array[int], capacity: int, begin: wp.array[int
     end[0] = wp.min(count[0], capacity)
 
 
+@wp.func
+def _apply_link_wrench(
+    slot: int,
+    link_count: int,
+    wrench: wp.spatial_vector,
+    link_body: wp.array2d[int],
+    mobility: wp.array3d[float],
+    contacted_links: wp.array2d[int],
+    contacted_count: wp.array[int],
+    qd: wp.array[wp.spatial_vector],
+):
+    """Propagate an impulse wrench on one link to the contacted links of its world."""
+    world = slot // link_count
+    link = slot % link_count
+    for k in range(contacted_count[world]):
+        other = contacted_links[world, k]
+        body = link_body[world, other]
+        qd[body] = qd[body] + mobility_response(mobility, world, other, link, wrench)
+
+
+@wp.func
+def side_point_response(
+    body: int,
+    slot: int,
+    link_count: int,
+    mass_inv: float,
+    inertia_inv: wp.mat33,
+    mobility: wp.array3d[float],
+    radius: wp.vec3,
+    impulse: wp.vec3,
+):
+    """Velocity change of a contact point for an impulse applied to its body there."""
+    if slot >= 0:
+        twist = mobility_response(
+            mobility,
+            slot // link_count,
+            slot % link_count,
+            slot % link_count,
+            wp.spatial_vector(impulse, wp.cross(radius, impulse)),
+        )
+        return point_velocity(twist, radius)
+    if body < 0:
+        return wp.vec3(0.0)
+    return mass_inv * impulse + wp.cross(inertia_inv * wp.cross(radius, impulse), radius)
+
+
+@wp.func
+def side_inverse_mass(
+    slot: int,
+    link_count: int,
+    mass_inv: float,
+    inertia_inv: wp.mat33,
+    mobility: wp.array3d[float],
+    radius: wp.vec3,
+    direction: wp.vec3,
+):
+    if slot >= 0:
+        return mobility_point_mass(mobility, slot // link_count, slot % link_count, radius, direction)
+    return impulse_mass(mass_inv, inertia_inv, radius, direction)
+
+
 @wp.kernel(enable_backward=False)
 def solve_contact_buckets(
     begin: wp.array[int],
@@ -382,6 +488,11 @@ def solve_contact_buckets(
     params: wp.array[wp.vec4],
     mass_inv: wp.array[float],
     inertia_inv: wp.array[wp.mat33],
+    link_slot: wp.array[int],
+    link_body: wp.array2d[int],
+    mobility: wp.array3d[float],
+    contacted_links: wp.array2d[int],
+    contacted_count: wp.array[int],
     qd: wp.array[wp.spatial_vector],
     impulses: wp.array[wp.vec3],
     body_impulse: wp.array[wp.spatial_vector],
@@ -391,10 +502,15 @@ def solve_contact_buckets(
 
     Contacts of a world keep their detection order, so each world reproduces
     the single-threaded reference ordering. Worlds share no dynamic bodies.
+    Articulated links respond through the link mobility: an impulse on one
+    link changes the velocities of every contacted link of its world.
     """
     bucket = wp.tid()
     first = begin[bucket]
     last = end[bucket]
+    link_count = int(0)
+    if link_body:
+        link_count = link_body.shape[1]
     for _sweep in range(iterations):
         for k in range(first, last):
             c = ids[k]
@@ -409,14 +525,20 @@ def solve_contact_buckets(
             mb = float(0.0)
             ia = wp.mat33(0.0)
             ib = wp.mat33(0.0)
+            slot_a = int(-1)
+            slot_b = int(-1)
             if a >= 0:
                 va = qd[a]
                 ma = mass_inv[a]
                 ia = inertia_inv[a]
+                if link_slot:
+                    slot_a = link_slot[a]
             if b >= 0:
                 vb = qd[b]
                 mb = mass_inv[b]
                 ib = inertia_inv[b]
+                if link_slot:
+                    slot_b = link_slot[b]
             ra = ra_list[c]
             rb = rb_list[c]
             n = normals[c]
@@ -432,18 +554,28 @@ def solve_contact_buckets(
                 normal_old + (target - wp.dot(relative, n) - softness * normal_old) / wp.max(denom + softness, 1.0e-12),
             )
             delta_n = (normal_new - normal_old) * n
-            relative = (
-                relative
-                + (ma + mb) * delta_n
-                + wp.cross(ib * wp.cross(rb, delta_n), rb)
-                + wp.cross(ia * wp.cross(ra, delta_n), ra)
-            )
+            if slot_a < 0 and slot_b < 0:
+                # Keep the reference kernel's arithmetic for independent bodies.
+                relative = (
+                    relative
+                    + (ma + mb) * delta_n
+                    + wp.cross(ib * wp.cross(rb, delta_n), rb)
+                    + wp.cross(ia * wp.cross(ra, delta_n), ra)
+                )
+            else:
+                relative = (
+                    relative
+                    + side_point_response(b, slot_b, link_count, mb, ib, mobility, rb, delta_n)
+                    + side_point_response(a, slot_a, link_count, ma, ia, mobility, ra, delta_n)
+                )
             tangent_velocity = relative - n * wp.dot(relative, n)
             tangent = old - normal_old * n
             speed = wp.length(tangent_velocity)
             if speed > 1.0e-9:
                 direction = tangent_velocity / speed
-                tangent_mass = impulse_mass(ma, ia, ra, direction) + impulse_mass(mb, ib, rb, direction)
+                tangent_mass = side_inverse_mass(
+                    slot_a, link_count, ma, ia, mobility, ra, direction
+                ) + side_inverse_mass(slot_b, link_count, mb, ib, mobility, rb, direction)
                 tangent = tangent - tangent_velocity / wp.max(tangent_mass, 1.0e-12)
             limit = p[3] * normal_new
             if wp.length(tangent) > limit:
@@ -452,11 +584,112 @@ def solve_contact_buckets(
             delta = new - old
             impulses[c] = new
             if a >= 0 and ma > 0.0:
-                qd[a] = va - wp.spatial_vector(ma * delta, ia * wp.cross(ra, delta))
-                body_impulse[a] = body_impulse[a] - wp.spatial_vector(delta, wp.cross(ra, delta))
+                wrench_a = wp.spatial_vector(-delta, -wp.cross(ra, delta))
+                if slot_a >= 0:
+                    _apply_link_wrench(
+                        slot_a, link_count, wrench_a, link_body, mobility, contacted_links, contacted_count, qd
+                    )
+                else:
+                    qd[a] = va - wp.spatial_vector(ma * delta, ia * wp.cross(ra, delta))
+                body_impulse[a] = body_impulse[a] + wrench_a
             if b >= 0 and mb > 0.0:
-                qd[b] = vb + wp.spatial_vector(mb * delta, ib * wp.cross(rb, delta))
-                body_impulse[b] = body_impulse[b] + wp.spatial_vector(delta, wp.cross(rb, delta))
+                wrench_b = wp.spatial_vector(delta, wp.cross(rb, delta))
+                if slot_b >= 0:
+                    _apply_link_wrench(
+                        slot_b, link_count, wrench_b, link_body, mobility, contacted_links, contacted_count, qd
+                    )
+                else:
+                    qd[b] = vb + wp.spatial_vector(mb * delta, ib * wp.cross(rb, delta))
+                body_impulse[b] = body_impulse[b] + wrench_b
+
+
+@wp.kernel
+def rewind_articulated_proxies(
+    link_body: wp.array2d[int],
+    body_local_to_proxy_global: wp.array[int],
+    coupling_forces: wp.array[wp.spatial_vector],
+    mobility: wp.array3d[float],
+    body_mass: wp.array[float],
+    gravity_acceleration: wp.array[wp.vec3],
+    dt: float,
+    qd: wp.array[wp.spatial_vector],
+    forces: wp.array[wp.spatial_vector],
+):
+    """Remove applied feedback from link end velocities through the articulated response.
+
+    The proxy force input cancels the gravity added by the proxy kick, so the
+    environment starts each link at the velocity it would have without feedback.
+    """
+    world, link = wp.tid()
+    body = link_body[world, link]
+    if body < 0:
+        return
+    change = wp.spatial_vector(wp.vec3(0.0), wp.vec3(0.0))
+    for other in range(link_body.shape[1]):
+        other_body = link_body[world, other]
+        if other_body < 0:
+            continue
+        proxy = body_local_to_proxy_global[other_body]
+        if proxy < 0:
+            continue
+        change += mobility_response(mobility, world, link, other, dt * coupling_forces[proxy])
+    qd[body] = qd[body] - change
+    forces[body] = wp.spatial_vector(-body_mass[body] * gravity_acceleration[body], wp.vec3(0.0))
+
+
+@wp.kernel
+def mark_contacted_links(
+    count: wp.array[int],
+    bodies: wp.array[wp.vec2i],
+    link_slot: wp.array[int],
+    contacted: wp.array[int],
+):
+    c = wp.tid()
+    if c >= wp.min(count[0], bodies.shape[0]):
+        return
+    pair = bodies[c]
+    for side in range(2):
+        body = pair[side]
+        if body >= 0 and link_slot[body] >= 0:
+            contacted[link_slot[body]] = 1
+
+
+@wp.kernel
+def compact_contacted_links(
+    contacted: wp.array[int],
+    link_count: int,
+    contacted_links: wp.array2d[int],
+    contacted_count: wp.array[int],
+):
+    """List each world's contacted link slots in slot order."""
+    world = wp.tid()
+    n = int(0)
+    for link in range(link_count):
+        if contacted[world * link_count + link] != 0:
+            contacted_links[world, n] = link
+            n += 1
+    contacted_count[world] = n
+
+
+@wp.kernel
+def finish_articulated_contacts(
+    link_body: wp.array2d[int],
+    mobility: wp.array3d[float],
+    qd_before: wp.array[wp.spatial_vector],
+    body_impulse: wp.array[wp.spatial_vector],
+    qd: wp.array[wp.spatial_vector],
+):
+    """Set every link velocity from the accumulated rigid contact impulses."""
+    world, link = wp.tid()
+    body = link_body[world, link]
+    if body < 0:
+        return
+    velocity = qd_before[body]
+    for other in range(link_body.shape[1]):
+        other_body = link_body[world, other]
+        if other_body >= 0:
+            velocity += mobility_response(mobility, world, link, other, body_impulse[other_body])
+    qd[body] = velocity
 
 
 @wp.kernel

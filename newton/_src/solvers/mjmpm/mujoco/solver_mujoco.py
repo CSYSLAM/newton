@@ -5021,6 +5021,44 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         self._step += 1
 
     @override
+    def coupling_save_iteration_state(self) -> None:
+        """Save MuJoCo data that persists across steps before re-solving one step.
+
+        ``qpos`` and ``qvel`` are pushed from the input state every step, but
+        the acceleration warm start, actuator activations, and simulation
+        time carry over. Restoring them makes a repeated solve of the same
+        step depend only on the step-start state and its inputs.
+        """
+        if self.update_data_interval != 1:
+            raise ValueError("Repeated coupling passes require update_data_interval=1")
+        self._iteration_step = self._step
+        if self.use_mujoco_cpu:
+            d = self.mj_data
+            self._iteration_buffers = (d.qacc_warmstart.copy(), d.act.copy(), float(d.time))
+            return
+        d = self.mjw_data
+        sources = tuple(array for array in (d.qacc_warmstart, d.act, d.time) if array.size)
+        buffers = getattr(self, "_iteration_buffers", None)
+        if buffers is None or len(buffers) != len(sources):
+            buffers = tuple(wp.empty_like(array) for array in sources)
+        for source, copy in zip(sources, buffers, strict=True):
+            wp.copy(copy, source)
+        self._iteration_buffers = buffers
+        self._iteration_sources = sources
+
+    def coupling_restore_iteration_state(self) -> None:
+        """Restore the data saved by :meth:`coupling_save_iteration_state`."""
+        self._step = self._iteration_step
+        if self.use_mujoco_cpu:
+            d = self.mj_data
+            warmstart, act, time = self._iteration_buffers
+            d.qacc_warmstart[:] = warmstart
+            d.act[:] = act
+            d.time = time
+            return
+        for source, copy in zip(self._iteration_sources, self._iteration_buffers, strict=True):
+            wp.copy(source, copy)
+
     def reset(
         self,
         state: State,

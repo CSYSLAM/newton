@@ -25,7 +25,7 @@ from newton._src.solvers.mjmpm.coupling.proxy_utils import (
     sync_proxy_particles_kernel,
     sync_proxy_states_kernel,
 )
-from newton._src.solvers.mjmpm.coupling.solver_coupled import SolverCoupled
+from newton._src.solvers.mjmpm.coupling.solver_coupled import SolverCoupled, _copy_state_to_entry
 
 if TYPE_CHECKING:
     from newton._src.sim import Contacts, Control, Model, State
@@ -328,6 +328,9 @@ class SolverCoupledProxy(SolverCoupled):
         entries: Sequence[SolverCoupled.Entry],
         coupling: SolverCoupledProxy.Config,
     ) -> None:
+        # Optional same-step iteration hooks (see ``same_step.SameStepIteration``).
+        self.iteration_observer = None
+        self._iteration = 0
         if len(entries) > 2:
             raise ValueError("Proxy coupling currently supports at most two solver entries")
 
@@ -1347,14 +1350,58 @@ class SolverCoupledProxy(SolverCoupled):
         del state_out
         self._reset_aitken_iteration_state()
         iterations = int(self._coupling.iterations)
+        observer = self.iteration_observer
+        if observer is not None:
+            observer.begin_step(iterations)
         for k in range(iterations):
             # Some solvers use state_in arrays as temporary buffers during a
             # step. Proxy iterations are repeated solves over the same top-level
             # interval, so relaxation restarts copy the original distributed
             # input state and only carry harvested feedback buffers forward.
             if k > 0:
+                if observer is not None:
+                    observer.restart()
                 self._distribute_state(state_in, dt=dt, iteration_restart=True)
+            self._iteration = k
             self._step_proxy(state_in, control, contacts, dt, iteration_restart=k > 0)
+            if observer is not None and observer.finished(k):
+                break
+        if observer is not None and observer.resolve_sources():
+            self._resolve_sources_with_harvested_feedback(state_in, control, contacts, dt)
+
+    def _resolve_sources_with_harvested_feedback(
+        self,
+        state_in: State,
+        control: Control | None,
+        contacts: Contacts | None,
+        dt: float,
+    ) -> None:
+        """Re-solve proxy sources from the step start with the final harvested feedback.
+
+        The destinations keep their last pass. Both domains then apply the same
+        contact impulse once, so momentum exchanged across the interface is
+        conserved even when the passes stop before full convergence.
+        """
+        observer = self.iteration_observer
+        for (src_name, _dst_name), group in self._proxy_groups.items():
+            body_proxies = group["bodies"]
+            if not body_proxies:
+                continue
+            src = self._entries[src_name]
+            for proxy in body_proxies:
+                observer.load_harvested_feedback(proxy)
+            observer.restore_source(src.solver)
+            flags = self._input_state_copy_flags(state_in, src.state_0)
+            _copy_state_to_entry(state_in, src.state_0, src)
+            self._copy_persistent_state_rows(state_in, src.state_0, src, scatter=False)
+            self._notify_input_state_update(src, flags, dt=dt, iteration_restart=True)
+            if src.has_body_force_input:
+                self._clear_body_force_input(src)
+                self._add_body_force_input(src, src.body_local_to_global, state_in.body_f)
+                for proxy in body_proxies:
+                    self._add_body_force_input(src, proxy.source_local_to_proxy_global, proxy.coupling_forces)
+                self._notify_input_state_update(src, StateFlags.BODY_F, dt=dt)
+            self._step_entry(src, control, contacts, dt)
 
     def _reset_aitken_iteration_state(self) -> None:
         for proxy in [*self._proxy_mappings, *self._proxy_particle_mappings]:
@@ -1576,6 +1623,8 @@ class SolverCoupledProxy(SolverCoupled):
                     contacts=dst_contacts_used,
                     dt=dt,
                 )
+                if self.iteration_observer is not None:
+                    self.iteration_observer.record_body_feedback(proxy, dst, self._iteration, dt)
                 self._blend_proxy_feedback(proxy)
 
             for proxy in particle_proxies:

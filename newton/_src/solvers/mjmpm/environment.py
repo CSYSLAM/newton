@@ -76,6 +76,15 @@ class Environment(SolverBase, CouplingInterface):
         self.contacts = self.detector.contacts()
         self.contact_impulses = wp.zeros(self.contacts.rigid_contact_max, dtype=wp.vec3, device=model.device)
         self._init_contact_buffers()
+        self._reuse_contacts = False
+        # Articulated link response; see enable_articulated_response().
+        self._link_mobility = None
+        self._mobility = None
+        self._link_slot = None
+        self._link_body = None
+        self._link_count = 0
+        self._contacted_links = None
+        self._contacted_count = None
         self.rigid_impulses = wp.zeros(model.body_count, dtype=wp.spatial_vector, device=model.device)
         self.material_impulses = wp.zeros_like(self.rigid_impulses)
         self.work = model.state()
@@ -222,6 +231,9 @@ class Environment(SolverBase, CouplingInterface):
                 self._contact_inertia_inv,
                 model.world_count,
                 self._single_bucket,
+                self._link_slot,
+                self._link_count,
+                self._mobility,
                 dt,
             ],
             outputs=[
@@ -255,6 +267,23 @@ class Environment(SolverBase, CouplingInterface):
                 outputs=[self._bucket_begin, self._bucket_end],
                 device=model.device,
             )
+        if self._mobility is not None:
+            wp.copy(self._qd_before_contacts, work.body_qd)
+            self._contacted.zero_()
+            wp.launch(
+                kernels.mark_contacted_links,
+                dim=capacity,
+                inputs=[c.rigid_contact_count, self._contact_bodies, self._link_slot],
+                outputs=[self._contacted],
+                device=model.device,
+            )
+            wp.launch(
+                kernels.compact_contacted_links,
+                dim=self._link_body.shape[0],
+                inputs=[self._contacted, self._link_count],
+                outputs=[self._contacted_links, self._contacted_count],
+                device=model.device,
+            )
         wp.launch(
             kernels.solve_contact_buckets,
             dim=self._bucket_count,
@@ -269,6 +298,11 @@ class Environment(SolverBase, CouplingInterface):
                 self._contact_params,
                 self._contact_mass_inv,
                 self._contact_inertia_inv,
+                self._link_slot,
+                self._link_body,
+                self._mobility,
+                self._contacted_links,
+                self._contacted_count,
                 work.body_qd,
                 self.contact_impulses,
                 self.rigid_impulses,
@@ -276,6 +310,87 @@ class Environment(SolverBase, CouplingInterface):
             ],
             device=model.device,
         )
+        if self._mobility is not None:
+            wp.launch(
+                kernels.finish_articulated_contacts,
+                dim=self._link_body.shape,
+                inputs=[self._link_body, self._mobility, self._qd_before_contacts, self.rigid_impulses],
+                outputs=[work.body_qd],
+                device=model.device,
+            )
+
+    def enable_articulated_response(self, link_mobility, link_body):
+        """Let articulation proxies respond through the MuJoCo link mobility.
+
+        Args:
+            link_mobility: :class:`~newton._src.solvers.mjmpm.coupling.articulated.LinkMobility`
+                refreshed after each MuJoCo step.
+            link_body: Proxy body index in this environment of each mobility
+                link slot, shape ``(world_count, link_count)``.
+        """
+        model = self.model
+        device = model.device
+        link_body = np.asarray(link_body, dtype=np.int32)
+        slots = np.full(model.body_count, -1, dtype=np.int32)
+        for world in range(link_body.shape[0]):
+            for link in range(link_body.shape[1]):
+                body = link_body[world, link]
+                if body >= 0:
+                    slots[body] = world * link_body.shape[1] + link
+        self._link_mobility = link_mobility
+        self._mobility = link_mobility.mobility
+        self._link_count = int(link_body.shape[1])
+        self._link_body = wp.array(link_body, dtype=int, device=device)
+        self._link_slot = wp.array(slots, dtype=int, device=device)
+        self._contacted = wp.zeros(link_body.size, dtype=int, device=device)
+        self._contacted_links = wp.zeros(link_body.shape, dtype=int, device=device)
+        self._contacted_count = wp.zeros(link_body.shape[0], dtype=int, device=device)
+        self._qd_before_contacts = wp.zeros(model.body_count, dtype=wp.spatial_vector, device=device)
+        if self.material is not None:
+            self.material.enable_articulated_response(self._mobility, self._link_body, self._link_slot)
+
+    def coupling_rewind_proxy_body(
+        self, body_local_to_proxy_global, state, coupling_forces, body_gravity_acceleration, dt
+    ):
+        """Rewind lagged feedback through the link mobility when articulated response is enabled."""
+        if self._link_mobility is None:
+            super().coupling_rewind_proxy_body(
+                body_local_to_proxy_global, state, coupling_forces, body_gravity_acceleration, dt
+            )
+            return
+        # MuJoCo has just stepped; evaluate the response at this step's configuration.
+        self._link_mobility.update()
+        wp.launch(
+            kernels.rewind_articulated_proxies,
+            dim=self._link_body.shape,
+            inputs=[
+                self._link_body,
+                body_local_to_proxy_global,
+                coupling_forces,
+                self._mobility,
+                self.model.body_mass,
+                body_gravity_acceleration,
+                dt,
+            ],
+            outputs=[state.body_qd, state.body_f],
+            device=self.model.device,
+        )
+
+    def coupling_save_iteration_state(self):
+        """Save history overwritten by a step before the same step is re-solved."""
+        self._reuse_contacts = False
+        if self.material is not None:
+            self.material.coupling_save_iteration_state()
+
+    def coupling_restore_iteration_state(self):
+        """Restore the step-start history for another pass over the same step.
+
+        Contacts depend only on step-start poses, so the repeated pass reuses
+        the first pass's detection.
+        """
+        self._reuse_contacts = True
+        if self.material is not None:
+            self.material.coupling_restore_iteration_state()
 
     def check_capacity_status(self):
         """Raise if a captured step exceeded a sparse-grid or particle-basis capacity."""
@@ -328,7 +443,9 @@ class Environment(SolverBase, CouplingInterface):
                 ],
                 device=model.device,
             )
-            self.detector.collide(work, self.contacts)
+            if not self._reuse_contacts:
+                self.detector.collide(work, self.contacts)
+            self._reuse_contacts = False
             self._solve_rigid_contacts(work, dt)
         if self.material is not None:
             self.material.step(work, work, control, None, dt)

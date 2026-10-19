@@ -1,0 +1,1 @@
+Add `articulated_response` to the experimental `SolverMJMPM`, which moves articulation links in MPM-side rigid and material contacts through the MuJoCo Warp link mobility `J H^-1 J^T` and re-solves MuJoCo with the harvested feedback, so a single coupling pass applies jointed contact response within the step.

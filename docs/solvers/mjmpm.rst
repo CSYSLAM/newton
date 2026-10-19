@@ -115,14 +115,62 @@ to detect cells whose extra particles were ignored. The press validation
 records the maximum observed cell occupancy alongside contact clearance and
 impulses.
 
+Same-step coupling
+------------------
+
+By default, two-way coupling makes one MuJoCo/MPM pass per step: MuJoCo
+advances the links with the contact feedback harvested in the previous step,
+and the MPM environment harvests new feedback against link proxies with
+approximate independent inertia (``mass_scale`` times MuJoCo's effective body
+inertia).
+
+``coupling_iterations`` repeats the pass from the same step-start state. Each
+repetition restores the MPM warm starts and previous collider poses, MuJoCo's
+acceleration warm start, actuator activations, and time, and reuses the
+step's contact detection; material history comes from the step-start state.
+At the fixed point the MPM proxy and MuJoCo link end velocities agree, so the
+proxy inertia only affects convergence. After the last pass MuJoCo is
+re-solved with that pass's unrelaxed feedback, so both domains apply the same
+contact impulse once and momentum exchanged across the interface is
+conserved even before convergence. ``relaxation_mode="aitken"`` adapts the
+feedback relaxation within each step, and ``coupling_tolerance`` [m/s, rad/s]
+ends uncaptured steps early. ``coupling_residuals`` holds each pass's largest
+linear and angular interface velocity residual, and ``coupling_passes`` the
+passes run.
+
+Articulated contact response
+----------------------------
+
+``articulated_response=True`` replaces the independent proxy inertia with the
+link mobility of the MuJoCo Warp step. For an impulse wrench on link ``m`` the
+step changes the twist of link ``l`` by ``Lambda^-1_lm p_m`` with
+``Lambda^-1 = J H^-1 J^T``, where ``J`` stacks the link center-of-mass
+Jacobians and ``H`` is the matrix MuJoCo factors to integrate velocities
+(``M - dt dqfrc/dqvel`` for the implicit integrators, which includes joint
+damping and actuator velocity gains). The mobility is evaluated after every
+MuJoCo step. Rigid environment contacts update every contacted link of the
+world, and the MPM collider rigidity operator maps nodal impulses to link
+wrenches and then to coupled link twists. MuJoCo is re-solved with the
+harvested feedback, so a single pass already applies contact feedback within
+the step. In regression scenes, one articulated pass matches the converged
+same-step solution of 30 to 40 proxy passes to within a few millimeters per
+second, including the motion transmitted to links that are not in contact.
+
+The mobility is linear and excludes MuJoCo constraints (joint limits, MuJoCo
+contacts, equality constraints) and actuator force clamping; additional
+coupling iterations correct them. It requires the MuJoCo Warp backend
+(``use_mujoco_cpu=False``), which also runs on CPU devices, and stores a
+``6 n x 6 n`` matrix per world for ``n`` articulated links.
+
 Current limits
 --------------
 
-- Two-way coupling returns contact wrenches on the next physical step. Same-step
-  interface convergence and complete articulated response inside the material
-  solve are planned, and are not implemented by this initial backend.
-- Rigid contacts use a sequential projected-impulse reference solver with
-  optional implicit compliance, intended for small validation scenes.
+- Same-step iterations repeat the full MPM solve per pass, so they multiply
+  the material cost. Articulated response removes most of the need for them
+  in the linear regime but does not include MuJoCo constraint activity.
+- Rigid contacts use a sequential projected-impulse solver with optional
+  implicit compliance. Worlds are solved in parallel, but the contacts of
+  one world are swept by one thread, so very contact-rich worlds are slow.
   Restitution coefficients, rolling/torsional friction,
   prescribed contact surface velocity, and continuous collision detection are
   not implemented by that solver.

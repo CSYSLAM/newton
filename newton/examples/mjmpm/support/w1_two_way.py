@@ -213,7 +213,11 @@ class W1MJMPMScene:
             self.model,
             coupling=SolverMJMPM.Coupling(args.coupling),
             relaxation=args.proxy_relaxation,
+            relaxation_mode=args.relaxation_mode,
             mass_scale=args.proxy_mass_scale,
+            coupling_iterations=args.coupling_iterations,
+            coupling_tolerance=args.coupling_tolerance,
+            articulated_response=args.articulated_response,
             rigid_iterations=30,
             rigid_contact_hard=False,
             mpm_options={
@@ -522,10 +526,30 @@ class W1MJMPMScene:
         )
         parser.add_argument("--proxy-relaxation", type=float, default=0.5, help="Two-way feedback relaxation.")
         parser.add_argument(
+            "--relaxation-mode", choices=("fixed", "aitken"), default="fixed", help="Two-way feedback relaxation mode."
+        )
+        parser.add_argument(
+            "--coupling-iterations",
+            type=int,
+            default=1,
+            help="MuJoCo/MPM passes per substep; more passes converge contact feedback within the substep.",
+        )
+        parser.add_argument(
+            "--coupling-tolerance",
+            type=float,
+            default=0.0,
+            help="Interface velocity residual [m/s, rad/s] that ends passes early without a CUDA graph.",
+        )
+        parser.add_argument(
             "--proxy-mass-scale",
             type=float,
             default=4.0,
             help="Scale of the MuJoCo effective inertia given to the MPM link proxies.",
+        )
+        parser.add_argument(
+            "--articulated-response",
+            action="store_true",
+            help="Move the robot links through the MuJoCo link mobility in MPM contacts instead of proxy inertia.",
         )
         parser.add_argument("--voxel-size", type=float, default=0.015, help="MPM grid cell size [m].")
         parser.add_argument("--no-cuda-graph", action="store_true")

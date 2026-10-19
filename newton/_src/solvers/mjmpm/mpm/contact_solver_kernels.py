@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import dataclass
+
 import warp as wp
 import warp.sparse as sp
 
@@ -280,3 +282,170 @@ def solve_subgrid_friction(
 
     impulse[i] += delta_lambda
     delta_impulse[i] = delta_lambda
+
+
+@wp.func
+def _mobility_block(mobility: wp.array3d[float], world: int, row_link: int, column_link: int, r0: int, c0: int):
+    return wp.mat33(
+        mobility[world, 6 * row_link + r0 + 0, 6 * column_link + c0 + 0],
+        mobility[world, 6 * row_link + r0 + 0, 6 * column_link + c0 + 1],
+        mobility[world, 6 * row_link + r0 + 0, 6 * column_link + c0 + 2],
+        mobility[world, 6 * row_link + r0 + 1, 6 * column_link + c0 + 0],
+        mobility[world, 6 * row_link + r0 + 1, 6 * column_link + c0 + 1],
+        mobility[world, 6 * row_link + r0 + 1, 6 * column_link + c0 + 2],
+        mobility[world, 6 * row_link + r0 + 2, 6 * column_link + c0 + 0],
+        mobility[world, 6 * row_link + r0 + 2, 6 * column_link + c0 + 1],
+        mobility[world, 6 * row_link + r0 + 2, 6 * column_link + c0 + 2],
+    )
+
+
+@wp.kernel
+def list_active_links(
+    link_body: wp.array2d[int],
+    IJtm_mat_offsets: wp.array[int],
+    active_links: wp.array2d[int],
+    active_count: wp.array[int],
+):
+    """List each world's links that have collider nodes in this step's rigidity operator."""
+    world = wp.tid()
+    n = int(0)
+    for link in range(link_body.shape[1]):
+        body = link_body[world, link]
+        if body >= 0 and IJtm_mat_offsets[2 * body + 2] > IJtm_mat_offsets[2 * body]:
+            active_links[world, n] = link
+            n += 1
+    active_count[world] = n
+
+
+@wp.kernel
+def apply_link_mobility(
+    link_body: wp.array2d[int],
+    active_links: wp.array2d[int],
+    active_count: wp.array[int],
+    mobility: wp.array3d[float],
+    wrenches: wp.array[float],
+    twists: wp.array[float],
+):
+    """Map impulse wrenches of the active links to their twists through the mobility.
+
+    Only links with collider nodes receive wrenches, and the collider velocity
+    map reads only their twists, so the product is restricted to them.
+    Rigidity-operator body blocks are ``(angular, linear)``: ``2 b`` holds the
+    torque or angular velocity and ``2 b + 1`` the force or linear velocity.
+    Mobility rows are ``(v_com, omega)`` and columns ``(force, torque)``.
+    """
+    world, row = wp.tid()
+    count = active_count[world]
+    if row >= count:
+        return
+    link = active_links[world, row]
+    body = link_body[world, link]
+    linear = wp.vec3(0.0)
+    angular = wp.vec3(0.0)
+    for k in range(count):
+        other = active_links[world, k]
+        other_body = link_body[world, other]
+        torque = wp.vec3(wrenches[6 * other_body + 0], wrenches[6 * other_body + 1], wrenches[6 * other_body + 2])
+        force = wp.vec3(wrenches[6 * other_body + 3], wrenches[6 * other_body + 4], wrenches[6 * other_body + 5])
+        linear += _mobility_block(mobility, world, link, other, 0, 0) * force
+        linear += _mobility_block(mobility, world, link, other, 0, 3) * torque
+        angular += _mobility_block(mobility, world, link, other, 3, 0) * force
+        angular += _mobility_block(mobility, world, link, other, 3, 3) * torque
+    for axis in range(3):
+        twists[6 * body + axis] = angular[axis]
+        twists[6 * body + 3 + axis] = linear[axis]
+
+
+@wp.kernel
+def articulated_collider_inv_mass(
+    J_mat_offsets: wp.array[int],
+    J_mat_columns: wp.array[int],
+    J_mat_values: wp.array[wp.mat33],
+    IJtm_mat_offsets: wp.array[int],
+    IJtm_mat_columns: wp.array[int],
+    IJtm_mat_values: wp.array[wp.mat33],
+    body_count: int,
+    link_slot: wp.array[int],
+    link_count: int,
+    mobility: wp.array3d[float],
+    collider_inv_mass: wp.array[float],
+):
+    """Replace the nodal inverse mass of articulated links with their own mobility block."""
+    i = wp.tid()
+    block_beg = J_mat_offsets[i]
+    block_end = J_mat_offsets[i + 1]
+    body = int(-1)
+    W = wp.mat33(0.0)
+    G_angular = wp.mat33(0.0)
+    G_linear = wp.mat33(0.0)
+    multiplicity = float(0.0)
+    for b in range(block_beg, block_end):
+        col = J_mat_columns[b]
+        if col >= 2 * body_count:
+            continue
+        candidate = col // 2
+        if link_slot[candidate] < 0:
+            continue
+        transposed_block = sp.bsr_block_index(col, i, IJtm_mat_offsets, IJtm_mat_columns)
+        if transposed_block == -1:
+            continue
+        body = candidate
+        multiplicity = float(IJtm_mat_offsets[col + 1] - IJtm_mat_offsets[col])
+        if col % 2 == 0:
+            W = J_mat_values[b]
+            G_angular = IJtm_mat_values[transposed_block]
+        else:
+            G_linear = IJtm_mat_values[transposed_block]
+    if body < 0:
+        return
+    slot = link_slot[body]
+    world = slot // link_count
+    link = slot % link_count
+    to_linear = _mobility_block(mobility, world, link, link, 0, 0) + W * _mobility_block(
+        mobility, world, link, link, 3, 0
+    )
+    to_angular = _mobility_block(mobility, world, link, link, 0, 3) + W * _mobility_block(
+        mobility, world, link, link, 3, 3
+    )
+    w_mat = (to_linear * G_linear + to_angular * G_angular) * multiplicity
+    _eigvecs, eigvals = wp.eig3(0.5 * (w_mat + wp.transpose(w_mat)))
+    collider_inv_mass[i] = wp.max(0.0, wp.max(eigvals))
+
+
+@wp.kernel
+def articulated_collider_masses(
+    link_slot: wp.array[int],
+    body_mass: wp.array[float],
+    body_inv_inertia: wp.array[wp.mat33],
+    out_mass: wp.array[float],
+    out_inv_inertia: wp.array[wp.mat33],
+):
+    """Use unit inertia for articulated links so the rigidity operator yields wrenches."""
+    body = wp.tid()
+    if link_slot[body] >= 0:
+        out_mass[body] = 1.0
+        out_inv_inertia[body] = wp.identity(n=3, dtype=float)
+    else:
+        out_mass[body] = body_mass[body]
+        out_inv_inertia[body] = body_inv_inertia[body]
+
+
+@dataclass
+class ArticulatedRigidity:
+    """Articulated link response appended to a collider rigidity operator.
+
+    Attributes:
+        body_count: Rigid bodies in the operator's body block columns.
+        link_body: Body index of each mobility link slot, shape ``(world_count, link_count)``.
+        link_slot: Mobility slot ``world * link_count + link`` of each body, or -1.
+        mobility: Link mobility, shape ``(world_count, 6 link_count, 6 link_count)``.
+        wrenches: Scratch copy of the body impulse wrenches.
+    """
+
+    body_count: int
+    link_body: wp.array2d[int]
+    link_slot: wp.array[int]
+    mobility: wp.array3d[float]
+    wrenches: wp.array[float] | None = None
+    active_links: wp.array2d[int] | None = None
+    active_count: wp.array[int] | None = None

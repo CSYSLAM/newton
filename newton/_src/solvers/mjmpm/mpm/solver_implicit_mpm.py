@@ -24,6 +24,7 @@ from newton._src.geometry.particle_surface import ParticleSurface
 from newton._src.sim import ModelFlags, StateFlags
 from newton._src.solvers.mjmpm.base import SolverBase
 from newton._src.solvers.mjmpm.coupling.interface import CouplingInterface
+from newton._src.solvers.mjmpm.mpm.contact_solver_kernels import ArticulatedRigidity, articulated_collider_masses
 from newton._src.solvers.mjmpm.mpm.implicit_mpm_model import ImplicitMPMModel
 from newton._src.solvers.mjmpm.mpm.particle_surface_colliders import extrapolate_surface_sdf_into_colliders
 from newton._src.solvers.mjmpm.mpm.rasterized_collisions import (
@@ -1507,6 +1508,8 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         self.gimp = config.integration_scheme == "gimp"
         self.collider_normal_from_sdf_gradient = config.collider_normal_from_sdf_gradient
         self.collider_basis = config.collider_basis
+        self._iteration_snapshots = {}
+        self._articulated_rigidity = None
         # Plain "pic" bases size their per-cell capacity from the particles.
         # Eager steps grow a rounded capacity so captured steps can reuse it.
         self._point_capacity = 0
@@ -2732,6 +2735,54 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 "choose a larger 'picN' suffix or step uncaptured until the occupancy peaks"
             )
 
+    def coupling_save_iteration_state(self) -> None:
+        """Save cross-step solver history before repeated solves of one step.
+
+        Material history lives in the state and is restored by
+        redistributing it. This saves the warm-start fields and previous
+        collider poses that :meth:`step` overwrites for the next step.
+        """
+        snapshots = {}
+        last = self._last_step_data
+        for name in ("ws_impulse_field", "ws_stress_field"):
+            field = getattr(last, name)
+            if field is None:
+                continue
+            values = field.dof_values
+            previous = self._iteration_snapshots.get(name)
+            copy = previous[3] if previous is not None and previous[3].shape == values.shape else None
+            if copy is None:
+                if self.model.device.is_capturing:
+                    raise RuntimeError("Warm-start field shapes changed during graph capture")
+                copy = wp.empty_like(values)
+            wp.copy(copy, values)
+            snapshots[name] = (field.space, field.space_partition, values, copy)
+        if last.body_q_prev is not None:
+            previous = self._iteration_snapshots.get("body_q_prev")
+            copy = previous[3] if previous is not None and previous[3].shape == last.body_q_prev.shape else None
+            if copy is None:
+                copy = wp.empty_like(last.body_q_prev)
+            wp.copy(copy, last.body_q_prev)
+            snapshots["body_q_prev"] = (None, None, last.body_q_prev, copy)
+        self._iteration_snapshots = snapshots
+
+    def coupling_restore_iteration_state(self) -> None:
+        """Restore the history saved by :meth:`coupling_save_iteration_state`."""
+        last = self._last_step_data
+        for name, (space, partition, values, copy) in self._iteration_snapshots.items():
+            if name == "body_q_prev":
+                wp.copy(last.body_q_prev, copy)
+                continue
+            field = getattr(last, name)
+            if field.space is space and field.dof_values is values:
+                wp.copy(values, copy)
+                continue
+            if self.model.device.is_capturing:
+                raise RuntimeError("Warm-start fields were rebound during graph capture")
+            # Unbounded sparse grids rebind warm starts to each step's grid.
+            field.rebind(space=space, space_partition=partition)
+            field.dof_values = wp.clone(copy)
+
     def _rebuild_scratchpad(self, pic: fem.PicQuadrature):
         """(Re)create function spaces and allocate per-step temporaries.
 
@@ -3211,19 +3262,55 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             if body_q is None:
                 body_q = wp.empty(0, dtype=wp.transform, device=self.model.device)
 
+            body_mass = self._mpm_model.collider_body_mass
+            body_inv_inertia = self._mpm_model.collider_body_inv_inertia
+            articulation = self._articulated_rigidity
+            if articulation is not None:
+                # Articulated links map node impulses to wrenches; the link
+                # mobility then provides their coupled response.
+                wp.launch(
+                    articulated_collider_masses,
+                    dim=articulation.body_count,
+                    inputs=[articulation.link_slot, body_mass, body_inv_inertia],
+                    outputs=[self._articulated_body_mass, self._articulated_body_inv_inertia],
+                    device=self.model.device,
+                )
+                body_mass = self._articulated_body_mass
+                body_inv_inertia = self._articulated_body_inv_inertia
+
             rigidity_operator = build_rigidity_operator(
                 cell_volume=cell_volume,
                 node_volumes=scratch.collider_node_volume,
                 node_positions=scratch.collider_position_field.dof_values,
                 collider=self._mpm_model.collider,
                 body_q=body_q,
-                body_mass=self._mpm_model.collider_body_mass,
-                body_inv_inertia=self._mpm_model.collider_body_inv_inertia,
+                body_mass=body_mass,
+                body_inv_inertia=body_inv_inertia,
                 particle_mass=self._mpm_model.model.particle_mass,
                 collider_ids=scratch.collider_ids,
             )
+            if articulation is not None:
+                rigidity_operator = (*rigidity_operator, articulation)
 
         return rigidity_operator
+
+    def enable_articulated_response(
+        self, mobility: wp.array3d[float], link_body: wp.array2d[int], link_slot: wp.array[int]
+    ) -> None:
+        """Let collider bodies of articulation links respond through a coupled link mobility.
+
+        Args:
+            mobility: Link mobility, shape ``(world_count, 6 n, 6 n)``, with
+                ``(v_com, omega)`` rows and ``(force, torque)`` columns.
+            link_body: Model body index of each link slot, shape ``(world_count, n)``.
+            link_slot: Link slot of each model body, or -1 for independent bodies.
+        """
+        body_count = self.model.body_count
+        self._articulated_rigidity = ArticulatedRigidity(
+            body_count=body_count, link_body=link_body, link_slot=link_slot, mobility=mobility
+        )
+        self._articulated_body_mass = wp.zeros(body_count, dtype=float, device=self.model.device)
+        self._articulated_body_inv_inertia = wp.zeros(body_count, dtype=wp.mat33, device=self.model.device)
 
     def _build_elasticity_system(
         self,

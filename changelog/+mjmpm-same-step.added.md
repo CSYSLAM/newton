@@ -1,0 +1,1 @@
+Add same-step MuJoCo/MPM coupling iterations to the experimental `SolverMJMPM` through `coupling_iterations`, with Aitken relaxation, an interface-residual early exit, per-pass residual diagnostics, restored step history, and a final MuJoCo re-solve that applies each contact impulse once in both domains.

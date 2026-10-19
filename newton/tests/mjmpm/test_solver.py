@@ -185,8 +185,11 @@ class TestMJMPMRigid(unittest.TestCase):
                             solver.step(state, state, None, None, 1.0 / 240.0)
                         states.append((state.body_q.numpy(), state.body_qd.numpy(), env.rigid_impulses.numpy()))
                     self.assertGreater(float(np.abs(states[0][2]).max()), 1.0e-3)
+                    # CUDA may contract the two kernels' arithmetic into different
+                    # fused multiply-adds; sliding stacks amplify that rounding.
+                    atol = 1.0e-5 if device == "cpu" else 1.0e-4
                     for expected, actual in zip(states[0], states[1], strict=True):
-                        np.testing.assert_allclose(actual, expected, atol=1.0e-5)
+                        np.testing.assert_allclose(actual, expected, atol=atol)
 
 
 class TestMJMPMMaterial(unittest.TestCase):
@@ -643,15 +646,437 @@ class TestMJMPMArticulation(unittest.TestCase):
         self.assertGreater(velocities[1], 0.001)
 
 
+def _prismatic_collision(free_mass=1.0, device="cpu"):
+    """Return a prismatic link moving at 1 m/s toward a resting free box without gravity."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverMJMPM.register_custom_attributes(builder)
+    cfg = newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.01)
+    pose = wp.transform(wp.vec3(-0.15, 0.0, 0.0), wp.quat_identity())
+    link = builder.add_link(xform=pose, mass=1.0, inertia=wp.mat33(np.eye(3)))
+    builder.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+    joint = builder.add_joint_prismatic(parent=-1, child=link, axis=(1.0, 0.0, 0.0), parent_xform=pose)
+    builder.add_articulation([joint])
+    builder.joint_qd[0] = 1.0
+    free = builder.add_body(
+        xform=wp.transform(wp.vec3(0.1, 0.0, 0.0), wp.quat_identity()), mass=free_mass, inertia=wp.mat33(np.eye(3))
+    )
+    builder.add_shape_box(free, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+    return builder.finalize(device=device), free
+
+
+class TestMJMPMSameStep(unittest.TestCase):
+    def test_iterations_resolve_contact_within_step(self):
+        """Converge link/box contact in the step it begins and exchange equal impulses."""
+        outcomes = {}
+        for iterations in (1, 8):
+            model, free = _prismatic_collision()
+            solver = SolverMJMPM(
+                model, relaxation=0.5, coupling_iterations=iterations, mujoco_options={"use_mujoco_cpu": True}
+            )
+            state = model.state()
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+            contact = None
+            for _ in range(150):
+                solver.step(state, state, None, None, 0.001)
+                residuals = solver.coupling_residuals.numpy().copy()
+                if contact is None and residuals.max() > 1.0e-6:
+                    contact = (float(state.joint_qd.numpy()[0]), float(state.body_qd.numpy()[free, 0]), residuals)
+                momentum = float(state.joint_qd.numpy()[0] + state.body_qd.numpy()[free, 0])
+                if iterations > 1:
+                    # Both domains apply each step's contact impulse in that step.
+                    self.assertAlmostEqual(momentum, 1.0, delta=1.0e-4)
+            self.assertAlmostEqual(momentum, 1.0, delta=1.0e-4)
+            outcomes[iterations] = contact
+        link, box, _residuals = outcomes[1]
+        # One pass applies the first contact impulse to the link one step late.
+        self.assertAlmostEqual(link, 1.0, delta=1.0e-4)
+        self.assertGreater(box, 0.7)
+        link, box, residuals = outcomes[8]
+        # Equal masses share the momentum in the contact step itself.
+        self.assertAlmostEqual(link, 0.5, delta=0.005)
+        self.assertAlmostEqual(box, 0.5, delta=0.005)
+        self.assertTrue(np.all(np.diff(residuals[:, 0]) < 0.0), residuals[:, 0])
+        self.assertLess(float(residuals[-1, 0]), 1.0e-3 * float(residuals[0, 0]))
+
+    def test_repeated_passes_restore_step_history(self):
+        """Repeat contact-free passes without accumulating material, rigid, or MuJoCo history."""
+        builder = newton.ModelBuilder()
+        SolverMJMPM.register_custom_attributes(builder)
+        pose = wp.transform(wp.vec3(3.0, 0.0, 1.0), wp.quat_identity())
+        link = builder.add_link(xform=pose, mass=1.0, inertia=wp.mat33(np.eye(3)))
+        builder.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1)
+        joint = builder.add_joint_revolute(parent=-1, child=link, axis=(0.0, 1.0, 0.0), parent_xform=pose)
+        builder.add_articulation([joint])
+        builder.joint_qd[0] = 2.0
+        _box(builder, (0.6, 0.0, 0.049), half=0.05)
+        builder.add_ground_plane()
+        _particles(builder)
+        model = builder.finalize(device="cpu")
+        options = {**_options(), "max_iterations": 6, "solver": "gs", "warmstart_mode": "auto", "voxel_size": 0.05}
+        results = []
+        for iterations in (1, 3):
+            solver = SolverMJMPM(
+                model, coupling_iterations=iterations, mpm_options=options, mujoco_options={"use_mujoco_cpu": True}
+            )
+            state = model.state()
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+            for _ in range(12):
+                solver.step(state, state, None, None, 0.005)
+            self.assertEqual(solver.coupling_passes, iterations)
+            results.append(
+                [
+                    state.joint_q.numpy(),
+                    state.joint_qd.numpy(),
+                    state.body_q.numpy(),
+                    state.body_qd.numpy(),
+                    state.particle_q.numpy(),
+                    state.particle_qd.numpy(),
+                    state.mpm.particle_Jp.numpy(),
+                    state.mpm.particle_elastic_strain.numpy(),
+                    state.mpm.particle_stress.numpy(),
+                ]
+            )
+        self.assertGreater(float(np.abs(results[0][8]).max()), 1.0)
+        for expected, actual in zip(results[0], results[1], strict=True):
+            np.testing.assert_array_equal(actual, expected)
+
+    def test_tolerance_stops_converged_steps_early(self):
+        """Stop after one pass without contact and iterate while contact feedback changes."""
+        model, _free = _prismatic_collision()
+        solver = SolverMJMPM(
+            model,
+            relaxation=0.5,
+            coupling_iterations=10,
+            coupling_tolerance=1.0e-3,
+            mujoco_options={"use_mujoco_cpu": True},
+        )
+        state = model.state()
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        passes = []
+        for _ in range(60):
+            solver.step(state, state, None, None, 0.001)
+            passes.append(solver.coupling_passes)
+        self.assertEqual(passes[0], 1)
+        self.assertGreater(max(passes), 2)
+        self.assertLess(max(passes), 10)
+
+    def test_iteration_options_require_two_way_articulation(self):
+        """Reject same-step iteration settings that would be ignored."""
+        model, _free = _prismatic_collision()
+        with self.assertRaisesRegex(ValueError, "two-way"):
+            SolverMJMPM(model, coupling=SolverMJMPM.Coupling.ONE_WAY, coupling_iterations=2)
+        builder = newton.ModelBuilder()
+        SolverMJMPM.register_custom_attributes(builder)
+        _box(builder, (0.0, 0.0, 1.0))
+        with self.assertRaisesRegex(ValueError, "articulation"):
+            SolverMJMPM(builder.finalize(device="cpu"), coupling_iterations=2)
+        with self.assertRaisesRegex(ValueError, "update_data_interval"):
+            SolverMJMPM(model, coupling_iterations=2, mujoco_options={"update_data_interval": 2})
+
+
+def _two_link_arm(builder, cfg, *, base=(0.0, 0.0, 0.0), axis=(1.0, 0.0, 0.0), length=0.2):
+    """Add a two-link revolute arm about z extending along ``axis`` from ``base``."""
+    base = np.asarray(base, dtype=float)
+    axis = np.asarray(axis, dtype=float)
+    half = np.where(axis != 0.0, length, 0.03)
+    l1 = builder.add_link(
+        xform=wp.transform(wp.vec3(*(base + length * axis)), wp.quat_identity()),
+        mass=2.0,
+        inertia=wp.mat33(np.diag([0.01, 0.03, 0.03])),
+    )
+    builder.add_shape_box(l1, hx=half[0], hy=half[1], hz=0.03, cfg=cfg)
+    j1 = builder.add_joint_revolute(
+        parent=-1,
+        child=l1,
+        axis=(0.0, 0.0, 1.0),
+        parent_xform=wp.transform(wp.vec3(*base), wp.quat_identity()),
+        child_xform=wp.transform(wp.vec3(*(-length * axis)), wp.quat_identity()),
+    )
+    l2 = builder.add_link(
+        xform=wp.transform(wp.vec3(*(base + 3.0 * length * axis)), wp.quat_identity()),
+        mass=1.0,
+        inertia=wp.mat33(np.diag([0.005, 0.015, 0.015])),
+    )
+    builder.add_shape_box(l2, hx=half[0], hy=half[1], hz=0.03, cfg=cfg)
+    j2 = builder.add_joint_revolute(
+        parent=l1,
+        child=l2,
+        axis=(0.0, 0.0, 1.0),
+        parent_xform=wp.transform(wp.vec3(*(length * axis)), wp.quat_identity()),
+        child_xform=wp.transform(wp.vec3(*(-length * axis)), wp.quat_identity()),
+    )
+    builder.add_articulation([j1, j2])
+
+
+def _arm_and_box(device="cpu"):
+    """Return a spinning two-link arm whose outer link strikes a free box without gravity."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverMJMPM.register_custom_attributes(builder)
+    cfg = newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.3)
+    _two_link_arm(builder, cfg)
+    builder.joint_qd[0] = 1.5
+    box = builder.add_body(
+        xform=wp.transform(wp.vec3(0.7, 0.115, 0.0), wp.quat_identity()), mass=1.5, inertia=wp.mat33(np.eye(3) * 0.005)
+    )
+    builder.add_shape_box(box, hx=0.05, hy=0.05, hz=0.05, cfg=cfg)
+    return builder.finalize(device=device), box
+
+
+def _run_coupled(model, steps, dt, record, **kwargs):
+    solver = SolverMJMPM(model, relaxation=0.5, **kwargs)
+    state = model.state()
+    newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+    rows = []
+    for _ in range(steps):
+        solver.step(state, state, None, None, dt)
+        rows.append(record(state))
+    return np.array(rows)
+
+
+class TestMJMPMArticulatedResponse(unittest.TestCase):
+    def test_link_mobility_matches_mujoco_step_response(self):
+        """Predict every link's one-step twist change for an impulse on any link of a damped chain."""
+        from newton._src.solvers.mjmpm.coupling.articulated import LinkMobility  # noqa: PLC0415
+        from newton._src.solvers.mjmpm.mujoco.solver_mujoco import SolverMuJoCo  # noqa: PLC0415
+
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        SolverMuJoCo.register_custom_attributes(builder)
+        base = builder.add_link(mass=2.0, inertia=wp.mat33(np.diag([0.02, 0.03, 0.04])))
+        builder.add_shape_box(base, hx=0.1, hy=0.1, hz=0.05)
+        j0 = builder.add_joint_prismatic(parent=-1, child=base, axis=(1.0, 0.0, 0.0))
+        l1 = builder.add_link(mass=1.0, inertia=wp.mat33(np.diag([0.01, 0.012, 0.005])))
+        builder.add_shape_capsule(l1, radius=0.03, half_height=0.15)
+        j1 = builder.add_joint_revolute(
+            parent=base,
+            child=l1,
+            axis=(0.0, 1.0, 0.0),
+            parent_xform=wp.transform(wp.vec3(0.0, 0.0, 0.05), wp.quat_identity()),
+            child_xform=wp.transform(wp.vec3(0.0, 0.0, -0.15), wp.quat_identity()),
+            target_ke=50.0,
+            target_kd=3.0,
+        )
+        l2 = builder.add_link(mass=0.5, inertia=wp.mat33(np.diag([0.004, 0.006, 0.002])))
+        builder.add_shape_capsule(l2, radius=0.02, half_height=0.12)
+        j2 = builder.add_joint_revolute(
+            parent=l1,
+            child=l2,
+            axis=(1.0, 0.0, 0.0),
+            parent_xform=wp.transform(wp.vec3(0.0, 0.0, 0.15), wp.quat_identity()),
+            child_xform=wp.transform(wp.vec3(0.0, 0.0, -0.12), wp.quat_identity()),
+        )
+        builder.add_articulation([j0, j1, j2])
+        builder.joint_q[1:3] = [0.4, -0.7]
+        builder.joint_qd[:] = [0.3, -0.5, 0.8]
+        model = builder.finalize(device="cpu")
+        solver = SolverMuJoCo(model, use_mujoco_cpu=False)
+        start = model.state()
+        newton.eval_fk(model, start.joint_q, start.joint_qd, start)
+        control = model.control()
+        dt = 0.002
+
+        def step(force=None):
+            state_in, state_out = model.state(), model.state()
+            state_in.assign(start)
+            if force is not None:
+                state_in.body_f.assign(force)
+            solver.step(state_in, state_out, control, None, dt)
+            return state_out.body_qd.numpy()
+
+        free = step()
+        mobility = LinkMobility(solver)
+        mobility.update()
+        matrix = mobility.mobility.numpy()[0]
+        links = mobility.link_body.numpy()[0]
+        rng = np.random.default_rng(0)
+        for k, body in enumerate(links):
+            wrench = rng.normal(size=6).astype(np.float32)
+            force = np.zeros((model.body_count, 6), dtype=np.float32)
+            force[body] = wrench
+            actual = step(force) - free
+            predicted = np.stack(
+                [matrix[6 * l : 6 * l + 6, 6 * k : 6 * k + 6] @ (dt * wrench) for l in range(len(links))]
+            )
+            np.testing.assert_allclose(predicted, actual[links], atol=5.0e-3 * float(np.abs(actual).max()))
+        # The coupled chain moves links that were not pushed.
+        self.assertGreater(float(np.abs(matrix[0:6, 12:18]).max()), 1.0e-2)
+
+    def test_single_pass_resolves_heavy_box_collision(self):
+        """Stop a light jointed link on a heavy box in the contact step instead of rebounding."""
+        outcomes = {}
+        for articulated in (False, True):
+            model, free = _prismatic_collision(free_mass=8.0)
+            rows = _run_coupled(
+                model,
+                150,
+                0.001,
+                lambda state, free=free: (float(state.joint_qd.numpy()[0]), float(state.body_qd.numpy()[free, 0])),
+                articulated_response=articulated,
+            )
+            contact = int(np.argmax(np.abs(rows[:, 1]) > 1.0e-4))
+            outcomes[articulated] = rows[contact], rows[-1]
+        # Independent proxy inertia misses the joint constraint and throws the link back.
+        self.assertLess(outcomes[False][1][0], -1.0)
+        link, box = outcomes[True][0]
+        self.assertAlmostEqual(link, 1.0 / 9.0, delta=0.01)
+        self.assertAlmostEqual(box, 1.0 / 9.0, delta=0.01)
+        final_link, final_box = outcomes[True][1]
+        self.assertAlmostEqual(final_link + 8.0 * final_box, 1.0, delta=1.0e-4)
+
+    def test_single_pass_matches_converged_arm_collision(self):
+        """Reproduce the converged same-step solution, including the push transmitted to the inner link."""
+
+        def run(**kwargs):
+            model, box = _arm_and_box()
+            return _run_coupled(
+                model,
+                40,
+                0.001,
+                lambda state, box=box: np.concatenate(
+                    (state.joint_qd.numpy()[:2], state.body_qd.numpy()[box, [0, 1, 5]])
+                ),
+                **kwargs,
+            )
+
+        reference = run(coupling_iterations=40)
+        articulated = run(articulated_response=True)
+        proxy = run()
+        self.assertGreater(float(reference[-1, 0]), 1.6)
+        self.assertLess(float(np.abs(articulated - reference).max()), 0.02)
+        self.assertGreater(float(np.abs(proxy - reference).max()), 1.0)
+
+    def test_single_pass_matches_converged_material_push(self):
+        """Move a jointed arm by MPM material contact through the articulated response."""
+
+        def run(**kwargs):
+            builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+            SolverMJMPM.register_custom_attributes(builder)
+            _two_link_arm(
+                builder,
+                newton.ModelBuilder.ShapeConfig(density=0.0),
+                base=(0.2, -0.45, 0.05),
+                axis=(0.0, 1.0, 0.0),
+            )
+            _particles(builder, velocity=(1.0, 0.0, 0.0))
+            model = builder.finalize(device="cpu")
+            return _run_coupled(
+                model,
+                30,
+                0.005,
+                lambda state: state.joint_qd.numpy().copy(),
+                mpm_options={**_options(), "voxel_size": 0.05},
+                **kwargs,
+            )
+
+        reference = run(coupling_iterations=30)
+        articulated = run(articulated_response=True)
+        proxy = run()
+        self.assertGreater(float(np.abs(reference[-1]).max()), 0.1)
+        self.assertLess(float(np.abs(articulated - reference).max()), 0.005)
+        self.assertGreater(float(np.abs(proxy - reference).max()), 0.1)
+
+    def test_articulated_response_keeps_worlds_independent(self):
+        """Evaluate per-world link mobility and contact propagation without cross-world coupling."""
+        single, free = _prismatic_collision(free_mass=8.0)
+        expected = _run_coupled(
+            single,
+            80,
+            0.001,
+            lambda state: np.concatenate((state.joint_qd.numpy()[:1], state.body_qd.numpy()[free, :1])),
+            articulated_response=True,
+        )
+        local = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        SolverMJMPM.register_custom_attributes(local)
+        cfg = newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.01)
+        pose = wp.transform(wp.vec3(-0.15, 0.0, 0.0), wp.quat_identity())
+        link = local.add_link(xform=pose, mass=1.0, inertia=wp.mat33(np.eye(3)))
+        local.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+        joint = local.add_joint_prismatic(parent=-1, child=link, axis=(1.0, 0.0, 0.0), parent_xform=pose)
+        local.add_articulation([joint])
+        box = local.add_body(
+            xform=wp.transform(wp.vec3(0.1, 0.0, 0.0), wp.quat_identity()), mass=8.0, inertia=wp.mat33(np.eye(3))
+        )
+        local.add_shape_box(box, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        SolverMJMPM.register_custom_attributes(builder)
+        speeds = (1.0, 0.0, -0.5)
+        for world, speed in enumerate(speeds):
+            builder.add_world(local, xform=wp.transform(wp.vec3(0.0, 2.0 * world, 0.0), wp.quat_identity()))
+            builder.joint_qd[builder.joint_qd_start[-2]] = speed
+        model = builder.finalize(device="cpu")
+        # Each world holds one prismatic dof followed by the box's free-joint dofs.
+        prismatic = model.joint_qd_start.numpy()[:-1][model.joint_type.numpy() == newton.JointType.PRISMATIC]
+        boxes = [box + world * local.body_count for world in range(len(speeds))]
+        rows = _run_coupled(
+            model,
+            80,
+            0.001,
+            lambda state: np.concatenate((state.joint_qd.numpy()[prismatic], state.body_qd.numpy()[boxes, 0])),
+            articulated_response=True,
+        )
+        np.testing.assert_allclose(rows[:, [0, 3]], expected, atol=1.0e-5)
+        # The world without motion stays still, and the receding link never touches its box.
+        np.testing.assert_allclose(
+            rows[:, [1, 2, 4, 5]], 0.0 * rows[:, [1, 2, 4, 5]] + [[0.0, -0.5, 0.0, 0.0]], atol=1.0e-6
+        )
+
+    def test_articulated_response_validates_backend(self):
+        """Reject articulated response where it cannot be evaluated or would be ignored."""
+        model, _free = _prismatic_collision()
+        with self.assertRaisesRegex(ValueError, "MuJoCo Warp"):
+            SolverMJMPM(model, articulated_response=True, mujoco_options={"use_mujoco_cpu": True})
+        with self.assertRaisesRegex(ValueError, "two-way"):
+            SolverMJMPM(model, coupling=SolverMJMPM.Coupling.ONE_WAY, articulated_response=True)
+
+
 @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
 class TestMJMPMCUDA(unittest.TestCase):
     def test_fixed_grid_graph_matches_eager(self):
         """Replay coupled articulation/rigid/material stepping in a fixed-grid CUDA graph."""
-        for collider_basis in ("pic8", "pic"):
-            with self.subTest(collider_basis=collider_basis):
-                self._check_graph_matches_eager(collider_basis)
+        for collider_basis, iterations in (("pic8", 1), ("pic", 1), ("pic", 3)):
+            with self.subTest(collider_basis=collider_basis, iterations=iterations):
+                self._check_graph_matches_eager(collider_basis, iterations)
 
-    def _check_graph_matches_eager(self, collider_basis):
+    def test_same_step_iterations_replay_in_graph(self):
+        """Capture repeated MuJoCo/MPM passes and their final source solve through contact."""
+        model, free = _prismatic_collision(device="cuda:0")
+        solvers = [SolverMJMPM(model, relaxation=0.5, coupling_iterations=4) for _ in range(2)]
+        states = [model.state(), model.state()]
+        for solver, state in zip(solvers, states, strict=True):
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+            solver.step(state, state, None, None, 0.001)
+        with wp.ScopedCapture(device=model.device, force_module_load=False) as capture:
+            solvers[1].step(states[1], states[1], None, None, 0.001)
+        for _ in range(80):
+            solvers[0].step(states[0], states[0], None, None, 0.001)
+            wp.capture_launch(capture.graph)
+        eager, captured = states
+        self.assertGreater(float(captured.body_qd.numpy()[free, 0]), 0.4)
+        momentum = float(captured.joint_qd.numpy()[0] + captured.body_qd.numpy()[free, 0])
+        self.assertAlmostEqual(momentum, 1.0, delta=1.0e-3)
+        np.testing.assert_allclose(captured.joint_qd.numpy(), eager.joint_qd.numpy(), atol=1.0e-5)
+        np.testing.assert_allclose(captured.body_qd.numpy(), eager.body_qd.numpy(), atol=1.0e-5)
+        np.testing.assert_allclose(captured.body_q.numpy(), eager.body_q.numpy(), atol=1.0e-6)
+        self.assertEqual(solvers[1].coupling_passes, 4)
+
+    def test_articulated_response_replays_in_graph(self):
+        """Capture the link mobility update, articulated contacts, and the MuJoCo re-solve."""
+        model, box = _arm_and_box(device="cuda:0")
+        solvers = [SolverMJMPM(model, relaxation=0.5, articulated_response=True) for _ in range(2)]
+        states = [model.state(), model.state()]
+        for solver, state in zip(solvers, states, strict=True):
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+            solver.step(state, state, None, None, 0.001)
+        with wp.ScopedCapture(device=model.device, force_module_load=False) as capture:
+            solvers[1].step(states[1], states[1], None, None, 0.001)
+        for _ in range(40):
+            solvers[0].step(states[0], states[0], None, None, 0.001)
+            wp.capture_launch(capture.graph)
+        eager, captured = states
+        self.assertGreater(float(np.abs(captured.body_qd.numpy()[box]).max()), 0.05)
+        np.testing.assert_allclose(captured.joint_qd.numpy(), eager.joint_qd.numpy(), atol=1.0e-4)
+        np.testing.assert_allclose(captured.body_qd.numpy(), eager.body_qd.numpy(), atol=1.0e-4)
+
+    def _check_graph_matches_eager(self, collider_basis, iterations):
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         SolverMJMPM.register_custom_attributes(builder)
         pose = wp.transform(wp.vec3(5.0, 0.0, 0.0), wp.quat_identity())
@@ -674,8 +1099,8 @@ class TestMJMPMCUDA(unittest.TestCase):
             "max_active_cell_count": 64,
             "collider_basis": collider_basis,
         }
-        eager = SolverMJMPM(model, mpm_options=options)
-        captured = SolverMJMPM(model, mpm_options=options)
+        eager = SolverMJMPM(model, mpm_options=options, coupling_iterations=iterations)
+        captured = SolverMJMPM(model, mpm_options=options, coupling_iterations=iterations)
         a, b = model.state(), model.state()
         for solver, state in ((eager, a), (captured, b)):
             velocity = state.particle_qd.numpy()
