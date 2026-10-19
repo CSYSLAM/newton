@@ -150,6 +150,44 @@ class TestMJMPMRigid(unittest.TestCase):
         np.testing.assert_array_equal(actual[0], model.body_q.numpy()[0])
         np.testing.assert_array_equal(actual[1], previous[1])
 
+    def test_world_parallel_contacts_match_sequential_reference(self):
+        """Reproduce the single-threaded contact sweeps when each world runs on its own thread."""
+        devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        for device in devices:
+            for hard in (True, False):
+                with self.subTest(device=device, hard=hard):
+                    local = newton.ModelBuilder()
+                    cfg = newton.ModelBuilder.ShapeConfig(density=500.0, ke=2.0e4, kd=50.0, mu=0.6)
+                    lower = local.add_body(
+                        xform=wp.transform(wp.vec3(0.0, 0.0, 0.11), wp.quat_from_axis_angle(wp.vec3(0, 0, 1), 0.3))
+                    )
+                    local.add_shape_box(lower, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+                    upper = local.add_body(xform=wp.transform(wp.vec3(0.03, 0.01, 0.32), wp.quat_identity()))
+                    local.add_shape_box(upper, hx=0.08, hy=0.08, hz=0.08, cfg=cfg)
+                    builder = newton.ModelBuilder()
+                    SolverMJMPM.register_custom_attributes(builder)
+                    for world in range(3):
+                        builder.add_world(local, xform=wp.transform(wp.vec3(world * 1.0, 0.0, 0.0), wp.quat_identity()))
+                    builder.add_ground_plane(cfg=cfg)
+                    model = builder.finalize(device=device)
+                    states = []
+                    for reference in (True, False):
+                        solver = SolverMJMPM(model, rigid_contact_hard=hard)
+                        env = solver.environment
+                        self.assertFalse(env._single_bucket)
+                        env._use_reference_rigid_solve = reference
+                        state = model.state()
+                        velocity = state.body_qd.numpy()
+                        velocity[:, 0] = np.linspace(-0.4, 0.4, model.body_count)
+                        velocity[:, 5] = np.linspace(1.0, -1.0, model.body_count)
+                        state.body_qd.assign(velocity)
+                        for _ in range(40):
+                            solver.step(state, state, None, None, 1.0 / 240.0)
+                        states.append((state.body_q.numpy(), state.body_qd.numpy(), env.rigid_impulses.numpy()))
+                    self.assertGreater(float(np.abs(states[0][2]).max()), 1.0e-3)
+                    for expected, actual in zip(states[0], states[1], strict=True):
+                        np.testing.assert_allclose(actual, expected, atol=1.0e-5)
+
 
 class TestMJMPMMaterial(unittest.TestCase):
     def test_free_material_crosses_grid_planes_without_air_drag(self):

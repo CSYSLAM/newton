@@ -75,10 +75,164 @@ class Environment(SolverBase, CouplingInterface):
         self.detector = CollisionPipeline(model, broad_phase="nxn", soft_contact_max=0)
         self.contacts = self.detector.contacts()
         self.contact_impulses = wp.zeros(self.contacts.rigid_contact_max, dtype=wp.vec3, device=model.device)
+        self._init_contact_buffers()
         self.rigid_impulses = wp.zeros(model.body_count, dtype=wp.spatial_vector, device=model.device)
         self.material_impulses = wp.zeros_like(self.rigid_impulses)
         self.work = model.state()
         self._all_worlds = wp.full(model.world_count + 1, True, dtype=wp.bool, device=model.device)
+
+    def _init_contact_buffers(self):
+        """Allocate the per-world contact solve workspace."""
+        model = self.model
+        device = model.device
+        capacity = self.contacts.rigid_contact_max
+        body_count = max(model.body_count, 1)
+        # Worlds share no dynamic bodies, so each world sweeps its contacts on
+        # its own thread. Global bodies may couple worlds (their mass can be
+        # changed later), so they force one sequential bucket, as does a
+        # single-world model.
+        global_bodies = bool(model.body_count and (model.body_world.numpy() < 0).any())
+        self._single_bucket = model.world_count <= 1 or global_bodies
+        self._bucket_count = 1 if self._single_bucket else model.world_count + 1
+        self._use_reference_rigid_solve = False
+        self._contact_center = wp.zeros(body_count, dtype=wp.vec3, device=device)
+        self._contact_mass_inv = wp.zeros(body_count, dtype=float, device=device)
+        self._contact_inertia_inv = wp.zeros(body_count, dtype=wp.mat33, device=device)
+        self._contact_bodies = wp.zeros(capacity, dtype=wp.vec2i, device=device)
+        self._contact_ra = wp.zeros(capacity, dtype=wp.vec3, device=device)
+        self._contact_rb = wp.zeros(capacity, dtype=wp.vec3, device=device)
+        self._contact_normal = wp.zeros(capacity, dtype=wp.vec3, device=device)
+        self._contact_params = wp.zeros(capacity, dtype=wp.vec4, device=device)
+        # Radix sorting needs twice the sorted length.
+        self._contact_keys = wp.zeros(2 * max(capacity, 1), dtype=int, device=device)
+        self._contact_ids = wp.zeros(2 * max(capacity, 1), dtype=int, device=device)
+        self._bucket_begin = wp.zeros(self._bucket_count, dtype=int, device=device)
+        self._bucket_end = wp.zeros(self._bucket_count, dtype=int, device=device)
+
+    def _solve_rigid_contacts(self, work, dt):
+        model = self.model
+        c = self.contacts
+        if self._use_reference_rigid_solve:
+            wp.launch(
+                kernels.solve_contacts,
+                dim=1,
+                inputs=[
+                    c.rigid_contact_count,
+                    c.rigid_contact_shape0,
+                    c.rigid_contact_shape1,
+                    c.rigid_contact_point0,
+                    c.rigid_contact_point1,
+                    c.rigid_contact_normal,
+                    c.rigid_contact_margin0,
+                    c.rigid_contact_margin1,
+                    model.shape_body,
+                    model.shape_material_mu,
+                    model.shape_material_ke,
+                    model.shape_material_kd,
+                    self.rigid_contact_hard,
+                    work.body_q,
+                    work.body_qd,
+                    model.body_com,
+                    model.body_inv_mass,
+                    model.body_inv_inertia,
+                    model.body_flags,
+                    self.contact_impulses,
+                    self.rigid_impulses,
+                    self.rigid_iterations,
+                    dt,
+                ],
+                device=model.device,
+            )
+            return
+        capacity = c.rigid_contact_max
+        if capacity == 0:
+            return
+        wp.launch(
+            kernels.prepare_contact_bodies,
+            dim=model.body_count,
+            inputs=[work.body_q, model.body_com, model.body_inv_mass, model.body_inv_inertia, model.body_flags],
+            outputs=[self._contact_center, self._contact_mass_inv, self._contact_inertia_inv],
+            device=model.device,
+        )
+        wp.launch(
+            kernels.prepare_contacts,
+            dim=capacity,
+            inputs=[
+                c.rigid_contact_count,
+                c.rigid_contact_shape0,
+                c.rigid_contact_shape1,
+                c.rigid_contact_point0,
+                c.rigid_contact_point1,
+                c.rigid_contact_normal,
+                c.rigid_contact_margin0,
+                c.rigid_contact_margin1,
+                model.shape_body,
+                model.shape_material_mu,
+                model.shape_material_ke,
+                model.shape_material_kd,
+                self.rigid_contact_hard,
+                work.body_q,
+                model.body_world,
+                model.body_flags,
+                self._contact_center,
+                self._contact_mass_inv,
+                self._contact_inertia_inv,
+                model.world_count,
+                self._single_bucket,
+                dt,
+            ],
+            outputs=[
+                self._contact_bodies,
+                self._contact_ra,
+                self._contact_rb,
+                self._contact_normal,
+                self._contact_params,
+                self._contact_keys,
+                self._contact_ids,
+                self.contact_impulses,
+            ],
+            device=model.device,
+        )
+        if self._single_bucket:
+            wp.launch(
+                kernels.single_bucket_range,
+                dim=1,
+                inputs=[c.rigid_contact_count, capacity],
+                outputs=[self._bucket_begin, self._bucket_end],
+                device=model.device,
+            )
+        else:
+            wp.utils.radix_sort_pairs(self._contact_keys, self._contact_ids, capacity)
+            self._bucket_begin.zero_()
+            self._bucket_end.zero_()
+            wp.launch(
+                kernels.contact_bucket_ranges,
+                dim=capacity,
+                inputs=[self._contact_keys, capacity, self._bucket_count],
+                outputs=[self._bucket_begin, self._bucket_end],
+                device=model.device,
+            )
+        wp.launch(
+            kernels.solve_contact_buckets,
+            dim=self._bucket_count,
+            inputs=[
+                self._bucket_begin,
+                self._bucket_end,
+                self._contact_ids,
+                self._contact_bodies,
+                self._contact_ra,
+                self._contact_rb,
+                self._contact_normal,
+                self._contact_params,
+                self._contact_mass_inv,
+                self._contact_inertia_inv,
+                work.body_qd,
+                self.contact_impulses,
+                self.rigid_impulses,
+                self.rigid_iterations,
+            ],
+            device=model.device,
+        )
 
     def notify_model_changed(self, flags):
         if self.material is not None:
@@ -126,37 +280,7 @@ class Environment(SolverBase, CouplingInterface):
                 device=model.device,
             )
             self.detector.collide(work, self.contacts)
-            c = self.contacts
-            wp.launch(
-                kernels.solve_contacts,
-                dim=1,
-                inputs=[
-                    c.rigid_contact_count,
-                    c.rigid_contact_shape0,
-                    c.rigid_contact_shape1,
-                    c.rigid_contact_point0,
-                    c.rigid_contact_point1,
-                    c.rigid_contact_normal,
-                    c.rigid_contact_margin0,
-                    c.rigid_contact_margin1,
-                    model.shape_body,
-                    model.shape_material_mu,
-                    model.shape_material_ke,
-                    model.shape_material_kd,
-                    self.rigid_contact_hard,
-                    work.body_q,
-                    work.body_qd,
-                    model.body_com,
-                    model.body_inv_mass,
-                    model.body_inv_inertia,
-                    model.body_flags,
-                    self.contact_impulses,
-                    self.rigid_impulses,
-                    self.rigid_iterations,
-                    dt,
-                ],
-                device=model.device,
-            )
+            self._solve_rigid_contacts(work, dt)
         if self.material is not None:
             self.material.step(work, work, control, None, dt)
             if model.body_count:
