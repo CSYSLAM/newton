@@ -333,6 +333,83 @@ class TestMJMPMMaterial(unittest.TestCase):
         np.testing.assert_allclose(momentum(), initial, atol=2.0e-4)
         self.assertGreater(float(state.body_qd.numpy()[body, 0]), 1.0e-4)
 
+    def test_collider_bound_culling_preserves_rasterization(self):
+        """Skip only colliders beyond their query distance, leaving sampled SDF data unchanged."""
+        from newton._src.solvers.mjmpm.mpm.rasterized_collisions import (  # noqa: PLC0415
+            _ALL_COLLIDER_WORLDS,
+            MJMPMCollider,
+            collision_sdf,
+        )
+
+        all_worlds = _ALL_COLLIDER_WORLDS
+
+        @wp.kernel
+        def sample(
+            points: wp.array[wp.vec3],
+            collider: MJMPMCollider,
+            body_q: wp.array[wp.transform],
+            body_qd: wp.array[wp.spatial_vector],
+            body_q_prev: wp.array[wp.transform],
+            sdf: wp.array[float],
+            grad: wp.array[wp.vec3],
+            vel: wp.array[wp.vec3],
+            ids: wp.array[int],
+        ):
+            i = wp.tid()
+            d, g, v, collider_id, _material = collision_sdf(
+                points[i], all_worlds, collider, body_q, body_qd, body_q_prev, 0.01
+            )
+            sdf[i] = d
+            grad[i] = g
+            vel[i] = v
+            ids[i] = collider_id
+
+        builder = newton.ModelBuilder()
+        SolverMJMPM.register_custom_attributes(builder)
+        rng = np.random.default_rng(3)
+        for k in range(6):
+            axis = rng.normal(size=3)
+            body = builder.add_body(
+                xform=wp.transform(
+                    wp.vec3(*rng.uniform(-0.4, 0.4, size=3)),
+                    wp.quat_from_axis_angle(wp.vec3(*(axis / np.linalg.norm(axis))), float(rng.uniform(0, 3))),
+                )
+            )
+            builder.add_shape_box(body, hx=0.05 + 0.02 * k, hy=0.04, hz=0.03)
+            builder.add_shape_sphere(body, xform=wp.transform(wp.vec3(0.06, 0.0, 0.0), wp.quat_identity()), radius=0.03)
+        builder.add_ground_plane()
+        _particles(builder)
+        model = builder.finalize(device="cpu")
+        solver = SolverMJMPM(model, mpm_options={**_options(), "voxel_size": 0.05})
+        mpm_model = solver.environment.material._mpm_model
+        collider = mpm_model.collider
+        state = model.state()
+        state.body_qd.assign(rng.normal(size=(model.body_count, 6)).astype(np.float32))
+        points = wp.array(rng.uniform(-0.7, 0.7, size=(20000, 3)).astype(np.float32), dtype=wp.vec3)
+
+        def evaluate():
+            out = (
+                wp.zeros(points.shape[0], dtype=float),
+                wp.zeros(points.shape[0], dtype=wp.vec3),
+                wp.zeros(points.shape[0], dtype=wp.vec3),
+                wp.zeros(points.shape[0], dtype=int),
+            )
+            wp.launch(
+                sample, dim=points.shape[0], inputs=[points, collider, state.body_q, state.body_qd, None], outputs=out
+            )
+            return [array.numpy() for array in out]
+
+        culled = evaluate()
+        lower, upper = collider.collider_aabb_lower, collider.collider_aabb_upper
+        unbounded = np.finfo(np.float32).max
+        self.assertTrue(np.isfinite(lower.numpy()).all() and (np.abs(lower.numpy()) < unbounded).all())
+        collider.collider_aabb_lower = wp.full(lower.shape[0], wp.vec3(-unbounded), dtype=wp.vec3)
+        collider.collider_aabb_upper = wp.full(upper.shape[0], wp.vec3(unbounded), dtype=wp.vec3)
+        exhaustive = evaluate()
+        self.assertGreater(int(np.count_nonzero(exhaustive[3] >= 0)), 1000)
+        for actual, expected in zip(culled, exhaustive, strict=True):
+            np.testing.assert_array_equal(actual, expected)
+
 
 class TestMJMPMArticulation(unittest.TestCase):
     def test_material_contact_starts_at_particle_surface(self):

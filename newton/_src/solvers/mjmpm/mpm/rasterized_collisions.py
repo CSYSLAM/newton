@@ -92,6 +92,12 @@ class MJMPMCollider:
     query_max_dist: float
     """Maximum distance to query collider sdf"""
 
+    collider_aabb_lower: wp.array[wp.vec3]
+    """Lower corner of each collider mesh's local bounding box [m]. Unbounded for mutable meshes."""
+
+    collider_aabb_upper: wp.array[wp.vec3]
+    """Upper corner of each collider mesh's local bounding box [m]. Unbounded for mutable meshes."""
+
 
 @wp.func
 def _sq_dist_point_seg_at_origin(q: wp.vec3, seg: wp.vec3, seg_len_sq: float):
@@ -170,6 +176,29 @@ def get_average_face_normal(
             face_normal += wp.mesh_eval_face_normal(mesh_id, face_index)
 
     return wp.normalize(face_normal)
+
+
+@wp.func
+def _collider_within_query_distance(
+    x: wp.vec3,
+    collider: MJMPMCollider,
+    body_q: wp.array[wp.transform],
+    stable_collider_id: int,
+):
+    """Return False only when the collider mesh lies beyond its query distance from ``x``.
+
+    The mesh query cannot report a closest point farther than this distance,
+    so skipping such colliders leaves the rasterized result unchanged.
+    """
+    body_id = collider.collider_body_index[stable_collider_id]
+    x_local = x
+    if body_id >= 0:
+        x_local = wp.transform_point(wp.transform_inverse(body_q[body_id]), x)
+    lower = collider.collider_aabb_lower[stable_collider_id]
+    upper = collider.collider_aabb_upper[stable_collider_id]
+    outside = wp.max(wp.max(lower - x_local, x_local - upper), wp.vec3(0.0))
+    max_dist = collider.query_max_dist + collider.collider_max_thickness[stable_collider_id]
+    return wp.length_sq(outside) <= max_dist * max_dist
 
 
 @wp.func
@@ -263,6 +292,8 @@ def collision_sdf(
         if not shared_worlds:
             stable_collider_id = collider.world_collider_ids[query_begin + query_offset]
 
+        if not _collider_within_query_distance(x, collider, body_q, stable_collider_id):
+            continue
         query_result, sdf, query_grad, query_vel, query_closest_point, query_material_id = _query_collider_sdf(
             x, collider, body_q, stable_collider_id
         )

@@ -884,6 +884,26 @@ class ImplicitMPMModel:
             self.collider.world_collider_ids = wp.array(world_collider_ids, dtype=int)
             self.collider.world_collider_offsets = wp.array(world_collider_offsets, dtype=int)
 
+            # Shape-built meshes are fixed in their body frame, so their bounds
+            # can cull distant colliders. User and deformable meshes may move.
+            unbounded = np.float32(np.finfo(np.float32).max)
+            aabb_lower = np.full((collider_count, 3), -unbounded, dtype=np.float32)
+            aabb_upper = np.full((collider_count, 3), unbounded, dtype=np.float32)
+            for collider_id in range(collider_count):
+                if collider_body_ids[collider_id] is None or collider_particle_ids[collider_id] is not None:
+                    continue
+                points = collider_meshes[collider_id].points.numpy()
+                if points.shape[0] == 0:
+                    continue
+                lower = points.min(axis=0)
+                upper = points.max(axis=0)
+                # Pad for float32 rounding of transformed query points.
+                pad = 1.0e-5 * (1.0 + float(np.abs(np.concatenate((lower, upper))).max()))
+                aabb_lower[collider_id] = lower - pad
+                aabb_upper[collider_id] = upper + pad
+            self.collider.collider_aabb_lower = wp.array(aabb_lower, dtype=wp.vec3)
+            self.collider.collider_aabb_upper = wp.array(aabb_upper, dtype=wp.vec3)
+
             all_face_material_ids = np.concatenate(face_material_ids) if face_material_ids else np.empty(0, dtype=int)
             self.collider.face_material_index = wp.array(all_face_material_ids, dtype=int)
 
