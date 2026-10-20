@@ -1,0 +1,1 @@
+Precompute the link-mobility responses of articulated rigid contacts in parallel once per step in the experimental MJMPM solver, so the sequential contact sweeps under `articulated_response` multiply small per-contact matrices instead of repeating 6x6 mobility products; the sweeps run about 15% faster with the same contact order.

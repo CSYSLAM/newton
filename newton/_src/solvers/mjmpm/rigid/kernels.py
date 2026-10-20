@@ -491,6 +491,141 @@ def side_inverse_mass(
     return impulse_mass(mass_inv, inertia_inv, radius, direction)
 
 
+MAX_RESPONSE_LINKS = 8
+"""Contacted links per world whose contact responses are precomputed for the sweeps."""
+
+mat63 = wp.types.matrix(shape=(6, 3), dtype=wp.float32)
+
+
+@wp.kernel
+def prepare_link_contact_responses(
+    count: wp.array[int],
+    bodies: wp.array[wp.vec2i],
+    ra_list: wp.array[wp.vec3],
+    rb_list: wp.array[wp.vec3],
+    mass_inv: wp.array[float],
+    link_slot: wp.array[int],
+    link_count: int,
+    mobility: wp.array3d[float],
+    contacted_links: wp.array2d[int],
+    contacted_count: wp.array[int],
+    point_mobility: wp.array[wp.mat33],
+    link_responses: wp.array2d[mat63],
+):
+    """Evaluate each link contact's mobility products once per step, in parallel.
+
+    For the contact's link side, ``link_responses[c, k]`` maps a contact
+    impulse to the twist change of the ``k``-th contacted link of the world,
+    and ``point_mobility[c]`` maps it to the velocity change of the contact
+    point. The sequential sweeps then avoid repeating the 6x6 mobility
+    products for every contact update.
+    """
+    c, k = wp.tid()
+    if c >= wp.min(count[0], bodies.shape[0]):
+        return
+    pair = bodies[c]
+    body = int(-1)
+    radius = wp.vec3(0.0)
+    if pair[0] >= 0 and link_slot[pair[0]] >= 0:
+        body = pair[0]
+        radius = ra_list[c]
+    elif pair[1] >= 0 and link_slot[pair[1]] >= 0:
+        body = pair[1]
+        radius = rb_list[c]
+    if body < 0 or mass_inv[body] <= 0.0:
+        return
+    slot = link_slot[body]
+    world = slot // link_count
+    link = slot % link_count
+    if k >= contacted_count[world] or contacted_count[world] > MAX_RESPONSE_LINKS:
+        return
+    other = contacted_links[world, k]
+    response = mat63()
+    point = wp.mat33()
+    for j in range(3):
+        unit = wp.vec3(0.0)
+        unit[j] = 1.0
+        twist = mobility_response(mobility, world, other, link, wp.spatial_vector(unit, wp.cross(radius, unit)))
+        for row in range(6):
+            response[row, j] = twist[row]
+        velocity = point_velocity(twist, radius)
+        for row in range(3):
+            point[row, j] = velocity[row]
+    link_responses[c, k] = response
+    if other == link:
+        point_mobility[c] = point
+
+
+@wp.func
+def _uses_link_responses(
+    slot: int, link_count: int, contacted_count: wp.array[int], point_mobility: wp.array[wp.mat33]
+):
+    return slot >= 0 and point_mobility and contacted_count[slot // link_count] <= MAX_RESPONSE_LINKS
+
+
+@wp.func
+def _side_point_response(
+    c: int,
+    body: int,
+    slot: int,
+    link_count: int,
+    mass_inv: float,
+    inertia_inv: wp.mat33,
+    mobility: wp.array3d[float],
+    contacted_count: wp.array[int],
+    point_mobility: wp.array[wp.mat33],
+    radius: wp.vec3,
+    impulse: wp.vec3,
+):
+    if _uses_link_responses(slot, link_count, contacted_count, point_mobility):
+        return point_mobility[c] * impulse
+    return side_point_response(body, slot, link_count, mass_inv, inertia_inv, mobility, radius, impulse)
+
+
+@wp.func
+def _side_inverse_mass(
+    c: int,
+    slot: int,
+    link_count: int,
+    mass_inv: float,
+    inertia_inv: wp.mat33,
+    mobility: wp.array3d[float],
+    contacted_count: wp.array[int],
+    point_mobility: wp.array[wp.mat33],
+    radius: wp.vec3,
+    direction: wp.vec3,
+):
+    if _uses_link_responses(slot, link_count, contacted_count, point_mobility):
+        return wp.dot(direction, point_mobility[c] * direction)
+    return side_inverse_mass(slot, link_count, mass_inv, inertia_inv, mobility, radius, direction)
+
+
+@wp.func
+def _apply_link_impulse(
+    c: int,
+    slot: int,
+    link_count: int,
+    impulse: wp.vec3,
+    wrench: wp.spatial_vector,
+    link_body: wp.array2d[int],
+    mobility: wp.array3d[float],
+    contacted_links: wp.array2d[int],
+    contacted_count: wp.array[int],
+    point_mobility: wp.array[wp.mat33],
+    link_responses: wp.array2d[mat63],
+    qd: wp.array[wp.spatial_vector],
+):
+    """Move the contacted links of the impulse's world, from precomputed responses when available."""
+    if not _uses_link_responses(slot, link_count, contacted_count, point_mobility):
+        _apply_link_wrench(slot, link_count, wrench, link_body, mobility, contacted_links, contacted_count, qd)
+        return
+    world = slot // link_count
+    for k in range(contacted_count[world]):
+        body = link_body[world, contacted_links[world, k]]
+        change = link_responses[c, k] * impulse
+        qd[body] = qd[body] + wp.spatial_vector(change[0], change[1], change[2], change[3], change[4], change[5])
+
+
 @wp.func
 def _apply_contact_impulse(
     a: int,
@@ -511,19 +646,48 @@ def _apply_contact_impulse(
     contacted_count: wp.array[int],
     qd: wp.array[wp.spatial_vector],
     body_impulse: wp.array[wp.spatial_vector],
+    c: int,
+    point_mobility: wp.array[wp.mat33],
+    link_responses: wp.array2d[mat63],
 ):
     """Apply a contact impulse change ``delta`` (on body ``b``, opposite on ``a``)."""
     if a >= 0 and ma > 0.0:
         wrench_a = wp.spatial_vector(-delta, -wp.cross(ra, delta))
         if slot_a >= 0:
-            _apply_link_wrench(slot_a, link_count, wrench_a, link_body, mobility, contacted_links, contacted_count, qd)
+            _apply_link_impulse(
+                c,
+                slot_a,
+                link_count,
+                -delta,
+                wrench_a,
+                link_body,
+                mobility,
+                contacted_links,
+                contacted_count,
+                point_mobility,
+                link_responses,
+                qd,
+            )
         else:
             qd[a] = qd[a] - wp.spatial_vector(ma * delta, ia * wp.cross(ra, delta))
         body_impulse[a] = body_impulse[a] + wrench_a
     if b >= 0 and mb > 0.0:
         wrench_b = wp.spatial_vector(delta, wp.cross(rb, delta))
         if slot_b >= 0:
-            _apply_link_wrench(slot_b, link_count, wrench_b, link_body, mobility, contacted_links, contacted_count, qd)
+            _apply_link_impulse(
+                c,
+                slot_b,
+                link_count,
+                delta,
+                wrench_b,
+                link_body,
+                mobility,
+                contacted_links,
+                contacted_count,
+                point_mobility,
+                link_responses,
+                qd,
+            )
         else:
             qd[b] = qd[b] + wp.spatial_vector(mb * delta, ib * wp.cross(rb, delta))
         body_impulse[b] = body_impulse[b] + wrench_b
@@ -546,6 +710,8 @@ def solve_contact_buckets(
     mobility: wp.array3d[float],
     contacted_links: wp.array2d[int],
     contacted_count: wp.array[int],
+    point_mobility: wp.array[wp.mat33],
+    link_responses: wp.array2d[mat63],
     qd: wp.array[wp.spatial_vector],
     impulses: wp.array[wp.vec3],
     body_impulse: wp.array[wp.spatial_vector],
@@ -558,6 +724,8 @@ def solve_contact_buckets(
     Articulated links respond through the link mobility: an impulse on one
     link changes the velocities of every contacted link of its world.
     Nonzero initial ``impulses`` (warm starts) are applied before the sweeps.
+    With ``point_mobility``, link sides use the responses evaluated by
+    :func:`prepare_link_contact_responses` instead of mobility products.
     """
     bucket = wp.tid()
     first = begin[bucket]
@@ -608,6 +776,9 @@ def solve_contact_buckets(
             contacted_count,
             qd,
             body_impulse,
+            c,
+            point_mobility,
+            link_responses,
         )
     for _sweep in range(iterations):
         for k in range(first, last):
@@ -663,17 +834,23 @@ def solve_contact_buckets(
             else:
                 relative = (
                     relative
-                    + side_point_response(b, slot_b, link_count, mb, ib, mobility, rb, delta_n)
-                    + side_point_response(a, slot_a, link_count, ma, ia, mobility, ra, delta_n)
+                    + _side_point_response(
+                        c, b, slot_b, link_count, mb, ib, mobility, contacted_count, point_mobility, rb, delta_n
+                    )
+                    + _side_point_response(
+                        c, a, slot_a, link_count, ma, ia, mobility, contacted_count, point_mobility, ra, delta_n
+                    )
                 )
             tangent_velocity = relative - n * wp.dot(relative, n)
             tangent = old - normal_old * n
             speed = wp.length(tangent_velocity)
             if speed > 1.0e-9:
                 direction = tangent_velocity / speed
-                tangent_mass = side_inverse_mass(
-                    slot_a, link_count, ma, ia, mobility, ra, direction
-                ) + side_inverse_mass(slot_b, link_count, mb, ib, mobility, rb, direction)
+                tangent_mass = _side_inverse_mass(
+                    c, slot_a, link_count, ma, ia, mobility, contacted_count, point_mobility, ra, direction
+                ) + _side_inverse_mass(
+                    c, slot_b, link_count, mb, ib, mobility, contacted_count, point_mobility, rb, direction
+                )
                 tangent = tangent - tangent_velocity / wp.max(tangent_mass, 1.0e-12)
             limit = p[3] * normal_new
             if wp.length(tangent) > limit:
@@ -700,6 +877,9 @@ def solve_contact_buckets(
                 contacted_count,
                 qd,
                 body_impulse,
+                c,
+                point_mobility,
+                link_responses,
             )
 
 

@@ -299,6 +299,25 @@ class Environment(SolverBase, CouplingInterface):
                 outputs=[self._contacted_links, self._contacted_count],
                 device=model.device,
             )
+            if self.rigid_solver == "gauss_seidel":
+                wp.launch(
+                    kernels.prepare_link_contact_responses,
+                    dim=(capacity, kernels.MAX_RESPONSE_LINKS),
+                    inputs=[
+                        c.rigid_contact_count,
+                        self._contact_bodies,
+                        self._contact_ra,
+                        self._contact_rb,
+                        self._contact_mass_inv,
+                        self._link_slot,
+                        self._link_count,
+                        self._mobility,
+                        self._contacted_links,
+                        self._contacted_count,
+                    ],
+                    outputs=[self._point_mobility, self._link_responses],
+                    device=model.device,
+                )
         if self.rigid_solver == "jacobi":
             self._solve_contacts_jacobi(work, capacity)
         else:
@@ -354,6 +373,8 @@ class Environment(SolverBase, CouplingInterface):
                 self._mobility,
                 self._contacted_links,
                 self._contacted_count,
+                self._point_mobility if self._mobility is not None else None,
+                self._link_responses if self._mobility is not None else None,
                 work.body_qd,
                 self.contact_impulses,
                 self.rigid_impulses,
@@ -464,6 +485,9 @@ class Environment(SolverBase, CouplingInterface):
         self._contacted_count = wp.zeros(link_body.shape[0], dtype=int, device=device)
         self._qd_before_contacts = wp.zeros(model.body_count, dtype=wp.spatial_vector, device=device)
         self._world_link_contacts = wp.zeros(link_body.shape[0], dtype=int, device=device)
+        capacity = self.contacts.rigid_contact_max
+        self._point_mobility = wp.zeros(capacity, dtype=wp.mat33, device=device)
+        self._link_responses = wp.zeros((capacity, kernels.MAX_RESPONSE_LINKS), dtype=kernels.mat63, device=device)
         if self.material is not None:
             self.material.enable_articulated_response(self._mobility, self._link_body, self._link_slot)
 
