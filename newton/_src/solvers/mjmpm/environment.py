@@ -99,6 +99,13 @@ class Environment(SolverBase, CouplingInterface):
         self.material_impulses = wp.zeros_like(self.rigid_impulses)
         self.work = model.state()
         self._all_worlds = wp.full(model.world_count + 1, True, dtype=wp.bool, device=model.device)
+        # The material terms that read only particles overlap the latency-bound
+        # rigid contact solve on a second stream.
+        self._material_stream = None
+        if self.material is not None and model.body_count and model.device.is_cuda:
+            self._material_stream = wp.Stream(model.device)
+            self._material_fork = wp.Event(model.device)
+            self._material_join = wp.Event(model.device)
 
     def _exclude_proxy_pairs(self):
         """Skip shape pairs whose contacts the rigid solve always discards.
@@ -440,6 +447,14 @@ class Environment(SolverBase, CouplingInterface):
         self.rigid_impulses.zero_()
         self.material_impulses.zero_()
         self.contact_impulses.zero_()
+        if self._material_stream is not None:
+            # Bodies change below; the prepared material terms read only particles.
+            stream = wp.get_stream(model.device)
+            stream.record_event(self._material_fork)
+            self._material_stream.wait_event(self._material_fork)
+            with wp.ScopedStream(self._material_stream, sync_enter=False):
+                self.material.prepare_step(work, dt)
+            self._material_stream.record_event(self._material_join)
         if model.body_count:
             wp.launch(
                 kernels.kick,
@@ -464,6 +479,8 @@ class Environment(SolverBase, CouplingInterface):
             self._reuse_contacts = False
             self._solve_rigid_contacts(work, dt)
         if self.material is not None:
+            if self._material_stream is not None:
+                stream.wait_event(self._material_join)
             self.material.step(work, work, control, None, dt)
             if model.body_count:
                 impulses, points, ids = self.material.collect_collider_impulses(work)

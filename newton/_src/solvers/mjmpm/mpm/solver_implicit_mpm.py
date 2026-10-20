@@ -1471,6 +1471,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         self.temporary_store = temporary_store
         self.verbose = verbose if verbose is not None else wp.config.log_level <= wp.LOG_DEBUG
         self.enable_timers = enable_timers
+        self._prepared_step = None
 
         self.velocity_basis = "Q1"
         self.strain_basis = config.strain_basis
@@ -1871,6 +1872,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         """
         self._validate_reset_inputs(state)
         world_mask = self._normalize_reset_world_mask(world_mask)
+        self._prepared_step = None
 
         reset_partitions = self._validate_reset_warmstart_fields(world_mask)
         state_flags = int(StateFlags.ALL if flags is None else flags)
@@ -1958,10 +1960,32 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         model = self.model
 
         with wp.ScopedDevice(model.device):
-            pic = self._particles_to_cells(state_in.particle_q)
-            scratch = self._rebuild_scratchpad(pic)
+            prepared = self._prepared_step
+            self._prepared_step = None
+            if prepared is None or prepared[0] is not state_in or prepared[1] != dt:
+                prepared = (state_in, dt, *self._prepare_step(state_in, dt))
+            pic, scratch = prepared[2:]
             self._step_impl(state_in, state_out, dt, pic, scratch)
             scratch.release_temporaries()
+
+    def prepare_step(self, state_in: newton.State, dt: float) -> None:
+        """Run the stages of the next :meth:`step` that read only particle data.
+
+        Bins the particles, rebuilds the grid function spaces, and assembles
+        the unconstrained grid velocity and the elastic system from
+        ``state_in``. They do not read body states or colliders, so a coupled
+        caller can issue them on another stream while it updates bodies. The
+        next :meth:`step` with the same ``state_in`` and ``dt`` then skips
+        them; particle data in ``state_in`` must not change in between.
+        """
+        with wp.ScopedDevice(self.model.device):
+            self._prepared_step = (state_in, dt, *self._prepare_step(state_in, dt))
+
+    def _prepare_step(self, state_in: newton.State, dt: float):
+        pic = self._particles_to_cells(state_in.particle_q)
+        scratch = self._rebuild_scratchpad(pic)
+        self._assemble_particle_terms(state_in, dt, pic, scratch)
+        return pic, scratch
 
     @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
@@ -3042,25 +3066,15 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         cell_volume = self._mpm_model.voxel_size**3
         inv_cell_volume = 1.0 / cell_volume
 
-        mpm_model = self._mpm_model
         last_step_data = self._last_step_data
 
-        self._require_collision_space_fields(scratch, last_step_data)
-        self._require_velocity_space_fields(scratch, mpm_model.has_compliant_particles)
+        # The particle-only terms were assembled by _prepare_step.
 
         # Rasterize colliders to discrete space
         self._rasterize_colliders(state_in, dt, last_step_data, scratch, inv_cell_volume, pic)
 
-        # Velocity right-hand side and inverse mass matrix
-        self._compute_unconstrained_velocity(state_in, dt, pic, scratch, inv_cell_volume)
-
         # Build collider rigidity matrix
         rigidity_operator = self._build_collider_rigidity_operator(state_in, scratch, cell_volume)
-
-        self._require_strain_space_fields(scratch, last_step_data)
-
-        # Build elasticity compliance matrix and right-hand-side
-        self._build_elasticity_system(state_in, dt, pic, scratch, inv_cell_volume)
 
         # Build strain matrix and offset, setup yield surface parameters
         self._build_plasticity_system(state_in, dt, pic, scratch, inv_cell_volume)
@@ -3079,6 +3093,28 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
         # Save data for next step or further processing
         self._save_data(state_in, scratch, last_step_data, state_out)
+
+    def _assemble_particle_terms(
+        self,
+        state_in: newton.State,
+        dt: float,
+        pic: fem.PicQuadrature,
+        scratch: ImplicitMPMScratchpad,
+    ):
+        """Assemble the step terms that read particle data only: grid velocity, inverse mass, elasticity."""
+        inv_cell_volume = 1.0 / self._mpm_model.voxel_size**3
+        last_step_data = self._last_step_data
+
+        self._require_collision_space_fields(scratch, last_step_data)
+        self._require_velocity_space_fields(scratch, self._mpm_model.has_compliant_particles)
+
+        # Velocity right-hand side and inverse mass matrix
+        self._compute_unconstrained_velocity(state_in, dt, pic, scratch, inv_cell_volume)
+
+        self._require_strain_space_fields(scratch, last_step_data)
+
+        # Build elasticity compliance matrix and right-hand-side
+        self._build_elasticity_system(state_in, dt, pic, scratch, inv_cell_volume)
 
     def _compute_unconstrained_velocity(
         self,
@@ -3205,6 +3241,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 node_environment_offsets=scratch.collider_environment_offsets,
                 evaluation_to_particle=pic.cell_particle_indices if particle_centered else None,
                 particle_radius=self._mpm_model.particle_radius if particle_centered else None,
+                max_query_count=self._mpm_model.max_collider_query_count,
             )
 
             # normal interpolation

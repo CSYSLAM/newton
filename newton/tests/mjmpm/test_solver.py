@@ -364,6 +364,46 @@ class TestMJMPMMaterial(unittest.TestCase):
         np.testing.assert_allclose(momentum(), initial, atol=2.0e-4)
         self.assertGreater(float(state.body_qd.numpy()[body, 0]), 1.0e-4)
 
+    def test_parallel_collider_query_matches_sequential(self):
+        """Query node-collider pairs in parallel without changing any rasterized or stepped value."""
+
+        def run(parallel):
+            builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+            SolverMJMPM.register_custom_attributes(builder)
+            # Four spinning boxes close in on the particle block from its sides,
+            # so several moving colliders compete for the same samples.
+            sides = ((1, 0), (-1, 0), (0, 1), (0, -1))
+            for x, y in sides:
+                body = builder.add_body(
+                    xform=wp.transform(
+                        wp.vec3(0.05 + 0.09 * x, 0.05 + 0.09 * y, 0.05),
+                        wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 0.3 * (x + 2 * y)),
+                    )
+                )
+                builder.add_shape_box(body, hx=0.04, hy=0.04, hz=0.06)
+            builder.add_ground_plane()
+            _particles(builder)
+            model = builder.finalize(device="cpu")
+            solver = SolverMJMPM(model, mpm_options={**_options(), "voxel_size": 0.05})
+            mpm_model = solver.environment.material._mpm_model
+            self.assertGreater(mpm_model.max_collider_query_count, 1)
+            if not parallel:
+                mpm_model.max_collider_query_count = 0
+            state = model.state()
+            velocity = np.zeros((model.body_count, 6), dtype=np.float32)
+            for body, (x, y) in enumerate(sides):
+                velocity[body] = (-0.5 * x, -0.5 * y, 0.0, 0.0, 0.0, 3.0)
+            state.body_qd.assign(velocity)
+            for _ in range(12):
+                solver.step(state, state, None, None, 0.005)
+            return state
+
+        sequential, parallel = run(False), run(True)
+        for name in ("particle_q", "particle_qd", "body_q", "body_qd"):
+            np.testing.assert_array_equal(getattr(parallel, name).numpy(), getattr(sequential, name).numpy())
+        # The boxes reached the material and pushed it.
+        self.assertGreater(float(np.abs(sequential.particle_qd.numpy()).max()), 0.05)
+
     def test_collider_bound_culling_preserves_rasterization(self):
         """Skip only colliders beyond their query distance, leaving sampled SDF data unchanged."""
         from newton._src.solvers.mjmpm.mpm.rasterized_collisions import (  # noqa: PLC0415

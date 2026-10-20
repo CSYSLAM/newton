@@ -310,6 +310,9 @@ class ImplicitMPMModel:
         self.collider = MJMPMCollider()
         """Collider struct"""
 
+        self.max_collider_query_count = 0
+        """Most colliders one rasterization sample queries; sizes the parallel query."""
+
         self.material_parameters = MJMPMMaterialParameters()
         """Material parameters struct"""
 
@@ -883,6 +886,9 @@ class ImplicitMPMModel:
             self.collider.collider_face_offset = wp.array(collider_face_offsets, dtype=int)
             self.collider.world_collider_ids = wp.array(world_collider_ids, dtype=int)
             self.collider.world_collider_offsets = wp.array(world_collider_offsets, dtype=int)
+            # Colliders a single sample may query: all of them for world-agnostic
+            # samples, otherwise those of its world.
+            self.max_collider_query_count = max(collider_count, *np.diff(world_collider_offsets).tolist(), 0)
 
             # Shape-built meshes are fixed in their body frame, so their bounds
             # can cull distant colliders. User and deformable meshes may move.

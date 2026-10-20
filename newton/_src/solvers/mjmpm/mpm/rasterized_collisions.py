@@ -40,6 +40,10 @@ _ALL_COLLIDER_WORLDS = -2
 """Environment sentinel that queries every collider in stable order."""
 
 
+_PARALLEL_QUERY_MAX_PAIRS = 1 << 20
+"""Largest node-collider pair count queried in parallel (44 bytes of query results per pair)."""
+
+
 @wp.struct
 class MJMPMCollider:
     """Packed collider parameters and geometry queried during rasterization."""
@@ -279,19 +283,9 @@ def collision_sdf(
     collider_id = int(_NULL_COLLIDER_ID)
     material_id = int(0)  # default material, always valid
 
-    shared_worlds = environment_index == _ALL_COLLIDER_WORLDS
-    query_begin = int(0)
-    query_count = collider.collider_mesh.shape[0]
-
-    if not shared_worlds:
-        query_begin = collider.world_collider_offsets[environment_index]
-        query_count = collider.world_collider_offsets[environment_index + 1] - query_begin
-
+    query_begin, query_count = _collider_query_range(environment_index, collider)
     for query_offset in range(query_count):
-        stable_collider_id = query_offset
-        if not shared_worlds:
-            stable_collider_id = collider.world_collider_ids[query_begin + query_offset]
-
+        stable_collider_id = _queried_collider_id(environment_index, query_begin, query_offset, collider)
         if not _collider_within_query_distance(x, collider, body_q, stable_collider_id):
             continue
         query_result, sdf, query_grad, query_vel, query_closest_point, query_material_id = _query_collider_sdf(
@@ -305,6 +299,45 @@ def collision_sdf(
             collider_id = stable_collider_id
             material_id = query_material_id
 
+    return _finish_collision_sdf(
+        min_sdf, sdf_grad, sdf_vel, closest_point, collider_id, material_id, collider, body_q, body_qd, body_q_prev, dt
+    )
+
+
+@wp.func
+def _collider_query_range(environment_index: int, collider: MJMPMCollider):
+    """First entry and count of the colliders a sample in ``environment_index`` queries."""
+    query_begin = int(0)
+    query_count = collider.collider_mesh.shape[0]
+    if environment_index != _ALL_COLLIDER_WORLDS:
+        query_begin = collider.world_collider_offsets[environment_index]
+        query_count = collider.world_collider_offsets[environment_index + 1] - query_begin
+    return query_begin, query_count
+
+
+@wp.func
+def _queried_collider_id(environment_index: int, query_begin: int, query_offset: int, collider: MJMPMCollider):
+    """Stable id of the ``query_offset``-th collider queried in ``environment_index``."""
+    if environment_index == _ALL_COLLIDER_WORLDS:
+        return query_offset
+    return collider.world_collider_ids[query_begin + query_offset]
+
+
+@wp.func
+def _finish_collision_sdf(
+    min_sdf: float,
+    sdf_grad: wp.vec3,
+    sdf_vel: wp.vec3,
+    closest_point: wp.vec3,
+    collider_id: int,
+    material_id: int,
+    collider: MJMPMCollider,
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_q_prev: wp.array[wp.transform],
+    dt: float,
+):
+    """Express the closest collider's gradient and velocity in the world frame."""
     # If closest collider has rigid motion, transform back to world frame
     # Do that as a second step to avoid requiring more registers inside bvh query loop
     if collider_id >= 0:
@@ -509,30 +542,92 @@ def rasterize_collider_kernel(
     i = wp.tid()
     x = node_positions[i]
 
-    if x[0] == fem.OUTSIDE:
-        bc_active = False
-        sdf = _INFINITY
-    else:
+    if x[0] != fem.OUTSIDE:
         environment_index = int(_ALL_COLLIDER_WORLDS)
         if node_environment_offsets:
             environment_index = environment_from_offsets(i, node_environment_offsets)
         sdf, sdf_gradient, sdf_vel, collider_id, material_id = collision_sdf(
             x, environment_index, collider, body_q, body_qd, body_q_prev, dt
         )
-        contact_radius = float(0.0)
-        if particle_radius:
-            particle = evaluation_to_particle[node_indices[i]]
-            contact_radius = particle_radius[particle]
-        bc_active = sdf < contact_radius + activation_distance * voxel_size
+        _store_collider_sample(
+            i,
+            sdf,
+            sdf_gradient,
+            sdf_vel,
+            collider_id,
+            material_id,
+            collider,
+            voxel_size,
+            activation_distance,
+            dt,
+            node_indices,
+            evaluation_to_particle,
+            particle_radius,
+            node_volumes,
+            collider_sdf,
+            collider_velocity,
+            collider_normals,
+            collider_friction,
+            collider_adhesion,
+            collider_ids,
+        )
+        return
 
+    collider_sdf[i] = _INFINITY
+    _store_inactive_collider_sample(
+        i, collider_velocity, collider_normals, collider_friction, collider_adhesion, collider_ids
+    )
+
+
+@wp.func
+def _store_inactive_collider_sample(
+    i: int,
+    collider_velocity: wp.array[wp.vec3],
+    collider_normals: wp.array[wp.vec3],
+    collider_friction: wp.array[float],
+    collider_adhesion: wp.array[float],
+    collider_ids: wp.array[int],
+):
+    collider_velocity[i] = wp.vec3(0.0)
+    collider_normals[i] = wp.vec3(0.0)
+    collider_friction[i] = -1.0
+    collider_adhesion[i] = 0.0
+    collider_ids[i] = _NULL_COLLIDER_ID
+
+
+@wp.func
+def _store_collider_sample(
+    i: int,
+    sdf: float,
+    sdf_gradient: wp.vec3,
+    sdf_vel: wp.vec3,
+    collider_id: int,
+    material_id: int,
+    collider: MJMPMCollider,
+    voxel_size: float,
+    activation_distance: float,
+    dt: float,
+    node_indices: wp.array[int],
+    evaluation_to_particle: wp.array[int],
+    particle_radius: wp.array[float],
+    node_volumes: wp.array[float],
+    collider_sdf: wp.array[float],
+    collider_velocity: wp.array[wp.vec3],
+    collider_normals: wp.array[wp.vec3],
+    collider_friction: wp.array[float],
+    collider_adhesion: wp.array[float],
+    collider_ids: wp.array[int],
+):
+    """Write one sample's collider data, or mark it inactive beyond the activation distance."""
+    contact_radius = float(0.0)
+    if particle_radius:
+        particle = evaluation_to_particle[node_indices[i]]
+        contact_radius = particle_radius[particle]
     collider_sdf[i] = sdf
-
-    if not bc_active:
-        collider_velocity[i] = wp.vec3(0.0)
-        collider_normals[i] = wp.vec3(0.0)
-        collider_friction[i] = -1.0
-        collider_adhesion[i] = 0.0
-        collider_ids[i] = _NULL_COLLIDER_ID
+    if not (sdf < contact_radius + activation_distance * voxel_size):
+        _store_inactive_collider_sample(
+            i, collider_velocity, collider_normals, collider_friction, collider_adhesion, collider_ids
+        )
         return
 
     collider_ids[i] = collider_id
@@ -542,6 +637,138 @@ def rasterize_collider_kernel(
     collider_adhesion[i] = collider.material_adhesion[material_id] * dt * node_volumes[i] / voxel_size
 
     collider_velocity[i] = sdf_vel
+
+
+@wp.kernel
+def collider_pair_distance_kernel(
+    collider: MJMPMCollider,
+    body_q: wp.array[wp.transform],
+    node_positions: wp.array[wp.vec3],
+    node_environment_offsets: wp.array[int],
+    pair_sdf: wp.array2d[float],
+    pair_gradient: wp.array2d[wp.vec3],
+    pair_velocity: wp.array2d[wp.vec3],
+    pair_closest_point: wp.array2d[wp.vec3],
+    pair_material: wp.array2d[int],
+):
+    """Query one (sample, collider) pair of ``collision_sdf`` in parallel.
+
+    Stores the pair's mesh query result, with an infinite distance where the
+    sequential loop skips the collider or the mesh query finds no point.
+    """
+    i, query_offset = wp.tid()
+    pair_sdf[i, query_offset] = _INFINITY
+    x = node_positions[i]
+    if x[0] == fem.OUTSIDE:
+        return
+    environment_index = int(_ALL_COLLIDER_WORLDS)
+    if node_environment_offsets:
+        environment_index = environment_from_offsets(i, node_environment_offsets)
+    query_begin, query_count = _collider_query_range(environment_index, collider)
+    if query_offset >= query_count:
+        return
+    stable_collider_id = _queried_collider_id(environment_index, query_begin, query_offset, collider)
+    if not _collider_within_query_distance(x, collider, body_q, stable_collider_id):
+        return
+    query_result, sdf, grad, vel, closest_point, material_id = _query_collider_sdf(
+        x, collider, body_q, stable_collider_id
+    )
+    if query_result:
+        pair_sdf[i, query_offset] = sdf
+        pair_gradient[i, query_offset] = grad
+        pair_velocity[i, query_offset] = vel
+        pair_closest_point[i, query_offset] = closest_point
+        pair_material[i, query_offset] = material_id
+
+
+@wp.kernel
+def rasterize_collider_pairs_kernel(
+    collider: MJMPMCollider,
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_q_prev: wp.array[wp.transform],
+    voxel_size: float,
+    activation_distance: float,
+    dt: float,
+    node_positions: wp.array[wp.vec3],
+    node_environment_offsets: wp.array[int],
+    node_indices: wp.array[int],
+    evaluation_to_particle: wp.array[int],
+    particle_radius: wp.array[float],
+    node_volumes: wp.array[float],
+    pair_sdf: wp.array2d[float],
+    pair_gradient: wp.array2d[wp.vec3],
+    pair_velocity: wp.array2d[wp.vec3],
+    pair_closest_point: wp.array2d[wp.vec3],
+    pair_material: wp.array2d[int],
+    collider_sdf: wp.array[float],
+    collider_velocity: wp.array[wp.vec3],
+    collider_normals: wp.array[wp.vec3],
+    collider_friction: wp.array[float],
+    collider_adhesion: wp.array[float],
+    collider_ids: wp.array[int],
+):
+    """Finish ``rasterize_collider_kernel`` from per-pair distances.
+
+    Selects the closest collider in the same order and with the same strict
+    comparison as ``collision_sdf``, so the same collider and distance win.
+    """
+    i = wp.tid()
+    x = node_positions[i]
+    if x[0] == fem.OUTSIDE:
+        collider_sdf[i] = _INFINITY
+        _store_inactive_collider_sample(
+            i, collider_velocity, collider_normals, collider_friction, collider_adhesion, collider_ids
+        )
+        return
+    environment_index = int(_ALL_COLLIDER_WORLDS)
+    if node_environment_offsets:
+        environment_index = environment_from_offsets(i, node_environment_offsets)
+    query_begin, query_count = _collider_query_range(environment_index, collider)
+    min_sdf = float(_INFINITY)
+    best_offset = int(-1)
+    for query_offset in range(query_count):
+        pair = pair_sdf[i, query_offset]
+        if pair < min_sdf:
+            min_sdf = pair
+            best_offset = query_offset
+
+    sdf_grad = wp.vec3(0.0)
+    sdf_vel = wp.vec3(0.0)
+    closest_point = wp.vec3(0.0)
+    collider_id = int(_NULL_COLLIDER_ID)
+    material_id = int(0)
+    if best_offset >= 0:
+        collider_id = _queried_collider_id(environment_index, query_begin, best_offset, collider)
+        sdf_grad = pair_gradient[i, best_offset]
+        sdf_vel = pair_velocity[i, best_offset]
+        closest_point = pair_closest_point[i, best_offset]
+        material_id = pair_material[i, best_offset]
+    sdf, sdf_gradient, sdf_velocity, closest_id, closest_material = _finish_collision_sdf(
+        min_sdf, sdf_grad, sdf_vel, closest_point, collider_id, material_id, collider, body_q, body_qd, body_q_prev, dt
+    )
+    _store_collider_sample(
+        i,
+        sdf,
+        sdf_gradient,
+        sdf_velocity,
+        closest_id,
+        closest_material,
+        collider,
+        voxel_size,
+        activation_distance,
+        dt,
+        node_indices,
+        evaluation_to_particle,
+        particle_radius,
+        node_volumes,
+        collider_sdf,
+        collider_velocity,
+        collider_normals,
+        collider_friction,
+        collider_adhesion,
+        collider_ids,
+    )
 
 
 @wp.func
@@ -727,6 +954,7 @@ def rasterize_collider(
     node_environment_offsets: wp.array | None = None,
     evaluation_to_particle: wp.array | None = None,
     particle_radius: wp.array | None = None,
+    max_query_count: int = 0,
 ):
     """Rasterize collider signed-distance, normals, velocity, and material onto grid nodes.
 
@@ -755,6 +983,10 @@ def rasterize_collider(
             queries every collider in stable order.
         evaluation_to_particle: Particle-contact evaluation-point to particle map.
         particle_radius: Physical contact radius at particle-centered samples.
+        max_query_count: Most colliders one node queries. If positive and the
+            node-collider pair count fits ``_PARALLEL_QUERY_MAX_PAIRS``, the
+            pairs are queried in parallel; the result is identical to the
+            sequential per-node query, which is used otherwise.
     """
     collision_node_count = collider_position_field.dof_values.shape[0]
 
@@ -771,30 +1003,50 @@ def rasterize_collider(
         0.0 if collider_position_field.degree == 0 else _COLLIDER_ACTIVATION_DISTANCE / collider_position_field.degree
     )
 
+    node_inputs = [
+        collider_position_field.dof_values,
+        node_environment_offsets,
+        collider_space_restriction.space_partition.space_node_indices(),
+        evaluation_to_particle,
+        particle_radius,
+        collider_node_volume,
+    ]
+    outputs = [
+        collider_distance_field.dof_values,
+        collider_velocity,
+        collider_normal_field.dof_values,
+        collider_friction,
+        collider_adhesion,
+        collider_ids,
+    ]
+    if 0 < max_query_count and collision_node_count * max_query_count <= _PARALLEL_QUERY_MAX_PAIRS:
+        # Few nodes near many colliders leave most of the device idle when each
+        # node walks the colliders alone; query every pair on its own thread.
+        shape = (collision_node_count, max_query_count)
+        pairs = [
+            fem.borrow_temporary(temporary_store, shape=shape, dtype=dtype)
+            for dtype in (float, wp.vec3, wp.vec3, wp.vec3, int)
+        ]
+        wp.launch(
+            collider_pair_distance_kernel,
+            dim=shape,
+            inputs=[collider, body_q, collider_position_field.dof_values, node_environment_offsets, *pairs],
+        )
+        wp.launch(
+            rasterize_collider_pairs_kernel,
+            dim=collision_node_count,
+            inputs=[collider, body_q, body_qd, body_q_prev, voxel_size, activation_distance, dt, *node_inputs, *pairs],
+            outputs=outputs,
+        )
+        for pair in pairs:
+            pair.release()
+        return
+
     wp.launch(
         rasterize_collider_kernel,
         dim=collision_node_count,
-        inputs=[
-            collider,
-            body_q,
-            body_qd,
-            body_q_prev,
-            voxel_size,
-            activation_distance,
-            dt,
-            collider_position_field.dof_values,
-            node_environment_offsets,
-            collider_space_restriction.space_partition.space_node_indices(),
-            evaluation_to_particle,
-            particle_radius,
-            collider_node_volume,
-            collider_distance_field.dof_values,
-            collider_velocity,
-            collider_normal_field.dof_values,
-            collider_friction,
-            collider_adhesion,
-            collider_ids,
-        ],
+        inputs=[collider, body_q, body_qd, body_q_prev, voxel_size, activation_distance, dt, *node_inputs],
+        outputs=outputs,
     )
 
 

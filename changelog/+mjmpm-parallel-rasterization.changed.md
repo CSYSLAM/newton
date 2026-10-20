@@ -1,0 +1,1 @@
+Speed up the experimental MJMPM solver without changing its results: rasterize material contacts by querying each node-collider pair on its own thread instead of walking all colliders per node, and assemble the particle-only MPM terms on a second CUDA stream while the environment solves rigid contacts. The W1 squeeze grasp runs about 11% faster.
