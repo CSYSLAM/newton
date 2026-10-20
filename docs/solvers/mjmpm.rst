@@ -181,6 +181,11 @@ Current limits
   Restitution coefficients, rolling/torsional friction,
   prescribed contact surface velocity, and continuous collision detection are
   not implemented by that solver.
+- Material trapped between a moving collider and a static one in a gap of
+  less than about two grid cells receives contradictory collider constraints
+  and can be ejected at high speed. Articulated response exposes this because
+  it keeps jointed links on their joints; independent proxies move off the
+  joint inside the MPM solve and hide it. Keep such gaps at two cells or more.
 - Sleeping is unsupported in the coupled backend.
 - Thin-shell cloth is not implicitly supported by assigning it to MPM.
 - Material support follows the private implicit MPM implementation. Air drag

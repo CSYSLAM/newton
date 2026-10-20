@@ -605,6 +605,19 @@ If you run the examples from a source checkout with uv, use
   </tr>
   <tr>
     <td align="center" width="33%">
+      <a href="newton/examples/mjmpm/example_mjmpm_push_sand.py">
+        <img width="320" src="docs/images/examples/example_mjmpm_push_sand.jpg" alt="MuJoCo–MPM Sand Push">
+      </a>
+    </td>
+    <td colspan="2">
+      <b>MuJoCo–MPM sand push (experimental)</b><br>
+      A MuJoCo gantry pushes a hinged paddle through an MPM sand pile, holds it under load, and retracts while the sand stays put.<br>
+      <code>python -m newton.examples mjmpm_push_sand</code><br>
+      <code>python -m newton.examples mjmpm_push_sand --articulated-response --substeps 4</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
       <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mpm/example_mpm_granular.py">
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mpm_granular.jpg" alt="MPM Granular">
       </a>
