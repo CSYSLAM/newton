@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-"""Grasp, lift, and release an MPM ball with a five-finger DexForce W1 hand.
+"""Grasp, lift, and release an MPM block with a five-finger DexForce W1 hand.
 
     uv run --extra examples -m newton.examples mjmpm_hand_grasp
     uv run --extra examples -m newton.examples mjmpm_hand_grasp --material plastic
@@ -8,11 +8,10 @@
 A palm-down W1 left hand hangs from a gravity-compensated vertical slide.
 MuJoCo integrates the slide and the fingers, whose distal joints follow the
 proximal ones through mimic equality constraints. The MPM environment owns
-the ball. The force-limited finger and thumb drives are commanded fully
-shut, so the ball's reaction stops them. The hand lowers onto the ball,
-closes, lifts, holds, lowers, and opens. The elastic ball springs back from
-most of its grasp deformation after release; the ``plastic`` dough ball, with a
-pressure-independent yield stress, keeps the finger dents.
+the block. The force-limited finger and thumb drives are commanded fully
+shut, so the block's reaction stops them. The hand lowers onto the block,
+closes, lifts, holds, lowers, and opens. The elastic block recovers its shape
+after release; the ``plastic`` block keeps the finger dents.
 """
 
 from itertools import pairwise
@@ -27,15 +26,11 @@ from newton.solvers import SolverMJMPM
 
 HAND_URDF = Path(__file__).resolve().parent / "assets/w1_hand/left_hand.urdf"
 TABLE_TOP = 0.10
-BALL_RADIUS = 0.03
-# A soft ball resting on a table is flattened at the contact; the flat base
-# also keeps the particle sphere from rocking on its faceted bottom.
-BALL_FLAT = 0.003
+BLOCK_HALF = 0.024
 PARTICLE_SPACING = 0.004
-# Ball center in the hand frame at the grasp pose (+z is the palm normal, +y
-# points along the fingers): 2 mm from the palm hollow, where the four fingers
-# reach the ball at about 70% closure and the thumb at about 70%.
-GRASP_IN_HAND = np.array((0.005, 0.095, 0.045))
+# Block center in the hand frame at the grasp pose (+z is the palm normal, +y
+# points along the fingers): the top face sits just below the palm hollow.
+GRASP_IN_HAND = np.array((0.005, 0.095, 0.039))
 APPROACH = 0.05
 LIFT = 0.08
 FINGERS = ("INDEX", "MIDDLE", "RING", "PINKY")
@@ -44,7 +39,7 @@ SCHEDULE = (
     (0.0, APPROACH, 0.0, 0.0),
     (1.5, APPROACH, 0.0, 0.0),
     (2.3, 0.0, 0.0, 0.0),
-    # Close slowly: fast fingers flick the light ball out before the thumb arrives.
+    # Close slowly: fast fingers flick the light block out before the thumb arrives.
     (3.8, 0.0, 1.0, 0.5),
     (4.2, 0.0, 1.0, 1.0),
     (4.6, 0.0, 1.0, 1.0),
@@ -58,6 +53,9 @@ SCHEDULE = (
 SETTLED = (1.3, 1.5)
 HOLD = (5.8, 6.6)
 RELEASED = (9.6, 10.0)
+# RMS shape change [m] after release, relative to the settled block.
+ELASTIC_RESIDUAL = 0.0035
+PLASTIC_RESIDUAL = 0.005
 
 
 def schedule(time):
@@ -97,8 +95,8 @@ class Example:
 
         # Palm down: the hand frame is turned half a revolution about the finger axis.
         hand_rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), np.pi)
-        ball_center = np.array((0.0, 0.0, TABLE_TOP + BALL_RADIUS - BALL_FLAT))
-        grasp_origin = ball_center - np.asarray(wp.quat_rotate(hand_rotation, wp.vec3(*GRASP_IN_HAND)))
+        block_center = np.array((0.0, 0.0, TABLE_TOP + BLOCK_HALF))
+        grasp_origin = block_center - np.asarray(wp.quat_rotate(hand_rotation, wp.vec3(*GRASP_IN_HAND)))
         self.grasp_height = float(grasp_origin[2])
         rail = wp.transform(wp.vec3(*grasp_origin), wp.quat_identity())
         mount = builder.add_link(
@@ -161,18 +159,15 @@ class Example:
             builder.joint_effort_limit[dof] = args.finger_effort
         del joint_begin
 
-        self.ball_begin = builder.particle_count
+        self.block_begin = builder.particle_count
         h = PARTICLE_SPACING
-        axis = np.arange(-BALL_RADIUS + 0.5 * h, BALL_RADIUS, h)
-        grid = np.stack(np.meshgrid(axis, axis, axis, indexing="ij"), axis=-1).reshape(-1, 3)
-        inside = (np.linalg.norm(grid, axis=1) <= BALL_RADIUS - 0.5 * h) & (grid[:, 2] >= BALL_FLAT - BALL_RADIUS)
-        points = grid[inside]
-        points += ball_center + np.array((0.0, 0.0, BALL_FLAT - BALL_RADIUS + 0.5 * h - points[:, 2].min()))
+        axis = np.arange(-BLOCK_HALF + 0.5 * h, BLOCK_HALF, h)
+        points = np.stack(np.meshgrid(axis, axis, axis, indexing="ij"), axis=-1).reshape(-1, 3) + block_center
         if args.material == "elastic":
             material = {"mpm:young_modulus": 4.0e4, "mpm:poisson_ratio": 0.3, "mpm:yield_stress": 1.0e6}
         else:
-            # Dough-like: pressure-independent yield (no Drucker-Prager friction),
-            # so a squeeze from the fingers leaves dents.
+            # Dough-like von Mises plasticity: without friction the pressure-dependent
+            # term vanishes and the shear limit is the yield stress alone.
             material = {
                 "mpm:young_modulus": 4.0e4,
                 "mpm:poisson_ratio": 0.3,
@@ -180,17 +175,17 @@ class Example:
                 "mpm:friction": 0.0,
             }
         material["mpm:tensile_yield_ratio"] = 1.0
-        # Foam and dough are viscoelastic; the relaxation time lets the ball come to rest.
-        material["mpm:damping"] = args.ball_damping
+        # Foam and dough are viscoelastic; the relaxation time lets the block come to rest.
+        material["mpm:damping"] = args.block_damping
         count = points.shape[0]
         builder.add_particles(
             pos=[wp.vec3(*p) for p in points],
             vel=[wp.vec3(0.0)] * count,
-            mass=[args.ball_density * h**3] * count,
+            mass=[args.block_density * h**3] * count,
             radius=[0.5 * h] * count,
             custom_attributes={key: [value] * count for key, value in material.items()},
         )
-        self.ball_end = builder.particle_count
+        self.block_end = builder.particle_count
         self.model = builder.finalize()
 
         self.solver = SolverMJMPM(
@@ -218,12 +213,11 @@ class Example:
         self.state_1.assign(self.state_0)
         self.target_q = self.model.joint_q.numpy().astype(np.float32)
         self.graph = None
-        self.initial_ball = self._ball().copy()
-        self.initial_extent = np.ptp(self.initial_ball, axis=0) + PARTICLE_SPACING
+        self.initial_block = self._block().copy()
+        self.initial_extent = np.ptp(self.initial_block, axis=0) + PARTICLE_SPACING
         self.records = []
         self.hold_impulse = np.zeros(self.model.body_count)
-        self.settled_ball = None
-        self.peak_deformation = 0.0
+        self.settled_block = None
 
         self.viewer.set_model(self.model)
         self.viewer.set_camera(pos=wp.vec3(0.04, -0.36, 0.25), pitch=-6.0, yaw=90.0)
@@ -231,8 +225,8 @@ class Example:
         if hasattr(self.viewer, "register_ui_callback"):
             self.viewer.register_ui_callback(self.render_ui, position="side")
 
-    def _ball(self):
-        return self.state_0.particle_q.numpy()[self.ball_begin : self.ball_end]
+    def _block(self):
+        return self.state_0.particle_q.numpy()[self.block_begin : self.block_end]
 
     def _simulate(self):
         for _ in range(self.args.substeps):
@@ -264,19 +258,17 @@ class Example:
         self.frame += 1
         self.sim_time = self.frame * self.frame_dt
         self._record(offset, fingers, thumb)
-        if self.settled_ball is None and self.sim_time >= SETTLED[1]:
-            self.settled_ball = self._ball().copy()
+        if self.settled_block is None and self.sim_time >= SETTLED[1]:
+            self.settled_block = self._block().copy()
         if HOLD[0] <= self.sim_time <= HOLD[1]:
             # Material contact impulse on each hand link in the last substep.
             impulse = self.solver.environment.material_impulses.numpy()
             self.hold_impulse = np.maximum(self.hold_impulse, np.linalg.norm(impulse[:, :3], axis=1))
-            if self.frame % 6 == 0:
-                self.peak_deformation = max(self.peak_deformation, self.residual_deformation())
 
     def _record(self, offset, fingers, thumb):
         q = self.state_0.joint_q.numpy()
-        ball = self._ball()
-        velocity = self.state_0.particle_qd.numpy()[self.ball_begin : self.ball_end]
+        block = self._block()
+        velocity = self.state_0.particle_qd.numpy()[self.block_begin : self.block_end]
         speed = np.linalg.norm(velocity, axis=1)
         self.records.append(
             {
@@ -287,9 +279,9 @@ class Example:
                 "thumb": q[self.thumb_dofs].copy(),
                 "pip": q[self.pip_dofs].copy(),
                 "finger_command": fingers,
-                "ball_bottom": float(ball[:, 2].min()) - 0.5 * PARTICLE_SPACING,
-                "ball_center": ball.mean(axis=0),
-                "ball_extent": np.ptp(ball, axis=0) + PARTICLE_SPACING,
+                "block_bottom": float(block[:, 2].min()) - 0.5 * PARTICLE_SPACING,
+                "block_center": block.mean(axis=0),
+                "block_extent": np.ptp(block, axis=0) + PARTICLE_SPACING,
                 "speed": float(np.percentile(speed, 99.0)),
                 "bulk_speed": float(np.linalg.norm(velocity.mean(axis=0))),
                 "peak_speed": float(speed.max()),
@@ -305,14 +297,14 @@ class Example:
         r = self.records[-1] if self.records else None
         imgui.text(f"Time: {self.sim_time:.2f} s")
         if r is not None:
-            imgui.text(f"Slide: {r['slide'] * 1e3:.1f} mm, ball lift {(r['ball_bottom'] - TABLE_TOP) * 1e3:.1f} mm")
+            imgui.text(f"Slide: {r['slide'] * 1e3:.1f} mm, block lift {(r['block_bottom'] - TABLE_TOP) * 1e3:.1f} mm")
             imgui.text(f"Fingers: {np.round(np.rad2deg(r['fingers']), 1).tolist()} deg")
 
     def residual_deformation(self):
-        """RMS particle offset [m] from the settled ball after the best rigid alignment."""
-        reference = self.settled_ball if self.settled_ball is not None else self.initial_ball
+        """RMS particle offset [m] from the settled block after the best rigid alignment."""
+        reference = self.settled_block if self.settled_block is not None else self.initial_block
         initial = reference - reference.mean(axis=0)
-        current = self._ball() - self._ball().mean(axis=0)
+        current = self._block() - self._block().mean(axis=0)
         u, _, vt = np.linalg.svd(current.T @ initial)
         rotation = u @ np.diag((1.0, 1.0, np.linalg.det(u @ vt))) @ vt
         return float(np.sqrt(np.mean(np.sum((current - initial @ rotation.T) ** 2, axis=1))))
@@ -324,8 +316,8 @@ class Example:
         for array in (self.state_0.joint_q, self.state_0.body_q, self.state_0.particle_q, self.state_0.particle_qd):
             if not np.isfinite(array.numpy()).all():
                 raise AssertionError("Nonfinite simulation state")
-        if self.records and self.records[-1]["ball_bottom"] < TABLE_TOP - 0.004:
-            raise AssertionError(f"The ball sank into the table: {self.records[-1]['ball_bottom'] - TABLE_TOP}")
+        if self.records and self.records[-1]["block_bottom"] < TABLE_TOP - 0.004:
+            raise AssertionError(f"The block sank into the table: {self.records[-1]['block_bottom'] - TABLE_TOP}")
 
     def test_final(self):
         self.test_post_step()
@@ -334,51 +326,50 @@ class Example:
             raise AssertionError(f"Run at least {round(SCHEDULE[-1][0] * 60)} frames")
         settled = max(r["bulk_speed"] for r in self.window(SETTLED))
         if settled > 0.005:
-            raise AssertionError(f"The ball did not settle before the approach: {settled} m/s")
+            raise AssertionError(f"The block did not settle before the approach: {settled} m/s")
         if self.args.coupling != "two_way":
             print(f"[HandGrasp] one-way run finished: {self.summary()}", flush=True)
             return
         hold = self.window(HOLD)
         fingers = np.array([r["fingers"] for r in hold])
-        # The thumb and at least two fingers carry the ball through material contact.
+        # The thumb and at least two fingers carry the block through material contact.
         names = [label.rsplit("/", 1)[-1] for label in self.model.body_label]
         loaded = [names[b] for b in self.hand_bodies if self.hold_impulse[b] > 1.0e-6]
         if (
             not any("thumb" in n for n in loaded)
             or sum(f in n for n in loaded for f in ("index", "middle", "ring", "pinky")) < 2
         ):
-            raise AssertionError(f"The ball is not held by the thumb and two fingers: {loaded}")
+            raise AssertionError(f"The block is not held by the thumb and two fingers: {loaded}")
         # Elastic contact stops the force-limited fingers short of their joint
-        # limits; the fingers sink into yielding dough.
+        # limits; the fingers may sink into yielding dough.
         if self.args.material == "elastic" and np.min(fingers.mean(axis=0) / self.finger_upper) > 0.95:
-            raise AssertionError(f"No finger stopped on the ball: {np.rad2deg(fingers.mean(axis=0))} deg")
-        lift = min(r["ball_bottom"] for r in hold) - TABLE_TOP
+            raise AssertionError(f"No finger stopped on the block: {np.rad2deg(fingers.mean(axis=0))} deg")
+        lift = min(r["block_bottom"] for r in hold) - TABLE_TOP
         if lift < 0.9 * LIFT:
-            raise AssertionError(f"The ball was not lifted: {lift * 1e3:.1f} mm")
-        drift = float(np.ptp(np.array([r["ball_center"] for r in hold]), axis=0).max())
+            raise AssertionError(f"The block was not lifted: {lift * 1e3:.1f} mm")
+        drift = float(np.ptp(np.array([r["block_center"] for r in hold]), axis=0).max())
         if drift > 0.002:
-            raise AssertionError(f"The held ball slipped: {drift * 1e3:.2f} mm")
+            raise AssertionError(f"The held block slipped: {drift * 1e3:.2f} mm")
         pulse = np.rad2deg(np.ptp(fingers, axis=0))
         if np.any(pulse > 1.0):
             raise AssertionError(f"The held grip pulses: {pulse} deg")
         released = self.records[-1]
-        if abs(released["ball_bottom"] - TABLE_TOP) > 0.003:
-            raise AssertionError(f"The released ball is not on the table: {released['ball_bottom'] - TABLE_TOP}")
-        # Deformation kept after release, relative to the deformation while held.
-        kept = self.residual_deformation() / max(self.peak_deformation, 1.0e-9)
-        if self.args.material == "elastic" and kept > 0.7:
-            raise AssertionError(f"The elastic ball kept {kept:.0%} of its grasp deformation")
-        if self.args.material == "plastic" and kept < 0.8:
-            raise AssertionError(f"The plastic ball kept only {kept:.0%} of its grasp deformation")
+        if abs(released["block_bottom"] - TABLE_TOP) > 0.003:
+            raise AssertionError(f"The released block is not on the table: {released['block_bottom'] - TABLE_TOP}")
+        # The elastic block keeps a small numerical residue; the plastic one keeps the dents.
+        residual = self.residual_deformation()
+        if self.args.material == "elastic" and residual > ELASTIC_RESIDUAL:
+            raise AssertionError(f"The elastic block did not recover: {residual * 1e3:.2f} mm")
+        if self.args.material == "plastic" and residual < PLASTIC_RESIDUAL:
+            raise AssertionError(f"The plastic block did not keep the dents: {residual * 1e3:.2f} mm")
         print(
-            f"[HandGrasp] PASS: {self.summary()}, loaded links {loaded}, "
-            f"grasp deformation {self.peak_deformation * 1e3:.2f} mm, {kept:.0%} kept after release",
+            f"[HandGrasp] PASS: {self.summary()}, loaded links {loaded}, residual deformation {residual * 1e3:.2f} mm",
             flush=True,
         )
 
     def summary(self):
         hold = self.window(HOLD)
-        lift = min(r["ball_bottom"] for r in hold) - TABLE_TOP if hold else float("nan")
+        lift = min(r["block_bottom"] for r in hold) - TABLE_TOP if hold else float("nan")
         fingers = np.array([r["fingers"] for r in hold]) if hold else np.zeros((1, 4))
         return (
             f"settled {max(r['bulk_speed'] for r in self.window(SETTLED)) * 1e3:.1f} mm/s, "
@@ -396,9 +387,9 @@ class Example:
         parser.add_argument("--substeps", type=int, default=10)
         parser.add_argument("--iterations", type=int, default=50)
         parser.add_argument("--voxel-size", type=float, default=0.0075, help="MPM grid cell size [m].")
-        parser.add_argument("--ball-density", type=float, default=300.0, help="Ball density [kg/m^3].")
-        parser.add_argument("--yield-stress", type=float, default=1.0e3, help="Yield stress of the plastic ball [Pa].")
-        parser.add_argument("--ball-damping", type=float, default=0.005, help="Ball viscous relaxation time [s].")
+        parser.add_argument("--block-density", type=float, default=300.0, help="Block density [kg/m^3].")
+        parser.add_argument("--yield-stress", type=float, default=3.0e3, help="Yield stress of the plastic block [Pa].")
+        parser.add_argument("--block-damping", type=float, default=0.005, help="Block viscous relaxation time [s].")
         parser.add_argument("--finger-kp", type=float, default=2.0, help="Finger drive stiffness [N*m/rad].")
         parser.add_argument("--finger-kd", type=float, default=0.02, help="Finger drive damping [N*m*s/rad].")
         parser.add_argument("--finger-effort", type=float, default=0.3, help="Finger joint torque limit [N*m].")
