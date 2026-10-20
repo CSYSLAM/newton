@@ -1,0 +1,1 @@
+Add `rigid_warm_start` to the experimental `SolverMJMPM`, which starts each environment rigid contact from the final impulse of its matched contact in the previous step, so friction on held objects converges over steps instead of restarting from zero and letting them creep or turn in the grip.

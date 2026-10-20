@@ -129,6 +129,10 @@ class Example(W1MJMPMScene):
         ), particles
 
     def after_step(self):
+        # Reading back state synchronizes the device; outside tests only the
+        # once-per-second log needs it.
+        if not self.args.test and self.frame % 60:
+            return
         bottoms, particles = self.object_heights()
         self.peak_lift = np.maximum(self.peak_lift, bottoms - TABLE_Z)
         self.lowest_particle = min(self.lowest_particle, float(particles[:, 2].min()) - PARTICLE_RADIUS)

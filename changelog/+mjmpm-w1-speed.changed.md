@@ -1,0 +1,1 @@
+Run the `mjmpm_w1_squeeze_grasp` example about four times faster by default (4 instead of 20 substeps, articulated response, Jacobi MPM iterations, warm-started rigid contacts, and fewer IK iterations per frame), and stop it from reading back simulation state every frame outside test mode. `--no-articulated-response` restores proxy response.

@@ -111,6 +111,34 @@ class TestMJMPMRigid(unittest.TestCase):
         self.assertAlmostEqual(float(state.body_q.numpy()[upper, 2]), 0.3, delta=0.004)
         self.assertLess(float(np.linalg.norm(state.body_qd.numpy())), 0.02)
 
+    def test_warm_started_friction_holds_pushed_box(self):
+        """Hold a box against a sideways push below the friction limit with two sweeps per step.
+
+        Restarting the contact impulses from zero each step leaves the friction
+        short of the push after two sweeps, and the box creeps (about 2 mm in
+        1.5 s); warm starts converge the friction over steps instead.
+        """
+        builder = newton.ModelBuilder()
+        SolverMJMPM.register_custom_attributes(builder)
+        cfg = newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.5)
+        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.1), wp.quat_identity()))
+        builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+        builder.add_ground_plane(cfg=cfg)
+        model = builder.finalize(device="cpu")
+        solver = SolverMJMPM(model, rigid_iterations=2, rigid_warm_start=True)
+        state = model.state()
+        dt = 1.0 / 240.0
+        for _ in range(120):
+            solver.step(state, state, None, None, dt)
+        start = float(state.body_q.numpy()[body, 0])
+        forces = state.body_f.numpy()
+        forces[body, 0] = 0.3 * float(model.body_mass.numpy()[body]) * 9.81
+        state.body_f.assign(forces)
+        for _ in range(360):
+            solver.step(state, state, None, None, dt)
+        self.assertLess(abs(float(state.body_q.numpy()[body, 0]) - start), 5.0e-5)
+        self.assertLess(float(np.linalg.norm(state.body_qd.numpy()[body])), 1.0e-5)
+
     def test_two_body_collision_conserves_momentum(self):
         """Exchange equal/opposite rigid contact impulses without a MuJoCo solver."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))

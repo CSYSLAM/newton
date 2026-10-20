@@ -9,6 +9,7 @@ Subclasses add task objects with :meth:`W1MJMPMScene.build_task` and return
 per-gripper TCP targets and the finger command from :meth:`W1MJMPMScene.plan`.
 """
 
+import argparse
 import xml.etree.ElementTree as ET
 from itertools import pairwise
 from pathlib import Path
@@ -217,9 +218,13 @@ class W1MJMPMScene:
             mass_scale=args.proxy_mass_scale,
             coupling_iterations=args.coupling_iterations,
             coupling_tolerance=args.coupling_tolerance,
-            articulated_response=args.articulated_response,
-            rigid_iterations=30,
+            articulated_response=args.articulated_response and args.coupling == "two_way",
+            rigid_iterations=args.rigid_iterations,
             rigid_contact_hard=False,
+            # Held-block friction converges over steps instead of restarting
+            # each step; cold-started sweeps let the block slip and turn in the
+            # grip at coarse substeps.
+            rigid_warm_start=True,
             mpm_options={
                 "grid_type": "fixed",
                 "voxel_size": args.voxel_size,
@@ -395,7 +400,7 @@ class W1MJMPMScene:
             1,
             [self.tcp_targets, self.positions[0].target_positions, self.positions[1].target_positions],
         )
-        self.ik_solver.step(self.ik_q, self.ik_q, iterations=12)
+        self.ik_solver.step(self.ik_q, self.ik_q, iterations=self.args.ik_iterations)
         wp.launch(
             _finish_ik_frame,
             self.frame_end.shape[0],
@@ -460,7 +465,8 @@ class W1MJMPMScene:
         self.frame += 1
         self.sim_time = self.frame * self.frame_dt
         self.targets = targets
-        if self.tracks_freely(self.sim_time):
+        # Reading back state synchronizes the device, so track only in tests.
+        if self.args.test and self.tracks_freely(self.sim_time):
             tcp = self.tcp_positions(self.state_0.body_q.numpy())
             self.peak_free_tcp_error = max(
                 self.peak_free_tcp_error, float(np.max(np.linalg.norm(tcp - targets, axis=1)))
@@ -509,11 +515,19 @@ class W1MJMPMScene:
         parser.add_argument(
             "--substeps",
             type=int,
-            default=20,
+            default=4,
             help="Physics substeps per frame; finer steps stabilize delayed robot-object contact feedback.",
         )
-        parser.add_argument("--iterations", type=int, default=50)
-        parser.add_argument("--mpm-solver", choices=("gs", "jacobi", "cr"), default="gs")
+        # Unconverged Jacobi solves can eject squeezed material at coarse substeps.
+        parser.add_argument("--iterations", type=int, default=60, help="Maximum MPM solver iterations per substep.")
+        parser.add_argument("--mpm-solver", choices=("gs", "jacobi", "cr"), default="jacobi")
+        parser.add_argument("--rigid-iterations", type=int, default=20, help="Rigid-block contact sweeps per substep.")
+        parser.add_argument(
+            "--ik-iterations",
+            type=int,
+            default=4,
+            help="IK iterations per frame, each started from the previous frame's solution.",
+        )
         parser.add_argument("--strain-basis", choices=("P0", "P1d", "Q1d"), default="P1d")
         parser.add_argument("--arm-kp", type=float, default=12000.0, help="Arm drive stiffness [N*m/rad].")
         parser.add_argument("--arm-kd", type=float, default=350.0, help="Arm drive damping [N*m*s/rad].")
@@ -552,8 +566,10 @@ class W1MJMPMScene:
         )
         parser.add_argument(
             "--articulated-response",
-            action="store_true",
-            help="Move the robot links through the MuJoCo link mobility in MPM contacts instead of proxy inertia.",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Move the robot links through the MuJoCo link mobility in MPM contacts instead of proxy inertia "
+            "(two-way coupling only).",
         )
         parser.add_argument("--voxel-size", type=float, default=0.015, help="MPM grid cell size [m].")
         parser.add_argument("--no-cuda-graph", action="store_true")

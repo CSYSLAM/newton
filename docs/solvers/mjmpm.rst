@@ -82,11 +82,20 @@ holds, lowers, and releases them. Finger effort limits remain 10 N.
 
 The soft cube uses 288 particles with the reference density and equivalent
 small-strain Young's modulus and Poisson ratio. It uses a discontinuous linear
-strain basis and Gauss-Seidel iteration to resolve the localized squeeze.
+strain basis to resolve the localized squeeze. Jacobi iterations are cheaper
+per substep than Gauss-Seidel here but converge more slowly; capped too early,
+they let the squeezed material be ejected, so the example allows 60.
 The scene selects ``rigid_contact_hard=False`` to use implicit spring/damper
 contacts from the shapes' ``ke`` and ``kd``, as in the reference scene. Hard
 rigid contacts remain the solver default. Compliant rigid contacts do not
 transmit forces across a positive surface gap.
+
+By default the example runs four substeps per frame with articulated response
+and ``rigid_warm_start=True``. Without warm starts the projected rigid contact
+sweeps restart the friction of the held block from zero each substep; at
+coarse substeps the friction then stays short of the load and the block slips
+and turns in the grip. Pass ``--substeps``, ``--mpm-solver``, ``--iterations``,
+``--rigid-iterations``, or ``--no-articulated-response`` to compare settings.
 
 The example's tests check ownership, dynamic robot flags, pre-contact material
 stability, grip width, hold jitter, object lift, table support, and recovery
@@ -178,7 +187,10 @@ Current limits
 - Rigid contacts use a sequential projected-impulse solver with optional
   implicit compliance. Worlds are solved in parallel, but the contacts of
   one world are swept by one thread, so very contact-rich worlds are slow.
-  Restitution coefficients, rolling/torsional friction,
+  Each step restarts the impulses from zero unless ``rigid_warm_start`` is
+  set; few sweeps then let resting or held bodies creep under friction.
+  Warm starts follow contacts matched between steps (within 0.5 mm) and fall
+  back to zero for new contacts. Restitution coefficients, rolling/torsional friction,
   prescribed contact surface velocity, and continuous collision detection are
   not implemented by that solver.
 - Material trapped between a moving collider and a static one in a gap of

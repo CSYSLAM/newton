@@ -49,10 +49,13 @@ class Environment(SolverBase, CouplingInterface):
     friction, or rigid joints.
     """
 
-    def __init__(self, model, *, mpm_options=None, rigid_iterations=20, rigid_contact_hard=True):
+    def __init__(
+        self, model, *, mpm_options=None, rigid_iterations=20, rigid_contact_hard=True, rigid_warm_start=False
+    ):
         super().__init__(model)
         self.rigid_iterations = rigid_iterations
         self.rigid_contact_hard = rigid_contact_hard
+        self.rigid_warm_start = rigid_warm_start
         config = SolverImplicitMPM.Config()
         config.separate_worlds = True
         # Sample contact at material particles, whose physical extent is given
@@ -71,10 +74,17 @@ class Environment(SolverBase, CouplingInterface):
             self.material.max_active_cell_count > 0
             and (config.grid_type == "fixed" or self.material._sparse_rebuildable)
         )
-        self.detector = CollisionPipeline(model, broad_phase="nxn", soft_contact_max=0)
+        # Warm starts carry each contact's impulse to its match in the next step.
+        self.detector = CollisionPipeline(
+            model,
+            broad_phase="nxn",
+            soft_contact_max=0,
+            contact_matching="latest" if rigid_warm_start else "disabled",
+        )
         self._exclude_proxy_pairs()
         self.contacts = self.detector.contacts()
         self.contact_impulses = wp.zeros(self.contacts.rigid_contact_max, dtype=wp.vec3, device=model.device)
+        self._previous_impulses = wp.zeros_like(self.contact_impulses) if rigid_warm_start else None
         self._init_contact_buffers()
         self._reuse_contacts = False
         # Articulated link response; see enable_articulated_response().
@@ -234,6 +244,8 @@ class Environment(SolverBase, CouplingInterface):
                 self._link_slot,
                 self._link_count,
                 self._mobility,
+                c.rigid_contact_match_index if self.rigid_warm_start else None,
+                self._previous_impulses,
                 dt,
             ],
             outputs=[
@@ -421,6 +433,10 @@ class Environment(SolverBase, CouplingInterface):
         _copy_same_view_state(state_in, self.work)
         _copy_forces(state_in, self.work)
         work = self.work
+        if self._previous_impulses is not None and not self._reuse_contacts:
+            # A repeated pass over the same step reuses its detection, and so
+            # also the previous step's impulses saved by the first pass.
+            wp.copy(self._previous_impulses, self.contact_impulses)
         self.rigid_impulses.zero_()
         self.material_impulses.zero_()
         self.contact_impulses.zero_()

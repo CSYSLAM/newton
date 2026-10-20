@@ -2,6 +2,14 @@
 
 - 更新：2026-10-19
 - 分支：`feature/mjmpm-two-way-grasp`（所有后续修改直接提交到此分支并推送到 `myfork`）
+
+## 2026-10-20 更新
+
+- W1 双手挤压抓取提速：默认改为 P3、4 子步、Jacobi 60 次、刚体接触热启动 20 遍、IK 4 次，RTX 5060 Ti 上 10.5 → 44 FPS，15/15 次验收通过。详见实施报告“第四轮”。
+- 新增 `SolverMJMPM(rigid_warm_start=True)`：W1 刚体块夹持滑转的根因是环境刚体接触每步从零开始的摩擦冲量未收敛，热启动后转角 ≤ 0.1°。
+- MPM 偶发单粒子抛射/NaN 的原因是 Jacobi 30 次未收敛（与热启动无关），默认改为 60 次。
+- 灵巧手例子按用户要求暂停：工作区中已把球改为方块（弹性/塑性，塑性方块 `friction=0` 才会屈服，3 kPa 时残余 7.9 mm、弹性 2.0 mm），未提交。
+- 本机 `test_collider_bound_culling_preserves_rasterization` 报 CUDA 错误 700，HEAD 同样失败，未处理。
 - 详细数据见 [实施报告](README.md)“第三轮”一节与 [计划](../../plans/mujoco_mpm_coupling_plan.md)。
 
 ## 已完成

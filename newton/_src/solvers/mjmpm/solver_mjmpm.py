@@ -57,6 +57,11 @@ class SolverMJMPM(SolverBase):
             rebuildable sparse grid; see :meth:`check_capacity_status`.
         mujoco_options: Private MuJoCo backend configuration fields.
         rigid_iterations: Projected rigid contact sweeps per step.
+        rigid_warm_start: Start each environment rigid contact from the final
+            impulse of its match in the previous step, using the collision
+            pipeline's frame-to-frame contact matching. Friction of held
+            objects then converges over steps instead of restarting from zero
+            each step, so fewer ``rigid_iterations`` suffice.
         rigid_contact_hard: Use hard rigid contact constraints. If False, use
             implicit spring/damper contacts from the shapes' ``ke`` and ``kd``.
         mass_scale: Virtual articulation proxy inertia multiplier. With
@@ -98,6 +103,7 @@ class SolverMJMPM(SolverBase):
         mujoco_options: Mapping[str, object] | None = None,
         rigid_iterations: int = 20,
         rigid_contact_hard: bool = True,
+        rigid_warm_start: bool = False,
         mass_scale: float = 1.0,
         relaxation: float = 1.0,
         relaxation_mode: str = "fixed",
@@ -143,6 +149,7 @@ class SolverMJMPM(SolverBase):
                 mpm_options=mpm_options,
                 rigid_iterations=rigid_iterations,
                 rigid_contact_hard=rigid_contact_hard,
+                rigid_warm_start=rigid_warm_start,
             )
 
         self._iteration = None
