@@ -703,6 +703,244 @@ def solve_contact_buckets(
             )
 
 
+@wp.func
+def _contact_side(
+    body: int,
+    mass_inv: wp.array[float],
+    inertia_inv: wp.array[wp.mat33],
+    link_slot: wp.array[int],
+):
+    """Inverse mass, world inverse inertia, and link slot (or -1) of one contact side."""
+    m = float(0.0)
+    inertia = wp.mat33(0.0)
+    slot = int(-1)
+    if body >= 0:
+        m = mass_inv[body]
+        inertia = inertia_inv[body]
+        if link_slot:
+            slot = link_slot[body]
+    return m, inertia, slot
+
+
+@wp.kernel
+def count_split_contacts(
+    bodies: wp.array[wp.vec2i],
+    mass_inv: wp.array[float],
+    link_slot: wp.array[int],
+    link_count: int,
+    body_contacts: wp.array[int],
+    world_link_contacts: wp.array[int],
+):
+    """Count the contacts sharing each dynamic body, or each world's coupled links.
+
+    Contacts on the links of one world all move through the same mobility,
+    so they share one count.
+    """
+    c = wp.tid()
+    pair = bodies[c]
+    for side in range(2):
+        body = pair[side]
+        if body >= 0 and mass_inv[body] > 0.0:
+            slot = int(-1)
+            if link_slot:
+                slot = link_slot[body]
+            if slot >= 0:
+                wp.atomic_add(world_link_contacts, slot // link_count, 1)
+            else:
+                wp.atomic_add(body_contacts, body, 1)
+
+
+@wp.func
+def _split_count(
+    body: int,
+    m: float,
+    slot: int,
+    link_count: int,
+    body_contacts: wp.array[int],
+    world_link_contacts: wp.array[int],
+):
+    if body < 0 or m <= 0.0:
+        return 1
+    if slot >= 0:
+        return wp.max(world_link_contacts[slot // link_count], 1)
+    return wp.max(body_contacts[body], 1)
+
+
+@wp.func
+def _scatter_contact_wrench(
+    body: int,
+    m: float,
+    wrench: wp.spatial_vector,
+    delta_wrench: wp.array[wp.spatial_vector],
+    body_impulse: wp.array[wp.spatial_vector],
+):
+    if body >= 0 and m > 0.0:
+        wp.atomic_add(delta_wrench, body, wrench)
+        wp.atomic_add(body_impulse, body, wrench)
+
+
+@wp.kernel(enable_backward=False)
+def scatter_initial_contact_impulses(
+    bodies: wp.array[wp.vec2i],
+    ra_list: wp.array[wp.vec3],
+    rb_list: wp.array[wp.vec3],
+    mass_inv: wp.array[float],
+    impulses: wp.array[wp.vec3],
+    delta_wrench: wp.array[wp.spatial_vector],
+    body_impulse: wp.array[wp.spatial_vector],
+):
+    """Accumulate the wrenches of warm-started contact impulses before the Jacobi sweeps."""
+    c = wp.tid()
+    pair = bodies[c]
+    initial = impulses[c]
+    if (pair[0] < 0 and pair[1] < 0) or initial == wp.vec3(0.0):
+        return
+    a = pair[0]
+    b = pair[1]
+    if a >= 0:
+        ra = ra_list[c]
+        _scatter_contact_wrench(
+            a, mass_inv[a], wp.spatial_vector(-initial, -wp.cross(ra, initial)), delta_wrench, body_impulse
+        )
+    if b >= 0:
+        rb = rb_list[c]
+        _scatter_contact_wrench(
+            b, mass_inv[b], wp.spatial_vector(initial, wp.cross(rb, initial)), delta_wrench, body_impulse
+        )
+
+
+@wp.kernel(enable_backward=False)
+def solve_contacts_jacobi(
+    bodies: wp.array[wp.vec2i],
+    ra_list: wp.array[wp.vec3],
+    rb_list: wp.array[wp.vec3],
+    normals: wp.array[wp.vec3],
+    params: wp.array[wp.vec4],
+    mass_inv: wp.array[float],
+    inertia_inv: wp.array[wp.mat33],
+    link_slot: wp.array[int],
+    link_count: int,
+    mobility: wp.array3d[float],
+    body_contacts: wp.array[int],
+    world_link_contacts: wp.array[int],
+    qd: wp.array[wp.spatial_vector],
+    impulses: wp.array[wp.vec3],
+    delta_wrench: wp.array[wp.spatial_vector],
+    body_impulse: wp.array[wp.spatial_vector],
+):
+    """Update every contact impulse in parallel from the same body velocities.
+
+    Uses the projection of ``solve_contact_buckets`` with each side's
+    inverse mass multiplied by the number of contacts sharing that body (or
+    the world's contacted links), so simultaneous updates on one body do not
+    overshoot. Scaling the denominators leaves the converged impulses
+    unchanged. Impulse changes accumulate into ``delta_wrench``.
+    """
+    c = wp.tid()
+    pair = bodies[c]
+    a = pair[0]
+    b = pair[1]
+    if a < 0 and b < 0:
+        return
+    ma, ia, slot_a = _contact_side(a, mass_inv, inertia_inv, link_slot)
+    mb, ib, slot_b = _contact_side(b, mass_inv, inertia_inv, link_slot)
+    split = float(
+        wp.max(
+            _split_count(a, ma, slot_a, link_count, body_contacts, world_link_contacts),
+            _split_count(b, mb, slot_b, link_count, body_contacts, world_link_contacts),
+        )
+    )
+    va = wp.spatial_vector(wp.vec3(0.0), wp.vec3(0.0))
+    vb = wp.spatial_vector(wp.vec3(0.0), wp.vec3(0.0))
+    if a >= 0:
+        va = qd[a]
+    if b >= 0:
+        vb = qd[b]
+    ra = ra_list[c]
+    rb = rb_list[c]
+    n = normals[c]
+    p = params[c]
+    target = p[0]
+    softness = p[1]
+    denom = p[2]
+    relative = point_velocity(vb, rb) - point_velocity(va, ra)
+    old = impulses[c]
+    normal_old = wp.dot(old, n)
+    normal_new = wp.max(
+        0.0,
+        normal_old + (target - wp.dot(relative, n) - softness * normal_old) / wp.max(split * denom + softness, 1.0e-12),
+    )
+    delta_n = (normal_new - normal_old) * n
+    relative = relative + split * (
+        side_point_response(b, slot_b, link_count, mb, ib, mobility, rb, delta_n)
+        + side_point_response(a, slot_a, link_count, ma, ia, mobility, ra, delta_n)
+    )
+    tangent_velocity = relative - n * wp.dot(relative, n)
+    tangent = old - normal_old * n
+    speed = wp.length(tangent_velocity)
+    if speed > 1.0e-9:
+        direction = tangent_velocity / speed
+        tangent_mass = split * (
+            side_inverse_mass(slot_a, link_count, ma, ia, mobility, ra, direction)
+            + side_inverse_mass(slot_b, link_count, mb, ib, mobility, rb, direction)
+        )
+        tangent = tangent - tangent_velocity / wp.max(tangent_mass, 1.0e-12)
+    limit = p[3] * normal_new
+    if wp.length(tangent) > limit:
+        tangent = wp.normalize(tangent) * limit
+    new = normal_new * n + tangent
+    delta = new - old
+    impulses[c] = new
+    _scatter_contact_wrench(a, ma, wp.spatial_vector(-delta, -wp.cross(ra, delta)), delta_wrench, body_impulse)
+    _scatter_contact_wrench(b, mb, wp.spatial_vector(delta, wp.cross(rb, delta)), delta_wrench, body_impulse)
+
+
+@wp.kernel(enable_backward=False)
+def apply_contact_wrenches_jacobi(
+    delta_wrench: wp.array[wp.spatial_vector],
+    mass_inv: wp.array[float],
+    inertia_inv: wp.array[wp.mat33],
+    link_slot: wp.array[int],
+    link_body: wp.array2d[int],
+    mobility: wp.array3d[float],
+    contacted_links: wp.array2d[int],
+    contacted_count: wp.array[int],
+    qd: wp.array[wp.spatial_vector],
+    next_delta_wrench: wp.array[wp.spatial_vector],
+):
+    """Apply one Jacobi sweep's accumulated wrenches and clear the next sweep's buffer.
+
+    Free bodies respond through their own inverse mass. A contacted link
+    responds to the wrenches on every contacted link of its world through the
+    mobility, as each contact does in ``solve_contact_buckets``.
+    """
+    body = wp.tid()
+    next_delta_wrench[body] = wp.spatial_vector(wp.vec3(0.0), wp.vec3(0.0))
+    slot = int(-1)
+    if link_slot:
+        slot = link_slot[body]
+    if slot >= 0:
+        link_count = link_body.shape[1]
+        world = slot // link_count
+        link = slot % link_count
+        change = wp.spatial_vector(wp.vec3(0.0), wp.vec3(0.0))
+        contacted = bool(False)
+        for k in range(contacted_count[world]):
+            other = contacted_links[world, k]
+            if other == link:
+                contacted = True
+            change += mobility_response(mobility, world, link, other, delta_wrench[link_body[world, other]])
+        if contacted:
+            qd[body] = qd[body] + change
+        return
+    m = mass_inv[body]
+    if m > 0.0:
+        wrench = delta_wrench[body]
+        qd[body] = qd[body] + wp.spatial_vector(
+            m * wp.spatial_top(wrench), inertia_inv[body] * wp.spatial_bottom(wrench)
+        )
+
+
 @wp.kernel
 def rewind_articulated_proxies(
     link_body: wp.array2d[int],

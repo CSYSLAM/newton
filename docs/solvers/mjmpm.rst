@@ -190,7 +190,13 @@ Current limits
   Each step restarts the impulses from zero unless ``rigid_warm_start`` is
   set; few sweeps then let resting or held bodies creep under friction.
   Warm starts follow contacts matched between steps (within 0.5 mm) and fall
-  back to zero for new contacts. Restitution coefficients, rolling/torsional friction,
+  back to zero for new contacts. ``rigid_solver="jacobi"`` instead updates all
+  contacts in parallel and divides each body's response among the contacts
+  that share it. It converges to the same impulses but more slowly when many
+  contacts press on one body: a two-box stack needs about 40 sweeps where
+  sequential sweeps need 8, and a block held by 36 finger contacts slips
+  noticeably more at equal cost, so sequential sweeps remain the default.
+  Restitution coefficients, rolling/torsional friction,
   prescribed contact surface velocity, and continuous collision detection are
   not implemented by that solver.
 - Material trapped between a moving collider and a static one in a gap of

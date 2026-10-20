@@ -62,6 +62,13 @@ class SolverMJMPM(SolverBase):
             pipeline's frame-to-frame contact matching. Friction of held
             objects then converges over steps instead of restarting from zero
             each step, so fewer ``rigid_iterations`` suffice.
+        rigid_solver: ``"gauss_seidel"`` sweeps each world's environment
+            rigid contacts in sequence on one thread. ``"jacobi"`` updates
+            all contacts in parallel from the same velocities, dividing each
+            body's response among the contacts that share it (mass
+            splitting); it converges to the same contact impulses but needs
+            more ``rigid_iterations`` per step, and atomic accumulation
+            makes the result vary slightly from run to run.
         rigid_contact_hard: Use hard rigid contact constraints. If False, use
             implicit spring/damper contacts from the shapes' ``ke`` and ``kd``.
         mass_scale: Virtual articulation proxy inertia multiplier. With
@@ -104,6 +111,7 @@ class SolverMJMPM(SolverBase):
         rigid_iterations: int = 20,
         rigid_contact_hard: bool = True,
         rigid_warm_start: bool = False,
+        rigid_solver: str = "gauss_seidel",
         mass_scale: float = 1.0,
         relaxation: float = 1.0,
         relaxation_mode: str = "fixed",
@@ -150,6 +158,7 @@ class SolverMJMPM(SolverBase):
                 rigid_iterations=rigid_iterations,
                 rigid_contact_hard=rigid_contact_hard,
                 rigid_warm_start=rigid_warm_start,
+                rigid_solver=rigid_solver,
             )
 
         self._iteration = None

@@ -139,6 +139,37 @@ class TestMJMPMRigid(unittest.TestCase):
         self.assertLess(abs(float(state.body_q.numpy()[body, 0]) - start), 5.0e-5)
         self.assertLess(float(np.linalg.norm(state.body_qd.numpy()[body])), 1.0e-5)
 
+    def test_jacobi_rigid_contacts_hold_and_stack(self):
+        """Converge parallel mass-split contact sweeps to resting and sticking contact.
+
+        Mass splitting converges more slowly than sequential sweeps: this stack
+        needs about 40 sweeps per step, where Gauss-Seidel holds with 8.
+        """
+        builder = newton.ModelBuilder()
+        SolverMJMPM.register_custom_attributes(builder)
+        cfg = newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.5)
+        lower = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.1), wp.quat_identity()))
+        builder.add_shape_box(lower, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+        upper = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.3), wp.quat_identity()))
+        builder.add_shape_box(upper, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+        builder.add_ground_plane(cfg=cfg)
+        model = builder.finalize(device="cpu")
+        solver = SolverMJMPM(model, rigid_iterations=40, rigid_warm_start=True, rigid_solver="jacobi")
+        state = model.state()
+        dt = 1.0 / 240.0
+        for _ in range(120):
+            solver.step(state, state, None, None, dt)
+        start = state.body_q.numpy()[:, :3].copy()
+        # Push the stack sideways below the friction limit of the ground contact.
+        forces = state.body_f.numpy()
+        forces[lower, 0] = 0.3 * float(model.body_mass.numpy().sum()) * 9.81
+        state.body_f.assign(forces)
+        for _ in range(240):
+            solver.step(state, state, None, None, dt)
+        np.testing.assert_allclose(state.body_q.numpy()[:, :3], start, atol=2.0e-4)
+        np.testing.assert_allclose(start[:, 2], (0.1, 0.3), atol=2.0e-3)
+        self.assertLess(float(np.linalg.norm(state.body_qd.numpy())), 1.0e-3)
+
     def test_two_body_collision_conserves_momentum(self):
         """Exchange equal/opposite rigid contact impulses without a MuJoCo solver."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))

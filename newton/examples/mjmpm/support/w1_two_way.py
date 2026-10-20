@@ -225,6 +225,7 @@ class W1MJMPMScene:
             # each step; cold-started sweeps let the block slip and turn in the
             # grip at coarse substeps.
             rigid_warm_start=True,
+            rigid_solver=args.rigid_solver,
             mpm_options={
                 "grid_type": "fixed",
                 "voxel_size": args.voxel_size,
@@ -522,6 +523,12 @@ class W1MJMPMScene:
         parser.add_argument("--iterations", type=int, default=60, help="Maximum MPM solver iterations per substep.")
         parser.add_argument("--mpm-solver", choices=("gs", "jacobi", "cr"), default="jacobi")
         parser.add_argument("--rigid-iterations", type=int, default=20, help="Rigid-block contact sweeps per substep.")
+        parser.add_argument(
+            "--rigid-solver",
+            choices=("gauss_seidel", "jacobi"),
+            default="gauss_seidel",
+            help="Rigid-block contact solve: sequential sweeps or parallel sweeps with mass splitting.",
+        )
         parser.add_argument(
             "--ik-iterations",
             type=int,

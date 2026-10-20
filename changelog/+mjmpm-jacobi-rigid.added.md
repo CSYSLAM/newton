@@ -1,0 +1,1 @@
+Add `rigid_solver="jacobi"` to the experimental `SolverMJMPM`, which sweeps environment rigid contacts in parallel with mass splitting instead of sequentially per world. It converges to the same contact impulses but needs more sweeps when many contacts share a body, so sequential sweeps remain the default.

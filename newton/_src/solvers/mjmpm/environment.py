@@ -50,12 +50,22 @@ class Environment(SolverBase, CouplingInterface):
     """
 
     def __init__(
-        self, model, *, mpm_options=None, rigid_iterations=20, rigid_contact_hard=True, rigid_warm_start=False
+        self,
+        model,
+        *,
+        mpm_options=None,
+        rigid_iterations=20,
+        rigid_contact_hard=True,
+        rigid_warm_start=False,
+        rigid_solver="gauss_seidel",
     ):
         super().__init__(model)
+        if rigid_solver not in ("gauss_seidel", "jacobi"):
+            raise ValueError("rigid_solver must be 'gauss_seidel' or 'jacobi'")
         self.rigid_iterations = rigid_iterations
         self.rigid_contact_hard = rigid_contact_hard
         self.rigid_warm_start = rigid_warm_start
+        self.rigid_solver = rigid_solver
         config = SolverImplicitMPM.Config()
         config.separate_worlds = True
         # Sample contact at material particles, whose physical extent is given
@@ -177,6 +187,11 @@ class Environment(SolverBase, CouplingInterface):
         self._contact_ids = wp.zeros(2 * max(capacity, 1), dtype=int, device=device)
         self._bucket_begin = wp.zeros(self._bucket_count, dtype=int, device=device)
         self._bucket_end = wp.zeros(self._bucket_count, dtype=int, device=device)
+        # Jacobi sweeps: contact counts for mass splitting and two wrench
+        # accumulators, each cleared by the sweep that does not write it.
+        self._body_contacts = wp.zeros(body_count, dtype=int, device=device)
+        self._world_link_contacts = wp.zeros(1, dtype=int, device=device)
+        self._delta_wrench = wp.zeros((2, body_count), dtype=wp.spatial_vector, device=device)
 
     def _solve_rigid_contacts(self, work, dt):
         model = self.model
@@ -267,6 +282,40 @@ class Environment(SolverBase, CouplingInterface):
             ],
             device=model.device,
         )
+        if self._mobility is not None:
+            wp.copy(self._qd_before_contacts, work.body_qd)
+            self._contacted.zero_()
+            wp.launch(
+                kernels.mark_contacted_links,
+                dim=capacity,
+                inputs=[c.rigid_contact_count, self._contact_bodies, self._link_slot],
+                outputs=[self._contacted],
+                device=model.device,
+            )
+            wp.launch(
+                kernels.compact_contacted_links,
+                dim=self._link_body.shape[0],
+                inputs=[self._contacted, self._link_count],
+                outputs=[self._contacted_links, self._contacted_count],
+                device=model.device,
+            )
+        if self.rigid_solver == "jacobi":
+            self._solve_contacts_jacobi(work, capacity)
+        else:
+            self._solve_contacts_gauss_seidel(work)
+        if self._mobility is not None:
+            wp.launch(
+                kernels.finish_articulated_contacts,
+                dim=self._link_body.shape,
+                inputs=[self._link_body, self._mobility, self._qd_before_contacts, self.rigid_impulses],
+                outputs=[work.body_qd],
+                device=model.device,
+            )
+
+    def _solve_contacts_gauss_seidel(self, work):
+        model = self.model
+        c = self.contacts
+        capacity = c.rigid_contact_max
         if self._single_bucket:
             wp.launch(
                 kernels.single_bucket_range,
@@ -284,23 +333,6 @@ class Environment(SolverBase, CouplingInterface):
                 dim=capacity,
                 inputs=[self._contact_keys, capacity, self._bucket_count],
                 outputs=[self._bucket_begin, self._bucket_end],
-                device=model.device,
-            )
-        if self._mobility is not None:
-            wp.copy(self._qd_before_contacts, work.body_qd)
-            self._contacted.zero_()
-            wp.launch(
-                kernels.mark_contacted_links,
-                dim=capacity,
-                inputs=[c.rigid_contact_count, self._contact_bodies, self._link_slot],
-                outputs=[self._contacted],
-                device=model.device,
-            )
-            wp.launch(
-                kernels.compact_contacted_links,
-                dim=self._link_body.shape[0],
-                inputs=[self._contacted, self._link_count],
-                outputs=[self._contacted_links, self._contacted_count],
                 device=model.device,
             )
         wp.launch(
@@ -329,14 +361,80 @@ class Environment(SolverBase, CouplingInterface):
             ],
             device=model.device,
         )
-        if self._mobility is not None:
+
+    def _solve_contacts_jacobi(self, work, capacity):
+        """Sweep all contacts in parallel with mass splitting instead of in sequence."""
+        model = self.model
+        device = model.device
+        body_count = model.body_count
+        self._body_contacts.zero_()
+        self._world_link_contacts.zero_()
+        self._delta_wrench.zero_()
+        wp.launch(
+            kernels.count_split_contacts,
+            dim=capacity,
+            inputs=[self._contact_bodies, self._contact_mass_inv, self._link_slot, self._link_count],
+            outputs=[self._body_contacts, self._world_link_contacts],
+            device=device,
+        )
+        buffers = (self._delta_wrench[0], self._delta_wrench[1])
+
+        def apply(delta, other):
             wp.launch(
-                kernels.finish_articulated_contacts,
-                dim=self._link_body.shape,
-                inputs=[self._link_body, self._mobility, self._qd_before_contacts, self.rigid_impulses],
-                outputs=[work.body_qd],
-                device=model.device,
+                kernels.apply_contact_wrenches_jacobi,
+                dim=body_count,
+                inputs=[
+                    delta,
+                    self._contact_mass_inv,
+                    self._contact_inertia_inv,
+                    self._link_slot,
+                    self._link_body,
+                    self._mobility,
+                    self._contacted_links,
+                    self._contacted_count,
+                ],
+                outputs=[work.body_qd, other],
+                device=device,
             )
+
+        # Warm-started impulses act on the bodies before the first sweep.
+        wp.launch(
+            kernels.scatter_initial_contact_impulses,
+            dim=capacity,
+            inputs=[
+                self._contact_bodies,
+                self._contact_ra,
+                self._contact_rb,
+                self._contact_mass_inv,
+                self.contact_impulses,
+            ],
+            outputs=[buffers[0], self.rigid_impulses],
+            device=device,
+        )
+        apply(buffers[0], buffers[1])
+        for sweep in range(self.rigid_iterations):
+            delta, other = buffers[(sweep + 1) % 2], buffers[sweep % 2]
+            wp.launch(
+                kernels.solve_contacts_jacobi,
+                dim=capacity,
+                inputs=[
+                    self._contact_bodies,
+                    self._contact_ra,
+                    self._contact_rb,
+                    self._contact_normal,
+                    self._contact_params,
+                    self._contact_mass_inv,
+                    self._contact_inertia_inv,
+                    self._link_slot,
+                    self._link_count,
+                    self._mobility,
+                    self._body_contacts,
+                    self._world_link_contacts,
+                ],
+                outputs=[work.body_qd, self.contact_impulses, delta, self.rigid_impulses],
+                device=device,
+            )
+            apply(delta, other)
 
     def enable_articulated_response(self, link_mobility, link_body):
         """Let articulation proxies respond through the MuJoCo link mobility.
@@ -365,6 +463,7 @@ class Environment(SolverBase, CouplingInterface):
         self._contacted_links = wp.zeros(link_body.shape, dtype=int, device=device)
         self._contacted_count = wp.zeros(link_body.shape[0], dtype=int, device=device)
         self._qd_before_contacts = wp.zeros(model.body_count, dtype=wp.spatial_vector, device=device)
+        self._world_link_contacts = wp.zeros(link_body.shape[0], dtype=int, device=device)
         if self.material is not None:
             self.material.enable_articulated_response(self._mobility, self._link_body, self._link_slot)
 
