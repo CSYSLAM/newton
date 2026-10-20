@@ -507,17 +507,23 @@ class TestMJMPMMaterial(unittest.TestCase):
         collider = mpm_model.collider
         state = model.state()
         state.body_qd.assign(rng.normal(size=(model.body_count, 6)).astype(np.float32))
-        points = wp.array(rng.uniform(-0.7, 0.7, size=(20000, 3)).astype(np.float32), dtype=wp.vec3)
+        # The collider arrays live on the model device; keep every array and the launch there.
+        device = model.device
+        points = wp.array(rng.uniform(-0.7, 0.7, size=(20000, 3)).astype(np.float32), dtype=wp.vec3, device=device)
 
         def evaluate():
             out = (
-                wp.zeros(points.shape[0], dtype=float),
-                wp.zeros(points.shape[0], dtype=wp.vec3),
-                wp.zeros(points.shape[0], dtype=wp.vec3),
-                wp.zeros(points.shape[0], dtype=int),
+                wp.zeros(points.shape[0], dtype=float, device=device),
+                wp.zeros(points.shape[0], dtype=wp.vec3, device=device),
+                wp.zeros(points.shape[0], dtype=wp.vec3, device=device),
+                wp.zeros(points.shape[0], dtype=int, device=device),
             )
             wp.launch(
-                sample, dim=points.shape[0], inputs=[points, collider, state.body_q, state.body_qd, None], outputs=out
+                sample,
+                dim=points.shape[0],
+                inputs=[points, collider, state.body_q, state.body_qd, None],
+                outputs=out,
+                device=device,
             )
             return [array.numpy() for array in out]
 
@@ -525,8 +531,8 @@ class TestMJMPMMaterial(unittest.TestCase):
         lower, upper = collider.collider_aabb_lower, collider.collider_aabb_upper
         unbounded = np.finfo(np.float32).max
         self.assertTrue(np.isfinite(lower.numpy()).all() and (np.abs(lower.numpy()) < unbounded).all())
-        collider.collider_aabb_lower = wp.full(lower.shape[0], wp.vec3(-unbounded), dtype=wp.vec3)
-        collider.collider_aabb_upper = wp.full(upper.shape[0], wp.vec3(unbounded), dtype=wp.vec3)
+        collider.collider_aabb_lower = wp.full(lower.shape[0], wp.vec3(-unbounded), dtype=wp.vec3, device=device)
+        collider.collider_aabb_upper = wp.full(upper.shape[0], wp.vec3(unbounded), dtype=wp.vec3, device=device)
         exhaustive = evaluate()
         self.assertGreater(int(np.count_nonzero(exhaustive[3] >= 0)), 1000)
         for actual, expected in zip(culled, exhaustive, strict=True):
