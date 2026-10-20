@@ -36,6 +36,9 @@ HOLD = (4.4, 7.4)
 # Lifted and stationary: the grip should not visibly pulse.
 STEADY = (6.0, 7.3)
 STEADY_P2P = 0.0005
+# Both finger drives saturate while squeezing, so nothing centers the held
+# object between them; it must not slide noticeably along the finger axis.
+MAX_SLIDE = 0.003
 
 
 class Example(W1MJMPMScene):
@@ -86,6 +89,7 @@ class Example(W1MJMPMScene):
         )
         self.soft_end = builder.particle_count
         self.hold_fingers = []
+        self.hold_slides = []
         self.steady_fingers = []
         self.steady_rigid_poses = []
         self.peak_lift = np.zeros(2)
@@ -129,8 +133,11 @@ class Example(W1MJMPMScene):
         self.peak_lift = np.maximum(self.peak_lift, bottoms - TABLE_Z)
         self.lowest_particle = min(self.lowest_particle, float(particles[:, 2].min()) - PARTICLE_RADIUS)
         fingers = self.finger_q()
+        pairs = self.finger_pairs()
         if HOLD[0] <= self.sim_time <= HOLD[1]:
-            self.hold_fingers.append(fingers)
+            # Half the finger gap, and the object's offset from the gripper center.
+            self.hold_fingers.append(pairs.mean(axis=1))
+            self.hold_slides.append(0.5 * (pairs[:, 0] - pairs[:, 1]))
         if STEADY[0] <= self.sim_time <= STEADY[1]:
             self.steady_fingers.append(fingers)
             self.steady_rigid_poses.append(self.state_0.body_q.numpy()[self.block].copy())
@@ -152,7 +159,7 @@ class Example(W1MJMPMScene):
             _, particles = self.object_heights()
             if np.ptp(particles[:, 2]) + 2 * PARTICLE_RADIUS < 0.9 * SOFT_SIZE[2]:
                 raise AssertionError("The material collapsed before grasp contact")
-        if STEADY[0] <= self.sim_time <= STEADY[1] and self.finger_q()[0] < BLOCK_HALF[1] - 0.002:
+        if STEADY[0] <= self.sim_time <= STEADY[1] and self.finger_pairs()[0].mean() < BLOCK_HALF[1] - 0.002:
             raise AssertionError("The rigid block escaped the gripper during the hold")
 
     def test_final(self):
@@ -174,7 +181,10 @@ class Example(W1MJMPMScene):
         rigid, soft = hold[:, 0], hold[:, 1]
         # Shut fingers must stop on the rigid faces instead of closing to zero.
         if rigid.min() < BLOCK_HALF[1] - 0.002:
-            raise AssertionError(f"The left fingers crushed the rigid block: {rigid.min()}")
+            raise AssertionError(f"The left fingers crushed the rigid block: half gap {rigid.min()}")
+        slide = np.max(np.abs(np.asarray(self.hold_slides)), axis=0)
+        if np.any(slide > MAX_SLIDE):
+            raise AssertionError(f"The held objects slid between the fingers: {slide * 1e3} mm")
         # The soft cube is squeezed, but its elastic force stops the fingers.
         if soft.mean() > SOFT_SIZE[1] / 2 - 0.002:
             raise AssertionError(f"The right fingers did not indent the soft cube: {soft.mean()}")
@@ -207,6 +217,7 @@ class Example(W1MJMPMScene):
             raise AssertionError("The released elastic material retained excessive vertical deformation")
         print(
             f"[W1SqueezeGrasp] PASS: rigid fingers held at {rigid.min() * 1e3:.1f} mm, "
+            f"peak slide {np.round(slide * 1e3, 2).tolist()} mm, "
             f"held-grip jitter {np.round(steady * 1e3, 2).tolist()} mm, "
             f"rigid-block drift {translation_jitter * 1e3:.2f} mm / {np.rad2deg(rotation_jitter):.2f} deg, "
             f"soft cube indented {(SOFT_SIZE[1] / 2 - soft.mean()) * 1e3:.1f} mm per side; "

@@ -311,8 +311,12 @@ class W1MJMPMScene:
 
     def finger_q(self) -> np.ndarray:
         """Finger-1 opening [m] of the left and right grippers."""
+        return self.finger_pairs()[:, 0]
+
+    def finger_pairs(self) -> np.ndarray:
+        """Opening [m] of both fingers of the left and right grippers, shape ``(2, 2)``."""
         q = self.state_0.joint_q.numpy()
-        return np.array([q[coords[0]] for coords in self.finger_coords])
+        return np.array([q[coords] for coords in self.finger_coords])
 
     # Robot control -----------------------------------------------------------
 
