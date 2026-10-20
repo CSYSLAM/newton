@@ -465,6 +465,8 @@ class Environment(SolverBase, CouplingInterface):
                     ],
                     device=model.device,
                 )
+                if self._mobility is not None:
+                    wp.copy(self._qd_before_contacts, work.body_qd)
                 wp.launch(
                     kernels.apply_material_impulses,
                     dim=model.body_count,
@@ -478,6 +480,15 @@ class Environment(SolverBase, CouplingInterface):
                     ],
                     device=model.device,
                 )
+                if self._mobility is not None:
+                    # Links move through the mobility, as inside the material solve.
+                    wp.launch(
+                        kernels.finish_articulated_contacts,
+                        dim=self._link_body.shape,
+                        inputs=[self._link_body, self._mobility, self._qd_before_contacts, self.material_impulses],
+                        outputs=[work.body_qd],
+                        device=model.device,
+                    )
         if model.body_count:
             wp.launch(
                 kernels.drift,

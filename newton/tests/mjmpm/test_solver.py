@@ -836,7 +836,6 @@ def _run_coupled(model, steps, dt, record, **kwargs):
 class TestMJMPMArticulatedResponse(unittest.TestCase):
     def test_link_mobility_matches_mujoco_step_response(self):
         """Predict every link's one-step twist change for an impulse on any link of a damped chain."""
-        from newton._src.solvers.mjmpm.coupling.articulated import LinkMobility  # noqa: PLC0415
         from newton._src.solvers.mjmpm.mujoco.solver_mujoco import SolverMuJoCo  # noqa: PLC0415
 
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -867,7 +866,68 @@ class TestMJMPMArticulatedResponse(unittest.TestCase):
         builder.add_articulation([j0, j1, j2])
         builder.joint_q[1:3] = [0.4, -0.7]
         builder.joint_qd[:] = [0.3, -0.5, 0.8]
-        model = builder.finalize(device="cpu")
+        matrix = self._check_mobility_prediction(builder.finalize(device="cpu"))
+        # The coupled chain moves links that were not pushed.
+        self.assertGreater(float(np.abs(matrix[0:6, 12:18]).max()), 1.0e-2)
+
+    def test_link_mobility_includes_active_joint_limit(self):
+        """Predict the one-step response of a chain whose prismatic base presses into its joint limit."""
+        from newton._src.solvers.mjmpm.mujoco.solver_mujoco import SolverMuJoCo  # noqa: PLC0415
+
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        SolverMuJoCo.register_custom_attributes(builder)
+        base = builder.add_link(mass=2.0, inertia=wp.mat33(np.diag([0.02, 0.03, 0.04])))
+        builder.add_shape_box(base, hx=0.1, hy=0.1, hz=0.05)
+        j0 = builder.add_joint_prismatic(parent=-1, child=base, axis=(1.0, 0.0, 0.0), limit_lower=-0.1, limit_upper=0.1)
+        arm = builder.add_link(mass=1.0, inertia=wp.mat33(np.diag([0.01, 0.012, 0.005])))
+        builder.add_shape_capsule(arm, radius=0.03, half_height=0.15)
+        j1 = builder.add_joint_revolute(
+            parent=base,
+            child=arm,
+            axis=(0.0, 1.0, 0.0),
+            parent_xform=wp.transform(wp.vec3(0.0, 0.0, 0.05), wp.quat_identity()),
+            child_xform=wp.transform(wp.vec3(0.0, 0.0, -0.15), wp.quat_identity()),
+        )
+        builder.add_articulation([j0, j1])
+        builder.joint_q[:] = [0.1005, 0.4]
+        builder.joint_qd[:] = [0.3, -0.5]
+        matrix = self._check_mobility_prediction(builder.finalize(device="cpu"))
+        # The limit absorbs most of a push along the slide, but not the arm's swing.
+        self.assertLess(matrix[0, 0], 0.2 * (1.0 / 3.0))
+        self.assertGreater(matrix[10, 10], 1.0)
+
+    def test_link_mobility_includes_mujoco_contact(self):
+        """Predict the one-step response of a chain whose base rests in MuJoCo contact with the ground."""
+        from newton._src.solvers.mjmpm.mujoco.solver_mujoco import SolverMuJoCo  # noqa: PLC0415
+
+        builder = newton.ModelBuilder()
+        SolverMuJoCo.register_custom_attributes(builder)
+        builder.add_ground_plane()
+        base = builder.add_link(mass=2.0, inertia=wp.mat33(np.diag([0.02, 0.03, 0.04])))
+        builder.add_shape_box(base, hx=0.1, hy=0.1, hz=0.05)
+        j0 = builder.add_joint_prismatic(parent=-1, child=base, axis=(0.0, 0.0, 1.0))
+        arm = builder.add_link(mass=1.0, inertia=wp.mat33(np.diag([0.01, 0.012, 0.005])))
+        builder.add_shape_capsule(arm, radius=0.03, half_height=0.15)
+        j1 = builder.add_joint_revolute(
+            parent=base,
+            child=arm,
+            axis=(0.0, 1.0, 0.0),
+            parent_xform=wp.transform(wp.vec3(0.0, 0.0, 0.05), wp.quat_identity()),
+            child_xform=wp.transform(wp.vec3(0.0, 0.0, -0.18), wp.quat_identity()),
+        )
+        builder.add_articulation([j0, j1])
+        builder.joint_q[:] = [0.049, 0.4]
+        builder.joint_qd[:] = [-0.2, -0.5]
+        matrix = self._check_mobility_prediction(builder.finalize(device="cpu"))
+        # The ground carries a vertical push on the base, but not the arm's swing.
+        self.assertLess(matrix[2, 2], 0.2 * (1.0 / 3.0))
+        self.assertGreater(matrix[10, 10], 1.0)
+
+    def _check_mobility_prediction(self, model):
+        """Compare the mobility with MuJoCo's one-step twist change for a wrench on each link."""
+        from newton._src.solvers.mjmpm.coupling.articulated import LinkMobility  # noqa: PLC0415
+        from newton._src.solvers.mjmpm.mujoco.solver_mujoco import SolverMuJoCo  # noqa: PLC0415
+
         solver = SolverMuJoCo(model, use_mujoco_cpu=False)
         start = model.state()
         newton.eval_fk(model, start.joint_q, start.joint_qd, start)
@@ -896,9 +956,9 @@ class TestMJMPMArticulatedResponse(unittest.TestCase):
             predicted = np.stack(
                 [matrix[6 * l : 6 * l + 6, 6 * k : 6 * k + 6] @ (dt * wrench) for l in range(len(links))]
             )
-            np.testing.assert_allclose(predicted, actual[links], atol=5.0e-3 * float(np.abs(actual).max()))
-        # The coupled chain moves links that were not pushed.
-        self.assertGreater(float(np.abs(matrix[0:6, 12:18]).max()), 1.0e-2)
+            # The floor covers float32 differencing of link velocities near 1 m/s.
+            np.testing.assert_allclose(predicted, actual[links], atol=max(5.0e-3 * float(np.abs(actual).max()), 2.0e-7))
+        return matrix
 
     def test_single_pass_resolves_heavy_box_collision(self):
         """Stop a light jointed link on a heavy box in the contact step instead of rebounding."""
@@ -973,6 +1033,71 @@ class TestMJMPMArticulatedResponse(unittest.TestCase):
         self.assertGreater(float(np.abs(reference[-1]).max()), 0.1)
         self.assertLess(float(np.abs(articulated - reference).max()), 0.005)
         self.assertGreater(float(np.abs(proxy - reference).max()), 0.1)
+
+    def test_single_pass_matches_converged_impact_on_joint_limit(self):
+        """Stop a box dropped on a link that gravity holds against its joint limit, as the converged solution does."""
+
+        def run(**kwargs):
+            builder = newton.ModelBuilder()
+            SolverMJMPM.register_custom_attributes(builder)
+            cfg = newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.01)
+            link = builder.add_link(mass=1.0, inertia=wp.mat33(np.eye(3) * 0.01))
+            builder.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+            joint = builder.add_joint_prismatic(
+                parent=-1, child=link, axis=(0.0, 0.0, 1.0), limit_lower=0.0, limit_upper=1.0
+            )
+            builder.add_articulation([joint])
+            # The soft limit settles before the box arrives.
+            box = builder.add_body(
+                xform=wp.transform(wp.vec3(0.0, 0.0, 0.3), wp.quat_identity()),
+                mass=1.0,
+                inertia=wp.mat33(np.eye(3) * 0.01),
+            )
+            builder.add_shape_box(box, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+            builder.joint_qd[builder.joint_qd_start[-1] + 2] = -1.0
+            model = builder.finalize(device="cpu")
+            return _run_coupled(
+                model,
+                150,
+                0.001,
+                lambda state, box=box: (float(state.joint_qd.numpy()[0]), float(state.body_qd.numpy()[box, 2])),
+                **kwargs,
+            )
+
+        reference = run(coupling_iterations=40)
+        articulated = run(articulated_response=True)
+        contact = int(np.argmax(np.abs(reference[:, 1] + 1.0 + 9.81 * 0.001 * np.arange(1, 151)) > 0.05))
+        # The limit absorbs the 1.7 m/s impact without throwing the box back up.
+        self.assertLess(float(reference[contact - 1, 1]), -1.5)
+        self.assertLess(float(reference[contact:, 1].max()), 0.01)
+        # The unconstrained mobility lets the box bounce off at 0.4 m/s.
+        self.assertLess(float(np.abs(articulated - reference).max()), 0.01)
+
+    def test_material_push_leaves_environment_links_at_mujoco_velocity(self):
+        """End MPM-side link velocities at MuJoCo's through the mobility after material contact."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        SolverMJMPM.register_custom_attributes(builder)
+        _two_link_arm(
+            builder,
+            newton.ModelBuilder.ShapeConfig(density=0.0),
+            base=(0.2, -0.45, 0.05),
+            axis=(0.0, 1.0, 0.0),
+        )
+        _particles(builder, velocity=(1.0, 0.0, 0.0))
+        model = builder.finalize(device="cpu")
+        solver = SolverMJMPM(
+            model, relaxation=0.5, articulated_response=True, mpm_options={**_options(), "voxel_size": 0.05}
+        )
+        state = model.state()
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        pushed = False
+        for _ in range(30):
+            solver.step(state, state, None, None, 0.005)
+            pushed |= float(np.abs(solver.environment.material_impulses.numpy()).max()) > 1.0e-4
+            np.testing.assert_allclose(
+                solver.environment.work.body_qd.numpy()[:2], state.body_qd.numpy()[:2], atol=1.0e-4
+            )
+        self.assertTrue(pushed)
 
     def test_articulated_response_keeps_worlds_independent(self):
         """Evaluate per-world link mobility and contact propagation without cross-world coupling."""

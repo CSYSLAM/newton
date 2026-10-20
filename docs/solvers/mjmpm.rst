@@ -144,11 +144,14 @@ Articulated contact response
 ``articulated_response=True`` replaces the independent proxy inertia with the
 link mobility of the MuJoCo Warp step. For an impulse wrench on link ``m`` the
 step changes the twist of link ``l`` by ``Lambda^-1_lm p_m`` with
-``Lambda^-1 = J H^-1 J^T``, where ``J`` stacks the link center-of-mass
-Jacobians and ``H`` is the matrix MuJoCo factors to integrate velocities
+``Lambda^-1 = J H^-1 M K^-1 J^T``. ``J`` stacks the link center-of-mass
+Jacobians, ``H`` is the matrix MuJoCo factors to integrate velocities
 (``M - dt dqfrc/dqvel`` for the implicit integrators, which includes joint
-damping and actuator velocity gains). The mobility is evaluated after every
-MuJoCo step. Rigid environment contacts update every contacted link of the
+damping and actuator velocity gains), and ``K = M + J_c^T D J_c`` adds the
+MuJoCo constraint rows (joint limits, MuJoCo contacts, equality constraints)
+that the step's constraint solve left in their quadratic state. Without active
+constraints the mobility reduces to ``J H^-1 J^T``. It is evaluated after
+every MuJoCo step. Rigid environment contacts update every contacted link of the
 world, and the MPM collider rigidity operator maps nodal impulses to link
 wrenches and then to coupled link twists. MuJoCo is re-solved with the
 harvested feedback, so a single pass already applies contact feedback within
@@ -156,9 +159,13 @@ the step. In regression scenes, one articulated pass matches the converged
 same-step solution of 30 to 40 proxy passes to within a few millimeters per
 second, including the motion transmitted to links that are not in contact.
 
-The mobility is linear and excludes MuJoCo constraints (joint limits, MuJoCo
-contacts, equality constraints) and actuator force clamping; additional
-coupling iterations correct them. It requires the MuJoCo Warp backend
+The mobility is linear at the active set of the latest MuJoCo constraint
+solve. Constraints that the contact impulse would activate or release,
+elliptic-cone contacts in the cone state, and actuator force clamping (which
+MuJoCo's own velocity derivative also ignores) are left to additional coupling
+iterations. A box dropped onto a link that gravity holds against its joint
+limit is stopped in one pass as in the converged solution; without the
+constraint rows the box rebounds at 0.4 m/s. It requires the MuJoCo Warp backend
 (``use_mujoco_cpu=False``), which also runs on CPU devices, and stores a
 ``6 n x 6 n`` matrix per world for ``n`` articulated links.
 
@@ -167,7 +174,7 @@ Current limits
 
 - Same-step iterations repeat the full MPM solve per pass, so they multiply
   the material cost. Articulated response removes most of the need for them
-  in the linear regime but does not include MuJoCo constraint activity.
+  while the MuJoCo constraint active set does not change within the step.
 - Rigid contacts use a sequential projected-impulse solver with optional
   implicit compliance. Worlds are solved in parallel, but the contacts of
   one world are swept by one thread, so very contact-rich worlds are slow.

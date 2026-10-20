@@ -70,9 +70,10 @@ class SolverMJMPM(SolverBase):
         coupling_tolerance: Interface velocity residual [m/s, rad/s] below
             which uncaptured steps stop iterating early. Zero runs every pass.
         articulated_response: Let MPM-side contacts move articulation links
-            through the MuJoCo link mobility ``J H^-1 J^T`` instead of
-            independent proxy inertia, so an impulse on one link also moves
-            the links it is jointed to. MuJoCo then re-solves the step with
+            through the MuJoCo link mobility instead of independent proxy
+            inertia, so an impulse on one link also moves the links it is
+            jointed to, and active MuJoCo joint limits and contacts absorb
+            their share of it. MuJoCo then re-solves the step with
             the harvested feedback, so contact feedback acts in the same step
             even with one coupling pass. Requires two-way coupling and the
             MuJoCo Warp backend.
