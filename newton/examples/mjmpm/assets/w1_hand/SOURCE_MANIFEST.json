@@ -1,0 +1,63 @@
+{
+  "revision": "da7026d8e7db6c4f9a50264feb0ef20cea411195",
+  "source": "assets/W1-hand-obj/",
+  "source_urdf": "DexforceW1V021.urdf",
+  "files": [
+    {
+      "path": "collision/L_base_link.obj",
+      "source": "assets/W1-hand-obj/Collision/left_hand/L_base_link.obj",
+      "sha256": "39a293eeaf7de0788fddbb54b3e6e4410eb817d3b833feb4edb2c1161f905360"
+    },
+    {
+      "path": "collision/L_thumb_prox.obj",
+      "source": "assets/W1-hand-obj/Collision/left_hand/L_thumb_prox.obj",
+      "sha256": "ba6ce0df16a8b84cc12be3205689c14aad746380e7b525256cf3c6cf2e4df5bd"
+    },
+    {
+      "path": "collision/L_thumb_dist.obj",
+      "source": "assets/W1-hand-obj/Collision/left_hand/L_thumb_dist.obj",
+      "sha256": "0bb12bcaf81692aee5743c9eb5d9fe3a8fb7ea1e9ba3403105fd83b8ac83e315"
+    },
+    {
+      "path": "collision/L_index_prox.obj",
+      "source": "assets/W1-hand-obj/Collision/left_hand/L_index_prox.obj",
+      "sha256": "0f4285047807f7b691ed2e3830d49ba5d7caab9fb252377dd6304cec96092b19"
+    },
+    {
+      "path": "collision/L_index_dist.obj",
+      "source": "assets/W1-hand-obj/Collision/left_hand/L_index_dist.obj",
+      "sha256": "9d441f4abdc5f7b1cfa39d1fb2839f27bc912ac414f2efdbdea7619a51c999d3"
+    },
+    {
+      "path": "collision/L_middle_prox.obj",
+      "source": "assets/W1-hand-obj/Collision/left_hand/L_middle_prox.obj",
+      "sha256": "f25e97976b30e7f5ee8cb6e4f442258d1433690a0cf4aa3b71f52bc1e6e17478"
+    },
+    {
+      "path": "collision/L_middle_dist.obj",
+      "source": "assets/W1-hand-obj/Collision/left_hand/L_middle_dist.obj",
+      "sha256": "c32a8576356a4c60623689e354c83cb1c54edc1783a234f1b6150cb169532482"
+    },
+    {
+      "path": "collision/L_ring_prox.obj",
+      "source": "assets/W1-hand-obj/Collision/left_hand/L_ring_prox.obj",
+      "sha256": "b397e1db94245624a4f9f3212a88f904944d02a0aeff241556457bd7e96573e8"
+    },
+    {
+      "path": "collision/L_ring_dist.obj",
+      "source": "assets/W1-hand-obj/Collision/left_hand/L_ring_dist.obj",
+      "sha256": "347283f941befed77555c7c8b59e05d4a6d9df9367f7c0eb20867dce4d1cddce"
+    },
+    {
+      "path": "collision/L_little_prox.obj",
+      "source": "assets/W1-hand-obj/Collision/left_hand/L_little_prox.obj",
+      "sha256": "5707e1060e02cb4ef4a30235055e02ef8d21f9cbf069a2ee20e5824320b1b1bc"
+    },
+    {
+      "path": "collision/L_little_dist.obj",
+      "source": "assets/W1-hand-obj/Collision/left_hand/L_little_dist.obj",
+      "sha256": "1192bb17af46645e4e1124ea2e6924e14ff021ce5b153beb3d61c84aa245009d"
+    }
+  ],
+  "source_urdf_sha256": "8203013430e1baf5820963799997680b034f52f4d6b218621a1dd7621a9146b0"
+}
