@@ -851,6 +851,17 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         """Maximum number of iterations for the rheology solver."""
         tolerance: float = 1.0e-4
         """Tolerance for the rheology solver."""
+        stall_tolerance: float = 0.0
+        """Residual below which the rheology solver also stops when it stops improving.
+
+        Jacobi iterations can approach the solution so slowly that each update
+        stays just above ``tolerance`` while the state barely changes. With a
+        positive value, the solver also stops once both residual norms are below
+        it and neither decreased by more than ``1 - stall_ratio`` since the
+        previous check. Zero disables this exit.
+        """
+        stall_ratio: float = 0.98
+        """Residual ratio between consecutive convergence checks that counts as stalled."""
         solver: _RheologySolverName | Sequence[_RheologySolverName] = "auto"
         """Solver to use for the rheology solver. ``"auto"`` selects ``"gs"``
         for Q1 velocity basis and ``"gs-batched"`` for higher-order bases
@@ -1467,6 +1478,8 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
         self.max_iterations = config.max_iterations
         self.tolerance = float(config.tolerance)
+        self.stall_tolerance = float(config.stall_tolerance)
+        self.stall_ratio = float(config.stall_ratio)
 
         self.temporary_store = temporary_store
         self.verbose = verbose if verbose is not None else wp.config.log_level <= wp.LOG_DEBUG
@@ -3768,6 +3781,8 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 temporary_store=self.temporary_store,
                 use_graph=self._use_cuda_graph,
                 verbose=self.verbose,
+                stall_tolerance=self.stall_tolerance,
+                stall_ratio=self.stall_ratio,
             )
 
         self._unapply_strain_eigenbasis(scratch, M_ev)

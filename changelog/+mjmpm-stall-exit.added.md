@@ -1,0 +1,1 @@
+Add `stall_tolerance` and `stall_ratio` to the experimental MJMPM material solver options, which end a rheology solve early once each residual norm is below its tolerance or has stopped decreasing below `stall_tolerance`. Jacobi solves of resting material otherwise run every iteration with updates just above the tolerance; the `mjmpm_w1_squeeze_grasp` example enables it.

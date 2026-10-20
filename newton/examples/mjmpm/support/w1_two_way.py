@@ -233,6 +233,7 @@ class W1MJMPMScene:
                 "max_active_cell_count": 512,
                 "strain_basis": args.strain_basis,
                 "max_iterations": args.iterations,
+                "stall_tolerance": args.stall_tolerance,
                 "solver": args.mpm_solver,
                 "air_drag": 0.0,
             },
@@ -522,6 +523,14 @@ class W1MJMPMScene:
         # Unconverged Jacobi solves can eject squeezed material at coarse substeps.
         parser.add_argument("--iterations", type=int, default=60, help="Maximum MPM solver iterations per substep.")
         parser.add_argument("--mpm-solver", choices=("gs", "jacobi", "cr"), default="jacobi")
+        # Resting material keeps Jacobi updates just above the tolerance without
+        # changing the state; contact phases stay well above this and use every iteration.
+        parser.add_argument(
+            "--stall-tolerance",
+            type=float,
+            default=2.0e-3,
+            help="MPM residual below which a solve that stopped improving ends early (0 disables).",
+        )
         parser.add_argument("--rigid-iterations", type=int, default=20, help="Rigid-block contact sweeps per substep.")
         parser.add_argument(
             "--rigid-solver",

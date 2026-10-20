@@ -395,6 +395,26 @@ class TestMJMPMMaterial(unittest.TestCase):
         np.testing.assert_allclose(momentum(), initial, atol=2.0e-4)
         self.assertGreater(float(state.body_qd.numpy()[body, 0]), 1.0e-4)
 
+    def test_stall_exit_keeps_resting_material(self):
+        """End stalled Jacobi solves early without moving resting material."""
+
+        def run(stall_tolerance):
+            builder = newton.ModelBuilder()
+            SolverMJMPM.register_custom_attributes(builder)
+            builder.add_ground_plane()
+            _particles(builder, position=(0.025, 0.025, 0.026))
+            model = builder.finalize(device="cpu")
+            options = {**_options(), "max_iterations": 60, "tolerance": 1.0e-6, "stall_tolerance": stall_tolerance}
+            solver = SolverMJMPM(model, mpm_options=options)
+            state = model.state()
+            for _ in range(40):
+                solver.step(state, state, None, None, 0.005)
+            return state
+
+        full, stalled = run(0.0), run(1.0e-2)
+        np.testing.assert_allclose(stalled.particle_q.numpy(), full.particle_q.numpy(), atol=1.0e-4)
+        self.assertLess(float(np.abs(stalled.particle_qd.numpy()).max()), 0.05)
+
     def test_parallel_collider_query_matches_sequential(self):
         """Query node-collider pairs in parallel without changing any rasterized or stepped value."""
 

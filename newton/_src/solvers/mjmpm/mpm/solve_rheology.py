@@ -242,21 +242,52 @@ class ArraySquaredNorm:
         self.release()
 
 
+@wp.func
+def _batch_converged(
+    l2: float,
+    linf: float,
+    previous: wp.array2d[float],
+    batch: int,
+    residual_threshold: float,
+    l2_scale: float,
+    stall_threshold: float,
+    stall_ratio: float,
+):
+    """Whether each of a batch's squared residual norms meets its tolerance or stalls below ``stall_threshold``.
+
+    A norm stalls when it decreased by no more than ``1 - stall_ratio`` (in
+    squared terms) since the previous check.
+    """
+    l2_done = l2 < residual_threshold * l2_scale or (
+        l2 < stall_threshold * l2_scale and l2 >= stall_ratio * previous[0, batch]
+    )
+    linf_done = linf < residual_threshold or (linf < stall_threshold and linf >= stall_ratio * previous[1, batch])
+    return l2_done and linf_done
+
+
 @wp.kernel
 def update_condition(
     residual_threshold: float,
     l2_scale: float,
     solve_granularity: int,
     max_iterations: int,
+    stall_threshold: float,
+    stall_ratio: float,
     residual: wp.array2d[float],
+    previous: wp.array2d[float],
     iteration: wp.array[int],
     condition: wp.array[int],
 ):
     cur_it = iteration[0] + solve_granularity
     converged = bool(True)
     for batch in range(residual.shape[1]):
-        converged = converged and residual[0, batch] < residual_threshold * l2_scale
-        converged = converged and residual[1, batch] < residual_threshold
+        l2 = residual[0, batch]
+        linf = residual[1, batch]
+        converged = converged and _batch_converged(
+            l2, linf, previous, batch, residual_threshold, l2_scale, stall_threshold, stall_ratio
+        )
+        previous[0, batch] = l2
+        previous[1, batch] = linf
 
     stop = converged or cur_it > max_iterations
 
@@ -270,7 +301,10 @@ def update_batched_condition(
     l2_tolerance_scales: wp.array[float],
     solve_granularity: int,
     max_iterations: int,
+    stall_threshold: float,
+    stall_ratio: float,
     residual: wp.array2d[float],
+    previous: wp.array2d[float],
     iteration: wp.array[int],
     condition: wp.array[int],
 ):
@@ -278,8 +312,13 @@ def update_batched_condition(
     converged = bool(True)
     for batch in range(residual.shape[1]):
         scale = l2_tolerance_scales[batch]
-        converged = converged and residual[0, batch] < residual_threshold * scale * scale
-        converged = converged and residual[1, batch] < residual_threshold
+        l2 = residual[0, batch]
+        linf = residual[1, batch]
+        converged = converged and _batch_converged(
+            l2, linf, previous, batch, residual_threshold, scale * scale, stall_threshold, stall_ratio
+        )
+        previous[0, batch] = l2
+        previous[1, batch] = linf
 
     stop = converged or cur_it > max_iterations
 
@@ -1857,13 +1896,21 @@ def _run_solver_loop(
     use_graph: bool,
     verbose: bool,
     temporary_store: fem.TemporaryStore,
+    stall_tolerance: float = 0.0,
+    stall_ratio: float = 0.98,
 ):
     solve_graph = None
+    # Squared-residual thresholds of the stall exit; zero disables it.
+    stall_threshold = stall_tolerance * stall_tolerance
+    stall_ratio_squared = stall_ratio * stall_ratio
     if use_graph:
         solve_granularity = 5
 
         iteration_and_condition = fem.borrow_temporary(temporary_store, shape=(2,), dtype=int)
         iteration_and_condition.fill_(1)
+        batch_count = 1 if rheology_solver.rheology.strain_environment_offsets is None else l2_tolerance_scale.shape[0]
+        previous_residual = fem.borrow_temporary(temporary_store, shape=(2, batch_count), dtype=float)
+        previous_residual.fill_(float("inf"))
 
         iteration = iteration_and_condition[:1]
         condition = iteration_and_condition[1:]
@@ -1882,7 +1929,10 @@ def _run_solver_loop(
                         l2_tolerance_scale * l2_tolerance_scale,
                         solve_granularity,
                         max_iterations,
+                        stall_threshold,
+                        stall_ratio_squared,
                         residual,
+                        previous_residual,
                         iteration,
                         condition,
                     ],
@@ -1896,7 +1946,10 @@ def _run_solver_loop(
                         l2_tolerance_scale,
                         solve_granularity,
                         max_iterations,
+                        stall_threshold,
+                        stall_ratio_squared,
                         residual,
+                        previous_residual,
                         iteration,
                         condition,
                     ],
@@ -1930,6 +1983,7 @@ def _run_solver_loop(
                 )
 
         iteration_and_condition.release()
+        previous_residual.release()
     else:
         solve_granularity = rheology_solver.solve_granularity
         host_tolerance_scale = (
@@ -1938,6 +1992,7 @@ def _run_solver_loop(
             else l2_tolerance_scale.numpy()
         )
 
+        previous_l2 = previous_linf = math.inf
         for first_iteration in range(0, max_iterations, solve_granularity):
             batch_size = min(solve_granularity, max_iterations - first_iteration)
             for _k in range(batch_size):
@@ -1957,6 +2012,11 @@ def _run_solver_loop(
                 )
             if res_l2 < tolerance and res_linf < tolerance:
                 break
+            l2_done = res_l2 < tolerance or (res_l2 < stall_tolerance and res_l2 >= stall_ratio * previous_l2)
+            linf_done = res_linf < tolerance or (res_linf < stall_tolerance and res_linf >= stall_ratio * previous_linf)
+            if l2_done and linf_done:
+                break
+            previous_l2, previous_linf = res_l2, res_linf
 
     return solve_graph
 
@@ -1972,6 +2032,8 @@ def solve_rheology(
     temporary_store: fem.TemporaryStore | None = None,
     use_graph: bool = True,
     verbose: bool | None = None,
+    stall_tolerance: float = 0.0,
+    stall_ratio: float = 0.98,
 ):
     """Solve coupled plasticity and collider contact to compute grid velocities.
 
@@ -2025,6 +2087,10 @@ def solve_rheology(
             for Jacobi solver).
         temporary_store: Temporary storage arena for intermediate arrays.
         use_graph: If True, uses conditional CUDA graphs for the iteration loop.
+        stall_tolerance: Residual below which the loop also stops once it stalls,
+            that is, when neither residual norm decreased by more than
+            ``1 - stall_ratio`` since the previous check. Zero disables this exit.
+        stall_ratio: Residual ratio between consecutive checks that counts as stalled.
         verbose: If True, log residuals/iteration counts. If False, suppress details. If None, log details when
             ``wp.config.log_level`` is configured for debug logging.
 
@@ -2126,6 +2192,8 @@ def solve_rheology(
         use_graph,
         verbose,
         temporary_store,
+        stall_tolerance,
+        stall_ratio,
     )
 
     # release temporary storage
