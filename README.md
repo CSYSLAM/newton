@@ -618,6 +618,19 @@ If you run the examples from a source checkout with uv, use
   </tr>
   <tr>
     <td align="center" width="33%">
+      <a href="newton/examples/mjmpm/example_mjmpm_hand_grasp.py">
+        <img width="320" src="docs/images/examples/example_mjmpm_hand_grasp.jpg" alt="MuJoCo–MPM Hand Grasp">
+      </a>
+    </td>
+    <td colspan="2">
+      <b>MuJoCo–MPM five-finger hand grasp (experimental)</b><br>
+      A force-limited W1 hand grasps, lifts, and releases an elastic MPM ball, or dents a dough ball.<br>
+      <code>python -m newton.examples mjmpm_hand_grasp</code><br>
+      <code>python -m newton.examples mjmpm_hand_grasp --material plastic --articulated-response</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
       <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mpm/example_mpm_granular.py">
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mpm_granular.jpg" alt="MPM Granular">
       </a>

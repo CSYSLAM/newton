@@ -10,8 +10,9 @@ MuJoCo integrates the slide and the fingers, whose distal joints follow the
 proximal ones through mimic equality constraints. The MPM environment owns
 the ball. The force-limited finger and thumb drives are commanded fully
 shut, so the ball's reaction stops them. The hand lowers onto the ball,
-closes, lifts, holds, lowers, and opens. The elastic ball recovers its shape
-after release; the ``plastic`` ball keeps the finger dents.
+closes, lifts, holds, lowers, and opens. The elastic ball springs back from
+most of its grasp deformation after release; the ``plastic`` dough ball, with a
+pressure-independent yield stress, keeps the finger dents.
 """
 
 from itertools import pairwise
@@ -170,7 +171,14 @@ class Example:
         if args.material == "elastic":
             material = {"mpm:young_modulus": 4.0e4, "mpm:poisson_ratio": 0.3, "mpm:yield_stress": 1.0e6}
         else:
-            material = {"mpm:young_modulus": 4.0e4, "mpm:poisson_ratio": 0.3, "mpm:yield_stress": args.yield_stress}
+            # Dough-like: pressure-independent yield (no Drucker-Prager friction),
+            # so a squeeze from the fingers leaves dents.
+            material = {
+                "mpm:young_modulus": 4.0e4,
+                "mpm:poisson_ratio": 0.3,
+                "mpm:yield_stress": args.yield_stress,
+                "mpm:friction": 0.0,
+            }
         material["mpm:tensile_yield_ratio"] = 1.0
         # Foam and dough are viscoelastic; the relaxation time lets the ball come to rest.
         material["mpm:damping"] = args.ball_damping
@@ -215,9 +223,10 @@ class Example:
         self.records = []
         self.hold_impulse = np.zeros(self.model.body_count)
         self.settled_ball = None
+        self.peak_deformation = 0.0
 
         self.viewer.set_model(self.model)
-        self.viewer.set_camera(pos=wp.vec3(0.32, -0.32, 0.3), pitch=-24.0, yaw=135.0)
+        self.viewer.set_camera(pos=wp.vec3(0.04, -0.36, 0.25), pitch=-6.0, yaw=90.0)
         self.viewer.show_particles = True
         if hasattr(self.viewer, "register_ui_callback"):
             self.viewer.register_ui_callback(self.render_ui, position="side")
@@ -261,6 +270,8 @@ class Example:
             # Material contact impulse on each hand link in the last substep.
             impulse = self.solver.environment.material_impulses.numpy()
             self.hold_impulse = np.maximum(self.hold_impulse, np.linalg.norm(impulse[:, :3], axis=1))
+            if self.frame % 6 == 0:
+                self.peak_deformation = max(self.peak_deformation, self.residual_deformation())
 
     def _record(self, offset, fingers, thumb):
         q = self.state_0.joint_q.numpy()
@@ -337,8 +348,9 @@ class Example:
             or sum(f in n for n in loaded for f in ("index", "middle", "ring", "pinky")) < 2
         ):
             raise AssertionError(f"The ball is not held by the thumb and two fingers: {loaded}")
-        # Contact stops the force-limited fingers short of their joint limits.
-        if np.min(fingers.mean(axis=0) / self.finger_upper) > 0.95:
+        # Elastic contact stops the force-limited fingers short of their joint
+        # limits; the fingers sink into yielding dough.
+        if self.args.material == "elastic" and np.min(fingers.mean(axis=0) / self.finger_upper) > 0.95:
             raise AssertionError(f"No finger stopped on the ball: {np.rad2deg(fingers.mean(axis=0))} deg")
         lift = min(r["ball_bottom"] for r in hold) - TABLE_TOP
         if lift < 0.9 * LIFT:
@@ -352,9 +364,15 @@ class Example:
         released = self.records[-1]
         if abs(released["ball_bottom"] - TABLE_TOP) > 0.003:
             raise AssertionError(f"The released ball is not on the table: {released['ball_bottom'] - TABLE_TOP}")
-        residual = self.residual_deformation()
+        # Deformation kept after release, relative to the deformation while held.
+        kept = self.residual_deformation() / max(self.peak_deformation, 1.0e-9)
+        if self.args.material == "elastic" and kept > 0.7:
+            raise AssertionError(f"The elastic ball kept {kept:.0%} of its grasp deformation")
+        if self.args.material == "plastic" and kept < 0.8:
+            raise AssertionError(f"The plastic ball kept only {kept:.0%} of its grasp deformation")
         print(
-            f"[HandGrasp] PASS: {self.summary()}, loaded links {loaded}, residual deformation {residual * 1e3:.2f} mm",
+            f"[HandGrasp] PASS: {self.summary()}, loaded links {loaded}, "
+            f"grasp deformation {self.peak_deformation * 1e3:.2f} mm, {kept:.0%} kept after release",
             flush=True,
         )
 
