@@ -841,9 +841,10 @@ class _ReorderedGaussSeidelSolver(_RheologySolver):
         num_blocks_capacity = self.rheology.color_blocks.shape[1]
 
         # Flat offsets: prefix sum over color-block sizes (fully written by kernel)
-        block_flat_offsets = fem.borrow_temporary(
+        self._block_flat_offsets = fem.borrow_temporary(
             temporary_store, shape=(num_blocks_capacity + 1,), dtype=int, device=self.device
         )
+        block_flat_offsets = self._block_flat_offsets
         wp.launch(
             kernel=build_flat_offsets,
             dim=1,
@@ -959,7 +960,8 @@ class _ReorderedGaussSeidelSolver(_RheologySolver):
             inputs=[
                 0,
                 color_launch_dim,
-                self._flat_color_offsets,
+                self.rheology.color_offsets,
+                self._block_flat_offsets,
                 self._flat_constraint_ids,
                 self._reordered_n_entries,
                 self._reordered_cols,
@@ -1007,6 +1009,7 @@ class _ReorderedGaussSeidelSolver(_RheologySolver):
     def release(self):
         super().release()
         self._flat_color_offsets.release()
+        self._block_flat_offsets.release()
         self._flat_constraint_ids.release()
         self._reordered_n_entries.release()
         self._reordered_cols.release()

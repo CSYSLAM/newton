@@ -1076,6 +1076,49 @@ class TestMJMPMCUDA(unittest.TestCase):
         np.testing.assert_allclose(captured.joint_qd.numpy(), eager.joint_qd.numpy(), atol=1.0e-4)
         np.testing.assert_allclose(captured.body_qd.numpy(), eager.body_qd.numpy(), atol=1.0e-4)
 
+    def test_reordered_gauss_seidel_matches_gauss_seidel(self):
+        """Solve the several strain nodes of a P1d cell in order in the reordered layout."""
+        results = {}
+        for solver_name in ("gs", "gs-soa"):
+            builder = newton.ModelBuilder()
+            SolverMJMPM.register_custom_attributes(builder)
+            builder.add_particle_grid(
+                pos=wp.vec3(0.405, -0.275, 0.0055),
+                rot=wp.quat_identity(),
+                vel=wp.vec3(0.0),
+                dim_x=6,
+                dim_y=6,
+                dim_z=8,
+                cell_x=0.01,
+                cell_y=0.01,
+                cell_z=0.01,
+                mass=0.00025,
+                radius_mean=0.005,
+                jitter=0.0,
+                custom_attributes={"mpm:young_modulus": 1.6e4, "mpm:poisson_ratio": 0.36, "mpm:yield_stress": 1.0e6},
+            )
+            builder.add_ground_plane()
+            model = builder.finalize(device="cuda:0")
+            solver = SolverMJMPM(
+                model,
+                mpm_options={
+                    "grid_type": "fixed",
+                    "voxel_size": 0.015,
+                    "grid_padding": 3,
+                    "max_active_cell_count": 512,
+                    "max_iterations": 50,
+                    "strain_basis": "P1d",
+                    "solver": solver_name,
+                    "air_drag": 0.0,
+                },
+            )
+            state = model.state()
+            for _ in range(30):
+                solver.step(state, state, None, None, 1.0 / 600.0)
+            results[solver_name] = state.particle_q.numpy()
+        self.assertTrue(np.isfinite(results["gs-soa"]).all())
+        np.testing.assert_allclose(results["gs-soa"], results["gs"], atol=1.0e-5)
+
     def _check_graph_matches_eager(self, collider_basis, iterations):
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         SolverMJMPM.register_custom_attributes(builder)

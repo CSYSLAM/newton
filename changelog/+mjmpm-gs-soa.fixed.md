@@ -1,0 +1,1 @@
+Fix NaN results of the experimental `SolverMJMPM` with `mpm_options={"solver": "gs-soa"}` and strain bases with several nodes per cell (such as `P1d`) on CUDA devices, where strain nodes sharing velocity nodes were solved concurrently.

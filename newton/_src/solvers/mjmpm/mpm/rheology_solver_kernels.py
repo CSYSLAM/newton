@@ -1169,7 +1169,9 @@ def make_reordered_gs_solve_kernel(
     The kernel processes strain nodes in color order (one launch per color),
     with a statically unrolled gather loop over the reordered SoA arrays for
     coalesced memory access.  Gather, local solve, and velocity scatter are
-    fused into a single kernel launch per color.
+    fused into a single kernel launch per color.  Like the AoS kernel, one
+    thread solves each color block in order, because the strain nodes of a
+    block (for example the P1d nodes of one cell) share velocity nodes.
     """
     key = (has_viscosity, has_dilatancy, has_compliance_mat, has_rotation, max_entries)
 
@@ -1177,7 +1179,8 @@ def make_reordered_gs_solve_kernel(
     def reordered_gs_solve_kernel_impl(
         color: int,
         launch_dim: int,
-        flat_color_offsets: wp.array[int],
+        color_offsets: wp.array[int],
+        block_flat_offsets: wp.array[int],
         flat_constraint_ids: wp.array[int],
         reordered_n_entries: wp.array[int],
         reordered_cols: wp.array2d[int],
@@ -1198,38 +1201,39 @@ def make_reordered_gs_solve_kernel(
         delta_correction: wp.array[vec6],
     ):
         i = wp.tid()
-        for fi in range(flat_color_offsets[color] + i, flat_color_offsets[color + 1], launch_dim):
-            tau_i = flat_constraint_ids[fi]
-            n = reordered_n_entries[fi]
+        for block in range(color_offsets[color] + i, color_offsets[color + 1], launch_dim):
+            for fi in range(block_flat_offsets[block], block_flat_offsets[block + 1]):
+                tau_i = flat_constraint_ids[fi]
+                n = reordered_n_entries[fi]
 
-            # Gather (statically unrolled; zero-padded entries contribute nothing)
-            tau = local_strain_rhs[tau_i]
-            for k in range(wp.static(max_entries)):
-                col = reordered_cols[k, fi]
-                val = wp.vec3(reordered_vals_x[k, fi], reordered_vals_y[k, fi], reordered_vals_z[k, fi])
-                tau += _symmetric_part_op(val, velocities[col])
+                # Gather (statically unrolled; zero-padded entries contribute nothing)
+                tau = local_strain_rhs[tau_i]
+                for k in range(wp.static(max_entries)):
+                    col = reordered_cols[k, fi]
+                    val = wp.vec3(reordered_vals_x[k, fi], reordered_vals_y[k, fi], reordered_vals_z[k, fi])
+                    tau += _symmetric_part_op(val, velocities[col])
 
-            if wp.static(has_compliance_mat):
-                for b in range(compliance_mat_offsets[tau_i], compliance_mat_offsets[tau_i + 1]):
-                    tau += compliance_mat_values[b] @ local_stress[compliance_mat_columns[b]]
+                if wp.static(has_compliance_mat):
+                    for b in range(compliance_mat_offsets[tau_i], compliance_mat_offsets[tau_i + 1]):
+                        tau += compliance_mat_values[b] @ local_stress[compliance_mat_columns[b]]
 
-            ds = wp.static(make_solve_local_stress(has_viscosity, has_dilatancy, has_rotation))(
-                tau_i,
-                tau,
-                yield_params,
-                strain_node_volume,
-                delassus_diagonal,
-                delassus_rotation,
-                local_stress,
-            )
-            local_stress[tau_i] += ds
-            delta_correction[tau_i] = ds
+                ds = wp.static(make_solve_local_stress(has_viscosity, has_dilatancy, has_rotation))(
+                    tau_i,
+                    tau,
+                    yield_params,
+                    strain_node_volume,
+                    delassus_diagonal,
+                    delassus_rotation,
+                    local_stress,
+                )
+                local_stress[tau_i] += ds
+                delta_correction[tau_i] = ds
 
-            # Scatter
-            for k in range(n):
-                col = reordered_cols[k, fi]
-                val = wp.vec3(reordered_vals_x[k, fi], reordered_vals_y[k, fi], reordered_vals_z[k, fi])
-                velocities[col] += inv_mass_matrix[col] * _symmetric_part_transposed_op(val, ds)
+                # Scatter
+                for k in range(n):
+                    col = reordered_cols[k, fi]
+                    val = wp.vec3(reordered_vals_x[k, fi], reordered_vals_y[k, fi], reordered_vals_z[k, fi])
+                    velocities[col] += inv_mass_matrix[col] * _symmetric_part_transposed_op(val, ds)
 
     return reordered_gs_solve_kernel_impl
 
