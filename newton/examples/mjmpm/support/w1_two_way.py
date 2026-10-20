@@ -232,6 +232,7 @@ class W1MJMPMScene:
                 "grid_padding": 20,
                 "max_active_cell_count": 512,
                 "strain_basis": args.strain_basis,
+                "collider_basis": "pic48",
                 "max_iterations": args.iterations,
                 "stall_tolerance": args.stall_tolerance,
                 "solver": args.mpm_solver,
@@ -544,7 +545,9 @@ class W1MJMPMScene:
             default=4,
             help="IK iterations per frame, each started from the previous frame's solution.",
         )
-        parser.add_argument("--strain-basis", choices=("P0", "P1d", "Q1d"), default="P1d")
+        # Squeezed on the coarse grid, up to about 40 particles share a cell; a fixed
+        # particle-basis capacity keeps captured frames within it.
+        parser.add_argument("--strain-basis", choices=("P0", "P1d", "Q1d", "pic48"), default="pic48")
         parser.add_argument("--arm-kp", type=float, default=12000.0, help="Arm drive stiffness [N*m/rad].")
         parser.add_argument("--arm-kd", type=float, default=350.0, help="Arm drive damping [N*m*s/rad].")
         parser.add_argument("--finger-kp", type=float, default=1000.0, help="Finger drive stiffness [N/m].")
@@ -587,6 +590,6 @@ class W1MJMPMScene:
             help="Move the robot links through the MuJoCo link mobility in MPM contacts instead of proxy inertia "
             "(two-way coupling only).",
         )
-        parser.add_argument("--voxel-size", type=float, default=0.015, help="MPM grid cell size [m].")
+        parser.add_argument("--voxel-size", type=float, default=0.04, help="MPM grid cell size [m].")
         parser.add_argument("--no-cuda-graph", action="store_true")
         return parser

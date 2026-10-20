@@ -80,11 +80,19 @@ The MPM environment owns the left free rigid block and the right elastic
 particle cube. The robot closes both grippers, lifts both objects by 0.15 m,
 holds, lowers, and releases them. Finger effort limits remain 10 N.
 
-The soft cube uses 288 particles with the reference density and equivalent
-small-strain Young's modulus and Poisson ratio. It uses a discontinuous linear
-strain basis to resolve the localized squeeze. Jacobi iterations are cheaper
-per substep than Gauss-Seidel here but converge more slowly; capped too early,
-they let the squeezed material be ejected, so the example allows 60.
+The soft cube uses the reference density and equivalent small-strain Young's
+modulus and Poisson ratio, sampled by 4 x 4 x 6 particles on a 4 cm grid with
+a per-particle strain basis (``pic48``). On a 1.5 cm grid with 288 particles
+and a per-cell linear strain basis, particles rearranged under the squeeze
+without recording strain, and the released cube kept about 3 mm of RMS
+deformation (66 x 64 x 89 mm instead of 60 x 60 x 80 mm). With the current
+sampling it returns to within about 1.5 mm. The coarse discretization is
+stiffer than the material parameters suggest: the fingers indent the cube by
+about 3.6 mm per side where about 8 mm is expected, and scaling Young's modulus
+by 0.35 restores that indentation while keeping the residual near 1.2 mm.
+Jacobi iterations are cheaper per substep than Gauss-Seidel here but converge
+more slowly; capped too early, they let the squeezed material be ejected, so
+the example allows 60.
 The scene selects ``rigid_contact_hard=False`` to use implicit spring/damper
 contacts from the shapes' ``ke`` and ``kd``, as in the reference scene. Hard
 rigid contacts remain the solver default. Compliant rigid contacts do not
