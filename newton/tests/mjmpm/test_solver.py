@@ -516,6 +516,7 @@ class TestMJMPMArticulation(unittest.TestCase):
         builder.add_shape_box(free, hx=0.1, hy=0.1, hz=0.1)
         model = builder.finalize(device="cpu")
         solver = SolverMJMPM(model, mujoco_options={"use_mujoco_cpu": True})
+        self.assertIsInstance(solver, newton.solvers.SolverBase)
         self.assertEqual(solver.ownership.mujoco_joints, (joint,))
         self.assertEqual(solver.ownership.mujoco_bodies, (body,))
         self.assertEqual(solver.ownership.mpm_bodies, (free,))

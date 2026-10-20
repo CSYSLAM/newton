@@ -15,13 +15,16 @@ import warp as wp
 
 from newton._src.sim import Model, ModelBuilder, ModelFlags
 from newton._src.sim.articulation import eval_ik
-from newton._src.solvers.mjmpm.base import SolverBase
 from newton._src.solvers.mjmpm.coupling.articulated import LinkMobility
 from newton._src.solvers.mjmpm.coupling.same_step import SameStepIteration
 from newton._src.solvers.mjmpm.coupling.solver_coupled_proxy import SolverCoupledProxy
 from newton._src.solvers.mjmpm.environment import Environment
 from newton._src.solvers.mjmpm.mpm.solver_implicit_mpm import SolverImplicitMPM
 from newton._src.solvers.mjmpm.ownership import resolve_ownership
+
+# The public API base keeps ``isinstance(solver, newton.solvers.SolverBase)``;
+# the private solvers composed below use the private copy in ``base.py``.
+from newton._src.solvers.solver import SolverBase
 
 
 @dataclass(frozen=True)

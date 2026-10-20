@@ -44,7 +44,12 @@ def main() -> None:
                 if not module.startswith("newton"):
                     continue
                 imports.add(module)
-                if module.startswith("newton._src.solvers.") and not module.startswith("newton._src.solvers.mjmpm."):
+                # The public solver must derive from the shared abstract API base;
+                # no shared solver implementation may be imported.
+                shared = module.startswith("newton._src.solvers.") and not module.startswith(
+                    "newton._src.solvers.mjmpm."
+                )
+                if shared and module != "newton._src.solvers.solver":
                     violations.append(f"{path.relative_to(ROOT)}:{node.lineno}: {module}")
                 if module == "newton.solvers":
                     violations.append(f"{path.relative_to(ROOT)}:{node.lineno}: public solver import")
