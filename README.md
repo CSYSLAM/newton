@@ -624,7 +624,7 @@ If you run the examples from a source checkout with uv, use
     </td>
     <td colspan="2">
       <b>MuJoCo–MPM five-finger hand grasp (experimental)</b><br>
-      A force-limited W1 hand grasps, lifts, and releases an elastic MPM ball, or dents a dough ball.<br>
+      A force-limited W1 hand grasps, lifts, and releases an elastic MPM block, or dents a dough block.<br>
       <code>python -m newton.examples mjmpm_hand_grasp</code><br>
       <code>python -m newton.examples mjmpm_hand_grasp --material plastic --articulated-response</code>
     </td>

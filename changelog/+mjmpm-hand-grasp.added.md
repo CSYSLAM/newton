@@ -1,1 +1,1 @@
-Add the experimental `mjmpm_hand_grasp` example, in which a five-finger DexForce W1 hand driven by MuJoCo grasps, lifts, and releases an elastic or plastic MPM ball through force-limited finger drives and mimic-coupled distal joints.
+Add the experimental `mjmpm_hand_grasp` example, in which a five-finger DexForce W1 hand driven by MuJoCo grasps, lifts, and releases an elastic or plastic MPM block through force-limited finger drives and mimic-coupled distal joints.

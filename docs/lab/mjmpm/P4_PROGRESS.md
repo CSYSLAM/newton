@@ -1,16 +1,21 @@
 # MJMPM P4 进度记录
 
-- 更新：2026-10-19
+- 更新：2026-10-21
 - 分支：`feature/mjmpm-two-way-grasp`（所有后续修改直接提交到此分支并推送到 `myfork`）
+- 详细数据见 [实施报告](README.md)“第三轮”一节与 [计划](../../plans/mujoco_mpm_coupling_plan.md)。
 
 ## 2026-10-20 更新
 
 - W1 双手挤压抓取提速：默认改为 P3、4 子步、Jacobi 60 次、刚体接触热启动 20 遍、IK 4 次，RTX 5060 Ti 上 10.5 → 44 FPS，15/15 次验收通过。详见实施报告“第四轮”。
 - 新增 `SolverMJMPM(rigid_warm_start=True)`：W1 刚体块夹持滑转的根因是环境刚体接触每步从零开始的摩擦冲量未收敛，热启动后转角 ≤ 0.1°。
 - MPM 偶发单粒子抛射/NaN 的原因是 Jacobi 30 次未收敛（与热启动无关），默认改为 60 次。
-- 灵巧手例子按用户要求暂停：工作区中已把球改为方块（弹性/塑性，塑性方块 `friction=0` 才会屈服，3 kPa 时残余 7.9 mm、弹性 2.0 mm），未提交。
-- 本机 `test_collider_bound_culling_preserves_rasterization` 报 CUDA 错误 700，HEAD 同样失败，未处理。
-- 详细数据见 [实施报告](README.md)“第三轮”一节与 [计划](../../plans/mujoco_mpm_coupling_plan.md)。
+- 灵巧手例子改为抓取方块（弹性/塑性，塑性方块 `friction=0` 才会屈服；3 kPa 时松开残余 7.9 mm、弹性 2.0 mm），已换截图、README 与 changelog。
+
+## 2026-10-21 更新
+
+- 求解器层面提速（结果不变或仅舍入差异）：碰撞体栅格化按（点，碰撞体）并行、MPM 准备阶段与刚体接触双流重叠、连杆接触响应每步并行预计算；新增可选的并行 Jacobi 刚体接触（W1 中夹持质量变差，默认仍为 GS）；停滞残差提前结束。详见实施报告第五、六轮。
+- W1 软块松开后形状恢复：4 cm 网格、4 × 4 × 6 粒子、逐粒子应变基 `pic48`，残余 3.0 → 0.46 mm，64 FPS；粗离散使软块偏硬（压入 3.6 mm/侧）。详见第七轮。
+- `test_collider_bound_culling_preserves_rasterization` 的 CUDA 错误 700 是测试在 CPU 模型上用 CUDA 建数组所致，已修复；MJMPM 测试 44/44 通过。
 
 ## 已完成
 
