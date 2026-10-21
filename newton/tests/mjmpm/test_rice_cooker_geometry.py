@@ -45,9 +45,17 @@ class TestRiceCookerGeometry(unittest.TestCase):
         for center, half in HANDLE_BOXES:
             self.assertFalse(np.all(np.abs(opening - np.asarray(center)) <= half))
 
-        # Detect stale Blender exports when the physical shell changes.
+        # The display wall is thin, while its inner contact boundary and floor
+        # agree with the outward-thickened numerical shell.
+        visual, _ = rice_cooker_geometry.cup_visual_mesh(segments=96)
+        physical, _ = cup_mesh(segments=96)
+        np.testing.assert_array_equal(visual[1 + 3 * 96 :], physical[1 + 3 * 96 :])
+        thickness = np.linalg.norm(visual[1 + 2 * 96 : 1 + 3 * 96, :2] - visual[1 + 3 * 96 : 1 + 4 * 96, :2], axis=1)
+        np.testing.assert_allclose(thickness, 0.002, atol=1e-7)
+
+        # Detect stale Blender exports independently of the numerical thickness.
         path = Path(rice_cooker_geometry.__file__).parents[1] / "assets/rice_cooker/realistic_visuals.npz"
         with np.load(path, allow_pickle=False) as archive:
             part = next(p for p in json.loads(str(archive["manifest"])) if p["name"] == "Newton pitcher shell")
             displayed = archive[part["key"] + "_points"]
-        np.testing.assert_array_equal(np.unique(displayed, axis=0), np.unique(vertices, axis=0))
+        np.testing.assert_array_equal(np.unique(displayed, axis=0), np.unique(visual, axis=0))

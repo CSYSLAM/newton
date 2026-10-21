@@ -13,9 +13,9 @@ CUP_HEIGHT = 0.085
 CUP_WALL = 0.015
 HANDLE_CENTER = np.array((-0.060, 0.0, 0.050))
 HANDLE_BOXES = (
-    ((-0.060, 0.0, 0.062), (0.025, 0.012, 0.003)),
-    ((-0.060, 0.0, 0.038), (0.025, 0.012, 0.003)),
-    ((-0.082, 0.0, 0.050), (0.003, 0.012, 0.009)),
+    ((-0.060, 0.0, 0.062), (0.025, 0.006, 0.003)),
+    ((-0.060, 0.0, 0.038), (0.025, 0.006, 0.003)),
+    ((-0.082, 0.0, 0.050), (0.003, 0.006, 0.009)),
 )
 
 
@@ -61,3 +61,18 @@ def cup_inner_radius(height):
     """Return the unflared inner radius at a local height [m]."""
     fraction = np.clip((height - CUP_WALL) / (CUP_HEIGHT - CUP_WALL), 0.0, 1.0)
     return CUP_BOTTOM_RADIUS - CUP_WALL + (CUP_RADIUS - CUP_BOTTOM_RADIUS) * fraction
+
+
+def cup_visual_mesh(*, segments=96):
+    """Return a 2 mm display shell sharing the collision cup's inner surface.
+
+    MPM's numerical wall extends outward from this surface. It is deliberately
+    thicker than the visible wall, preserving the material boundary and floor.
+    """
+    vertices, triangles = cup_mesh(segments=segments)
+    for ring in range(3):
+        selection = slice(1 + ring * segments, 1 + (ring + 1) * segments)
+        xy = vertices[selection, :2]
+        radius = np.linalg.norm(xy, axis=1, keepdims=True)
+        vertices[selection, :2] *= (radius - (CUP_WALL - 0.002)) / radius
+    return vertices, triangles

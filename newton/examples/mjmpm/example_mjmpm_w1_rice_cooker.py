@@ -49,7 +49,7 @@ from newton.examples.mjmpm.support.w1_two_way import (
 # Cup body: origin at the bottom centre. Walls are one MPM cell thick so grains
 # cannot tunnel through them.
 CUP_ORIGIN = np.array((0.49, -0.25))
-# The open handle has a 24 mm width between the gripper's finger pads.
+# The molded handle has a 12 mm width between the gripper's finger pads.
 RICE_SPACING = 0.0035
 RICE_FILL = 0.050
 RICE_DENSITY = 850.0
@@ -361,7 +361,8 @@ class Example(W1MJMPMScene):
         # fingers support its load without a delayed reaction or final projection.
         parser.set_defaults(
             substeps=6,
-            rigid_iterations=40,
+            rigid_iterations=60,
+            finger_kp=2500.0,
             voxel_size=0.015,
             strain_basis="P0",
             mpm_solver="gs",

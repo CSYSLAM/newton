@@ -37,7 +37,7 @@ class RiceCookerVisuals:
                     name,
                     wp.array(archive[key + "_points"], dtype=wp.vec3, device=device),
                     wp.array(archive[key + "_indices"], dtype=wp.int32, device=device),
-                    normals=wp.array(archive[key + "_normals"], dtype=wp.vec3, device=device),
+                    normals=wp.array(archive[key + "_normals"].astype(np.float32), dtype=wp.vec3, device=device),
                     hidden=True,
                     backface_culling=False,
                     color=tuple(part["color"]),

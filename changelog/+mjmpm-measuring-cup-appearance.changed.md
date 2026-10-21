@@ -1,0 +1,1 @@
+Give the MJMPM rice-cooker measuring cup a separate thin visual shell, rolled lip, continuous clear handle, silicone grip and curved calibrated millilitre scale. Keep the material-contact boundary aligned with the numerical shell and adjust the thinner handle's grasp settings without changing the 1,478-sample rice fill.
