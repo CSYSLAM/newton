@@ -58,14 +58,18 @@ class Environment(SolverBase, CouplingInterface):
         rigid_contact_hard=True,
         rigid_warm_start=False,
         rigid_solver="gauss_seidel",
+        rigid_material_coupling="implicit",
     ):
         super().__init__(model)
         if rigid_solver not in ("gauss_seidel", "jacobi"):
             raise ValueError("rigid_solver must be 'gauss_seidel' or 'jacobi'")
+        if rigid_material_coupling not in ("implicit", "lagged"):
+            raise ValueError("rigid_material_coupling must be 'implicit' or 'lagged'")
         self.rigid_iterations = rigid_iterations
         self.rigid_contact_hard = rigid_contact_hard
         self.rigid_warm_start = rigid_warm_start
         self.rigid_solver = rigid_solver
+        self.rigid_material_coupling = rigid_material_coupling
         config = SolverImplicitMPM.Config()
         config.separate_worlds = True
         # Sample contact at material particles, whose physical extent is given
@@ -109,6 +113,15 @@ class Environment(SolverBase, CouplingInterface):
         self.material_impulses = wp.zeros_like(self.rigid_impulses)
         self.work = model.state()
         self._all_worlds = wp.full(model.world_count + 1, True, dtype=wp.bool, device=model.device)
+        # Lagged rigid-material coupling: the material solve sees free rigid
+        # bodies as kinematic, and its reaction reaches them at the start of the
+        # next step, before the rigid contact solve.
+        self._lagged_material = None
+        if self.material is not None and model.body_count and rigid_material_coupling == "lagged":
+            self._lagged_material = wp.zeros_like(self.rigid_impulses)
+            self._lagged_material_saved = wp.zeros_like(self.rigid_impulses)
+            self._immediate_material = wp.zeros_like(self.rigid_impulses)
+            self.material.setup_collider(body_q=model.body_q, body_mass=self._material_body_mass())
         # The material terms that read only particles overlap the latency-bound
         # rigid contact solve on a second stream.
         self._material_stream = None
@@ -518,9 +531,21 @@ class Environment(SolverBase, CouplingInterface):
             device=self.model.device,
         )
 
+    def _material_body_mass(self):
+        """Body masses seen by the material solve: zero for free rigid bodies under lagged coupling."""
+        model = self.model
+        mass = model.body_mass.numpy().copy()
+        flags = model.body_flags.numpy()
+        free = (flags & (int(BodyFlags.KINEMATIC) | int(BodyFlags.PROXY))) == 0
+        mass[free] = 0.0
+        mass[(flags & int(BodyFlags.KINEMATIC)) != 0] = 0.0
+        return wp.array(mass, dtype=float, device=model.device)
+
     def coupling_save_iteration_state(self):
         """Save history overwritten by a step before the same step is re-solved."""
         self._reuse_contacts = False
+        if self._lagged_material is not None:
+            wp.copy(self._lagged_material_saved, self._lagged_material)
         if self.material is not None:
             self.material.coupling_save_iteration_state()
 
@@ -531,6 +556,8 @@ class Environment(SolverBase, CouplingInterface):
         the first pass's detection.
         """
         self._reuse_contacts = True
+        if self._lagged_material is not None:
+            wp.copy(self._lagged_material, self._lagged_material_saved)
         if self.material is not None:
             self.material.coupling_restore_iteration_state()
 
@@ -544,7 +571,8 @@ class Environment(SolverBase, CouplingInterface):
         if self.material is not None:
             self.material.notify_model_changed(flags)
             if flags & ModelFlags.BODY_INERTIAL_PROPERTIES:
-                self.material.setup_collider(body_q=self.model.body_q)
+                body_mass = self._material_body_mass() if self._lagged_material is not None else None
+                self.material.setup_collider(body_q=self.model.body_q, body_mass=body_mass)
 
     def coupling_harvest_proxy_wrenches(
         self, body_local_to_proxy_global, out_body_f, *, body_qd_before, state, state_out, contacts, dt
@@ -597,6 +625,22 @@ class Environment(SolverBase, CouplingInterface):
                 ],
                 device=model.device,
             )
+            if self._lagged_material is not None:
+                # Last step's material reaction on free bodies, so that the
+                # contact solve below holds against it.
+                wp.launch(
+                    kernels.apply_material_impulses,
+                    dim=model.body_count,
+                    inputs=[
+                        self._lagged_material,
+                        work.body_q,
+                        work.body_qd,
+                        model.body_inv_mass,
+                        model.body_inv_inertia,
+                        model.body_flags,
+                    ],
+                    device=model.device,
+                )
             if not self._reuse_contacts:
                 self.detector.collide(work, self.contacts)
             self._reuse_contacts = False
@@ -623,11 +667,21 @@ class Environment(SolverBase, CouplingInterface):
                 )
                 if self._mobility is not None:
                     wp.copy(self._qd_before_contacts, work.body_qd)
+                applied = self.material_impulses
+                if self._lagged_material is not None:
+                    wp.launch(
+                        kernels.split_lagged_material_impulses,
+                        dim=model.body_count,
+                        inputs=[self.material_impulses, model.body_inv_mass, model.body_flags],
+                        outputs=[self._immediate_material, self._lagged_material],
+                        device=model.device,
+                    )
+                    applied = self._immediate_material
                 wp.launch(
                     kernels.apply_material_impulses,
                     dim=model.body_count,
                     inputs=[
-                        self.material_impulses,
+                        applied,
                         work.body_q,
                         work.body_qd,
                         model.body_inv_mass,
@@ -678,4 +732,6 @@ class Environment(SolverBase, CouplingInterface):
             )
         if self.material is not None:
             self.material.reset(state, world_mask=mask, flags=flags)
+        if self._lagged_material is not None:
+            self._lagged_material.zero_()
         self.detector.reset_contact_matching(world_mask=world_mask)

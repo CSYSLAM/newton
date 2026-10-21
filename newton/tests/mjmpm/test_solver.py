@@ -395,6 +395,48 @@ class TestMJMPMMaterial(unittest.TestCase):
         np.testing.assert_allclose(momentum(), initial, atol=2.0e-4)
         self.assertGreater(float(state.body_qd.numpy()[body, 0]), 1.0e-4)
 
+    def test_lagged_material_coupling_holds_loaded_tray_on_slope(self):
+        """Hold a friction-supported tray under a layer of grains with lagged rigid-material coupling.
+
+        With implicit coupling the grains' load reaches the tray after its
+        contact solve each step, and the tray creeps down the slope (about
+        11 mm in 1 s); lagged coupling applies it before the contact solve.
+        """
+        slope = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), float(np.deg2rad(20.0)))
+        builder = newton.ModelBuilder()
+        SolverMJMPM.register_custom_attributes(builder)
+        cfg = newton.ModelBuilder.ShapeConfig(density=500.0, mu=0.8)
+        builder.add_shape_box(-1, xform=wp.transform(wp.vec3(0.0, 0.0, -0.05), slope), hx=0.5, hy=0.3, hz=0.05, cfg=cfg)
+        tray_pose = wp.transform(wp.quat_rotate(slope, wp.vec3(0.0, 0.0, 0.0201)), slope)
+        tray = builder.add_body(xform=tray_pose)
+        builder.add_shape_box(tray, hx=0.08, hy=0.08, hz=0.02, cfg=cfg)
+        spacing = 0.02
+        for i in range(6):
+            for j in range(6):
+                for k in range(2):
+                    local = wp.vec3(-0.05 + i * spacing, -0.05 + j * spacing, 0.03 + k * spacing)
+                    builder.add_particle(
+                        wp.transform_point(tray_pose, local), wp.vec3(0.0), 1600.0 * spacing**3, 0.5 * spacing
+                    )
+        model = builder.finalize(device="cpu")
+        options = {
+            "grid_type": "dense",
+            "voxel_size": 0.04,
+            "max_iterations": 20,
+            "solver": "jacobi",
+            "warmstart_mode": "none",
+        }
+        solver = SolverMJMPM(model, rigid_material_coupling="lagged", mpm_options=options)
+        state = model.state()
+        start = state.body_q.numpy()[tray, :3].copy()
+        for _ in range(240):
+            solver.step(state, state, None, None, 1.0 / 240.0)
+        # Motion along the slope; the tray settles about 3 mm normal to it as the grains land.
+        downhill = np.asarray(wp.quat_rotate(slope, wp.vec3(1.0, 0.0, 0.0)))
+        self.assertLess(abs(float((state.body_q.numpy()[tray, :3] - start) @ downhill)), 2.0e-4)
+        self.assertLess(float(np.linalg.norm(state.body_qd.numpy()[tray])), 1.0e-3)
+        self.assertTrue(np.isfinite(state.particle_q.numpy()).all())
+
     def test_stall_exit_keeps_resting_material(self):
         """End stalled Jacobi solves early without moving resting material."""
 

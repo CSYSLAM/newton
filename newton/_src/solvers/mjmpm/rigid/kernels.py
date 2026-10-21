@@ -1247,6 +1247,25 @@ def apply_material_impulses(
 
 
 @wp.kernel
+def split_lagged_material_impulses(
+    impulse: wp.array[wp.spatial_vector],
+    mass_inv: wp.array[float],
+    flags: wp.array[int],
+    immediate: wp.array[wp.spatial_vector],
+    lagged: wp.array[wp.spatial_vector],
+):
+    """Defer the material impulses on free rigid bodies to the next step; keep the proxies' immediate."""
+    i = wp.tid()
+    zero = wp.spatial_vector(wp.vec3(0.0), wp.vec3(0.0))
+    if mass_inv[i] > 0.0 and (flags[i] & (BodyFlags.KINEMATIC | BodyFlags.PROXY)) == 0:
+        immediate[i] = zero
+        lagged[i] = impulse[i]
+    else:
+        immediate[i] = impulse[i]
+        lagged[i] = zero
+
+
+@wp.kernel
 def harvest_feedback(
     mapping: wp.array[int],
     impulses: wp.array[wp.spatial_vector],

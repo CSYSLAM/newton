@@ -69,6 +69,15 @@ class SolverMJMPM(SolverBase):
             splitting); it converges to the same contact impulses but needs
             more ``rigid_iterations`` per step, and atomic accumulation
             makes the result vary slightly from run to run.
+        rigid_material_coupling: How material and environment rigid bodies
+            exchange impulses. ``"implicit"`` lets free rigid bodies move inside
+            the material solve and applies the material impulses after the rigid
+            contact solve of the same step. A body held by contacts, such as a
+            gripped container of grains, then creeps in the grip by about
+            ``F / m * dt`` per unit time. ``"lagged"`` treats free rigid bodies
+            as kinematic in the material solve and applies its reaction at the
+            start of the next step, before the rigid contact solve, so contacts
+            hold against it. Articulation proxies are unaffected.
         rigid_contact_hard: Use hard rigid contact constraints. If False, use
             implicit spring/damper contacts from the shapes' ``ke`` and ``kd``.
         mass_scale: Virtual articulation proxy inertia multiplier. With
@@ -112,6 +121,7 @@ class SolverMJMPM(SolverBase):
         rigid_contact_hard: bool = True,
         rigid_warm_start: bool = False,
         rigid_solver: str = "gauss_seidel",
+        rigid_material_coupling: str = "implicit",
         mass_scale: float = 1.0,
         relaxation: float = 1.0,
         relaxation_mode: str = "fixed",
@@ -159,6 +169,7 @@ class SolverMJMPM(SolverBase):
                 rigid_contact_hard=rigid_contact_hard,
                 rigid_warm_start=rigid_warm_start,
                 rigid_solver=rigid_solver,
+                rigid_material_coupling=rigid_material_coupling,
             )
 
         self._iteration = None

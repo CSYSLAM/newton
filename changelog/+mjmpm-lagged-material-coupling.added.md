@@ -1,0 +1,1 @@
+Add `rigid_material_coupling="lagged"` to the experimental `SolverMJMPM`. It treats free rigid bodies as kinematic in the material solve and applies the material reaction before the next rigid contact solve, so a gripped container of grains no longer creeps in the grip by about `F / m * dt` per unit time. The default `"implicit"` coupling is unchanged.
