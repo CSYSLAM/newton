@@ -716,6 +716,7 @@ def solve_contact_buckets(
     impulses: wp.array[wp.vec3],
     body_impulse: wp.array[wp.spatial_vector],
     iterations: int,
+    fallback: wp.array[int],
 ):
     """Run sequential projected-impulse sweeps independently for each world.
 
@@ -726,8 +727,12 @@ def solve_contact_buckets(
     Nonzero initial ``impulses`` (warm starts) are applied before the sweeps.
     With ``point_mobility``, link sides use the responses evaluated by
     :func:`prepare_link_contact_responses` instead of mobility products.
+    With ``fallback``, only buckets flagged by :func:`solve_contact_buckets_local`
+    are solved.
     """
     bucket = wp.tid()
+    if fallback and fallback[bucket] == 0:
+        return
     first = begin[bucket]
     last = end[bucket]
     link_count = int(0)
@@ -881,6 +886,365 @@ def solve_contact_buckets(
                 point_mobility,
                 link_responses,
             )
+
+
+LOCAL_BODIES = 32
+"""Bodies per bucket that :func:`solve_contact_buckets_local` holds in local storage."""
+_local_values = wp.types.vector(length=LOCAL_BODIES, dtype=wp.float32)
+_local_bodies = wp.types.vector(length=LOCAL_BODIES, dtype=wp.int32)
+_local_links = wp.types.vector(length=MAX_RESPONSE_LINKS, dtype=wp.int32)
+
+
+@wp.struct
+class PackedContact:
+    """Sweep-invariant data of one contact, in sweep order."""
+
+    c: int
+    a: int
+    b: int
+    la: int
+    lb: int
+    slot_a: int
+    slot_b: int
+    ma: float
+    mb: float
+    ia: wp.mat33
+    ib: wp.mat33
+    ra: wp.vec3
+    rb: wp.vec3
+    normal: wp.vec3
+    params: wp.vec4
+    responses_a: int
+    responses_b: int
+    point_mobility: wp.mat33
+
+
+@wp.func
+def _packed_point_response(
+    responses: int, pm: wp.mat33, body: int, mass_inv: float, inertia_inv: wp.mat33, radius: wp.vec3, impulse: wp.vec3
+):
+    """Contact point response of one side; link sides always use precomputed responses here."""
+    if responses != 0:
+        return pm * impulse
+    if body < 0:
+        return wp.vec3(0.0)
+    return mass_inv * impulse + wp.cross(inertia_inv * wp.cross(radius, impulse), radius)
+
+
+@wp.func
+def _packed_inverse_mass(
+    responses: int, pm: wp.mat33, mass_inv: float, inertia_inv: wp.mat33, radius: wp.vec3, direction: wp.vec3
+):
+    if responses != 0:
+        return wp.dot(direction, pm * direction)
+    return impulse_mass(mass_inv, inertia_inv, radius, direction)
+
+
+@wp.kernel(enable_backward=False)
+def solve_contact_buckets_local(
+    begin: wp.array[int],
+    end: wp.array[int],
+    ids: wp.array[int],
+    bodies: wp.array[wp.vec2i],
+    ra_list: wp.array[wp.vec3],
+    rb_list: wp.array[wp.vec3],
+    normals: wp.array[wp.vec3],
+    params: wp.array[wp.vec4],
+    mass_inv: wp.array[float],
+    inertia_inv: wp.array[wp.mat33],
+    link_slot: wp.array[int],
+    link_body: wp.array2d[int],
+    mobility: wp.array3d[float],
+    contacted_links: wp.array2d[int],
+    contacted_count: wp.array[int],
+    point_mobility: wp.array[wp.mat33],
+    link_responses: wp.array2d[mat63],
+    qd: wp.array[wp.spatial_vector],
+    impulses: wp.array[wp.vec3],
+    body_impulse: wp.array[wp.spatial_vector],
+    iterations: int,
+    packed: wp.array[PackedContact],
+    fallback: wp.array[int],
+):
+    """:func:`solve_contact_buckets` with each bucket's body state in local storage.
+
+    A pre-pass packs the sweep-invariant contact data in sweep order and
+    gathers the bodies the bucket touches (contact sides and, through the link
+    responses, the contacted links of its world) into thread-local storage.
+    The sweeps then use the reference arithmetic and order on that state, so
+    the result is bitwise identical, and write velocities and body impulses
+    back once. A bucket that touches more than ``LOCAL_BODIES`` bodies, links
+    of several worlds, or links that need mobility products sets ``fallback``
+    and is left unchanged for :func:`solve_contact_buckets`.
+    """
+    bucket = wp.tid()
+    first = begin[bucket]
+    last = end[bucket]
+    fallback[bucket] = 0
+    link_count = int(0)
+    if link_body:
+        link_count = link_body.shape[1]
+
+    table = _local_bodies()
+    count = int(0)
+    world = int(-1)
+    ok = bool(True)
+    for k in range(first, last):
+        c = ids[k]
+        pair = bodies[c]
+        e = PackedContact()
+        e.c = c
+        e.a = pair[0]
+        e.b = pair[1]
+        e.la = -1
+        e.lb = -1
+        e.slot_a = -1
+        e.slot_b = -1
+        e.ma = 0.0
+        e.mb = 0.0
+        e.ia = wp.mat33(0.0)
+        e.ib = wp.mat33(0.0)
+        e.ra = ra_list[c]
+        e.rb = rb_list[c]
+        e.normal = normals[c]
+        e.params = params[c]
+        e.responses_a = 0
+        e.responses_b = 0
+        e.point_mobility = wp.mat33(0.0)
+        for side in range(2):
+            body = pair[side]
+            if body >= 0 and ok:
+                slot = int(-1)
+                if link_slot:
+                    slot = link_slot[body]
+                if slot >= 0:
+                    if not _uses_link_responses(slot, link_count, contacted_count, point_mobility):
+                        ok = False
+                    elif world < 0:
+                        world = slot // link_count
+                    elif world != slot // link_count:
+                        ok = False
+                found = int(-1)
+                for j in range(count):
+                    if table[j] == body:
+                        found = j
+                if found < 0:
+                    if count < LOCAL_BODIES:
+                        table[count] = body
+                        found = count
+                        count += 1
+                    else:
+                        ok = False
+                if slot >= 0:
+                    e.point_mobility = point_mobility[c]
+                if side == 0:
+                    e.responses_a = wp.where(slot >= 0, 1, 0)
+                    e.la = found
+                    e.slot_a = slot
+                    e.ma = mass_inv[body]
+                    e.ia = inertia_inv[body]
+                else:
+                    e.responses_b = wp.where(slot >= 0, 1, 0)
+                    e.lb = found
+                    e.slot_b = slot
+                    e.mb = mass_inv[body]
+                    e.ib = inertia_inv[body]
+        packed[k] = e
+    links = _local_links()
+    link_total = int(0)
+    if world >= 0 and ok:
+        link_total = contacted_count[world]
+        for k in range(link_total):
+            body = link_body[world, contacted_links[world, k]]
+            found = int(-1)
+            for j in range(count):
+                if table[j] == body:
+                    found = j
+            if found < 0:
+                if count < LOCAL_BODIES:
+                    table[count] = body
+                    found = count
+                    count += 1
+                else:
+                    ok = False
+            links[k] = found
+    if not ok:
+        fallback[bucket] = 1
+        return
+
+    # Velocities (v*) and body impulses (w*) by component, indexed by local body.
+    v0 = _local_values()
+    v1 = _local_values()
+    v2 = _local_values()
+    v3 = _local_values()
+    v4 = _local_values()
+    v5 = _local_values()
+    w0 = _local_values()
+    w1 = _local_values()
+    w2 = _local_values()
+    w3 = _local_values()
+    w4 = _local_values()
+    w5 = _local_values()
+    for j in range(count):
+        q = qd[table[j]]
+        v0[j] = q[0]
+        v1[j] = q[1]
+        v2[j] = q[2]
+        v3[j] = q[3]
+        v4[j] = q[4]
+        v5[j] = q[5]
+        f = body_impulse[table[j]]
+        w0[j] = f[0]
+        w1[j] = f[1]
+        w2[j] = f[2]
+        w3[j] = f[3]
+        w4[j] = f[4]
+        w5[j] = f[5]
+
+    for phase in range(iterations + 1):
+        for k in range(first, last):
+            e = packed[k]
+            a = e.a
+            b = e.b
+            if a < 0 and b < 0:
+                continue
+            c = e.c
+            ra = e.ra
+            rb = e.rb
+            ma = e.ma
+            mb = e.mb
+            ia = e.ia
+            ib = e.ib
+            slot_a = e.slot_a
+            slot_b = e.slot_b
+            delta = wp.vec3(0.0)
+            if phase == 0:
+                delta = impulses[c]
+                if delta == wp.vec3(0.0):
+                    continue
+            else:
+                va = wp.spatial_vector(wp.vec3(0.0), wp.vec3(0.0))
+                vb = wp.spatial_vector(wp.vec3(0.0), wp.vec3(0.0))
+                if a >= 0:
+                    j = e.la
+                    va = wp.spatial_vector(v0[j], v1[j], v2[j], v3[j], v4[j], v5[j])
+                if b >= 0:
+                    j = e.lb
+                    vb = wp.spatial_vector(v0[j], v1[j], v2[j], v3[j], v4[j], v5[j])
+                n = e.normal
+                p = e.params
+                target = p[0]
+                softness = p[1]
+                denom = p[2]
+                relative = point_velocity(vb, rb) - point_velocity(va, ra)
+                old = impulses[c]
+                normal_old = wp.dot(old, n)
+                normal_new = wp.max(
+                    0.0,
+                    normal_old
+                    + (target - wp.dot(relative, n) - softness * normal_old) / wp.max(denom + softness, 1.0e-12),
+                )
+                delta_n = (normal_new - normal_old) * n
+                if slot_a < 0 and slot_b < 0:
+                    relative = (
+                        relative
+                        + (ma + mb) * delta_n
+                        + wp.cross(ib * wp.cross(rb, delta_n), rb)
+                        + wp.cross(ia * wp.cross(ra, delta_n), ra)
+                    )
+                else:
+                    relative = (
+                        relative
+                        + _packed_point_response(e.responses_b, e.point_mobility, b, mb, ib, rb, delta_n)
+                        + _packed_point_response(e.responses_a, e.point_mobility, a, ma, ia, ra, delta_n)
+                    )
+                tangent_velocity = relative - n * wp.dot(relative, n)
+                tangent = old - normal_old * n
+                speed = wp.length(tangent_velocity)
+                if speed > 1.0e-9:
+                    direction = tangent_velocity / speed
+                    tangent_mass = _packed_inverse_mass(
+                        e.responses_a, e.point_mobility, ma, ia, ra, direction
+                    ) + _packed_inverse_mass(e.responses_b, e.point_mobility, mb, ib, rb, direction)
+                    tangent = tangent - tangent_velocity / wp.max(tangent_mass, 1.0e-12)
+                limit = p[3] * normal_new
+                if wp.length(tangent) > limit:
+                    tangent = wp.normalize(tangent) * limit
+                new = normal_new * n + tangent
+                delta = new - old
+                impulses[c] = new
+            if a >= 0 and ma > 0.0:
+                wrench_a = wp.spatial_vector(-delta, -wp.cross(ra, delta))
+                if slot_a >= 0:
+                    for k2 in range(link_total):
+                        change = link_responses[c, k2] * (-delta)
+                        j = links[k2]
+                        u = wp.spatial_vector(v0[j], v1[j], v2[j], v3[j], v4[j], v5[j]) + wp.spatial_vector(
+                            change[0], change[1], change[2], change[3], change[4], change[5]
+                        )
+                        v0[j] = u[0]
+                        v1[j] = u[1]
+                        v2[j] = u[2]
+                        v3[j] = u[3]
+                        v4[j] = u[4]
+                        v5[j] = u[5]
+                else:
+                    j = e.la
+                    u = wp.spatial_vector(v0[j], v1[j], v2[j], v3[j], v4[j], v5[j]) - wp.spatial_vector(
+                        ma * delta, ia * wp.cross(ra, delta)
+                    )
+                    v0[j] = u[0]
+                    v1[j] = u[1]
+                    v2[j] = u[2]
+                    v3[j] = u[3]
+                    v4[j] = u[4]
+                    v5[j] = u[5]
+                j = e.la
+                g = wp.spatial_vector(w0[j], w1[j], w2[j], w3[j], w4[j], w5[j]) + wrench_a
+                w0[j] = g[0]
+                w1[j] = g[1]
+                w2[j] = g[2]
+                w3[j] = g[3]
+                w4[j] = g[4]
+                w5[j] = g[5]
+            if b >= 0 and mb > 0.0:
+                wrench_b = wp.spatial_vector(delta, wp.cross(rb, delta))
+                if slot_b >= 0:
+                    for k2 in range(link_total):
+                        change = link_responses[c, k2] * delta
+                        j = links[k2]
+                        u = wp.spatial_vector(v0[j], v1[j], v2[j], v3[j], v4[j], v5[j]) + wp.spatial_vector(
+                            change[0], change[1], change[2], change[3], change[4], change[5]
+                        )
+                        v0[j] = u[0]
+                        v1[j] = u[1]
+                        v2[j] = u[2]
+                        v3[j] = u[3]
+                        v4[j] = u[4]
+                        v5[j] = u[5]
+                else:
+                    j = e.lb
+                    u = wp.spatial_vector(v0[j], v1[j], v2[j], v3[j], v4[j], v5[j]) + wp.spatial_vector(
+                        mb * delta, ib * wp.cross(rb, delta)
+                    )
+                    v0[j] = u[0]
+                    v1[j] = u[1]
+                    v2[j] = u[2]
+                    v3[j] = u[3]
+                    v4[j] = u[4]
+                    v5[j] = u[5]
+                j = e.lb
+                g = wp.spatial_vector(w0[j], w1[j], w2[j], w3[j], w4[j], w5[j]) + wrench_b
+                w0[j] = g[0]
+                w1[j] = g[1]
+                w2[j] = g[2]
+                w3[j] = g[3]
+                w4[j] = g[4]
+                w5[j] = g[5]
+
+    for j in range(count):
+        qd[table[j]] = wp.spatial_vector(v0[j], v1[j], v2[j], v3[j], v4[j], v5[j])
+        body_impulse[table[j]] = wp.spatial_vector(w0[j], w1[j], w2[j], w3[j], w4[j], w5[j])
 
 
 @wp.func

@@ -348,6 +348,72 @@ class TestMJMPMRigid(unittest.TestCase):
                     for expected, actual in zip(states[0], states[1], strict=True):
                         np.testing.assert_allclose(actual, expected, atol=atol)
 
+    def test_local_contact_buckets_match_reference(self):
+        """Reproduce the reference sweeps bitwise on bucket-local body state, and fall back when crowded."""
+
+        def stack(worlds, boxes, device):
+            local = newton.ModelBuilder()
+            cfg = newton.ModelBuilder.ShapeConfig(density=500.0, ke=2.0e4, kd=50.0, mu=0.6)
+            for i in range(boxes):
+                body = local.add_body(
+                    xform=wp.transform(
+                        wp.vec3(0.03 * (i % 2), 0.25 * (i // 6), 0.06 + 0.11 * (i % 6)),
+                        wp.quat_from_axis_angle(wp.vec3(0, 0, 1), 0.2 * i),
+                    )
+                )
+                local.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05, cfg=cfg)
+            builder = newton.ModelBuilder()
+            SolverMJMPM.register_custom_attributes(builder)
+            for world in range(worlds):
+                builder.add_world(local, xform=wp.transform(wp.vec3(world * 2.0, 0.0, 0.0), wp.quat_identity()))
+            builder.add_ground_plane(cfg=cfg)
+            return builder.finalize(device=device)
+
+        def run(model, steps, dt, **kwargs):
+            # Contact order from CUDA detection varies between runs, so compare
+            # the two sweeps on the same inputs within each solve.
+            solver = SolverMJMPM(model, **kwargs)
+            env = solver.environment
+            sweep = env._solve_contacts_gauss_seidel
+            outputs = (env.contact_impulses, env.rigid_impulses)
+            stats = {"solves": 0, "fallback": 0, "impulse": 0.0}
+
+            def compare(work):
+                saved = [wp.clone(a) for a in (work.body_qd, *outputs)]
+                env._use_local_rigid_buckets = False
+                sweep(work)
+                expected = [a.numpy() for a in (work.body_qd, *outputs)]
+                for array, value in zip((work.body_qd, *outputs), saved, strict=True):
+                    array.assign(value)
+                env._use_local_rigid_buckets = True
+                sweep(work)
+                for array, value in zip((work.body_qd, *outputs), expected, strict=True):
+                    np.testing.assert_array_equal(array.numpy(), value)
+                stats["solves"] += 1
+                stats["fallback"] = max(stats["fallback"], int(env._bucket_fallback.numpy().max()))
+                stats["impulse"] = max(stats["impulse"], float(np.abs(expected[1]).max()))
+
+            env._solve_contacts_gauss_seidel = compare
+            state = model.state()
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+            for _ in range(steps):
+                solver.step(state, state, None, None, dt)
+            self.assertGreater(stats["solves"], 0)
+            self.assertGreater(stats["impulse"], 1.0e-4)
+            return stats["fallback"]
+
+        devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        for device in devices:
+            for worlds, boxes, crowded in ((1, 4, False), (3, 4, False), (1, 40, True)):
+                for hard in (True, False):
+                    with self.subTest(device=device, worlds=worlds, boxes=boxes, hard=hard):
+                        fallback = run(stack(worlds, boxes, device), 40, 1.0 / 240.0, rigid_contact_hard=hard)
+                        self.assertEqual(bool(fallback), crowded)
+            with self.subTest(device=device, articulated=True):
+                model, _box_body = _arm_and_box(device=device)
+                fallback = run(model, 40, 0.001, relaxation=0.5, articulated_response=True)
+                self.assertEqual(fallback, 0)
+
 
 class TestMJMPMMaterial(unittest.TestCase):
     def test_free_material_crosses_grid_planes_without_air_drag(self):

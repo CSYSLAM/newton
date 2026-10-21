@@ -1,0 +1,1 @@
+Speed up the MJMPM environment's Gauss-Seidel rigid contact sweeps by running each world's sweeps on packed contact data and thread-local body state. Results are bitwise identical to the previous sweeps; the W1 rice-cooker example runs about 19% faster per frame.

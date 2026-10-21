@@ -215,6 +215,10 @@ class Environment(SolverBase, CouplingInterface):
         self._contact_ids = wp.zeros(2 * max(capacity, 1), dtype=int, device=device)
         self._bucket_begin = wp.zeros(self._bucket_count, dtype=int, device=device)
         self._bucket_end = wp.zeros(self._bucket_count, dtype=int, device=device)
+        # Gauss-Seidel sweeps on bucket-local body state, with a reference fallback.
+        self._packed_contacts = wp.zeros(capacity, dtype=kernels.PackedContact, device=device)
+        self._bucket_fallback = wp.zeros(self._bucket_count, dtype=int, device=device)
+        self._use_local_rigid_buckets = True
         # Jacobi sweeps: contact counts for mass splitting and two wrench
         # accumulators, each cleared by the sweep that does not write it.
         self._body_contacts = wp.zeros(body_count, dtype=int, device=device)
@@ -382,32 +386,42 @@ class Environment(SolverBase, CouplingInterface):
                 outputs=[self._bucket_begin, self._bucket_end],
                 device=model.device,
             )
+        inputs = [
+            self._bucket_begin,
+            self._bucket_end,
+            self._contact_ids,
+            self._contact_bodies,
+            self._contact_ra,
+            self._contact_rb,
+            self._contact_normal,
+            self._contact_params,
+            self._contact_mass_inv,
+            self._contact_inertia_inv,
+            self._link_slot,
+            self._link_body,
+            self._mobility,
+            self._contacted_links,
+            self._contacted_count,
+            self._point_mobility if self._mobility is not None else None,
+            self._link_responses if self._mobility is not None else None,
+            work.body_qd,
+            self.contact_impulses,
+            self.rigid_impulses,
+            self.rigid_iterations,
+        ]
+        if self._use_local_rigid_buckets:
+            wp.launch(
+                kernels.solve_contact_buckets_local,
+                dim=self._bucket_count,
+                inputs=[*inputs, self._packed_contacts, self._bucket_fallback],
+                device=model.device,
+            )
+        else:
+            self._bucket_fallback.fill_(1)
         wp.launch(
             kernels.solve_contact_buckets,
             dim=self._bucket_count,
-            inputs=[
-                self._bucket_begin,
-                self._bucket_end,
-                self._contact_ids,
-                self._contact_bodies,
-                self._contact_ra,
-                self._contact_rb,
-                self._contact_normal,
-                self._contact_params,
-                self._contact_mass_inv,
-                self._contact_inertia_inv,
-                self._link_slot,
-                self._link_body,
-                self._mobility,
-                self._contacted_links,
-                self._contacted_count,
-                self._point_mobility if self._mobility is not None else None,
-                self._link_responses if self._mobility is not None else None,
-                work.body_qd,
-                self.contact_impulses,
-                self.rigid_impulses,
-                self.rigid_iterations,
-            ],
+            inputs=[*inputs, self._bucket_fallback],
             device=model.device,
         )
 
