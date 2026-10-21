@@ -18,6 +18,7 @@ from warp.fem.linalg import array_axpy
 from warp.optim.linear import LinearOperator, cg, cr, gmres
 
 from newton._src.solvers.mjmpm.mpm.contact_solver_kernels import (
+    apply_independent_mobility,
     apply_link_mobility,
     apply_nodal_impulse_warmstart,
     apply_subgrid_impulse,
@@ -25,6 +26,7 @@ from newton._src.solvers.mjmpm.mpm.contact_solver_kernels import (
     articulated_collider_inv_mass,
     compute_collider_delassus_diagonal,
     compute_collider_inv_mass,
+    independent_collider_inv_mass,
     list_active_links,
     solve_nodal_friction,
     solve_subgrid_friction,
@@ -348,7 +350,7 @@ def apply_rigidity_operator(rigidity_operator, delta_collider_impulse, collider_
 
     J, IJtm = rigidity_operator[:2]
     sp.bsr_mv(IJtm, x=delta_collider_impulse, y=delta_body_qd, alpha=-1.0, beta=0.0)
-    if len(rigidity_operator) > 2:
+    if len(rigidity_operator) > 2 and rigidity_operator[2] is not None:
         # Articulated links received impulse wrenches; map them to link twists.
         articulation = rigidity_operator[2]
         wp.copy(articulation.wrenches, delta_body_qd)
@@ -363,6 +365,14 @@ def apply_rigidity_operator(rigidity_operator, delta_collider_impulse, collider_
                 articulation.wrenches,
             ],
             outputs=[delta_body_qd],
+        )
+    if len(rigidity_operator) > 3:
+        independent = rigidity_operator[3]
+        wp.launch(
+            apply_independent_mobility,
+            dim=independent.body_count,
+            inputs=[independent.enabled, independent.mobility],
+            outputs=[delta_body_qd, independent.velocity_delta],
         )
     sp.bsr_mv(J, x=delta_body_qd, y=collider_velocity, alpha=1.0, beta=1.0)
 
@@ -1691,7 +1701,7 @@ class _ContactSolver:
                     self.collider_inv_mass,
                 ],
             )
-            if len(self.collision.rigidity_operator) > 2:
+            if len(self.collision.rigidity_operator) > 2 and self.collision.rigidity_operator[2] is not None:
                 articulation = self.collision.rigidity_operator[2]
                 if articulation.wrenches is None or articulation.wrenches.shape[0] != J.shape[1]:
                     articulation.wrenches = wp.empty(J.shape[1], dtype=float, device=J.device)
@@ -1718,6 +1728,25 @@ class _ContactSolver:
                         articulation.link_slot,
                         articulation.link_body.shape[1],
                         articulation.mobility,
+                    ],
+                    outputs=[self.collider_inv_mass],
+                )
+
+            if len(self.collision.rigidity_operator) > 3:
+                independent = self.collision.rigidity_operator[3]
+                wp.launch(
+                    independent_collider_inv_mass,
+                    dim=self.collision.collider_impulse.shape[0],
+                    inputs=[
+                        J.offsets,
+                        J.columns,
+                        J.values,
+                        IJtm.offsets,
+                        IJtm.columns,
+                        IJtm.values,
+                        independent.body_count,
+                        independent.enabled,
+                        independent.mobility,
                     ],
                     outputs=[self.collider_inv_mass],
                 )

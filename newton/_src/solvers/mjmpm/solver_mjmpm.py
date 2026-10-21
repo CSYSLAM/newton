@@ -70,18 +70,19 @@ class SolverMJMPM(SolverBase):
             more ``rigid_iterations`` per step, and atomic accumulation
             makes the result vary slightly from run to run.
         rigid_material_coupling: How material and environment rigid bodies
-            exchange impulses. ``"implicit"`` lets free rigid bodies move inside
-            the material solve and applies the material impulses after the rigid
-            contact solve of the same step. A body held by contacts, such as a
-            gripped container of grains, then creeps in the grip by about
-            ``F / m * dt`` per unit time. ``"lagged"`` treats free rigid bodies
-            as kinematic in the material solve and applies its reaction at the
-            start of the next step, before the rigid contact solve, so contacts
-            hold against it. Articulation proxies are unaffected.
-            The lagged reaction is explicit: it is unstable for a free body
-            that rests on or sinks into material much heavier than itself
-            (a 0.5 kg box on a sand pile oscillates at ~20 m/s), so use it only
-            for bodies held by contacts or joints.
+            exchange impulses. The default, "constrained", freezes the current
+            normal compliance and sticking contact response for each material
+            solve, retaining true inertia in unconstrained directions. Contacts
+            with static shapes and kinematic or articulation proxies are supported;
+            bodies touching another independent dynamic body use "implicit".
+            A final cheap contact solve recovers current-load reactions without
+            projecting the material boundary velocity. The environment exposes
+            momentum_residual, material_velocity_residual, and
+            constraint_velocity_residual for the frozen response approximation.
+            "implicit" applies material impulses after rigid contacts and can
+            creep under supported material loads. "lagged" delays free-body
+            material reactions until the next contact solve and can diverge for
+            light free bodies on heavy material. Articulation response is separate.
         rigid_contact_hard: Use hard rigid contact constraints. If False, use
             implicit spring/damper contacts from the shapes' ``ke`` and ``kd``.
         mass_scale: Virtual articulation proxy inertia multiplier. With
@@ -125,7 +126,7 @@ class SolverMJMPM(SolverBase):
         rigid_contact_hard: bool = True,
         rigid_warm_start: bool = False,
         rigid_solver: str = "gauss_seidel",
-        rigid_material_coupling: str = "implicit",
+        rigid_material_coupling: str = "constrained",
         mass_scale: float = 1.0,
         relaxation: float = 1.0,
         relaxation_mode: str = "fixed",

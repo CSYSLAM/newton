@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import warp as wp
 import warp.sparse as sp
 
+from newton._src.solvers.mjmpm.rigid.response import mat66
+
 wp.set_module_options({"enable_backward": False})
 
 
@@ -449,3 +451,104 @@ class ArticulatedRigidity:
     wrenches: wp.array[float] | None = None
     active_links: wp.array2d[int] | None = None
     active_count: wp.array[int] | None = None
+
+
+@wp.func
+def _independent_block(matrix: mat66, r0: int, c0: int):
+    out = wp.mat33()
+    for i in range(3):
+        for j in range(3):
+            out[i, j] = matrix[r0 + i, c0 + j]
+    return out
+
+
+@wp.kernel
+def apply_independent_mobility(
+    enabled: wp.array[int], mobility: wp.array[mat66], twists: wp.array[float], accumulated: wp.array[wp.spatial_vector]
+):
+    body = wp.tid()
+    if not enabled[body]:
+        return
+    torque = wp.vec3(twists[6 * body], twists[6 * body + 1], twists[6 * body + 2])
+    force = wp.vec3(twists[6 * body + 3], twists[6 * body + 4], twists[6 * body + 5])
+    matrix = mobility[body]
+    linear = _independent_block(matrix, 0, 0) * force + _independent_block(matrix, 0, 3) * torque
+    angular = _independent_block(matrix, 3, 0) * force + _independent_block(matrix, 3, 3) * torque
+    accumulated[body] += wp.spatial_vector(linear, angular)
+    for i in range(3):
+        twists[6 * body + i] = angular[i]
+        twists[6 * body + 3 + i] = linear[i]
+
+
+@wp.kernel
+def independent_collider_masses(
+    enabled: wp.array[int],
+    mass: wp.array[float],
+    inverse: wp.array[wp.mat33],
+    out_mass: wp.array[float],
+    out_inverse: wp.array[wp.mat33],
+):
+    body = wp.tid()
+    out_mass[body] = mass[body]
+    out_inverse[body] = inverse[body]
+    if enabled[body]:
+        out_mass[body] = 1.0
+        out_inverse[body] = wp.identity(n=3, dtype=float)
+
+
+@dataclass
+class IndependentRigidity:
+    """Frozen per-body response in world (linear, angular) spatial coordinates."""
+
+    body_count: int
+    enabled: wp.array[int]
+    mobility: wp.array[mat66]
+    velocity_delta: wp.array[wp.spatial_vector]
+
+
+@wp.kernel
+def independent_collider_inv_mass(
+    J_mat_offsets: wp.array[int],
+    J_mat_columns: wp.array[int],
+    J_mat_values: wp.array[wp.mat33],
+    IJtm_mat_offsets: wp.array[int],
+    IJtm_mat_columns: wp.array[int],
+    IJtm_mat_values: wp.array[wp.mat33],
+    body_count: int,
+    enabled: wp.array[int],
+    mobility: wp.array[mat66],
+    collider_inv_mass: wp.array[float],
+):
+    """Replace the nodal inverse mass of articulated links with their frozen independent mobility block."""
+    i = wp.tid()
+    block_beg = J_mat_offsets[i]
+    block_end = J_mat_offsets[i + 1]
+    body = int(-1)
+    W = wp.mat33(0.0)
+    G_angular = wp.mat33(0.0)
+    G_linear = wp.mat33(0.0)
+    multiplicity = float(0.0)
+    for b in range(block_beg, block_end):
+        col = J_mat_columns[b]
+        if col >= 2 * body_count:
+            continue
+        candidate = col // 2
+        if not enabled[candidate]:
+            continue
+        transposed_block = sp.bsr_block_index(col, i, IJtm_mat_offsets, IJtm_mat_columns)
+        if transposed_block == -1:
+            continue
+        body = candidate
+        multiplicity = float(IJtm_mat_offsets[col + 1] - IJtm_mat_offsets[col])
+        if col % 2 == 0:
+            W = J_mat_values[b]
+            G_angular = IJtm_mat_values[transposed_block]
+        else:
+            G_linear = IJtm_mat_values[transposed_block]
+    if body < 0:
+        return
+    to_linear = _independent_block(mobility[body], 0, 0) + W * _independent_block(mobility[body], 3, 0)
+    to_angular = _independent_block(mobility[body], 0, 3) + W * _independent_block(mobility[body], 3, 3)
+    w_mat = (to_linear * G_linear + to_angular * G_angular) * multiplicity
+    _eigvecs, eigvals = wp.eig3(0.5 * (w_mat + wp.transpose(w_mat)))
+    collider_inv_mass[i] = wp.max(0.0, wp.max(eigvals))

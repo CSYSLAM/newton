@@ -591,9 +591,9 @@ class W1MJMPMScene:
         )
         parser.add_argument(
             "--rigid-material-coupling",
-            choices=("implicit", "lagged"),
-            default="implicit",
-            help="Material reaction on free rigid bodies: in the material solve, or before the next contact solve.",
+            choices=("implicit", "lagged", "constrained"),
+            default="constrained",
+            help="Contact-aware material response (default), independent implicit response, or delayed material reaction.",
         )
         parser.add_argument(
             "--ik-iterations",

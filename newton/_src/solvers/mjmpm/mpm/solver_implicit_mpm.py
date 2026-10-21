@@ -24,7 +24,12 @@ from newton._src.geometry.particle_surface import ParticleSurface
 from newton._src.sim import ModelFlags, StateFlags
 from newton._src.solvers.mjmpm.base import SolverBase
 from newton._src.solvers.mjmpm.coupling.interface import CouplingInterface
-from newton._src.solvers.mjmpm.mpm.contact_solver_kernels import ArticulatedRigidity, articulated_collider_masses
+from newton._src.solvers.mjmpm.mpm.contact_solver_kernels import (
+    ArticulatedRigidity,
+    IndependentRigidity,
+    articulated_collider_masses,
+    independent_collider_masses,
+)
 from newton._src.solvers.mjmpm.mpm.implicit_mpm_model import ImplicitMPMModel
 from newton._src.solvers.mjmpm.mpm.particle_surface_colliders import extrapolate_surface_sdf_into_colliders
 from newton._src.solvers.mjmpm.mpm.rasterized_collisions import (
@@ -1523,6 +1528,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         self.collider_normal_from_sdf_gradient = config.collider_normal_from_sdf_gradient
         self.collider_basis = config.collider_basis
         self._iteration_snapshots = {}
+        self._independent_rigidity = None
         self._articulated_rigidity = None
         # Plain "pic" bases size their per-cell capacity from the particles.
         # Eager steps grow a rounded capacity so captured steps can reuse it.
@@ -3314,6 +3320,17 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
             body_mass = self._mpm_model.collider_body_mass
             body_inv_inertia = self._mpm_model.collider_body_inv_inertia
+            independent = self._independent_rigidity
+            if independent is not None:
+                wp.launch(
+                    independent_collider_masses,
+                    dim=independent.body_count,
+                    inputs=[independent.enabled, body_mass, body_inv_inertia],
+                    outputs=[self._independent_mass, self._independent_inverse],
+                    device=self.model.device,
+                )
+                body_mass = self._independent_mass
+                body_inv_inertia = self._independent_inverse
             articulation = self._articulated_rigidity
             if articulation is not None:
                 # Articulated links map node impulses to wrenches; the link
@@ -3339,10 +3356,21 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 particle_mass=self._mpm_model.model.particle_mass,
                 collider_ids=scratch.collider_ids,
             )
-            if articulation is not None:
+            if articulation is not None or independent is not None:
                 rigidity_operator = (*rigidity_operator, articulation)
+            if independent is not None:
+                rigidity_operator = (*rigidity_operator, independent)
 
         return rigidity_operator
+
+    def enable_independent_response(self, enabled, mobility):
+        """Share the environment's frozen free-body contact response with the material solve."""
+        count = self.model.body_count
+        self._independent_rigidity = IndependentRigidity(
+            count, enabled, mobility, wp.zeros(count, dtype=wp.spatial_vector, device=self.model.device)
+        )
+        self._independent_mass = wp.zeros(count, dtype=float, device=self.model.device)
+        self._independent_inverse = wp.zeros(count, dtype=wp.mat33, device=self.model.device)
 
     def enable_articulated_response(
         self, mobility: wp.array3d[float], link_body: wp.array2d[int], link_slot: wp.array[int]
@@ -3770,6 +3798,8 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 has_colliders=self._mpm_model.collider.collider_mesh.shape[0] > 0,
             )
 
+            if self._independent_rigidity is not None:
+                self._independent_rigidity.velocity_delta.zero_()
             # Retain graph to avoid immediate CPU sync
             solve_graph = solve_rheology(
                 self.solver,

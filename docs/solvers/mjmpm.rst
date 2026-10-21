@@ -124,9 +124,10 @@ Blender, rolls the wrist 135 degrees to pour, turns the empty cup upright, puts
 it back, and releases it. The cup is an MPM-owned free body held by finger
 friction alone, and it hangs ahead of the handle, so the rice's weight reaches
 the robot as a torque on the grip. The example uses
-``rigid_material_coupling="lagged"``: with implicit coupling the cup creeps in
-the grip, and correcting the cup after the material solve lets the rice walk
-through its bottom. The test requires the cup to stay in the grip (handle slip
+``rigid_material_coupling="constrained"``: the material solve uses the cup's
+current normal compliance and sticking-contact mobility, so the fingers hold
+against the rice load without delaying its reaction or projecting the cup after
+material contact. The test requires the cup to stay in the grip (handle slip
 below 6 mm and 8 degrees), at least 80% of the rice in the cooker with at most
 15% spilled, the empty cup back upright, and the difference between the
 vertical finger load before and after the pour to match the rice's weight
@@ -227,13 +228,27 @@ Current limits
   contacts press on one body: a two-box stack needs about 40 sweeps where
   sequential sweeps need 8, and a block held by 36 finger contacts slips
   noticeably more at equal cost, so sequential sweeps remain the default.
-  With the default ``rigid_material_coupling="implicit"``, free rigid bodies
-  move inside the material solve and receive its impulses after the rigid
-  contact solve of the same step. A body held by contacts against a material
-  load (a gripped cup of grains, a loaded tray on a slope) then creeps by about
-  ``F / m * dt`` per unit time. ``"lagged"`` treats free rigid bodies as
-  kinematic in the material solve and applies its reaction before the next
-  contact solve, which removes the creep at the cost of one step of delay.
+  The default ``rigid_material_coupling="constrained"`` predicts material
+  load from the previous substep only to select contact states. The material
+  solve then uses the current-load response with true inertia in free
+  directions, implicit normal compliance, and frozen sticking directions.
+  Small per-body square-root updates keep the response positive semidefinite
+  under redundant constraints. A final rigid contact solve recovers reactions
+  for proxy feedback; its velocities do not replace the material boundary.
+  This supports free bodies contacting static shapes and kinematic or
+  articulation proxies. Bodies touching another independent dynamic body
+  retain the independent implicit response. Contact-state changes within a
+  substep remain an approximation. Inspect the environment's
+  ``momentum_residual`` [N s, N m s], ``material_velocity_residual``
+  [m/s, rad/s], and ``constraint_velocity_residual`` [m/s, rad/s]. The second
+  compares accumulated body response inside MPM with the accepted body
+  velocity; the third compares the frozen response with the final contact
+  re-solve. Diagnostics are per-body spatial vectors in world coordinates,
+  with linear components first. They are zero for bodies outside this mode.
+  ``"implicit"`` retains the previous independent response, which can creep
+  under supported material loads. ``"lagged"`` delays material reaction until
+  the next rigid contact solve; its explicit feedback can diverge for a light
+  free body resting on much heavier material.
   Restitution coefficients, rolling/torsional friction,
   prescribed contact surface velocity, and continuous collision detection are
   not implemented by that solver.

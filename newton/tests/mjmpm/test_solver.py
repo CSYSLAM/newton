@@ -48,7 +48,105 @@ def _options():
     }
 
 
+def _loaded_tray(*, device="cpu", particles=True):
+    """Build the inclined tray with either grains or an equivalent external load."""
+    slope = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), float(np.deg2rad(20.0)))
+    builder = newton.ModelBuilder()
+    SolverMJMPM.register_custom_attributes(builder)
+    cfg = newton.ModelBuilder.ShapeConfig(density=500.0, mu=0.8)
+    builder.add_shape_box(-1, xform=wp.transform(wp.vec3(0.0, 0.0, -0.05), slope), hx=0.5, hy=0.3, hz=0.05, cfg=cfg)
+    pose = wp.transform(wp.quat_rotate(slope, wp.vec3(0.0, 0.0, 0.0201)), slope)
+    tray = builder.add_body(xform=pose)
+    joint = builder.joint_count - 1
+    builder.add_shape_box(tray, hx=0.08, hy=0.08, hz=0.02, cfg=cfg)
+    spacing = 0.02
+    if particles:
+        for i in range(6):
+            for j in range(6):
+                for k in range(2):
+                    local = wp.vec3(-0.05 + i * spacing, -0.05 + j * spacing, 0.03 + k * spacing)
+                    builder.add_particle(
+                        wp.transform_point(pose, local), wp.vec3(0.0), 1600.0 * spacing**3, 0.5 * spacing
+                    )
+    return builder.finalize(device=device), tray, joint, np.asarray(wp.quat_rotate(slope, wp.vec3(1.0, 0.0, 0.0)))
+
+
+def _box_on_heavy_material(mass, drop, *, device="cuda:0"):
+    """Build a light four-centimeter box over a five-kilogram material bed."""
+    builder = newton.ModelBuilder()
+    SolverMJMPM.register_custom_attributes(builder)
+    builder.add_ground_plane()
+    builder.add_particle_grid(
+        pos=wp.vec3(-0.09, -0.09, 0.01),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(0.0),
+        dim_x=10,
+        dim_y=10,
+        dim_z=5,
+        cell_x=0.02,
+        cell_y=0.02,
+        cell_z=0.02,
+        mass=0.01,
+        jitter=0.0,
+        radius_mean=0.01,
+        custom_attributes={"mpm:friction": 0.5},
+    )
+    box = builder.add_body(
+        xform=wp.transform(wp.vec3(0.0, 0.0, 0.12 + drop), wp.quat_identity()),
+        mass=mass,
+        inertia=wp.mat33(np.eye(3) * mass * 0.04**2 / 6.0),
+    )
+    joint = builder.joint_count - 1
+    builder.add_shape_box(box, hx=0.02, hy=0.02, hz=0.02, cfg=newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.5))
+    return builder.finalize(device=device), box, joint
+
+
 class TestMJMPMRigid(unittest.TestCase):
+    def test_constrained_response_matches_scalar_compliance(self):
+        """Match the exact one-dimensional response to hard, soft, and redundant support rows."""
+        from newton._src.solvers.mjmpm.rigid import response  # noqa: PLC0415
+
+        for mass in (0.0016, 0.512):
+            for softness in (0.0, 2.0, 1000.0):
+                for rows in (1, 4):
+                    with self.subTest(mass=mass, softness=softness, rows=rows):
+                        device = "cpu"
+                        enabled = wp.array([1], dtype=int, device=device)
+                        pose = wp.array([wp.transform_identity()], dtype=wp.transform, device=device)
+                        inverse_mass = wp.array([1.0 / mass], dtype=float, device=device)
+                        inverse_inertia = wp.array([np.eye(3)], dtype=wp.mat33, device=device)
+                        count = wp.array([rows], dtype=int, device=device)
+                        bodies = wp.array([[-1, 0]] * rows, dtype=wp.vec2i, device=device)
+                        radius = wp.zeros(rows, dtype=wp.vec3, device=device)
+                        normal = wp.array([[0.0, 0.0, 1.0]] * rows, dtype=wp.vec3, device=device)
+                        params = wp.array([[0.0, softness, 1.0 / mass, 0.0]] * rows, dtype=wp.vec4, device=device)
+                        impulses = wp.array([[0.0, 0.0, 1.0]] * rows, dtype=wp.vec3, device=device)
+                        matrix = wp.empty(1, dtype=response.mat66, device=device)
+                        wp.launch(
+                            response.build_response,
+                            dim=1,
+                            inputs=[
+                                enabled,
+                                pose,
+                                inverse_mass,
+                                inverse_inertia,
+                                count,
+                                bodies,
+                                radius,
+                                radius,
+                                normal,
+                                params,
+                                impulses,
+                            ],
+                            outputs=[matrix],
+                            device=device,
+                        )
+                        result = matrix.numpy()[0]
+                        expected = softness / (mass * softness + rows)
+                        self.assertAlmostEqual(float(result[2, 2]), expected, delta=max(1.0e-6, expected * 1.0e-5))
+                        self.assertAlmostEqual(float(result[0, 0]), 1.0 / mass, delta=1.0e-4)
+                        np.testing.assert_allclose(result[3:, 3:], np.eye(3), atol=1.0e-6)
+
     def test_compliant_contact_balances_weight_with_indentation(self):
         """Balance gravity with shape stiffness instead of a hard rigid contact constraint."""
         builder = newton.ModelBuilder()
@@ -402,23 +500,7 @@ class TestMJMPMMaterial(unittest.TestCase):
         contact solve each step, and the tray creeps down the slope (about
         11 mm in 1 s); lagged coupling applies it before the contact solve.
         """
-        slope = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), float(np.deg2rad(20.0)))
-        builder = newton.ModelBuilder()
-        SolverMJMPM.register_custom_attributes(builder)
-        cfg = newton.ModelBuilder.ShapeConfig(density=500.0, mu=0.8)
-        builder.add_shape_box(-1, xform=wp.transform(wp.vec3(0.0, 0.0, -0.05), slope), hx=0.5, hy=0.3, hz=0.05, cfg=cfg)
-        tray_pose = wp.transform(wp.quat_rotate(slope, wp.vec3(0.0, 0.0, 0.0201)), slope)
-        tray = builder.add_body(xform=tray_pose)
-        builder.add_shape_box(tray, hx=0.08, hy=0.08, hz=0.02, cfg=cfg)
-        spacing = 0.02
-        for i in range(6):
-            for j in range(6):
-                for k in range(2):
-                    local = wp.vec3(-0.05 + i * spacing, -0.05 + j * spacing, 0.03 + k * spacing)
-                    builder.add_particle(
-                        wp.transform_point(tray_pose, local), wp.vec3(0.0), 1600.0 * spacing**3, 0.5 * spacing
-                    )
-        model = builder.finalize(device="cpu")
+        model, tray, _joint, downhill = _loaded_tray()
         options = {
             "grid_type": "dense",
             "voxel_size": 0.04,
@@ -432,10 +514,32 @@ class TestMJMPMMaterial(unittest.TestCase):
         for _ in range(240):
             solver.step(state, state, None, None, 1.0 / 240.0)
         # Motion along the slope; the tray settles about 3 mm normal to it as the grains land.
-        downhill = np.asarray(wp.quat_rotate(slope, wp.vec3(1.0, 0.0, 0.0)))
         self.assertLess(abs(float((state.body_q.numpy()[tray, :3] - start) @ downhill)), 2.0e-4)
         self.assertLess(float(np.linalg.norm(state.body_qd.numpy()[tray])), 1.0e-3)
         self.assertTrue(np.isfinite(state.particle_q.numpy()).all())
+
+    def test_constrained_material_coupling_holds_loaded_tray_on_slope(self):
+        """Hold a loaded tray using same-step contact response instead of delaying material impulses."""
+        model, tray, _joint, downhill = _loaded_tray()
+        options = {
+            "grid_type": "dense",
+            "voxel_size": 0.04,
+            "max_iterations": 20,
+            "solver": "jacobi",
+            "warmstart_mode": "none",
+        }
+        solver = SolverMJMPM(model, rigid_material_coupling="constrained", rigid_warm_start=True, mpm_options=options)
+        state = model.state()
+        start = state.body_q.numpy()[tray, :3].copy()
+        for _ in range(240):
+            solver.step(state, state, None, None, 1.0 / 240.0)
+        # Motion along the slope; the tray settles about 3 mm normal to it as the grains land.
+        self.assertLess(abs(float((state.body_q.numpy()[tray, :3] - start) @ downhill)), 2.0e-4)
+        self.assertLess(float(np.linalg.norm(state.body_qd.numpy()[tray])), 1.0e-3)
+        self.assertTrue(np.isfinite(state.particle_q.numpy()).all())
+        self.assertLess(float(np.max(np.abs(solver.environment.material_velocity_residual.numpy()))), 1.0e-5)
+        self.assertLess(float(np.max(np.abs(solver.environment.momentum_residual.numpy()))), 1.0e-5)
+        self.assertLess(float(np.max(np.abs(solver.environment.constraint_velocity_residual.numpy()))), 1.0e-4)
 
     def test_stall_exit_keeps_resting_material(self):
         """End stalled Jacobi solves early without moving resting material."""
@@ -1002,6 +1106,69 @@ def _run_coupled(model, steps, dt, record, **kwargs):
 
 
 class TestMJMPMArticulatedResponse(unittest.TestCase):
+    def test_mujoco_owned_free_body_material_momentum(self):
+        """Transfer material momentum to a MuJoCo-owned free body without double applying feedback."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        SolverMJMPM.register_custom_attributes(builder)
+        box = builder.add_body(
+            xform=wp.transform(wp.vec3(0.3, 0.05, 0.05), wp.quat_identity()),
+            mass=0.0016,
+            inertia=wp.mat33(np.eye(3) * 1.0e-5),
+        )
+        joint = builder.joint_count - 1
+        builder.add_shape_box(box, hx=0.2, hy=0.2, hz=0.2, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+        _particles(builder, velocity=(1.0, 0.0, 0.0))
+        model = builder.finalize(device="cpu")
+        solver = SolverMJMPM(
+            model,
+            mujoco_joints=[joint],
+            articulated_response=True,
+            mpm_options={**_options(), "voxel_size": 0.05, "max_iterations": 20},
+        )
+        state = model.state()
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        body_mass, particle_mass = model.body_mass.numpy(), model.particle_mass.numpy()
+
+        def momentum():
+            return body_mass @ state.body_qd.numpy()[:, :3] + particle_mass @ state.particle_qd.numpy()
+
+        initial = momentum()
+        for _ in range(12):
+            solver.step(state, state, None, None, 0.005)
+        np.testing.assert_allclose(momentum(), initial, atol=2.0e-6)
+        self.assertGreater(float(state.body_qd.numpy()[box, 0]), 0.1)
+        self.assertEqual(solver.ownership.mujoco_bodies, (box,))
+        self.assertEqual(solver.ownership.mpm_bodies, ())
+        proxy = solver.backend._proxy_mappings[0]
+        destination = solver.backend._entries["mpm"]
+        np.testing.assert_allclose(
+            destination.state_1.body_qd.numpy()[proxy.proxy_ids_local.numpy()],
+            state.body_qd.numpy()[[box]],
+            atol=1.0e-5,
+        )
+
+    def test_mujoco_owned_loaded_tray(self):
+        """Hold a MuJoCo-owned free tray against the weight of MPM grains."""
+        model, tray, joint, downhill = _loaded_tray()
+        solver = SolverMJMPM(
+            model,
+            mujoco_joints=[joint],
+            articulated_response=True,
+            mujoco_options={"impratio": 100.0},
+            mpm_options={**_options(), "voxel_size": 0.04, "max_iterations": 20},
+        )
+        self.assertEqual(solver.ownership.mujoco_bodies, (tray,))
+        self.assertEqual(solver.ownership.mpm_bodies, ())
+        state = model.state()
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        start = state.body_q.numpy()[tray, :3].copy()
+        for _ in range(240):
+            solver.step(state, state, None, None, 1.0 / 240.0)
+        slip = abs(float((state.body_q.numpy()[tray, :3] - start) @ downhill))
+        self.assertLess(slip, 2.0e-4)
+        self.assertTrue(np.isfinite(state.particle_q.numpy()).all())
+        self.assertEqual(int(solver.environment.contacts.rigid_contact_count.numpy()[0]), 0)
+
     def test_link_mobility_matches_mujoco_step_response(self):
         """Predict every link's one-step twist change for an impulse on any link of a damped chain."""
         from newton._src.solvers.mjmpm.mujoco.solver_mujoco import SolverMuJoCo  # noqa: PLC0415
@@ -1323,6 +1490,47 @@ class TestMJMPMArticulatedResponse(unittest.TestCase):
 
 @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
 class TestMJMPMCUDA(unittest.TestCase):
+    def test_constrained_light_boxes_on_heavy_material(self):
+        """Keep contact-aware 1.6-to-512-gram free boxes stable on five kilograms of material in a CUDA graph."""
+        for mass in (0.0016, 0.077, 0.512):
+            for drop in (0.0, 0.05):
+                with self.subTest(mass=mass, drop=drop):
+                    model, box, _joint = _box_on_heavy_material(mass, drop)
+                    solver = SolverMJMPM(
+                        model,
+                        rigid_material_coupling="constrained",
+                        rigid_warm_start=True,
+                        mpm_options={
+                            "grid_type": "fixed",
+                            "voxel_size": 0.025,
+                            "grid_padding": 12,
+                            "max_active_cell_count": 4096,
+                            "collider_basis": "pic48",
+                            "strain_basis": "P0",
+                            "max_iterations": 50,
+                            "solver": "gs",
+                            "air_drag": 0.0,
+                            "tolerance": 0.0,
+                        },
+                    )
+                    state = model.state()
+                    newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+                    dt = 1.0 / 360.0
+                    solver.step(state, state, None, None, dt)
+                    with wp.ScopedCapture(device=model.device) as capture:
+                        for _ in range(6):
+                            solver.step(state, state, None, None, dt)
+                    peak = 0.0
+                    for _ in range(90):
+                        wp.capture_launch(capture.graph)
+                        velocity = state.body_qd.numpy()[box]
+                        self.assertTrue(np.isfinite(velocity).all())
+                        self.assertTrue(np.isfinite(state.particle_q.numpy()).all())
+                        peak = max(peak, float(np.linalg.norm(velocity[:3])))
+                    self.assertLess(peak, 3.0)
+                    self.assertGreater(float(state.body_q.numpy()[box, 2]), 0.04)
+                    solver.check_capacity_status()
+
     def test_fixed_grid_graph_matches_eager(self):
         """Replay coupled articulation/rigid/material stepping in a fixed-grid CUDA graph."""
         for collider_basis, iterations in (("pic8", 1), ("pic", 1), ("pic", 3)):

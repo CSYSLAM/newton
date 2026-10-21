@@ -15,7 +15,7 @@ from newton._src.solvers.mjmpm.collision.pipeline import CollisionPipeline
 from newton._src.solvers.mjmpm.coupling.interface import CouplingInterface
 from newton._src.solvers.mjmpm.coupling.solver_coupled import _copy_forces, _copy_same_view_state
 from newton._src.solvers.mjmpm.mpm.solver_implicit_mpm import SolverImplicitMPM
-from newton._src.solvers.mjmpm.rigid import kernels
+from newton._src.solvers.mjmpm.rigid import kernels, response
 
 
 @wp.kernel
@@ -58,13 +58,13 @@ class Environment(SolverBase, CouplingInterface):
         rigid_contact_hard=True,
         rigid_warm_start=False,
         rigid_solver="gauss_seidel",
-        rigid_material_coupling="implicit",
+        rigid_material_coupling="constrained",
     ):
         super().__init__(model)
         if rigid_solver not in ("gauss_seidel", "jacobi"):
             raise ValueError("rigid_solver must be 'gauss_seidel' or 'jacobi'")
-        if rigid_material_coupling not in ("implicit", "lagged"):
-            raise ValueError("rigid_material_coupling must be 'implicit' or 'lagged'")
+        if rigid_material_coupling not in ("implicit", "lagged", "constrained"):
+            raise ValueError("rigid_material_coupling must be 'implicit', 'lagged', or 'constrained'")
         self.rigid_iterations = rigid_iterations
         self.rigid_contact_hard = rigid_contact_hard
         self.rigid_warm_start = rigid_warm_start
@@ -122,6 +122,21 @@ class Environment(SolverBase, CouplingInterface):
             self._lagged_material_saved = wp.zeros_like(self.rigid_impulses)
             self._immediate_material = wp.zeros_like(self.rigid_impulses)
             self.material.setup_collider(body_q=model.body_q, body_mass=self._material_body_mass())
+        self._constrained_material = (
+            self.material is not None and model.body_count > 0 and rigid_material_coupling == "constrained"
+        )
+        if self._constrained_material:
+            self._response_enabled = wp.zeros(model.body_count, dtype=int, device=model.device)
+            self._body_response = wp.zeros(model.body_count, dtype=response.mat66, device=model.device)
+            self._material_prediction = wp.zeros_like(self.material_impulses)
+            self._saved_prediction = wp.zeros_like(self.material_impulses)
+            self._response_start = wp.zeros_like(self.material_impulses)
+            self._response_base = wp.zeros_like(self.material_impulses)
+            self._response_accepted = wp.zeros_like(self.material_impulses)
+            self.material_velocity_residual = wp.zeros_like(self.material_impulses)
+            self.momentum_residual = wp.zeros_like(self.material_impulses)
+            self.constraint_velocity_residual = wp.zeros_like(self.material_impulses)
+            self.material.enable_independent_response(self._response_enabled, self._body_response)
         # The material terms that read only particles overlap the latency-bound
         # rigid contact solve on a second stream.
         self._material_stream = None
@@ -546,6 +561,8 @@ class Environment(SolverBase, CouplingInterface):
         self._reuse_contacts = False
         if self._lagged_material is not None:
             wp.copy(self._lagged_material_saved, self._lagged_material)
+        if self._constrained_material:
+            wp.copy(self._saved_prediction, self._material_prediction)
         if self.material is not None:
             self.material.coupling_save_iteration_state()
 
@@ -558,8 +575,131 @@ class Environment(SolverBase, CouplingInterface):
         self._reuse_contacts = True
         if self._lagged_material is not None:
             wp.copy(self._lagged_material, self._lagged_material_saved)
+        if self._constrained_material:
+            wp.copy(self._material_prediction, self._saved_prediction)
         if self.material is not None:
             self.material.coupling_restore_iteration_state()
+
+    def _predict_constrained_material(self, work):
+        model = self.model
+        wp.copy(self._response_start, work.body_qd)
+        wp.launch(
+            response.select_bodies,
+            dim=model.body_count,
+            inputs=[
+                self.contacts.rigid_contact_count,
+                self.contacts.rigid_contact_shape0,
+                self.contacts.rigid_contact_shape1,
+                model.shape_body,
+                model.body_flags,
+                model.body_inv_mass,
+            ],
+            outputs=[self._response_enabled],
+            device=model.device,
+        )
+        wp.launch(
+            response.apply_prediction,
+            dim=model.body_count,
+            inputs=[
+                self._response_enabled,
+                self._material_prediction,
+                work.body_q,
+                model.body_inv_mass,
+                model.body_inv_inertia,
+            ],
+            outputs=[work.body_qd],
+            device=model.device,
+        )
+
+    def _prepare_constrained_material(self, work):
+        model = self.model
+        wp.launch(
+            response.build_response,
+            dim=model.body_count,
+            inputs=[
+                self._response_enabled,
+                work.body_q,
+                model.body_inv_mass,
+                model.body_inv_inertia,
+                self.contacts.rigid_contact_count,
+                self._contact_bodies,
+                self._contact_ra,
+                self._contact_rb,
+                self._contact_normal,
+                self._contact_params,
+                self.contact_impulses,
+            ],
+            outputs=[self._body_response],
+            device=model.device,
+        )
+        wp.launch(
+            response.remove_prediction,
+            dim=model.body_count,
+            inputs=[self._response_enabled, self._body_response, self._material_prediction],
+            outputs=[work.body_qd],
+            device=model.device,
+        )
+        wp.copy(self._response_base, work.body_qd)
+
+    def _finish_constrained_material(self, work, dt):
+        model = self.model
+        wp.launch(
+            response.finish_material,
+            dim=model.body_count,
+            inputs=[self._response_enabled, self._body_response, self._response_base, self.material_impulses],
+            outputs=[work.body_qd],
+            device=model.device,
+        )
+        wp.launch(
+            response.check_material_velocity,
+            dim=model.body_count,
+            inputs=[
+                self._response_enabled,
+                self._response_base,
+                self.material._independent_rigidity.velocity_delta,
+                work.body_qd,
+            ],
+            outputs=[self.material_velocity_residual],
+            device=model.device,
+        )
+        wp.copy(self._response_accepted, work.body_qd)
+        # Re-solve only the cheap contact problem to recover current-load reactions.
+        # Its velocities are diagnostic: the accepted material boundary is retained.
+        wp.copy(work.body_qd, self._response_start)
+        wp.launch(
+            response.apply_prediction,
+            dim=model.body_count,
+            inputs=[
+                self._response_enabled,
+                self.material_impulses,
+                work.body_q,
+                model.body_inv_mass,
+                model.body_inv_inertia,
+            ],
+            outputs=[work.body_qd],
+            device=model.device,
+        )
+        self.rigid_impulses.zero_()
+        self._solve_rigid_contacts(work, dt)
+        wp.launch(
+            response.diagnose,
+            dim=model.body_count,
+            inputs=[
+                self._response_enabled,
+                work.body_q,
+                model.body_mass,
+                model.body_inertia,
+                self._response_start,
+                self._response_accepted,
+                work.body_qd,
+                self.material_impulses,
+                self.rigid_impulses,
+            ],
+            outputs=[self.momentum_residual, self.constraint_velocity_residual],
+            device=model.device,
+        )
+        wp.copy(work.body_qd, self._response_accepted)
+        wp.copy(self._material_prediction, self.material_impulses)
 
     def check_capacity_status(self):
         """Raise if a captured step exceeded a sparse-grid or particle-basis capacity."""
@@ -644,7 +784,11 @@ class Environment(SolverBase, CouplingInterface):
             if not self._reuse_contacts:
                 self.detector.collide(work, self.contacts)
             self._reuse_contacts = False
+            if self._constrained_material:
+                self._predict_constrained_material(work)
             self._solve_rigid_contacts(work, dt)
+            if self._constrained_material:
+                self._prepare_constrained_material(work)
         if self.material is not None:
             if self._material_stream is not None:
                 stream.wait_event(self._material_join)
@@ -699,6 +843,8 @@ class Environment(SolverBase, CouplingInterface):
                         outputs=[work.body_qd],
                         device=model.device,
                     )
+        if self._constrained_material:
+            self._finish_constrained_material(work, dt)
         if model.body_count:
             wp.launch(
                 kernels.drift,
@@ -734,4 +880,6 @@ class Environment(SolverBase, CouplingInterface):
             self.material.reset(state, world_mask=mask, flags=flags)
         if self._lagged_material is not None:
             self._lagged_material.zero_()
+        if self._constrained_material:
+            self._material_prediction.zero_()
         self.detector.reset_contact_matching(world_mask=world_mask)
