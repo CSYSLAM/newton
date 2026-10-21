@@ -1,0 +1,1 @@
+Use Blender-authored product meshes for the MJMPM rice-cooker example, with a transparent round measuring cup, open handle and pouring lip shared by its collision geometry. Increase the fill to 1,478 live MPM rice samples with matching instanced visuals and reserve enough collider-basis capacity for CUDA Graph replay. Add `--visual-style collision` for inspection.

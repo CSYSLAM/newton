@@ -4,6 +4,7 @@
 
     uv run --extra examples -m newton.examples mjmpm_w1_rice_cooker
     uv run --extra examples -m newton.examples mjmpm_w1_rice_cooker --coupling one_way
+    uv run --extra examples -m newton.examples mjmpm_w1_rice_cooker --visual-style collision
 
 The right gripper closes on the handle of a measuring cup filled with MPM rice,
 lifts it, carries it over the open rice cooker, rolls the wrist to pour, turns
@@ -13,6 +14,10 @@ from the handle by finger friction alone, so the weight of the rice reaches the
 robot as a torque on the grip and the finger contact load drops once the rice
 has left. With ``--coupling one_way`` the fingers close through the handle and
 the cup stays on the table.
+
+Blender-authored visuals follow the free cup and live MPM samples. The default
+realistic style uses the same closed collision geometry and physical parameters;
+``--visual-style collision`` draws that geometry and spherical sample markers.
 """
 
 from pathlib import Path
@@ -22,6 +27,16 @@ import warp as wp
 
 import newton
 import newton.examples
+from newton.examples.mjmpm.support.rice_cooker_geometry import (
+    CUP_HEIGHT,
+    CUP_RADIUS,
+    CUP_WALL,
+    HANDLE_BOXES,
+    HANDLE_CENTER,
+    cup_inner_radius,
+    cup_mesh,
+)
+from newton.examples.mjmpm.support.rice_cooker_visuals import RiceCookerVisuals
 from newton.examples.mjmpm.support.w1_two_way import (
     FINGER_OPEN,
     FINGER_SHUT,
@@ -34,14 +49,9 @@ from newton.examples.mjmpm.support.w1_two_way import (
 # Cup body: origin at the bottom centre. Walls are one MPM cell thick so grains
 # cannot tunnel through them.
 CUP_ORIGIN = np.array((0.49, -0.25))
-CUP_OUTER = np.array((0.07, 0.07, 0.07))
-CUP_WALL = 0.015
-# Handle toward the robot; the gripper closes on its 24 mm width, which the
-# finger pads cover like the W1 squeeze-grasp block.
-HANDLE_HALF = np.array((0.025, 0.012, 0.015))
-HANDLE_CENTER = np.array((-CUP_OUTER[0] / 2 - HANDLE_HALF[0], 0.0, 0.05))
-RICE_SPACING = 0.005
-RICE_FILL = 0.035
+# The open handle has a 24 mm width between the gripper's finger pads.
+RICE_SPACING = 0.0035
+RICE_FILL = 0.050
 RICE_DENSITY = 850.0
 RICE_FRICTION = 0.5
 LIFT = 0.19
@@ -81,21 +91,30 @@ def _roll(angle):
 
 
 class Example(W1MJMPMScene):
+    camera_pos = wp.vec3(0.15, -0.90, 1.60)
+    camera_pitch = -31.0
+    camera_yaw = 69.0
+
     def initial_targets(self):
         grasp = np.array((CUP_ORIGIN[0], CUP_ORIGIN[1], TABLE_Z)) + HANDLE_CENTER
         return np.array(((0.43, 0.25, TABLE_Z + 0.10), grasp))
 
     def build_task(self, builder):
         self.grasp = self.initial_targets()[1]
-        cup_cfg = newton.ModelBuilder.ShapeConfig(density=400.0, ke=2.0e4, kd=100.0, mu=1.0)
+        cup_cfg = newton.ModelBuilder.ShapeConfig(
+            density=400.0, ke=2.0e4, kd=100.0, mu=1.0, is_visible=self.args.visual_style == "collision"
+        )
         self.cup = builder.add_body(
             xform=wp.transform(wp.vec3(CUP_ORIGIN[0], CUP_ORIGIN[1], TABLE_Z), wp.quat_identity()), label="cup"
         )
-        hx, hy, hz = CUP_OUTER / 2
-        t = CUP_WALL
-        boxes = [((0.0, 0.0, t / 2), (hx, hy, t / 2))]
-        boxes += [((sx * (hx - t / 2), 0.0, hz), (t / 2, hy, hz)) for sx in (-1, 1)]
-        boxes += [((0.0, sy * (hy - t / 2), hz), (hx - t, t / 2, hz)) for sy in (-1, 1)]
+        vertices, faces = cup_mesh()
+        builder.add_shape_mesh(
+            self.cup,
+            mesh=newton.Mesh(vertices, faces.ravel()),
+            cfg=cup_cfg,
+            color=(0.85, 0.90, 0.88),
+            label="cup_shell",
+        )
         # A rubberized handle: the cup hangs ahead of the grip, so its weight
         # twists the handle in the pad plane against the pads' torsional friction.
         handle_cfg = newton.ModelBuilder.ShapeConfig(
@@ -103,55 +122,57 @@ class Example(W1MJMPMScene):
             ke=float(__import__("os").environ.get("HANDLE_KE", 1.0e5)),
             kd=100.0,
             mu=float(__import__("os").environ.get("HANDLE_MU", 2.0)),
+            is_visible=self.args.visual_style == "collision",
         )
-        boxes = [(center, half, cup_cfg) for center, half in boxes]
-        boxes += [(tuple(HANDLE_CENTER), tuple(HANDLE_HALF), handle_cfg)]
-        for center, half, cfg in boxes:
+        for center, half in HANDLE_BOXES:
             builder.add_shape_box(
                 self.cup,
                 xform=wp.transform(wp.vec3(*center), wp.quat_identity()),
                 hx=half[0],
                 hy=half[1],
                 hz=half[2],
-                cfg=cfg,
+                cfg=handle_cfg,
                 color=(0.85, 0.85, 0.80),
                 label="cup",
             )
         cooker = wp.transform(wp.vec3(COOKER_CENTER[0], COOKER_CENTER[1], TABLE_Z), wp.quat_identity())
+        cooker_cfg = newton.ModelBuilder.ShapeConfig(
+            ke=2.0e4, kd=100.0, mu=0.8, is_visible=self.args.visual_style == "collision"
+        )
         for part, color in (("body", (0.22, 0.23, 0.25)), ("lid", (0.68, 0.70, 0.73))):
             builder.add_shape_mesh(
                 -1,
                 xform=cooker,
                 mesh=_load_obj(COOKER_ASSETS / f"{part}.obj"),
-                cfg=self.surface_cfg,
+                cfg=cooker_cfg,
                 color=color,
                 label=f"rice_cooker_{part}",
             )
 
-        inner = CUP_OUTER[:2] - 2 * CUP_WALL - RICE_SPACING
-        cells = np.floor(np.array((inner[0], inner[1], RICE_FILL)) / RICE_SPACING).astype(int)
         radius = 0.5 * RICE_SPACING
         self.rice_begin = builder.particle_count
-        builder.add_particle_grid(
-            pos=wp.vec3(
-                CUP_ORIGIN[0] - 0.5 * (cells[0] - 1) * RICE_SPACING,
-                CUP_ORIGIN[1] - 0.5 * (cells[1] - 1) * RICE_SPACING,
-                TABLE_Z + CUP_WALL + radius + 0.001,
-            ),
-            rot=wp.quat_identity(),
-            vel=wp.vec3(0.0),
-            dim_x=int(cells[0]),
-            dim_y=int(cells[1]),
-            dim_z=int(cells[2]),
-            cell_x=RICE_SPACING,
-            cell_y=RICE_SPACING,
-            cell_z=RICE_SPACING,
-            mass=RICE_DENSITY * RICE_SPACING**3,
-            jitter=0.2 * RICE_SPACING,
-            radius_mean=radius,
-            custom_attributes={"mpm:friction": RICE_FRICTION},
-        )
+        random = np.random.default_rng(47)
+        for layer in range(int(RICE_FILL / RICE_SPACING)):
+            z = CUP_WALL + radius + 0.001 + layer * RICE_SPACING
+            safe_radius = cup_inner_radius(z) - radius - 0.001
+            cells = int(safe_radius / RICE_SPACING)
+            for i in range(-cells, cells + 1):
+                for j in range(-cells, cells + 1):
+                    xy = np.array((i, j)) * RICE_SPACING + random.uniform(-0.12, 0.12, 2) * RICE_SPACING
+                    if np.linalg.norm(xy) > safe_radius:
+                        continue
+                    builder.add_particle(
+                        wp.vec3(CUP_ORIGIN[0] + xy[0], CUP_ORIGIN[1] + xy[1], TABLE_Z + z),
+                        wp.vec3(0.0),
+                        RICE_DENSITY * RICE_SPACING**3,
+                        radius,
+                        custom_attributes={"mpm:friction": RICE_FRICTION},
+                    )
         self.rice_end = builder.particle_count
+        rice_count = self.rice_end - self.rice_begin
+        print(
+            f"[W1RiceCooker] {rice_count} MPM rice samples, {rice_count * RICE_DENSITY * RICE_SPACING**3 * 1000:.1f} g."
+        )
         self.cup_in_grip = []
         self.finger_load = {"full": [], "empty": []}
         self.peak_grain = 0.0
@@ -163,19 +184,30 @@ class Example(W1MJMPMScene):
         count = self.rice_end - self.rice_begin
         self.rice_radii = wp.full(count, 0.5 * RICE_SPACING, dtype=float, device=self.model.device)
         self.rice_colors = wp.full(count, wp.vec3(0.95, 0.93, 0.85), dtype=wp.vec3, device=self.model.device)
+        self.visuals = None
+        if args.visual_style == "realistic":
+            self.visuals = RiceCookerVisuals(
+                viewer,
+                device=self.model.device,
+                cooker_pose=wp.transform(wp.vec3(COOKER_CENTER[0], COOKER_CENTER[1], TABLE_Z), wp.quat_identity()),
+                rice_count=count,
+            )
 
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
-        self.viewer.log_points(
-            "/rice", self.state_0.particle_q[self.rice_begin : self.rice_end], self.rice_radii, self.rice_colors
-        )
+        rice_positions = self.state_0.particle_q[self.rice_begin : self.rice_end]
+        if self.visuals is not None:
+            self.visuals.render(cup_pose=self.state_0.body_q[self.cup : self.cup + 1], rice_positions=rice_positions)
+        else:
+            self.viewer.log_points("/rice", rice_positions, self.rice_radii, self.rice_colors)
         self.viewer.end_frame()
 
     def mpm_option_overrides(self):
         # Granular flow pours on a 1.5 cm grid; finer grids with one-cell walls
         # eject grains once the stream leaves the rim.
-        return {"max_active_cell_count": 4096, "air_drag": 1.0}
+        # The denser fill exceeds pic48's per-cell capacity during graph replay.
+        return {"max_active_cell_count": 4096, "air_drag": 1.0, "collider_basis": "pic128"}
 
     def configure_model(self, model):
         shape_body = model.shape_body.numpy()
@@ -235,12 +267,10 @@ class Example(W1MJMPMScene):
         x = self.state_0.particle_q.numpy()[self.rice_begin : self.rice_end]
         frame = wp.transform_inverse(self._cup_frame())
         local = np.array([wp.transform_point(frame, wp.vec3(*p)) for p in x])
-        hx, hy, _ = CUP_OUTER / 2
         in_cup = (
-            (np.abs(local[:, 0]) < hx)
-            & (np.abs(local[:, 1]) < hy)
+            (np.linalg.norm(local[:, :2], axis=1) < CUP_RADIUS + 0.006)
             & (local[:, 2] > -0.005)
-            & (local[:, 2] < CUP_OUTER[2] + 0.01)
+            & (local[:, 2] < CUP_HEIGHT + 0.01)
         )
         in_pot = (np.linalg.norm(x[:, :2] - COOKER_CENTER, axis=1) < COOKER_INNER_RADIUS) & (
             x[:, 2] < TABLE_Z + COOKER_HEIGHT + 0.01
@@ -321,17 +351,23 @@ class Example(W1MJMPMScene):
     @staticmethod
     def create_parser():
         parser = W1MJMPMScene.add_arguments(newton.examples.create_parser(), num_frames=990)
-        # The held cup must not move inside the rice solve, or the rice walks
-        # through its bottom; its reaction reaches the cup before the next
-        # contact solve instead, so the grip holds against the rice's weight.
+        parser.add_argument(
+            "--visual-style",
+            choices=("realistic", "collision"),
+            default="realistic",
+            help="Draw the Blender assets, or show the collision geometry for diagnostics.",
+        )
+        # The material solve uses the cup's current contact response, so the
+        # fingers support its load without a delayed reaction or final projection.
         parser.set_defaults(
             substeps=6,
+            rigid_iterations=40,
             voxel_size=0.015,
             strain_basis="P0",
             mpm_solver="gs",
             iterations=50,
             stall_tolerance=0.0,
-            rigid_material_coupling="lagged",
+            rigid_material_coupling="constrained",
         )
         return parser
 
