@@ -605,6 +605,19 @@ If you run the examples from a source checkout with uv, use
   </tr>
   <tr>
     <td align="center" width="33%">
+      <a href="newton/examples/mjmpm/example_mjmpm_w1_rice_cooker.py">
+        <img width="320" src="docs/images/examples/example_mjmpm_w1_rice_cooker.jpg" alt="MuJoCo–MPM Rice Cooker">
+      </a>
+    </td>
+    <td colspan="2">
+      <b>MuJoCo–MPM rice cooker (experimental)</b><br>
+      The W1 gripper holds a measuring cup of MPM rice by its handle, pours the rice into a rice cooker, and puts the cup back; the fingers carry the rice's weight until it is poured.<br>
+      <code>python -m newton.examples mjmpm_w1_rice_cooker</code><br>
+      <code>python -m newton.examples mjmpm_w1_rice_cooker --coupling one_way</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
       <a href="newton/examples/mjmpm/example_mjmpm_push_sand.py">
         <img width="320" src="docs/images/examples/example_mjmpm_push_sand.jpg" alt="MuJoCo–MPM Sand Push">
       </a>

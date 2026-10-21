@@ -56,25 +56,37 @@ def _interpolate_targets(
 def _write_frame_inputs(
     left: wp.vec3,
     right: wp.vec3,
-    finger: float,
+    left_rotation: wp.vec4,
+    right_rotation: wp.vec4,
+    left_finger: float,
+    right_finger: float,
     tcp_targets: wp.array[wp.vec3],
+    rotation_targets: wp.array[wp.vec4],
     finger_target: wp.array[float],
 ):
     """Store this frame's sampled targets in persistent device buffers."""
     tcp_targets[0] = left
     tcp_targets[1] = right
-    finger_target[0] = finger
+    rotation_targets[0] = left_rotation
+    rotation_targets[1] = right_rotation
+    finger_target[0] = left_finger
+    finger_target[1] = right_finger
 
 
 @wp.kernel
 def _unpack_tcp_targets(
     tcp_targets: wp.array[wp.vec3],
+    rotation_targets: wp.array[wp.vec4],
     left_objective: wp.array[wp.vec3],
     right_objective: wp.array[wp.vec3],
+    left_rotation_objective: wp.array[wp.vec4],
+    right_rotation_objective: wp.array[wp.vec4],
 ):
-    """Feed the stored TCP targets to the two IK position objectives."""
+    """Feed the stored TCP targets to the IK position and rotation objectives."""
     left_objective[0] = tcp_targets[0]
     right_objective[0] = tcp_targets[1]
+    left_rotation_objective[0] = rotation_targets[0]
+    right_rotation_objective[0] = rotation_targets[1]
 
 
 @wp.kernel
@@ -86,12 +98,15 @@ def _finish_ik_frame(
     finger_target: wp.array[float],
     frame_end: wp.array[float],
 ):
-    """Clamp the IK solution to joint limits, apply the finger command, and store the frame target."""
+    """Clamp the IK solution to joint limits, apply the finger commands, and store the frame target.
+
+    ``finger_coords`` lists the two finger coordinates of the left, then the right gripper.
+    """
     i = wp.tid()
     value = wp.clamp(ik_q[0, i], lower[i], upper[i])
     for k in range(finger_coords.shape[0]):
         if finger_coords[k] == i:
-            value = finger_target[0]
+            value = finger_target[k // 2]
     ik_q[0, i] = value
     frame_end[i] = value
 
@@ -206,7 +221,8 @@ class W1MJMPMScene:
         self.frame_end = wp.clone(self.ik_q.flatten())
         self.frame_start = wp.clone(self.frame_end)
         self.tcp_targets = wp.zeros(2, dtype=wp.vec3, device=self.model.device)
-        self.finger_target = wp.zeros(1, dtype=float, device=self.model.device)
+        self.rotation_targets = wp.zeros(2, dtype=wp.vec4, device=self.model.device)
+        self.finger_target = wp.zeros(2, dtype=float, device=self.model.device)
         self.finger_coord_array = wp.array(
             [coord for coords in self.finger_coords for coord in coords], dtype=int, device=self.model.device
         )
@@ -226,6 +242,7 @@ class W1MJMPMScene:
             # grip at coarse substeps.
             rigid_warm_start=True,
             rigid_solver=args.rigid_solver,
+            rigid_material_coupling=args.rigid_material_coupling,
             mpm_options={
                 "grid_type": "fixed",
                 "voxel_size": args.voxel_size,
@@ -237,7 +254,8 @@ class W1MJMPMScene:
                 "stall_tolerance": args.stall_tolerance,
                 "solver": args.mpm_solver,
                 "air_drag": 0.0,
-            },
+            }
+            | self.mpm_option_overrides(),
         )
         self.graph = None
         self.viewer.set_model(self.model)
@@ -255,9 +273,21 @@ class W1MJMPMScene:
     def build_task(self, builder: newton.ModelBuilder) -> None:
         """Add task objects after the robot, ground, and worktop."""
 
-    def plan(self, time: float) -> tuple[np.ndarray, float]:
-        """Return ``(tcp_targets[2, 3], finger_target)`` at ``time`` [s]."""
+    def plan(self, time: float) -> tuple[np.ndarray, float | np.ndarray]:
+        """Return ``(tcp_targets[2, 3], finger_target)`` at ``time`` [s].
+
+        ``finger_target`` is one opening [m] for both grippers or one per gripper.
+        """
         raise NotImplementedError
+
+    def gripper_rotations(self, time: float) -> tuple[wp.vec4, wp.vec4]:
+        """Return the left and right gripper orientation targets ``(x, y, z, w)`` at ``time`` [s]."""
+        del time
+        return self.gripper_rotation, self.gripper_rotation
+
+    def mpm_option_overrides(self) -> dict:
+        """Return MPM options that replace the scene defaults."""
+        return {}
 
     def tracks_freely(self, time: float) -> bool:
         """Whether the TCPs should reach their targets (no intended contact)."""
@@ -363,10 +393,11 @@ class W1MJMPMScene:
             ik.IKObjectivePosition(body, TCP, wp.array([wp.vec3(*p)], dtype=wp.vec3))
             for body, p in zip(self.ee, self.home, strict=True)
         ]
-        objectives = list(self.positions) + [
+        self.rotations = [
             ik.IKObjectiveRotation(body, wp.quat_identity(), wp.array([self.gripper_rotation], dtype=wp.vec4))
             for body in self.ee
         ]
+        objectives = list(self.positions) + list(self.rotations)
         objectives.append(
             ik.IKObjectiveJointLimit(self.ik_model.joint_limit_lower, self.ik_model.joint_limit_upper, weight=10.0)
         )
@@ -401,7 +432,14 @@ class W1MJMPMScene:
         wp.launch(
             _unpack_tcp_targets,
             1,
-            [self.tcp_targets, self.positions[0].target_positions, self.positions[1].target_positions],
+            [
+                self.tcp_targets,
+                self.rotation_targets,
+                self.positions[0].target_positions,
+                self.positions[1].target_positions,
+                self.rotations[0].target_rotations,
+                self.rotations[1].target_rotations,
+            ],
         )
         self.ik_solver.step(self.ik_q, self.ik_q, iterations=self.args.ik_iterations)
         wp.launch(
@@ -444,10 +482,22 @@ class W1MJMPMScene:
 
     def step(self):
         targets, finger_target = self.plan(self.sim_time + self.frame_dt)
+        fingers = np.broadcast_to(np.asarray(finger_target, dtype=float), (2,))
+        left_rotation, right_rotation = self.gripper_rotations(self.sim_time + self.frame_dt)
         wp.launch(
             _write_frame_inputs,
             1,
-            [wp.vec3(*targets[0]), wp.vec3(*targets[1]), float(finger_target), self.tcp_targets, self.finger_target],
+            [
+                wp.vec3(*targets[0]),
+                wp.vec3(*targets[1]),
+                wp.vec4(*left_rotation),
+                wp.vec4(*right_rotation),
+                float(fingers[0]),
+                float(fingers[1]),
+                self.tcp_targets,
+                self.rotation_targets,
+                self.finger_target,
+            ],
         )
         if self.graph is None:
             self._simulate_frame()
@@ -538,6 +588,12 @@ class W1MJMPMScene:
             choices=("gauss_seidel", "jacobi"),
             default="gauss_seidel",
             help="Rigid-block contact solve: sequential sweeps or parallel sweeps with mass splitting.",
+        )
+        parser.add_argument(
+            "--rigid-material-coupling",
+            choices=("implicit", "lagged"),
+            default="implicit",
+            help="Material reaction on free rigid bodies: in the material solve, or before the next contact solve.",
         )
         parser.add_argument(
             "--ik-iterations",

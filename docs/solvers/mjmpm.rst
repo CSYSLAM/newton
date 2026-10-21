@@ -110,6 +110,29 @@ stability, grip width, hold jitter, object lift, table support, and recovery
 after release. A full test run requires 720 frames. Asset provenance and
 import behavior are documented beside the copied URDF.
 
+W1 rice cooker
+--------------
+
+.. code-block:: console
+
+   uv run -m newton.examples mjmpm_w1_rice_cooker
+   uv run -m newton.examples mjmpm_w1_rice_cooker --coupling one_way
+
+The right W1 gripper closes on the handle of a measuring cup holding 343 MPM
+rice grains (36 g), lifts it, carries it over a rice cooker modelled in
+Blender, rolls the wrist 135 degrees to pour, turns the empty cup upright, puts
+it back, and releases it. The cup is an MPM-owned free body held by finger
+friction alone, and it hangs ahead of the handle, so the rice's weight reaches
+the robot as a torque on the grip. The example uses
+``rigid_material_coupling="lagged"``: with implicit coupling the cup creeps in
+the grip, and correcting the cup after the material solve lets the rice walk
+through its bottom. The test requires the cup to stay in the grip (handle slip
+below 6 mm and 8 degrees), at least 80% of the rice in the cooker with at most
+15% spilled, the empty cup back upright, and the difference between the
+vertical finger load before and after the pour to match the rice's weight
+within 30%. Rice pours on a 1.5 cm grid; walls are at least one cell thick.
+With ``--coupling one_way`` the fingers close through the handle.
+
 Material contacts
 -----------------
 
@@ -204,6 +227,13 @@ Current limits
   contacts press on one body: a two-box stack needs about 40 sweeps where
   sequential sweeps need 8, and a block held by 36 finger contacts slips
   noticeably more at equal cost, so sequential sweeps remain the default.
+  With the default ``rigid_material_coupling="implicit"``, free rigid bodies
+  move inside the material solve and receive its impulses after the rigid
+  contact solve of the same step. A body held by contacts against a material
+  load (a gripped cup of grains, a loaded tray on a slope) then creeps by about
+  ``F / m * dt`` per unit time. ``"lagged"`` treats free rigid bodies as
+  kinematic in the material solve and applies its reaction before the next
+  contact solve, which removes the creep at the cost of one step of delay.
   Restitution coefficients, rolling/torsional friction,
   prescribed contact surface velocity, and continuous collision detection are
   not implemented by that solver.

@@ -17,6 +17,8 @@
 - W1 软块松开后形状恢复：4 cm 网格、4 × 4 × 6 粒子、逐粒子应变基 `pic48`，残余 3.0 → 0.46 mm，64 FPS；粗离散使软块偏硬（压入 3.6 mm/侧）。详见第七轮。
 - `test_collider_bound_culling_preserves_rasterization` 的 CUDA 错误 700 是测试在 CPU 模型上用 CUDA 建数组所致，已修复；MJMPM 测试 44/44 通过。
 
+- 新例子 `mjmpm_w1_rice_cooker`：W1 夹量杯手柄往 Blender 建模的电饭煲里倒米，米重经杯子与指面传到机器人；新增 `rigid_material_coupling="lagged"` 消除夹持容器的蠕滑。详见第八轮。
+
 ## 已完成
 
 | 内容 | 说明 |

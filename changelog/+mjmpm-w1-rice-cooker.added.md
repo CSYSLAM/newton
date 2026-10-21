@@ -1,0 +1,1 @@
+Add the experimental `mjmpm_w1_rice_cooker` example, in which the W1 gripper holds a measuring cup of MPM rice by its handle, pours the rice into a rice cooker modelled in Blender, and puts the cup back. The shared W1 scene now accepts per-arm finger commands, per-frame gripper orientations, and MPM option overrides.
