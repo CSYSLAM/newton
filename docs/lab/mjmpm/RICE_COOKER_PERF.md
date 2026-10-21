@@ -132,3 +132,57 @@ Correctness:
   spilled, peak grain 1.94 m/s; baseline 3.34 mm / 3.28 deg, 100%, 0%, 1.93
   m/s; the example varies run to run at this level).
 - CUDA graph capture and replay unchanged (the bench runs graph replay).
+
+## 3. Breakdown after 2.1 and next candidates
+
+Refined phases (commit 95d605ec, same windows; collision and MuJoCo split
+out): frame 46.6 ms.
+
+| Phase | ms/frame | share | calls/frame |
+|---|---:|---:|---:|
+| rigid GS sweeps (2 per substep) | 17.5 | 37.6% | 12 |
+| MPM step (main stream) | 12.6 | 27.1% | 6 |
+| of which MPM iterations | 6.7-6.9 | 14.4% | 6 |
+| of which rasterize colliders | 2.5 | 5.3% | 6 |
+| of which rigidity operator | 1.9 | 4.1% | 6 |
+| of which plasticity system | 0.9 | 2.0% | 6 |
+| collision detection | 6.2 | 13.3% | 6 |
+| of which narrow phase (mesh-mesh SDF) | 5.2 | 11.2% | 6 |
+| of which contact sort / match / broad phase | 0.8 | 1.6% | 6 |
+| MuJoCo step (main + feedback re-solve) | 4.0 | 8.7% | 12 |
+| MPM prepare [side stream, overlapped] | 5.5 | 11.8% | 6 |
+
+MPM iterations in these windows average 12.5 per solve, so one iteration
+costs about 92 us. An iteration launches 8 Gauss-Seidel color kernels (the
+P0 strain graph has 8 colors) plus about 6 contact kernels (nodal friction,
+two BSR products and the link/independent response maps), about 6.5 us per
+graph node: the iteration is launch-latency bound, not compute bound.
+
+Tried and rejected for the GS sweep kernel:
+
+- statically unrolled link loop (`range(MAX_RESPONSE_LINKS)` with a guard):
+  1.39 -> 1.52 ms/launch, slower.
+- thread-local matrix rows for body state: 2x slower (Warp copies the whole
+  matrix on every dynamic row write); per-component vectors avoid this.
+
+Tooling notes: Nsight Systems 2024.6 records no CUDA activity with the
+installed CUDA 13.3 driver; CUDA events recorded inside the captured graph
+work and are what `rice_bench.py phases` uses. Kernel timing without the
+graph (`wp.timing_begin`) inflates small kernels and memsets by several
+times and is not usable for this scene.
+
+Candidates, by expected gain:
+
+1. GS sweeps are still the top item (37.6%), single-threaded and now
+   compute-latency bound (~330 ns per contact update). Half of it is the
+   reaction-recovery re-solve in `_finish_constrained_material`; making it
+   cheaper (warm start from the first solve, fewer sweeps) changes results
+   and belongs to the second batch.
+2. MPM iterations (14%): fuse the 8 color launches into one single-block
+   kernel that loops over colors with block-level synchronization when the
+   strain node count fits one block, and fuse the contact-side launches;
+   requires a capacity check and fallback to the multi-launch path.
+3. Mesh-mesh SDF narrow phase (11%): shared Newton geometry code; check the
+   launch dimension against the active pair count before touching it.
+4. Rasterize colliders and rigidity operator (9%): rebuilt every substep;
+   check which parts depend only on body poses.
