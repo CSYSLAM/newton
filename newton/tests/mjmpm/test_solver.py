@@ -1686,6 +1686,73 @@ class TestMJMPMCUDA(unittest.TestCase):
         self.assertTrue(np.isfinite(results["gs-soa"]).all())
         np.testing.assert_allclose(results["gs-soa"], results["gs"], atol=1.0e-5)
 
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA required")
+    def test_single_node_eigenbasis_matches_assembled(self):
+        """Integrate the P0 strain mass diagonal directly with the assembled matrix's eigenbasis result."""
+        from newton._src.solvers.mjmpm.mpm.solver_implicit_mpm import SolverImplicitMPM as Material  # noqa: PLC0415
+
+        build = Material._build_strain_eigenbasis
+        stats = {"calls": 0, "nodes": 0}
+
+        def compare(material, pic, scratch, inv_cell_volume):
+            volume = scratch.strain_node_particle_volume
+            before = wp.clone(volume)
+            _ev, rotated = material._assemble_strain_eigenbasis(pic, scratch, inv_cell_volume)
+            expected = volume.numpy().copy(), rotated.numpy().copy()
+            volume.assign(before)
+            result = build(material, pic, scratch, inv_cell_volume)
+            self.assertIsNone(result[0])
+            count = result[1].shape[0]
+            np.testing.assert_allclose(volume.numpy()[:count], expected[0][:count], rtol=1.0e-6, atol=0.0)
+            np.testing.assert_allclose(result[1].numpy(), expected[1][:count], rtol=1.0e-6, atol=0.0)
+            stats["calls"] += 1
+            regular = (expected[0][:count] != 0.0) & (expected[0][:count] != 1.0)
+            stats["nodes"] = max(stats["nodes"], int(regular.sum()))
+            return result
+
+        Material._build_strain_eigenbasis = compare
+        try:
+            builder = newton.ModelBuilder()
+            SolverMJMPM.register_custom_attributes(builder)
+            builder.add_particle_grid(
+                pos=wp.vec3(-0.05, -0.05, 0.005),
+                rot=wp.quat_identity(),
+                vel=wp.vec3(0.3, 0.0, 0.0),
+                dim_x=8,
+                dim_y=8,
+                dim_z=8,
+                cell_x=0.01,
+                cell_y=0.01,
+                cell_z=0.01,
+                mass=0.0016,
+                jitter=0.0,
+                radius_mean=0.005,
+                custom_attributes={"mpm:friction": 0.5},
+            )
+            body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.14), wp.quat_identity()))
+            builder.add_shape_box(body, hx=0.03, hy=0.03, hz=0.03, cfg=newton.ModelBuilder.ShapeConfig(density=500.0))
+            builder.add_ground_plane()
+            model = builder.finalize(device="cuda:0")
+            solver = SolverMJMPM(
+                model,
+                mpm_options={
+                    "grid_type": "fixed",
+                    "grid_padding": 6,
+                    "max_active_cell_count": 2048,
+                    "voxel_size": 0.02,
+                    "max_iterations": 10,
+                    "solver": "gs",
+                    "strain_basis": "P0",
+                },
+            )
+            state = model.state()
+            for _ in range(20):
+                solver.step(state, state, None, None, 1.0 / 240.0)
+        finally:
+            Material._build_strain_eigenbasis = build
+        self.assertGreater(stats["calls"], 0)
+        self.assertGreater(stats["nodes"], 0)
+
     def _check_graph_matches_eager(self, collider_basis, iterations):
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         SolverMJMPM.register_custom_attributes(builder)

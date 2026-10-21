@@ -606,6 +606,45 @@ def mass_form(
     return p(s) * q(s) * inv_cell_volume
 
 
+@fem.integrand
+def node_mass_form(
+    s: fem.Sample,
+    q: fem.Field,
+    inv_cell_volume: float,
+    particle_flags: wp.array[wp.int32],
+):
+    """Diagonal of :func:`mass_form` for strain bases with one node per element (shape values 0 or 1)."""
+    if ~particle_flags[s.qp_index] & newton.ParticleFlags.ACTIVE:
+        return 0.0
+
+    return q(s) * inv_cell_volume
+
+
+@wp.kernel
+def single_node_eigenvalues(
+    node_mass: wp.array[float],
+    volume: wp.array[float],
+    rotated_volume: wp.array[float],
+):
+    """:func:`compute_eigenvalues` for one node per element, from the mass diagonal.
+
+    A zero mass marks a block that sparse assembly prunes; eigenvectors are
+    trivial and not needed.
+    """
+    i = wp.tid()
+    m = node_mass[i]
+    if m == 0.0:
+        volume[i] = 0.0
+        rotated_volume[i] = 0.0
+    elif m <= _EIGENVALUE_FLOOR:
+        volume[i] = 1.0
+        rotated_volume[i] = 1.0
+    else:
+        s = volume[i]
+        rotated_volume[i] = wp.sign(s) * s
+        volume[i] = m
+
+
 @wp.kernel(module="unique")
 def compute_eigenvalues(
     offsets: wp.array[int],

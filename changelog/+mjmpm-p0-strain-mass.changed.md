@@ -1,0 +1,1 @@
+Speed up MJMPM material solves with one-node strain bases such as the default P0 by integrating the diagonal strain mass directly instead of assembling and decomposing the full PIC mass matrix. Results are unchanged; the W1 rice-cooker example runs about 3% faster per frame.

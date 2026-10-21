@@ -91,6 +91,7 @@ from newton._src.solvers.mjmpm.mpm.implicit_mpm_solver_kernels import (
     mat31,
     mat66,
     node_color,
+    node_mass_form,
     record_volume_rebuild_status,
     reset_mpm_collider_history,
     reset_mpm_grid_warmstart,
@@ -99,6 +100,7 @@ from newton._src.solvers.mjmpm.mpm.implicit_mpm_solver_kernels import (
     rotate_matrix_columns,
     rotate_matrix_rows,
     scatter_field_dof_values,
+    single_node_eigenvalues,
     strain_delta_form,
     strain_rhs,
     update_particle_frames,
@@ -3604,6 +3606,41 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             M_diag.assign(self._mpm_model.material_particle_volume * inv_cell_volume)
             return None, None
 
+        nodes_per_elt = scratch.divergence_test.space.topology.MAX_NODES_PER_ELEMENT
+        if nodes_per_elt == 1:
+            # The mass matrix is diagonal and its eigenbasis trivial: integrate
+            # the diagonal directly instead of assembling and copying a matrix.
+            node_mass = fem.integrate(
+                node_mass_form,
+                quadrature=pic,
+                fields={"q": scratch.divergence_test},
+                values={
+                    "inv_cell_volume": inv_cell_volume,
+                    "particle_flags": self._mpm_model.material_particle_flags,
+                },
+                output_dtype=float,
+            )
+            M_diag = scratch.strain_node_particle_volume
+            rotated_volume = wp.empty_like(M_diag)
+            wp.launch(
+                single_node_eigenvalues,
+                dim=node_mass.shape[0],
+                inputs=[node_mass],
+                outputs=[M_diag, rotated_volume],
+            )
+            return None, rotated_volume
+
+        return self._assemble_strain_eigenbasis(pic, scratch, inv_cell_volume)
+
+    def _assemble_strain_eigenbasis(
+        self,
+        pic: fem.PicQuadrature,
+        scratch: ImplicitMPMScratchpad,
+        inv_cell_volume: float,
+    ):
+        """Eigenbasis of the element-diagonal blocks of the assembled PIC mass matrix."""
+        nodes_per_elt = scratch.divergence_test.space.topology.MAX_NODES_PER_ELEMENT
+
         # build mass matrix of PIC integration
         M = fem.integrate(
             mass_form,
@@ -3617,7 +3654,6 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         )
 
         # extract diagonal blocks
-        nodes_per_elt = scratch.divergence_test.space.topology.MAX_NODES_PER_ELEMENT
         M_elt_wise = wps.bsr_copy(M, block_shape=(nodes_per_elt, nodes_per_elt))
 
         if M_elt_wise.block_shape == (1, 1):

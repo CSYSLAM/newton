@@ -244,3 +244,113 @@ device) and requires zero mismatches; with the fused kernel deliberately
 skipping the last color it reports 23,044 mismatches. Rice cooker `--test`
 PASS (slip 3.36 mm / 3.74 deg, 100% in pot, 0% spilled, peak grain 1.96
 m/s).
+
+### 2.3 Rigid GS local capacity (closed)
+
+Same-input micro-benchmark, all bitwise identical to the reference:
+
+| local bodies | frame 515 | frame 300 |
+|---:|---:|---:|
+| 8 | 1.399 ms | 1.971 ms |
+| 16 | 1.408 ms | 1.987 ms |
+| 32 (kept) | 1.392 ms | 1.966 ms |
+
+No spill effect: per-component vectors only touch the slots in use. Buckets
+here hold 3 bodies (two finger links and the cup) and 2 contacted links. The
+remaining time is the serial dependence of Gauss-Seidel itself; further
+gains need algorithm changes (second batch).
+
+### 2.4 Mesh-mesh SDF narrow phase work (measured, change reverted)
+
+Instrumented the narrow phase inside the captured graph (per-launch events)
+and read the mesh-mesh pair and block counts at three stages:
+
+| stage | mesh-mesh pairs | blocks with work / launched | SDF kernel ms/frame | narrow phase ms/frame |
+|---|---:|---:|---:|---:|
+| approach (frame 30) | 0 | 0 / 576 | 0.085 | 2.34 |
+| carry (frame 300) | 2 (finger pads x cup shell) | 33 / 576 | 3.59 | 6.02 |
+| pour (frame 515) | 2 | 33 / 576 | 3.75 | 6.02 |
+
+Idle blocks are cheap (the empty launch costs 0.085 ms per frame). The cost
+is the work itself on only 33 blocks for 36 SMs: `compute_block_counts_from_weights`
+gives every block at least 256 edges (`wp.max(256, total_weight //
+target_blocks)`), so 8,248 edges get 33 blocks instead of the 144 the
+partition targets. The floor dates from #2215, where it was a per-block
+triangle/vertex count.
+
+Experiment: make the floor a parameter for the mesh-mesh path only. On
+identical states the reduced contact sets are bitwise identical for floors
+256/128/64/32/16 (83 contacts at frame 300, 70 at frame 515), and `collide()`
+drops from 0.77-0.79 ms to 0.52-0.58 ms per call (floor 32), about 1.3 ms per
+frame (2.8%).
+
+Not kept:
+
+- With floor 32, full-frame graph replay hangs (GPU at 100%, the frame never
+  completes) shortly after the grasp starts (frames 150-190). It does not hang
+  with floors 64 or 128 (240 frames), with floor 256 and only 144 launched
+  blocks, in eager steps (also with 144 launched blocks), with the MPM prepare
+  side stream disabled, or for single eager `collide()` calls on those
+  states. The in-place exclusive scan of the block offsets checks out in graph
+  replay (2,000 replays). The hanging kernel was not identified: events
+  recorded in the graph do not report completion to `is_complete`, and Nsight
+  Systems records nothing on this driver.
+- The gain is below the 3% bar, and lowering the floor exposes what looks like
+  a latent race or deadlock in shared collision code that needs its own
+  investigation (worth reporting upstream with the reproduction: rice-cooker
+  example, floor 32, graph replay with the material side stream).
+
+### 2.5 Direct strain mass diagonal for one-node strain bases (kept)
+
+Cost of `_build_strain_eigenbasis` before the change (frame 300 window,
+events around its parts; the instrumentation itself adds time, 1.84 ms/frame
+without it):
+
+| part | ms/frame |
+|---|---:|
+| `fem.integrate(mass_form)` (BSR assembly from triplets) | 1.51 |
+| `bsr_copy` to element blocks | 1.23 |
+| `compute_eigenvalues` | ~0.1 |
+
+With the P0 strain basis an element has one node, so the PIC mass matrix is
+diagonal and each 1x1 "eigendecomposition" is trivial; only the node volume
+and `rotated_volume` are used afterwards (the eigenvectors are applied only
+for more than one node per element).
+
+Change: for `MAX_NODES_PER_ELEMENT == 1`, integrate the diagonal as a linear
+form (`node_mass_form`, `q(s) * inv_cell_volume`, which equals the bilinear
+`p(s) * q(s) * inv_cell_volume` for 0/1 shape values) and finish with
+`single_node_eigenvalues`, which reproduces `compute_eigenvalues` for 1x1
+blocks: a zero mass stands for a block that sparse assembly prunes (volume
+and rotated volume 0), a mass below the eigenvalue floor gives 1 and 1, and
+otherwise the volume becomes the mass and the rotated volume `sign(s) * s` of
+the previous node volume. The general path moved to
+`_assemble_strain_eigenbasis`, unchanged.
+
+Equivalence: running both paths on the same inputs at every solve of the
+example in eager mode (3,360 solves, frames 0-559, up to 287 active strain
+nodes) gave identical volumes and rotated volumes (relative difference 0, no
+branch mismatches). New test `test_single_node_eigenbasis_matches_assembled`
+does the same comparison for a sand-and-box scene on CUDA (rtol 1e-6); with
+the fast path deliberately doubling the volume it fails (100 mismatches).
+(On CPU, after other tests in the same process, warp.fem fails to generate
+`fill_element_node_indices` for this scene; the test therefore runs on CUDA
+with a fixed grid like the other material tests.)
+
+Phase time of the eigenbasis build: 2.72 -> 0.51 ms/frame (both runs carry
+the part instrumentation).
+
+Full trajectory, alternating runs (A = previous method restored from git,
+B = new). The machine ran about 3 ms slower overall in this session than in
+2.1-2.2; the alternation cancels that out:
+
+| run | A median | A p90 | B median | B p90 |
+|---|---:|---:|---:|---:|
+| 1 | 48.87 | 60.09 | 47.56 | 58.36 |
+| 2 | 50.12 | 61.42 | 46.82 | 58.69 |
+| 3 | 49.20 | 59.79 | 47.86 | 59.08 |
+| median | 49.20 | 60.09 | 47.56 | 58.69 |
+
+Median -3.3%, mean -3.3% (50.05 -> 48.41), p90 -2.3%; B is faster in every
+pair. Rice cooker `--test` PASS (slip 3.34 mm / 3.48 deg, 100% in pot, 0%
+spilled, peak grain 1.91 m/s). MJMPM tests 54/54.
