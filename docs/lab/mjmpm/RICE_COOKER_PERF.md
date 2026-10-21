@@ -186,3 +186,61 @@ Candidates, by expected gain:
    launch dimension against the active pair count before touching it.
 4. Rasterize colliders and rigidity operator (9%): rebuilt every substep;
    check which parts depend only on body poses.
+
+### 2.2 Single-block launch for all Gauss-Seidel strain colors (measured, reverted)
+
+Not kept: about 1% per frame did not justify a native block barrier, a
+device-flag `capture_if` and about 400 added lines in the MPM solver. The
+measurements below are kept for reference.
+
+Change: `make_gs_solve_fused_kernel` and `apply_stress_gs_fused`
+(`rheology_solver_kernels.py`) run all colors of the strain Gauss-Seidel
+sweep in one launch of one 256-thread block, with a block barrier
+(`__syncthreads` through `wp.func_native`) between colors. The per-color
+body is shared with the existing kernels (`_make_gs_solve_color`,
+`_apply_stress_color`), so order and arithmetic are unchanged. At the start
+of each solve, `gs_fused_condition` sets a device flag when no color holds
+more than 512 blocks, and `wp.capture_if` picks the fused or the per-color
+path, so a captured graph stays valid if the grid grows.
+
+Why: in this scene a color holds 4-41 blocks of one strain node each, while
+the per-color launch starts 36 SMs x 2 x 64 = 4,608 threads per color.
+
+Measured cost split inside the rheology solve (phases with `FINE=1`, frame
+300 window, 14.4 iterations per solve):
+
+| part | ms/frame |
+|---|---:|
+| solver loop (`_run_solver_loop`) | 3.74 |
+| strain eigenbasis build | 1.84 |
+| GS initial guess + solver setup | 0.34 |
+| other (contact solver setup, delassus, eigenbasis apply) | ~1.2 |
+
+So the iterations were never the whole "MPM iterations" phase: with the GS
+and contact sweeps replaced by no-ops (diagnostic only) the phase still
+took 5.7 ms/frame.
+
+Effect on the solver loop (same windows, two runs each): per-color 3.76 /
+4.05 ms at 12.3 / 12.8 iterations, fused 3.27 / 2.95 ms at 13.3 / 12.8
+iterations; per iteration ~51 us -> ~40 us (-22%).
+
+Full trajectory, alternating runs (A = per-color via
+`FUSED_MAX_COLOR_BLOCKS = -1`, B = fused):
+
+| run | A median | A p90 | B median | B p90 |
+|---|---:|---:|---:|---:|
+| 1 | 46.42 | 56.08 | 45.88 | 55.39 |
+| 2 | 46.10 | 56.81 | 45.74 | 55.16 |
+| 3 | 46.18 | 55.74 | 44.92 | 54.73 |
+| median | 46.18 | 56.08 | 45.74 | 55.16 |
+
+Median -1.0%, p90 -1.6%; B is faster in every pair, but the gain is close to
+the run-to-run spread.
+
+Correctness: new test `test_fused_gauss_seidel_colors_match_per_color_launches`
+runs every `apply_initial_guess` and `solve` of a sand-and-box scene through
+both paths on the same inputs (eager steps and graph replay, comparison on
+device) and requires zero mismatches; with the fused kernel deliberately
+skipping the last color it reports 23,044 mismatches. Rice cooker `--test`
+PASS (slip 3.36 mm / 3.74 deg, 100% in pot, 0% spilled, peak grain 1.96
+m/s).
