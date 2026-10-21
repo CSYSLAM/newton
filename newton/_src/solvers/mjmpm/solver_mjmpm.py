@@ -78,6 +78,10 @@ class SolverMJMPM(SolverBase):
             as kinematic in the material solve and applies its reaction at the
             start of the next step, before the rigid contact solve, so contacts
             hold against it. Articulation proxies are unaffected.
+            The lagged reaction is explicit: it is unstable for a free body
+            that rests on or sinks into material much heavier than itself
+            (a 0.5 kg box on a sand pile oscillates at ~20 m/s), so use it only
+            for bodies held by contacts or joints.
         rigid_contact_hard: Use hard rigid contact constraints. If False, use
             implicit spring/damper contacts from the shapes' ``ke`` and ``kd``.
         mass_scale: Virtual articulation proxy inertia multiplier. With
