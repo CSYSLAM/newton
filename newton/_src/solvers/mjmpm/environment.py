@@ -219,6 +219,7 @@ class Environment(SolverBase, CouplingInterface):
         self._packed_contacts = wp.zeros(capacity, dtype=kernels.PackedContact, device=device)
         self._bucket_fallback = wp.zeros(self._bucket_count, dtype=int, device=device)
         self._use_local_rigid_buckets = True
+        self._use_cooperative_rigid_buckets = True
         # Jacobi sweeps: contact counts for mass splitting and two wrench
         # accumulators, each cleared by the sweep that does not write it.
         self._body_contacts = wp.zeros(body_count, dtype=int, device=device)
@@ -410,12 +411,25 @@ class Environment(SolverBase, CouplingInterface):
             self.rigid_iterations,
         ]
         if self._use_local_rigid_buckets:
-            wp.launch(
-                kernels.solve_contact_buckets_local,
-                dim=self._bucket_count,
-                inputs=[*inputs, self._packed_contacts, self._bucket_fallback],
-                device=model.device,
-            )
+            if self._use_cooperative_rigid_buckets and self._mobility is not None and model.device.is_cuda:
+                from newton._src.solvers.mjmpm.rigid.warp_sweeps import (  # noqa: PLC0415
+                    solve_contact_buckets_cooperative,
+                )
+
+                wp.launch(
+                    solve_contact_buckets_cooperative,
+                    dim=(self._bucket_count, 32),
+                    inputs=[*inputs, self._packed_contacts, self._bucket_fallback],
+                    device=model.device,
+                    block_dim=32,
+                )
+            else:
+                wp.launch(
+                    kernels.solve_contact_buckets_local,
+                    dim=self._bucket_count,
+                    inputs=[*inputs, self._packed_contacts, self._bucket_fallback],
+                    device=model.device,
+                )
         else:
             self._bucket_fallback.fill_(1)
         wp.launch(

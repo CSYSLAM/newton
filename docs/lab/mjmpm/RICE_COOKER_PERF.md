@@ -589,3 +589,115 @@ To reproduce the rejected experiment in a disposable checkout containing
 These options are intentionally absent from the retained benchmark script.
 After the revert, the retained production tree passes all **50 MJMPM
 tests** (109.4 s); Ruff checks, formatting, and `git diff --check` pass.
+
+### 2.9 Warp-cooperative contact sweeps and display caching (checkpoint)
+
+Checkpoint `a84a6331` was committed and pushed to
+`fork/feature/mjmpm-two-way-grasp` before this work. The changes described
+below form the next checkpoint on that branch. They are not yet a
+verified claim of sustained 25 FPS.
+
+Retained changes:
+
+| Area | Implementation | Scope and qualification |
+|---|---|---|
+| Rigid GS | Compact prepared contacts with valid bodies, preserve their relative order, skip exactly zero impulse updates | Retain all 60 sweeps in each of the two contact solves per substep |
+| Articulated contact GS | One CUDA warp per bucket; distribute body velocity and impulse updates over lanes, broadcast point velocities, precompute the contact's combined point mobility | Enabled for articulated CUDA environments; unsupported buckets fall back, and independent free-body worlds retain their scalar path |
+| Link mobility | Factor matrices up to 32 DOFs using a warp and shared memory | Preserve per-entry Cholesky arithmetic order; CPU and larger matrices retain the original factorization |
+| Material feedback | Fuse articulated and independent mobility maps, removing an intermediate copy | Keep both sparse matrix-vector products; retain the general path outside the bounded supported case |
+| Display | Reuse immutable instance colors/materials/opacities; merge adjacent opaque parts with identical parent and material | Keep all geometry, rice instances, texture maps, transparency, and draw order |
+
+The cooperative GS still uses the same contact ordering and physical
+contact law, but its precomputed point mobility and tangent calculations
+reassociate float32 arithmetic. It is **not bitwise equivalent** to the
+scalar reference. The final candidate restores the original normal
+division and tangent normalization rather than retaining the reciprocal
+and rescaled-normalization experiment.
+
+Configuration remains **1,478 rice particles, 6 substeps, 60/60 rigid
+sweeps, MPM iteration cap 50**, with CUDA graphs enabled. No physics
+tolerance was relaxed. The supported-path dispatch does not replace
+Jacobi, CPU, or oversized-bucket fallback behavior.
+
+Measured evidence, with timing protocols kept separate:
+
+| Version and protocol | Full-trajectory FPS | Grasp through pour FPS | Pour FPS |
+|---|---:|---:|---:|
+| `a84a6331`, offscreen, synchronized | 18.32 | not recorded | not recorded |
+| Combined cooperative/cached-display stage, offscreen, synchronized | 24.91 | 23.62 | 24.37 |
+| Later factor/point-broadcast stage, offscreen, synchronized | see raw JSON | 24.28 | 24.95 |
+| Visible-window stage, synchronized | see raw JSON | 23.36 | 23.91 |
+| Latest candidate, visible window, native application timing | 23.66 | 22.51 | 23.35 |
+
+These are successive development stages, not repeated alternating pairs
+of one final revision. They establish improvement and its approximate
+scale; they do not establish a final speedup confidence interval. The
+latest visible-window run requested 1920x1080, but Windows provided a
+1920x1061 framebuffer. Offscreen comparisons use 1920x1080. Record actual
+framebuffer sizes in future comparisons.
+
+The synchronized protocol inserts device synchronization and `glFinish`
+to attribute GPU cost to physics versus display. Native timing omits
+those per-frame diagnostic barriers. In native timing, `step_ms` measures
+submission time, and outstanding GPU work can be charged to the following
+render call; **5.24 ms submission time is not 5.24 ms physics**. Use total
+frame time for application FPS. Never compare those component timings
+across protocols as if they measured the same quantity.
+
+Validation completed so far:
+
+- The complete 51-test MJMPM suite passed again on the retained checkpoint
+  in 111.52 s, including the final point-broadcast, shared-factor and
+  arithmetic-order changes. The earlier intermediate run passed in
+  146.57 s. These suite durations are not performance benchmarks.
+- Cholesky tests cover 1, 7, 24, 32 and 33 DOFs, three worlds, positive
+  definite and zero matrices. Factors compare bitwise against the scalar
+  implementation, including repeated captured execution and large-matrix
+  fallback.
+- Fused mobility tests cover articulated, rank-deficient independent,
+  absent active rows and empty rows, comparing output bits and graph replay.
+- The latest 990-frame physics acceptance run passed: 100% rice in the
+  pot, 0% spilled, cup slip 3.38 mm / 2.34 degrees, full/empty finger load
+  1.64/1.10 N and peak grain speed 1.88 m/s. Median physics time was
+  31.71 ms; this includes test telemetry and excludes display.
+- On identical frozen states at frames 180, 300 and 515, immutable-property
+  caching and adjacent batching produced **zero different pixel
+  components** versus the original display. Caching reduced frozen render
+  time from about 9.5-9.7 ms to 7.1-7.4 ms. The extra batching gain is small
+  and inconsistent; do not attribute the main improvement to it.
+- **Unresolved strict numerical comparison:** full-trajectory same-input
+  cooperative/scalar comparison examined 35,640 output arrays. The latest
+  version reports seven scalar components exceeding
+  `atol=1e-5, rtol=1e-5`; maximum absolute differences are
+  `3.07e-5` in body twist, `1.79e-6` in contact impulse and `8.77e-7` in
+  body impulse. Physical task acceptance passes, but the strict comparison
+  command exits with failure. Do not describe it as passed or loosen
+  existing acceptance thresholds to hide it.
+
+Rejected experiments remain outside production: shared contact/impulse
+caches, a one-DOF-per-lane layout, the contact-frame variant, and a scalar
+precomputed-Delassus alternative did not provide a useful measured gain.
+Globally grouping nonadjacent visual parts changed four pixels and was
+replaced with adjacent-only grouping. No collision-block-floor reduction,
+recovery-sweep reduction, reduced precision, or texture stripping is
+retained.
+
+Reproduction tools:
+
+- `scripts/benchmark_mjmpm_sweeps.py frozen --cooperative --allow-roundoff
+  --snapshots <directory> --output-dir <directory>` compares identical
+  contact inputs; `verify` instead checks the complete trajectory.
+- `scripts/benchmark_mjmpm_sweeps.py full --cooperative --output-dir
+  <directory>` runs physics acceptance.
+- `scripts/benchmark_mjmpm_sweeps.py display --cooperative --variant
+  current --visible --timing native --output-dir <directory>` measures
+  visible application timing. Use `--variant baseline` with the same
+  timing options for the committed reference.
+- `scripts/profile_mjmpm_frame.py --output <file.json>` separates captured
+  solver phases; `scripts/verify_mjmpm_visual_uploads.py --output-dir
+  <directory>` checks identical-state rendered images.
+
+Raw evidence and rejected source snapshots are under
+`C:/Users/Administrator/Documents/Blender/RicePour/target_25fps`.
+Remaining gates are the unresolved strict comparison and repeated
+matched-protocol performance pairs. The original 25 FPS target remains open.

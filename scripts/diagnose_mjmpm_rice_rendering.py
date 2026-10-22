@@ -36,6 +36,10 @@ def main():
     parser.add_argument("--warmup", type=int, default=60)
     parser.add_argument("--width", type=int, default=1920)
     parser.add_argument("--height", type=int, default=1080)
+    parser.add_argument("--timing", choices=("synchronized", "native"), default="synchronized")
+    parser.add_argument(
+        "--visible", action="store_true", help="Measure the actual desktop window instead of offscreen rendering"
+    )
     opts = parser.parse_args()
     if opts.frames <= opts.warmup:
         parser.error("--frames must exceed --warmup")
@@ -48,7 +52,7 @@ def main():
     viewer = (
         ViewerNull(num_frames=opts.frames)
         if opts.case == "none"
-        else ViewerGL(width=opts.width, height=opts.height, headless=True, num_frames=opts.frames)
+        else ViewerGL(width=opts.width, height=opts.height, headless=not opts.visible, num_frames=opts.frames)
     )
     removed = []
     if opts.case == "untextured":
@@ -124,20 +128,23 @@ def main():
     texture_inventory = []
     try:
         for frame in range(opts.frames):
-            wp.synchronize_device(example.model.device)
+            if opts.timing == "synchronized" or frame == opts.warmup:
+                wp.synchronize_device(example.model.device)
             if frame == opts.warmup:
                 started = time.perf_counter()
             begin = time.perf_counter()
             example.step()
-            wp.synchronize_device(example.model.device)
+            if opts.timing == "synchronized":
+                wp.synchronize_device(example.model.device)
             stepped = time.perf_counter()
             if test:
                 example.test_post_step()
             checked = time.perf_counter()
             if opts.case != "none":
                 example.render()
-                viewer.renderer.gl.glFinish()
-                wp.synchronize_device(example.model.device)
+                if opts.timing == "synchronized":
+                    viewer.renderer.gl.glFinish()
+                    wp.synchronize_device(example.model.device)
             rendered = time.perf_counter()
             if frame == 0 and opts.case != "none":
                 texture_inventory = [
@@ -155,12 +162,33 @@ def main():
                 samples.append((stepped - begin, checked - stepped, rendered - checked, finished - rendered))
             if frame % 120 == 0:
                 print(f"[{opts.case}] {frame + 1}/{opts.frames}, simulation {example.sim_time:.2f} s", flush=True)
+        if opts.case != "none":
+            viewer.renderer.gl.glFinish()
+        wp.synchronize_device(example.model.device)
         elapsed = time.perf_counter() - started
         example.solver.check_capacity_status()
         example.check_finite()
         if test:
             example.test_final()
         values = np.asarray(samples) * 1000
+        phase_metrics = {}
+        sampled_frames = np.arange(opts.warmup, opts.frames)
+        for name, first, last in (
+            ("grasp_to_pour", 180, 600),
+            ("lift", 258, 348),
+            ("carry", 348, 420),
+            ("pour", 420, 600),
+        ):
+            selected = values[(sampled_frames >= first) & (sampled_frames < last)]
+            if selected.size:
+                total = selected.sum(axis=1)
+                phase_metrics[name] = {
+                    "fps": float(1000 / np.mean(total)),
+                    "step_ms": float(np.mean(selected[:, 0])),
+                    "render_ms": float(np.mean(selected[:, 2])),
+                    "frame_p50_ms": float(np.median(total)),
+                    "frame_p90_ms": float(np.percentile(total, 90)),
+                }
         inventory = []
         if opts.case != "none":
             for name, obj in viewer.objects.items():
@@ -171,10 +199,17 @@ def main():
                         {"name": name, "instances": int(count), "triangles": int(mesh.num_indices // 3) * int(count)}
                     )
         report = {
+            "phases": phase_metrics,
+            "frame_timings_ms": values.tolist(),
             "case": opts.case,
             "frames": opts.frames,
             "warmup": opts.warmup,
             "resolution": [opts.width, opts.height],
+            "framebuffer_resolution": list(viewer.renderer.window.get_framebuffer_size())
+            if opts.case != "none"
+            else None,
+            "timing": opts.timing,
+            "visible": opts.visible,
             "fps": len(samples) / elapsed,
             "step_ms": float(values[:, 0].mean()),
             "validation_ms": float(values[:, 1].mean()),
@@ -196,7 +231,7 @@ def main():
             "video": str(video_path) if encoder is not None else None,
         }
         (opts.output_dir / f"{opts.case}.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-        print(json.dumps(report), flush=True)
+        print(json.dumps({k: v for k, v in report.items() if k != "frame_timings_ms"}), flush=True)
     finally:
         if encoder is not None:
             encoder.stdin.close()

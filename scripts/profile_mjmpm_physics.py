@@ -18,6 +18,7 @@ import warp as wp
 
 from newton._src.solvers.mjmpm.mpm import solver_implicit_mpm as sm
 from newton._src.solvers.mjmpm.rigid import kernels as rk
+from newton._src.solvers.mjmpm.rigid import warp_sweeps
 from newton.examples.mjmpm.example_mjmpm_w1_rice_cooker import Example
 from newton.viewer import ViewerNull
 
@@ -230,7 +231,10 @@ def main():
         kernel = kw.get("kernel", a[0] if a else None)
         if active and kernel is original_build.__globals__["fill_collider_coupling_matrices"]:
             return events.call("fill", original_launch, *a, **kw)
-        if kernel is rk.solve_contact_buckets_local and example.model.device.is_capturing:
+        if (
+            kernel in (rk.solve_contact_buckets_local, warp_sweeps.solve_contact_buckets_cooperative)
+            and example.model.device.is_capturing
+        ):
             index = sweep_index
             sweep_index += 1
             if index in snapshots:

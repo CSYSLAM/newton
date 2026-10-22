@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import warp as wp
 
+from newton.viewer import ViewerGL
+
 
 @wp.kernel
 def _rice_transforms(
@@ -22,7 +24,7 @@ def _rice_transforms(
 class RiceCookerVisuals:
     """Instance visual meshes without adding mass or collision shapes to the model."""
 
-    def __init__(self, viewer, *, device, cooker_pose, rice_count):
+    def __init__(self, viewer, *, device, cooker_pose, rice_count, batch_opaque=True, prefix="/rice_cooker_visuals"):
         self.viewer = viewer
         self.device = device
         self.parts = []
@@ -30,14 +32,49 @@ class RiceCookerVisuals:
         self.single_scale = wp.full(1, wp.vec3(1.0), dtype=wp.vec3, device=device)
         path = Path(__file__).resolve().parents[1] / "assets/rice_cooker/realistic_visuals.npz"
         with np.load(path, allow_pickle=False) as archive:
+            groups = []
             for part in json.loads(str(archive["manifest"])):
                 key = part["key"]
-                name = f"/rice_cooker_visuals/{key}"
+                material_key = (
+                    part["parent"],
+                    tuple(part["color"]),
+                    part["roughness"],
+                    part["metallic"],
+                    part["opacity"],
+                )
+                # Merge only adjacent opaque parts, preserving draw order even
+                # where different materials meet at coincident triangle edges.
+                group = (
+                    groups[-1]
+                    if batch_opaque and part["opacity"] == 1.0 and groups and groups[-1]["material_key"] == material_key
+                    else None
+                )
+                points = archive[key + "_points"]
+                indices = archive[key + "_indices"]
+                normals = archive[key + "_normals"]
+                if group is None:
+                    group = {
+                        "part": part,
+                        "material_key": material_key,
+                        "points": [],
+                        "indices": [],
+                        "normals": [],
+                        "vertices": 0,
+                    }
+                    groups.append(group)
+                group["points"].append(points)
+                group["indices"].append(indices + group["vertices"])
+                group["normals"].append(normals)
+                group["vertices"] += len(points)
+            for group in groups:
+                part = group["part"]
+                key = part["key"]
+                name = f"{prefix}/{key}"
                 viewer.log_mesh(
                     name,
-                    wp.array(archive[key + "_points"], dtype=wp.vec3, device=device),
-                    wp.array(archive[key + "_indices"], dtype=wp.int32, device=device),
-                    normals=wp.array(archive[key + "_normals"].astype(np.float32), dtype=wp.vec3, device=device),
+                    wp.array(np.concatenate(group["points"]), dtype=wp.vec3, device=device),
+                    wp.array(np.concatenate(group["indices"]), dtype=wp.int32, device=device),
+                    normals=wp.array(np.concatenate(group["normals"]).astype(np.float32), dtype=wp.vec3, device=device),
                     hidden=True,
                     backface_culling=False,
                     color=tuple(part["color"]),
@@ -63,6 +100,9 @@ class RiceCookerVisuals:
         self.rice_colors = wp.array(colors, dtype=wp.vec3, device=device)
         self.rice_materials = wp.full(rice_count, wp.vec4(0.38, 0.0, 0.0, 0.0), dtype=wp.vec4, device=device)
         self._static_logged = False
+        # ViewerGL preserves instance attributes when their update arrays are
+        # omitted. These materials and opacities are immutable in this scene.
+        self._reuse_instance_properties = isinstance(viewer, ViewerGL)
 
     def render(self, *, cup_pose, rice_positions):
         """Draw the cup at its rigid pose and one grain at each MPM sample position."""
@@ -82,5 +122,7 @@ class RiceCookerVisuals:
             else:
                 poses = cup_pose if parent == "cup" else self.cooker_pose
                 scales, colors, opacities, materials = self.single_scale, color, opacity, material
+            if self._reuse_instance_properties and self._static_logged:
+                colors, materials, opacities = None, None, None
             self.viewer.log_instances(name + "/instances", name, poses, scales, colors, materials, opacities=opacities)
         self._static_logged = True

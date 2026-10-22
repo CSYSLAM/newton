@@ -989,9 +989,12 @@ def solve_contact_buckets_local(
     count = int(0)
     world = int(-1)
     ok = bool(True)
+    packed_end = first
     for k in range(first, last):
         c = ids[k]
         pair = bodies[c]
+        if pair[0] < 0 and pair[1] < 0:
+            continue
         e = PackedContact()
         e.c = c
         e.a = pair[0]
@@ -1049,7 +1052,8 @@ def solve_contact_buckets_local(
                     e.slot_b = slot
                     e.mb = mass_inv[body]
                     e.ib = inertia_inv[body]
-        packed[k] = e
+        packed[packed_end] = e
+        packed_end += 1
     links = _local_links()
     link_total = int(0)
     if world >= 0 and ok:
@@ -1102,12 +1106,10 @@ def solve_contact_buckets_local(
         w5[j] = f[5]
 
     for phase in range(iterations + 1):
-        for k in range(first, last):
+        for k in range(first, packed_end):
             e = packed[k]
             a = e.a
             b = e.b
-            if a < 0 and b < 0:
-                continue
             c = e.c
             ra = e.ra
             rb = e.rb
@@ -1173,6 +1175,8 @@ def solve_contact_buckets_local(
                 new = normal_new * n + tangent
                 delta = new - old
                 impulses[c] = new
+            if delta == wp.vec3(0.0):
+                continue
             if a >= 0 and ma > 0.0:
                 wrench_a = wp.spatial_vector(-delta, -wp.cross(ra, delta))
                 if slot_a >= 0:
@@ -1570,7 +1574,16 @@ def finish_articulated_contacts(
     for other in range(link_body.shape[1]):
         other_body = link_body[world, other]
         if other_body >= 0:
-            velocity += mobility_response(mobility, world, link, other, body_impulse[other_body])
+            impulse = body_impulse[other_body]
+            if (
+                impulse[0] != 0.0
+                or impulse[1] != 0.0
+                or impulse[2] != 0.0
+                or impulse[3] != 0.0
+                or impulse[4] != 0.0
+                or impulse[5] != 0.0
+            ):
+                velocity += mobility_response(mobility, world, link, other, impulse)
     qd[body] = velocity
 
 

@@ -123,6 +123,60 @@ def _cholesky(nv: int, matrix: wp.array3d[float]):
             matrix[world, i, j] = value / pivot
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+    __shared__ float lower[32][32];
+    if (row < nv) {
+        for (int col = 0; col < nv; ++col)
+            lower[row][col] = *reinterpret_cast<float*>(
+                reinterpret_cast<char*>(matrix.data) + world * matrix.strides[0]
+                + row * matrix.strides[1] + col * matrix.strides[2]);
+    }
+    __syncwarp(0xffffffff);
+    for (int j = 0; j < nv; ++j) {
+        if (row == j) {
+            float diagonal = lower[j][j];
+            for (int k = 0; k < j; ++k)
+                diagonal -= lower[j][k] * lower[j][k];
+            lower[j][j] = sqrtf(fmaxf(diagonal, 1.0e-20f));
+        }
+        __syncwarp(0xffffffff);
+        if (row > j && row < nv) {
+            float value = lower[row][j];
+            for (int k = 0; k < j; ++k)
+                value -= lower[row][k] * lower[j][k];
+            lower[row][j] = value / lower[j][j];
+        }
+        __syncwarp(0xffffffff);
+    }
+    if (row < nv) {
+        for (int col = 0; col <= row; ++col)
+            *reinterpret_cast<float*>(reinterpret_cast<char*>(matrix.data)
+                + world * matrix.strides[0] + row * matrix.strides[1]
+                + col * matrix.strides[2]) = lower[row][col];
+    }
+#endif
+""")
+def _factor_shared(nv: int, matrix: wp.array3d[float], world: int, row: int):
+    """Factor a small matrix in shared memory, using one row per lane of a full warp."""
+    ...
+
+
+@wp.kernel(enable_backward=False)
+def _cholesky_cooperative(nv: int, matrix: wp.array3d[float]):
+    """Factor up to 32 rows in parallel, preserving the scalar arithmetic order per entry."""
+    world, row = wp.tid()
+    _factor_shared(nv, matrix, world, row)
+
+
+def _factor_matrix(nv, matrix):
+    """Select the full-warp implementation only for matrices it can cover completely."""
+    if matrix.device.is_cuda and nv <= 32:
+        wp.launch(_cholesky_cooperative, dim=(matrix.shape[0], 32), inputs=[nv, matrix], block_dim=32)
+    else:
+        wp.launch(_cholesky, dim=matrix.shape[0], inputs=[nv, matrix])
+
+
 @wp.func
 def _jac_dof(
     body_isdofancestor: wp.array2d[int],
@@ -302,7 +356,7 @@ class LinkMobility:
                     inputs=[m.opt.timestep, damping],
                     outputs=[self._h],
                 )
-            wp.launch(_cholesky, dim=self.world_count, inputs=[self.nv], outputs=[self._h])
+            _factor_matrix(self.nv, self._h)
             # K = M + J_c^T D J_c at the active set of the latest constraint solve.
             self._mass.zero_()
             wp.launch(
@@ -336,7 +390,7 @@ class LinkMobility:
                     inputs=[int(d.njmax), d.nefc, efc.state, efc.D, efc.J],
                     outputs=[self._constrained],
                 )
-            wp.launch(_cholesky, dim=self.world_count, inputs=[self.nv], outputs=[self._constrained])
+            _factor_matrix(self.nv, self._constrained)
             wp.launch(
                 _link_jacobian,
                 dim=(self.world_count, self.link_count, self.nv),

@@ -65,6 +65,7 @@ logger = logging.getLogger(__name__)
 
 _TILED_SUM_BLOCK_DIM = 512
 _STRESS_DOF_COUNT = 6
+_FUSE_RIGIDITY_FEEDBACK = True
 
 
 @wp.kernel
@@ -349,6 +350,46 @@ def apply_rigidity_operator(rigidity_operator, delta_collider_impulse, collider_
     """
 
     J, IJtm = rigidity_operator[:2]
+    if (
+        _FUSE_RIGIDITY_FEEDBACK
+        and len(rigidity_operator) > 3
+        and rigidity_operator[2] is not None
+        and J.values.device.is_cuda
+        and J.row_counts is None
+        and IJtm.row_counts is None
+    ):
+        articulation = rigidity_operator[2]
+        independent = rigidity_operator[3]
+        body_count = independent.body_count
+        if (
+            0 < body_count <= 64
+            and J.nrow <= 4096
+            and J.ncol == 2 * body_count
+            and J.nnz * J.block_size <= 128 * J.shape[0]
+        ):
+            from newton._src.solvers.mjmpm.mpm.rigidity_feedback import apply_mobility_feedback  # noqa: PLC0415
+
+            sp.bsr_mv(IJtm, x=delta_collider_impulse, y=articulation.wrenches, alpha=-1.0, beta=0.0)
+            wp.launch(
+                apply_mobility_feedback,
+                dim=body_count,
+                inputs=[
+                    IJtm.offsets,
+                    articulation.link_slot,
+                    articulation.link_body,
+                    articulation.active_links,
+                    articulation.active_count,
+                    articulation.mobility,
+                    independent.enabled,
+                    independent.mobility,
+                    articulation.wrenches,
+                    independent.velocity_delta,
+                    delta_body_qd,
+                ],
+                device=J.values.device,
+            )
+            sp.bsr_mv(J, x=delta_body_qd, y=collider_velocity, alpha=1.0, beta=1.0)
+            return
     sp.bsr_mv(IJtm, x=delta_collider_impulse, y=delta_body_qd, alpha=-1.0, beta=0.0)
     if len(rigidity_operator) > 2 and rigidity_operator[2] is not None:
         # Articulated links received impulse wrenches; map them to link twists.

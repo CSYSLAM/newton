@@ -369,11 +369,12 @@ class TestMJMPMRigid(unittest.TestCase):
             builder.add_ground_plane(cfg=cfg)
             return builder.finalize(device=device)
 
-        def run(model, steps, dt, **kwargs):
+        def run(model, steps, dt, *, cooperative=False, **kwargs):
             # Contact order from CUDA detection varies between runs, so compare
             # the two sweeps on the same inputs within each solve.
             solver = SolverMJMPM(model, **kwargs)
             env = solver.environment
+            env._use_cooperative_rigid_buckets = cooperative
             sweep = env._solve_contacts_gauss_seidel
             outputs = (env.contact_impulses, env.rigid_impulses)
             stats = {"solves": 0, "fallback": 0, "impulse": 0.0}
@@ -388,7 +389,10 @@ class TestMJMPMRigid(unittest.TestCase):
                 env._use_local_rigid_buckets = True
                 sweep(work)
                 for array, value in zip((work.body_qd, *outputs), expected, strict=True):
-                    np.testing.assert_array_equal(array.numpy(), value)
+                    if cooperative:
+                        np.testing.assert_allclose(array.numpy(), value, rtol=1.0e-5, atol=1.0e-5)
+                    else:
+                        np.testing.assert_array_equal(array.numpy(), value)
                 stats["solves"] += 1
                 stats["fallback"] = max(stats["fallback"], int(env._bucket_fallback.numpy().max()))
                 stats["impulse"] = max(stats["impulse"], float(np.abs(expected[1]).max()))
@@ -413,9 +417,138 @@ class TestMJMPMRigid(unittest.TestCase):
                 model, _box_body = _arm_and_box(device=device)
                 fallback = run(model, 40, 0.001, relaxation=0.5, articulated_response=True)
                 self.assertEqual(fallback, 0)
+                if device != "cpu":
+                    for worlds in (1, 3):
+                        articulated, _ = _arm_and_box(device=device, worlds=worlds)
+                        fallback = run(
+                            articulated, 40, 0.001, cooperative=True, relaxation=0.5, articulated_response=True
+                        )
+                        self.assertEqual(fallback, 0)
 
 
 class TestMJMPMMaterial(unittest.TestCase):
+    def test_cooperative_articulated_factor_matches_reference(self):
+        """Parallel rows retain the scalar factors, including clamped zero pivots and graph replay."""
+        from newton._src.solvers.mjmpm.coupling import articulated  # noqa: PLC0415
+
+        if not wp.is_cuda_available():
+            self.skipTest("Requires a CUDA warp")
+        with wp.ScopedDevice("cuda:0"):
+            rng = np.random.default_rng(91)
+            for size in (1, 7, 24, 32, 33):
+                with self.subTest(size=size):
+                    basis = rng.normal(size=(3, size, size)).astype(np.float32)
+                    values = basis @ basis.transpose(0, 2, 1) + np.eye(size, dtype=np.float32)
+                    values[2] = 0.0
+                    source = wp.array(values, dtype=float)
+                    reference = wp.clone(source)
+                    actual = wp.clone(source)
+                    wp.launch(articulated._cholesky, dim=3, inputs=[size, reference])
+                    articulated._factor_matrix(size, actual)
+                    expected = reference.numpy().view(np.uint32)
+                    np.testing.assert_array_equal(actual.numpy().view(np.uint32), expected)
+                    with wp.ScopedCapture(force_module_load=False) as capture:
+                        wp.copy(actual, source)
+                        articulated._factor_matrix(size, actual)
+                    for _ in range(3):
+                        wp.capture_launch(capture.graph)
+                        np.testing.assert_array_equal(actual.numpy().view(np.uint32), expected)
+
+    def test_fused_rigid_mobility_matches_reference(self):
+        """Preserve combined link and constrained-body feedback as active collider rows change."""
+        import warp.sparse as sparse  # noqa: PLC0415
+
+        from newton._src.solvers.mjmpm.mpm import contact_solver_kernels as contacts  # noqa: PLC0415
+        from newton._src.solvers.mjmpm.mpm import solve_rheology as rheology  # noqa: PLC0415
+
+        devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        for device in devices:
+            with self.subTest(device=device), wp.ScopedDevice(device):
+                rng = np.random.default_rng(17)
+                basis = rng.normal(size=(12, 12)).astype(np.float32)
+                mobility = wp.array((basis @ basis.T)[None], dtype=float)
+                independent_matrix = np.zeros((3, 6, 6), dtype=np.float32)
+                independent_matrix[2] = np.diag([0.0, 0.25, 0.5, 1.0, 2.0, 3.0])
+                initial_velocity = wp.array(rng.normal(size=(6, 3)).astype(np.float32), dtype=wp.vec3)
+                initial_accumulated = wp.array(rng.normal(size=(3, 6)).astype(np.float32), dtype=wp.spatial_vector)
+                impulse = wp.array(rng.normal(size=(6, 3)).astype(np.float32), dtype=wp.vec3)
+                saved_flag = rheology._FUSE_RIGIDITY_FEEDBACK
+                try:
+                    for active in ("all", "free", "empty"):
+                        rows, columns, values = [], [], []
+                        for node in range(6):
+                            body = node % 3
+                            r = rng.normal(size=3).astype(np.float32)
+                            cross = np.array([[0, -r[2], r[1]], [r[2], 0, -r[0]], [-r[1], r[0], 0]])
+                            for side, value in enumerate((-cross, np.eye(3))):
+                                rows.append(node)
+                                columns.append(2 * body + side)
+                                keep = active == "all" or (active == "free" and body == 2)
+                                values.append(value if keep else np.zeros((3, 3)))
+                        jacobian = sparse.bsr_from_triplets(
+                            6,
+                            6,
+                            wp.array(rows, dtype=int),
+                            wp.array(columns, dtype=int),
+                            wp.array(np.asarray(values, dtype=np.float32), dtype=wp.mat33),
+                        )
+                        inverse = sparse.bsr_transposed(jacobian)
+                        articulation = contacts.ArticulatedRigidity(
+                            body_count=3,
+                            link_body=wp.array([[0, 1]], dtype=int),
+                            link_slot=wp.array([0, 1, -1], dtype=int),
+                            mobility=mobility,
+                            wrenches=wp.empty(18, dtype=float),
+                            active_links=wp.empty((1, 2), dtype=int),
+                            active_count=wp.empty(1, dtype=int),
+                        )
+                        wp.launch(
+                            contacts.list_active_links,
+                            dim=1,
+                            inputs=[articulation.link_body, inverse.offsets],
+                            outputs=[articulation.active_links, articulation.active_count],
+                        )
+                        independent = contacts.IndependentRigidity(
+                            body_count=3,
+                            enabled=wp.array([0, 0, 1], dtype=int),
+                            mobility=wp.array(independent_matrix, dtype=contacts.mat66),
+                            velocity_delta=wp.empty_like(initial_accumulated),
+                        )
+                        operator = (jacobian, inverse, articulation, independent)
+                        velocity = wp.empty_like(initial_velocity)
+                        body_delta = wp.empty(18, dtype=float)
+
+                        def evaluate(
+                            fused,
+                            velocity=velocity,
+                            initial_velocity=initial_velocity,
+                            independent=independent,
+                            initial_accumulated=initial_accumulated,
+                            operator=operator,
+                            impulse=impulse,
+                            body_delta=body_delta,
+                        ):
+                            rheology._FUSE_RIGIDITY_FEEDBACK = fused
+                            wp.copy(velocity, initial_velocity)
+                            wp.copy(independent.velocity_delta, initial_accumulated)
+                            rheology.apply_rigidity_operator(operator, impulse, velocity, body_delta)
+
+                        outputs = (velocity, body_delta, independent.velocity_delta)
+                        evaluate(False)
+                        expected = [a.numpy().view(np.uint32).copy() for a in outputs]
+                        evaluate(True)
+                        for a, b in zip(outputs, expected, strict=True):
+                            np.testing.assert_array_equal(a.numpy().view(np.uint32), b)
+                        if device != "cpu":
+                            with wp.ScopedCapture(force_module_load=False) as capture:
+                                evaluate(True)
+                            for _ in range(3):
+                                wp.capture_launch(capture.graph)
+                                for a, b in zip(outputs, expected, strict=True):
+                                    np.testing.assert_array_equal(a.numpy().view(np.uint32), b)
+                finally:
+                    rheology._FUSE_RIGIDITY_FEEDBACK = saved_flag
+
     def test_rigid_coupling_assembly_matches_triplets(self):
         """Preserve sorted blocks, zero pruning, and operator values as captured contacts change."""
         import warp.sparse as sparse  # noqa: PLC0415
@@ -1260,7 +1393,7 @@ def _two_link_arm(builder, cfg, *, base=(0.0, 0.0, 0.0), axis=(1.0, 0.0, 0.0), l
     builder.add_articulation([j1, j2])
 
 
-def _arm_and_box(device="cpu"):
+def _arm_and_box(device="cpu", *, worlds=1):
     """Return a spinning two-link arm whose outer link strikes a free box without gravity."""
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     SolverMJMPM.register_custom_attributes(builder)
@@ -1271,6 +1404,12 @@ def _arm_and_box(device="cpu"):
         xform=wp.transform(wp.vec3(0.7, 0.115, 0.0), wp.quat_identity()), mass=1.5, inertia=wp.mat33(np.eye(3) * 0.005)
     )
     builder.add_shape_box(box, hx=0.05, hy=0.05, hz=0.05, cfg=cfg)
+    if worlds > 1:
+        local = builder
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        SolverMJMPM.register_custom_attributes(builder)
+        for world in range(worlds):
+            builder.add_world(local, xform=wp.transform(wp.vec3(2.0 * world, 0.0, 0.0), wp.quat_identity()))
     return builder.finalize(device=device), box
 
 
