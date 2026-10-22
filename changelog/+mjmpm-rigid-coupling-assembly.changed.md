@@ -1,0 +1,1 @@
+Speed up small rigid-only MJMPM collider coupling assembly without changing solver parameters, sparse block values, zero pruning, or matrix-vector reduction ordering. Deformable colliders and larger domains retain the general sparse assembly path.

@@ -354,3 +354,238 @@ B = new). The machine ran about 3 ms slower overall in this session than in
 Median -3.3%, mean -3.3% (50.05 -> 48.41), p90 -2.3%; B is faster in every
 pair. Rice cooker `--test` PASS (slip 3.34 mm / 3.48 deg, 100% in pot, 0%
 spilled, peak grain 1.91 m/s). MJMPM tests 54/54.
+
+### 2.6 Rigidity assembly and recovery warm-start probes (measured, experimental)
+
+Probed at `2930c795`. Reproduction scripts:
+
+- `scripts/profile_mjmpm_physics.py --output-dir <directory>` records CUDA
+  events inside the frame graph and freezes contact inputs for offline GS
+  comparisons. Instrumented timings are not production FPS.
+- `scripts/benchmark_mjmpm_recovery.py --output-dir <directory>` runs the
+  unchanged 60/60-sweep task; add `--warm-start --recovery-sweeps 20` (or
+  40/60) to experiment with the recovery solve only.
+- `scripts/test_mjmpm_recovery_experiment.py <report.json>` runs existing
+  MJMPM tests with process-local recovery warm starts and a recovery budget
+  of `min(20, configured sweeps)`. It calls the real solvers, not mocks.
+
+All scripts run from the repository root. They leave production solver
+source and defaults unchanged. These new probes complement the earlier
+scratchpad tools; raw results for this session are under
+`C:/Users/Administrator/Documents/Blender/RicePour/physics_optimization_probe`.
+
+Rigidity build, median of 62 frame samples (after 60 warm-up frames, sampled
+every 15 frames over the complete 990-frame trajectory):
+
+| part | ms/frame |
+|---|---:|
+| `build_rigidity_operator` total | 1.886 |
+| fill coupling triplets | 0.033 |
+| triplets to BSR: J | 0.888 |
+| triplets to BSR: IJtm | 0.851 |
+
+Each part is called six times per frame. Nested event overhead is included;
+the medians do not add exactly. Each build has 1,478 collider nodes, 25
+bodies, and zero deformable collider vertices. Generic BSR construction is
+the substantial fixed cost; this measurement does not isolate sorting
+from the other operations inside `bsr_from_triplets`. A rigid-only direct
+construction is worth a bounded experiment, retaining the general path.
+IJtm includes mass/inertia and weighting, so it is not simply J transposed.
+
+GS probes freeze both solves at the first and last substeps of 13 frames
+between 120 and 960: 52 input sets. Each budget starts from the same input
+and applies its initial impulses correctly. For the 26 recovery inputs,
+also try the corresponding first solve's 60-sweep impulse as a warm start.
+Diagnostics never write their solved states back into the live trajectory.
+120 sweeps is a comparison budget, not an exact solution.
+
+Recovery normal projection residual in frames 240-600 (median, m/s):
+
+| guess | 20 sweeps | 40 sweeps | 60 sweeps | 120 sweeps |
+|---|---:|---:|---:|---:|
+| current initial guess | 0.005360 | 0.004397 | 0.003031 | 0.001311 |
+| first solve's 60-sweep impulse | 0.002180 | 0.001636 | 0.001423 | 0.000436 |
+
+The residual evaluates one contact projection at frozen final velocities;
+normal impulse correction is scaled by local inverse effective mass plus
+softness to obtain m/s. This is not just the last sweep's impulse difference
+and is not a global convergence proof. Warm starting helps early accuracy,
+but does not make a smaller iteration budget equivalent in all inputs.
+
+Full-task trials, one run per variant followed by a repeated baseline:
+
+| recovery | median ms | p90 ms | slip mm | turn deg | task |
+|---|---:|---:|---:|---:|---|
+| current, 60 sweeps | 44.48 | 53.75 | 3.36 | 4.08 | PASS |
+| warm, 20 sweeps | 38.88 | 46.15 | 3.32 | 2.56 | PASS |
+| warm, 40 sweeps | 42.27 | 51.33 | 3.31 | 1.52 | PASS |
+| warm, 60 sweeps | 45.19 | 57.75 | 3.30 | 1.69 | PASS |
+| current, 60 sweeps, repeated | 43.82 | 53.10 | 3.32 | 2.97 | PASS |
+
+Initial solves remain at 60 sweeps. All trials pour 100% into the pot with
+0% spilled, and pass the existing load checks. Timed steps include normal
+test telemetry; post-step checks and extra residual downloads are outside
+the timed interval. No rendering. Warm 20 saves about 11-13% against the two
+baseline runs; this is exploratory, not three alternating A/B pairs.
+
+Important limitation: successful task checks do not establish unchanged
+coupling accuracy. Maxima sampled every 60 frames, not per-frame maxima:
+
+| recovery | linear momentum residual, N s | recovery angular velocity mismatch, rad/s |
+|---|---:|---:|
+| current, 60 | 5.26e-5 | 0.00627 |
+| warm, 20 | 8.29e-5 | 0.0377 |
+| warm, 40 | 2.98e-4 | 0.0719 |
+| warm, 60 | 3.77e-4 | 0.154 |
+| current, 60, repeated | 6.56e-5 | 0.00709 |
+
+MPM-versus-accepted collider velocity mismatch remains around 1e-9 or below,
+but recovery-versus-accepted velocity and momentum residuals change. More
+recovery iterations do not monotonically lower these trajectory peaks.
+One possible mechanism is that the first solve defines the frozen B_c and
+accepted material velocity, while the warm-started recovery follows a
+different finite-iteration path. This explanation needs a controlled test;
+CUDA contact ordering also varies between trajectories.
+
+Current unittest discovery ran 49 MJMPM tests with the experimental path:
+all PASS, zero skips (37 constrained GS environments instrumented). This
+does not override the residual limitation or prove cross-scene equivalence.
+Keep the warm recovery experiment out of the production default. Prioritize
+rigid-only BSR construction; investigate reaction/accepted-velocity
+consistency before enabling recovery warm starts or early termination.
+
+### 2.7 Direct rigid coupling BSR assembly (kept)
+
+Change: a rigid node has at most two distinct block columns, angular then
+linear, already in sorted order. Keep `fill_collider_coupling_matrices`
+unchanged, then construct compact J rows and IJtm rows directly. Integer
+counts and prefix scans determine storage; a warp-sized tile compacts each
+IJtm row in increasing node order. No floating-point reduction or
+approximation is introduced. J and IJtm independently prune exactly zero
+blocks, including singular-inertia and zero-volume cases.
+
+The previous `3 * node_count` nnz upper bound is retained deliberately:
+`bsr_mv` uses it to select its reduction kernel. Reducing that bound to the
+actual two-block maximum could change floating-point reduction ordering.
+The fast path is bounded to 4,096 nodes, 64 bodies, and node-by-body-row work
+of at most 262,144. Larger domains and all deformable colliders keep the
+unchanged triplet assembler. Both CPU and CUDA are supported.
+
+No changes to physical parameters, contact order, warm-start policy,
+60/60 rigid sweeps, MPM iteration limit/tolerances, constrained response, or
+rendering. In particular, the recovery experiment in 2.6 is not enabled.
+
+Validation:
+
+- `test_rigid_coupling_assembly_matches_triplets` compares compact offsets,
+  active columns, float32 value bits, and matrix-vector products on CPU and
+  CUDA. It includes COM nodes, minimum positive float32 values, zero and
+  singular inverse inertia, infinite/static mass, zero cell volume, empty
+  input, deformable fallback, and both sides of each fast-path capacity
+  boundary. CUDA replay changes the contact set from empty to active and
+  back to a single active node.
+- On a complete 990-frame rice-cooker trajectory, build the direct and
+  reference operators from the same input at every substep and compare on
+  device: **11,880 matrices, zero bitwise mismatches**. This instrumented
+  run passes the complete task checks; its time is not used as a benchmark.
+- Full MJMPM unittest discovery: **50/50 PASS** (103.7 s). Expanded boundary
+  checks also pass independently after the final capacity guards.
+- Ruff checks and formatting pass.
+
+Complete-trajectory timing, three alternating pairs, frames 60-989. Same
+RTX 5060 Ti, 1,478 rice samples, six substeps, CUDA graph, no rendering;
+test telemetry remains enabled identically in both variants. Post-step
+checks and additional residual downloads are outside the timed step.
+
+| run | generic median ms | direct median ms | generic p90 ms | direct p90 ms |
+|---|---:|---:|---:|---:|
+| 1 | 44.03 | 42.45 | 53.60 | 52.80 |
+| 2 | 44.11 | 42.47 | 53.07 | 52.21 |
+| 3 | 44.13 | 42.23 | 53.43 | 52.44 |
+| median | 44.11 | 42.45 | 53.43 | 52.44 |
+
+Median physical step time **-3.77%** (1.66 ms), p90 **-1.87%**. Every pair
+improves. The corresponding short 135-frame instrumented assembly probe
+falls from 1.84 to 0.38 ms/frame; this is a short-window stage measurement,
+not a new whole-task FPS measurement.
+
+All six timed trajectories pass: 100% into the pot, 0% spilled. Generic
+slip ranges 3.30-3.40 mm and turn 3.32-4.48 degrees; direct slip ranges
+3.33-3.37 mm and turn 3.43-3.69 degrees. Finger loads and grain-speed checks
+also pass. Independent CUDA trajectories are not claimed bitwise equal:
+their existing atomic/contact ordering varies between runs. The controlled
+same-input operator comparison, rather than trajectory equality, establishes
+that this assembly change preserves the numerical operator.
+
+Residual samples remain available in every run JSON. The median of each
+run's sampled recovery-angular-mismatch maximum is 0.00873 rad/s for
+generic and 0.00795 rad/s for direct; the largest individual sampled peak
+is 0.0168 versus 0.0519 rad/s. Thus these few independent trajectories do
+not establish identical residual envelopes; no tighter residual bound or
+convergence improvement is claimed. The exact-operator comparison and
+unchanged iteration/reduction rules distinguish this change from the
+non-equivalent recovery warm-start experiment.
+
+Reproduction: `scripts/benchmark_mjmpm_rigidity.py --assembly generic
+--output <run.json>` or `--assembly direct`; add `--verify` to compare
+operators during the trajectory (exclude this mode from performance
+measurements). Raw JSON and logs are under
+`C:/Users/Administrator/Documents/Blender/RicePour/rigid_assembly_optimization`.
+
+### 2.8 Reusing contact preparation during reaction recovery (reverted)
+
+Tested reusing the first rigid solve's body transforms, contact geometry,
+bucket ordering, and articulated contact responses in the second solve of
+the same substep. Neither MPM nor the material impulse application changes
+these inputs before rigid positions are integrated. Recovery still used
+the original cold start or the same projected previous-step warm start,
+and all 60 sweeps. No first-solve impulse warm start was introduced.
+Jacobi and the reference solver retained their existing paths.
+
+Correctness evidence for the candidate:
+
+- CPU and CUDA same-input comparisons passed for hard/soft contacts,
+  cold/previous-step warm starts, one/three worlds, and an articulated arm
+  interacting with both a free box and particles. Every comparison checked
+  the float32 bits of body velocities, contact impulses, and body impulses.
+- A separate full 990-frame CUDA-graph trajectory compared cached versus
+  rebuilt recovery at every substep: **5,940 solves, 17,820 output arrays,
+  zero bitwise mismatches**. The complete task also passed. Its doubled
+  solves are excluded from performance measurements.
+
+Performance evidence, three alternating full-trajectory pairs, using the
+direct BSR path from 2.7 in both variants and the same timing/check protocol:
+
+| run | rebuild median ms | reuse median ms | rebuild p90 ms | reuse p90 ms |
+|---|---:|---:|---:|---:|
+| 1 | 43.61 | 42.93 | 52.80 | 51.26 |
+| 2 | 42.57 | 42.99 | 52.25 | 51.94 |
+| 3 | 42.77 | 42.95 | 53.14 | 52.61 |
+| median | 42.77 | 42.95 | 52.80 | 51.94 |
+
+The median of run medians is **0.41% slower**; only one of three pairs
+improves that metric. The median of run means improves 0.72% and p90
+improves 1.63%, but this does not establish a consistent improvement in
+typical frame time. All six timed trajectories pass, with 100% of rice
+inside the pot and 0% spilled. Independent CUDA trajectories retain their
+existing contact/atomic-order variation; the controlled comparisons above
+establish same-input reaction equivalence, not trajectory determinism.
+
+Decision: **revert the candidate**, including its extra warm-start storage
+and production dispatch helpers. Keep the accepted direct BSR optimization
+in 2.7. Small kernel-count savings alone are insufficient to claim faster
+physics. The next investigation should target time inside the rigid GS
+sweeps, particularly repeated articulated response loads and updates, using
+frozen identical inputs before making another production change. Preserve
+sweep order, iteration counts, and reaction accuracy throughout that work.
+
+Raw results, verification counters, the candidate environment patch, and
+its benchmark/test snapshots are archived at
+`C:/Users/Administrator/Documents/Blender/RicePour/contact_preparation_optimization`.
+To reproduce the rejected experiment in a disposable checkout containing
+2.7, apply `candidate_environment.patch` and run the archived
+`candidate_benchmark_mjmpm_rigidity.py` with `--preparation rebuild` or
+`--preparation reuse`; use `--verify-recovery` only for correctness checks.
+These options are intentionally absent from the retained benchmark script.
+After the revert, the retained production tree passes all **50 MJMPM
+tests** (109.4 s); Ruff checks, formatting, and `git diff --check` pass.

@@ -43,6 +43,15 @@ _ALL_COLLIDER_WORLDS = -2
 _PARALLEL_QUERY_MAX_PAIRS = 1 << 20
 """Largest node-collider pair count queried in parallel (44 bytes of query results per pair)."""
 
+_RIGID_ASSEMBLY_MAX_WORK = 1 << 18
+"""Bound the node-by-body work of deterministic rigid-only sparse assembly."""
+
+_RIGID_ASSEMBLY_MAX_NODES = 4096
+"""Keep long rows on the general assembler rather than serializing tile scans."""
+
+_RIGID_ASSEMBLY_MAX_BODIES = 64
+"""Avoid launching a tile for each body row in large mostly inactive models."""
+
 
 @wp.struct
 class MJMPMCollider:
@@ -1086,6 +1095,124 @@ def interpolate_collider_normals(
     )
 
 
+@wp.func
+def _nonzero_coupling_block(value: wp.mat33):
+    nonzero = bool(False)
+    for row in range(3):
+        for col in range(3):
+            nonzero = nonzero or value[row, col] != 0.0
+    return nonzero
+
+
+@wp.kernel
+def _count_rigid_coupling_blocks(
+    rows: wp.array[int],
+    columns: wp.array[int],
+    j_values: wp.array[wp.mat33],
+    ij_values: wp.array[wp.mat33],
+    j_counts: wp.array[int],
+    ij_counts: wp.array[int],
+    ij_active: wp.array[int],
+):
+    i = wp.tid()
+    count = int(0)
+    if i < j_counts.shape[0] - 1:
+        for side in range(2):
+            slot = 3 * i + side
+            active = int(0)
+            if rows[slot] >= 0:
+                if _nonzero_coupling_block(j_values[slot]):
+                    count += 1
+                if _nonzero_coupling_block(ij_values[slot]):
+                    active = 1
+                    wp.atomic_add(ij_counts, columns[slot], 1)
+            ij_active[2 * i + side] = active
+    j_counts[i] = count
+
+
+@wp.kernel
+def _pack_rigid_jacobian(
+    rows: wp.array[int],
+    columns: wp.array[int],
+    values: wp.array[wp.mat33],
+    offsets: wp.array[int],
+    out_columns: wp.array[int],
+    out_values: wp.array[wp.mat33],
+):
+    i = wp.tid()
+    dest = offsets[i]
+    for side in range(2):
+        slot = 3 * i + side
+        if rows[slot] >= 0 and _nonzero_coupling_block(values[slot]):
+            out_columns[dest] = columns[slot]
+            out_values[dest] = values[slot]
+            dest += 1
+
+
+@wp.kernel
+def _pack_rigid_impulse_map(
+    columns: wp.array[int],
+    values: wp.array[wp.mat33],
+    active: wp.array[int],
+    offsets: wp.array[int],
+    node_count: int,
+    out_columns: wp.array[int],
+    out_values: wp.array[wp.mat33],
+):
+    row, lane = wp.tid()
+    dest = offsets[row]
+    side = row % 2
+    # Keep increasing node order, matching the sorted generic BSR reduction.
+    for start in range(0, node_count, wp.block_dim()):
+        i = start + lane
+        keep = int(0)
+        if i < node_count:
+            if columns[3 * i + side] == row and active[2 * i + side] != 0:
+                keep = 1
+        prefix = wp.tile_scan_inclusive(wp.tile(keep))
+        if keep != 0:
+            slot = dest + wp.untile(prefix) - 1
+            out_columns[slot] = i
+            out_values[slot] = values[3 * i + side]
+        dest += wp.tile_extract(prefix, wp.block_dim() - 1)
+
+
+def _assemble_rigid_coupling(rows, columns, j_values, ij_values, node_count, body_count):
+    """Compact unique rigid blocks without sorting or floating-point reduction."""
+    device = rows.device
+    j = wps.bsr_zeros(node_count, 2 * body_count, wp.mat33, device=device)
+    ij = wps.bsr_zeros(2 * body_count, node_count, wp.mat33, device=device)
+    # Keep the generic upper bound: sparse matvec uses it to choose its
+    # reduction kernel, whose floating-point ordering must stay unchanged.
+    j.notify_nnz_changed(nnz=3 * node_count)
+    ij.notify_nnz_changed(nnz=3 * node_count)
+    j_counts = wp.empty(node_count + 1, dtype=int, device=device)
+    ij_counts = wp.zeros(2 * body_count + 1, dtype=int, device=device)
+    ij_active = wp.empty(2 * node_count, dtype=int, device=device)
+    wp.launch(
+        _count_rigid_coupling_blocks,
+        dim=node_count + 1,
+        inputs=[rows, columns, j_values, ij_values, j_counts, ij_counts, ij_active],
+        device=device,
+    )
+    wp.utils.array_scan(j_counts, j.offsets, inclusive=False)
+    wp.utils.array_scan(ij_counts, ij.offsets, inclusive=False)
+    wp.launch(
+        _pack_rigid_jacobian,
+        dim=node_count,
+        inputs=[rows, columns, j_values, j.offsets, j.columns, j.values],
+        device=device,
+    )
+    wp.launch_tiled(
+        _pack_rigid_impulse_map,
+        dim=(2 * body_count,),
+        inputs=[columns, ij_values, ij_active, ij.offsets, node_count, ij.columns, ij.values],
+        device=device,
+        block_dim=32,
+    )
+    return j, ij
+
+
 def build_rigidity_operator(
     cell_volume: float,
     node_volumes: wp.array[float],
@@ -1155,6 +1282,18 @@ def build_rigidity_operator(
             IJtm_values,
         ],
     )
+
+    # Rigid rows have unique, already sorted angular/linear blocks. Larger
+    # domains and deformable vertices retain the general sparse assembler.
+    if (
+        deformable_vertex_count == 0
+        and vel_node_count > 0
+        and vel_node_count <= _RIGID_ASSEMBLY_MAX_NODES
+        and body_count > 0
+        and body_count <= _RIGID_ASSEMBLY_MAX_BODIES
+        and vel_node_count * (2 * body_count) <= _RIGID_ASSEMBLY_MAX_WORK
+    ):
+        return _assemble_rigid_coupling(J_rows, J_cols, J_values, IJtm_values, vel_node_count, body_count)
 
     J = wps.bsr_from_triplets(
         rows_of_blocks=vel_node_count,

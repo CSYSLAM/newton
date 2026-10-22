@@ -416,6 +416,120 @@ class TestMJMPMRigid(unittest.TestCase):
 
 
 class TestMJMPMMaterial(unittest.TestCase):
+    def test_rigid_coupling_assembly_matches_triplets(self):
+        """Preserve sorted blocks, zero pruning, and operator values as captured contacts change."""
+        import warp.sparse as sparse  # noqa: PLC0415
+
+        from newton._src.solvers.mjmpm.mpm import rasterized_collisions as rc  # noqa: PLC0415
+
+        limit = rc._RIGID_ASSEMBLY_MAX_WORK
+        for device in ("cpu", "cuda:0"):
+            if device == "cuda:0" and not wp.is_cuda_available():
+                continue
+            with self.subTest(device=device), wp.ScopedDevice(device):
+                collider = rc.MJMPMCollider()
+                collider.collider_body_index = wp.array([0, 1, 2, -1], dtype=int)
+                collider.collider_particle_offsets = wp.zeros(5, dtype=int)
+                collider.collider_particle_ids = wp.empty(0, dtype=int)
+                collider.body_com = wp.array([(0, 0, 0), (0.01, 0.02, 0.03), (0, 0, 0)], dtype=wp.vec3)
+                poses = [
+                    wp.transform_identity(),
+                    wp.transform(wp.vec3(-0.2, 0.3, 0.1), wp.quat_from_axis_angle(wp.vec3(0, 0, 1), 0.7)),
+                    wp.transform_identity(),
+                ]
+                body_q = wp.array(poses, dtype=wp.transform)
+                mass = wp.array([0.0016, 2.0, 0.0], dtype=float)
+                inverse = wp.array([np.diag([3, 4, 5]), np.zeros((3, 3)), np.eye(3)], dtype=wp.mat33)
+                center = np.asarray(wp.transform_point(poses[1], wp.vec3(0.01, 0.02, 0.03)))
+                points = wp.array(
+                    [
+                        (0, 0, 0),
+                        (float(np.nextafter(np.float32(0), np.float32(1))), 0, 0),
+                        (0, 0.03, 0),
+                        center,
+                        np.add(center, (0.02, -0.05, 0.1)),
+                        (0, 0, 0),
+                        (0.2, 0.1, 0.4),
+                        (-0.1, 0, 0.2),
+                    ],
+                    dtype=wp.vec3,
+                )
+                ids = wp.array([0, 0, 0, 1, 1, 2, 3, -1], dtype=int)
+                original_ids = ids.numpy()
+                volumes = wp.ones(8, dtype=float)
+                particles = wp.empty(0, dtype=float)
+
+                data = [volumes, points, collider, body_q, mass, inverse, particles, ids]
+
+                def build(cell_volume, data=data):
+                    return rc.build_rigidity_operator(cell_volume, *data)
+
+                def reference(cell_volume, build=build):
+                    rc._RIGID_ASSEMBLY_MAX_WORK = 0
+                    try:
+                        return build(cell_volume)
+                    finally:
+                        rc._RIGID_ASSEMBLY_MAX_WORK = limit
+
+                def compare(actual, expected):
+                    for a, b in zip(actual, expected, strict=True):
+                        offsets = b.offsets.numpy()
+                        count = int(offsets[-1])
+                        np.testing.assert_array_equal(a.offsets.numpy(), offsets)
+                        np.testing.assert_array_equal(a.columns.numpy()[:count], b.columns.numpy()[:count])
+                        np.testing.assert_array_equal(
+                            a.values.numpy()[:count].view(np.uint32), b.values.numpy()[:count].view(np.uint32)
+                        )
+                        x = wp.array(np.arange(b.ncol * 3, dtype=np.float32).reshape(-1, 3), dtype=wp.vec3)
+                        np.testing.assert_array_equal(sparse.bsr_mv(a, x=x).numpy(), sparse.bsr_mv(b, x=x).numpy())
+
+                for cell_volume in (0.001, 0.0):
+                    compare(build(cell_volume), reference(cell_volume))
+                mass.assign(np.array([1e15, 2.0, 0.0], dtype=np.float32))
+                compare(build(0.001), reference(0.001))
+                mass.assign(np.array([0.0016, 2.0, 0.0], dtype=np.float32))
+                if device == "cuda:0":
+                    with wp.ScopedCapture(force_module_load=False) as capture:
+                        captured = build(0.001)
+                    for topology in (np.full(8, -1), original_ids, np.array([0, -1, -1, -1, -1, -1, -1, -1])):
+                        ids.assign(topology.astype(np.int32))
+                        wp.capture_launch(capture.graph)
+                        compare(captured, reference(0.001))
+
+                # Exercise both sides of each bounded fast-path dimension.
+                saved_data = data.copy()
+                saved_com = collider.body_com
+                for node_count, body_count in ((0, 3), (8, 64), (8, 65), (4096, 3), (4097, 3), (2048, 64), (2049, 64)):
+                    data[0] = wp.ones(node_count, dtype=float)
+                    data[1] = wp.full(node_count, wp.vec3(0.03, 0.02, 0.01), dtype=wp.vec3)
+                    data[3] = wp.array(poses + [wp.transform_identity()] * (body_count - 3), dtype=wp.transform)
+                    data[4] = wp.array([0.0016, 2.0, 0.0] + [0.0] * (body_count - 3), dtype=float)
+                    data[5] = wp.array(
+                        np.concatenate((inverse.numpy(), np.zeros((body_count - 3, 3, 3)))), dtype=wp.mat33
+                    )
+                    data[7] = wp.zeros(node_count, dtype=int)
+                    collider.body_com = wp.array(
+                        np.concatenate((saved_com.numpy(), np.zeros((body_count - 3, 3)))), dtype=wp.vec3
+                    )
+                    compare(build(0.001), reference(0.001))
+                data[:] = saved_data
+                collider.body_com = saved_com
+
+                # A deformable collider must keep the generic barycentric path.
+                mesh = wp.Mesh(
+                    points=wp.array([(0, 0, 0), (1, 0, 0), (0, 1, 0)], dtype=wp.vec3),
+                    indices=wp.array([0, 1, 2], dtype=int),
+                )
+                collider.collider_body_index = wp.array([-1], dtype=int)
+                collider.collider_particle_offsets = wp.array([0, 3], dtype=int)
+                collider.collider_particle_ids = wp.array([0, 1, 2], dtype=int)
+                collider.collider_mesh = wp.array([mesh.id], dtype=wp.uint64)
+                collider.collider_max_thickness = wp.zeros(1, dtype=float)
+                collider.query_max_dist = 1.0
+                data[6] = wp.array([1.0, 0.0, 2.0], dtype=float)
+                ids.fill_(0)
+                compare(build(0.001), reference(0.001))
+
     def test_free_material_crosses_grid_planes_without_air_drag(self):
         """Keep elastic free fall finite when grid-aligned particles leave empty grid nodes."""
         builder = newton.ModelBuilder()
