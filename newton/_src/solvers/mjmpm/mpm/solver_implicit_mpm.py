@@ -32,6 +32,7 @@ from newton._src.solvers.mjmpm.mpm.contact_solver_kernels import (
 )
 from newton._src.solvers.mjmpm.mpm.implicit_mpm_model import ImplicitMPMModel
 from newton._src.solvers.mjmpm.mpm.particle_surface_colliders import extrapolate_surface_sdf_into_colliders
+from newton._src.solvers.mjmpm.mpm.point_restriction import make_point_restriction
 from newton._src.solvers.mjmpm.mpm.rasterized_collisions import (
     MJMPMCollider,
     build_rigidity_operator,
@@ -444,7 +445,7 @@ class ImplicitMPMScratchpad:
             environment_first=environment_first,
             temporary_store=temporary_store,
         )
-        collision_space_restriction = fem.make_space_restriction(
+        collision_space_restriction = make_point_restriction(
             space_partition=collision_space_partition, domain=domain, temporary_store=temporary_store
         )
 

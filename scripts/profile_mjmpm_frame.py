@@ -75,6 +75,9 @@ def main():
         (env, "_finish_constrained_material", "finish_response"),
         (env.material, "prepare_step", "mpm_prepare_overlapped"),
         (env.material, "step", "mpm_main"),
+        (env.material, "_particles_to_cells", "mpm_binning"),
+        (env.material, "_rebuild_scratchpad", "mpm_spaces"),
+        (env.material, "_assemble_particle_terms", "mpm_particle_terms"),
         (rheology, "_run_solver_loop", "mpm_iterations"),
     ):
         events.wrap(obj, method, name)

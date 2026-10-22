@@ -770,3 +770,114 @@ home directory). The retained specialization passes all **52 MJMPM tests**
 in 129.26 s, including bitwise substitution comparisons and graph replay.
 All pre-commit checks and `git diff --check` pass. Suite duration includes
 compilation and is not a performance measurement.
+
+### 2.11 Direct PIC collider adjacency
+
+The next profile still identifies rigid GS as the largest individual
+cost: about 10.7 ms during carry, with collision detection around 5.5 ms.
+Two frozen-input experiments did not justify production changes: shrinking
+the cooperative bucket's body-index table from 32 to 4/8 entries had no
+consistent benefit; register limits of 64/96 made it slower, and 128/160
+were within measurement variation. All compared outputs were bitwise
+identical. These variants remain archived outside the solver.
+
+MPM preparation spends about 2.75 ms per frame rebuilding function spaces
+in this profile. The generic point-space restriction materializes a
+`domain_element_capacity * max_points_per_cell` table, fills unused slots
+with null entries and sorts/compresses it. For the rice scene the configured
+capacities permit 4096 * 128 slots, despite only 1478 actual particle
+samples. No capacity or particle count is reduced in this optimization.
+
+PIC evaluation-node indices already identify unique entries in the sorted
+particle bins, including distinct samples of a particle spanning several
+cells. The specialized restriction:
+
+1. Locates each evaluation point in the existing cell-prefix offsets.
+2. Applies the original per-cell point cap, domain mapping and existing
+   partition node mapping.
+3. Scans one presence flag per partition node and writes the adjacency
+   directly in ascending partition-node order.
+
+There is at most one cell reference per evaluation node. This avoids the
+padded table and its sort while preserving the meaningful adjacency
+entries. Retain the original generic restriction for CPU, non-PIC spaces,
+particle-index rather than evaluation-index point spaces, and other
+unsupported domains. Only the collider restriction is changed; velocity
+and strain space construction retain their original implementation.
+CUDA graph execution uses fixed host-known capacities and device prefix
+counts; no device-to-host count read is introduced into the step.
+
+Controlled verification builds both restrictions on identical inputs at
+every substep of a complete 990-frame task. **23,764 arrays compare with
+zero differences**: complete per-node offsets, active node indices, active
+domain-element indices and active indices within each element. Unused
+padding is excluded from comparisons, because reducing that padding is
+the intended storage change. Physical acceptance also passes. Timings of
+this doubled-build verification run are not performance results.
+
+The regression test exercises multi-cell samples, null samples, empty
+adjacency, per-cell capacity clipping, whole and partial partitions,
+environment-major ordering, CPU fallback and repeated captured rebuilds.
+The generated PIC fixture names distinguish partition argument types to
+avoid Warp point-topology cache-name collisions between test geometries.
+
+Two alternating full-task physics pairs, with all settings from 2.10:
+
+| pair | generic median ms | direct median ms | generic mean ms | direct mean ms | generic p90 ms | direct p90 ms |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 31.389 | 31.179 | 31.653 | 31.495 | 36.816 | 37.108 |
+| 2 | 32.367 | 31.170 | 32.724 | 31.255 | 38.420 | 36.272 |
+
+Median improvements are 0.7% and 3.7%. The median of the two run medians
+improves about 2.2%, but two pairs do not establish a tight confidence
+interval, and pair 1 p90 regresses slightly. All four runs pass with
+100% rice in the pot and 0% spilled. Keep these physics measurements
+separate from visible-window FPS.
+
+Reproduce using `scripts/benchmark_mjmpm_sweeps.py full --cooperative
+--point-restriction general --output-dir <directory>` and
+`--point-restriction direct`. Add `--verify-point-restriction` to the direct
+case only for same-input correctness comparison. For application FPS use
+`display --visible --timing native` with the same options, resolution and
+rendering configuration in both variants. Raw JSON, logs and rejected
+kernel snapshots remain under `target_25fps` and the user's home directory.
+
+This optimization does not change the cooperative GS arithmetic or resolve
+the strict float32 comparison recorded in 2.9. The 25 FPS target remains
+subject to visible-window measurements.
+
+A fixed 1920x1080 offscreen synchronized full-display pair retains all
+textures, geometry, transparency and physical settings:
+
+| metric | generic | direct |
+|---|---:|---:|
+| whole-task FPS | 25.05 | 25.82 |
+| grasp through pour FPS | 23.66 | 24.49 |
+| lift FPS | 22.58 | 24.13 |
+| carry FPS | 23.16 | 23.80 |
+| pour FPS | 24.79 | 25.24 |
+| whole-task physics ms | 32.16 | 31.00 |
+| whole-task rendering ms | 7.76 | 7.71 |
+
+This is one display pair, not a repeated confidence estimate. It supports
+a solver-side gain rather than a visual-quality reduction. It does not
+establish continuous 25 FPS during the entire grasp/pour action.
+
+The visible native-timing pair is **not a controlled comparison**: Windows
+reported 1920x1061 for the generic run and 1920x1080 for the direct run.
+The direct run was slower (20.43 versus 22.60 action FPS), with a wider
+frame-time tail. Framebuffer mismatch alone does not prove the cause of
+that slowdown; window/display scheduling or other interference remains
+unresolved. Do not report this pair as evidence of a visible FPS gain.
+Use the controlled offscreen pair for the current full-display comparison
+and repeat matched visible-window measurements before claiming the target.
+The raw `restriction_visible_general/direct` reports are preserved.
+
+All **53 MJMPM tests pass** (114.53 s), including the constrained light-box
+stress cases and captured replay. A subsequent resource-bound assertion
+requires CUDA adjacency storage to be bounded by the number of PIC
+evaluation points. Replacing the specialized factory with the general
+implementation makes that test fail in all eight CUDA subcases, while
+the retained implementation passes the updated test. This verifies the
+storage improvement as well as the meaningful-map equivalence.
+All pre-commit checks, Ruff formatting and `git diff --check` pass.

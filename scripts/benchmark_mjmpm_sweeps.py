@@ -39,6 +39,15 @@ def compare_roundoff(a: wp.array[float], b: wp.array[float], stats: wp.array[int
         wp.atomic_add(stats, 0, 1)
 
 
+@wp.kernel
+def compare_restriction(a: wp.array[int], b: wp.array[int], count: wp.array[int], stats: wp.array[int]):
+    i = wp.tid()
+    if i == 0:
+        wp.atomic_add(stats, 1, 1)
+    if i < count[0] and a[i] != b[i]:
+        wp.atomic_add(stats, 0, 1)
+
+
 def load_baseline(output, commit):
     """Load the committed reference without changing the checkout."""
     source = subprocess.run(
@@ -133,6 +142,8 @@ def main():
     parser.add_argument("--reference", default="a84a6331")
     parser.add_argument("--feedback", choices=("reference", "fused"), default="fused")
     parser.add_argument("--column-solver", choices=("reference", "local"), default="local")
+    parser.add_argument("--point-restriction", choices=("general", "direct"), default="direct")
+    parser.add_argument("--verify-point-restriction", action="store_true")
     parser.add_argument("--properties", choices=("reference", "cached"), default="cached")
     parser.add_argument("--batch-opaque", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--visible", action="store_true")
@@ -177,6 +188,39 @@ def main():
         from newton._src.solvers.mjmpm.coupling import articulated  # noqa: PLC0415
         from newton._src.solvers.mjmpm.environment import Environment  # noqa: PLC0415
         from newton._src.solvers.mjmpm.mpm import solve_rheology as rheology  # noqa: PLC0415
+        from newton._src.solvers.mjmpm.mpm import solver_implicit_mpm as material  # noqa: PLC0415
+
+        original_restriction = material.make_point_restriction
+        restriction_stats = wp.zeros(2, dtype=int, device="cuda:0")
+
+        def make_restriction(*a, **kw):
+            if opts.point_restriction == "general" or opts.variant == "baseline":
+                return material.fem.make_space_restriction(*a, **kw)
+            actual = original_restriction(*a, **kw)
+            if opts.verify_point_restriction:
+                expected = material.fem.make_space_restriction(*a, **kw)
+                wp.launch(
+                    compare_bits,
+                    dim=actual.partition_element_offsets().size,
+                    inputs=[
+                        actual.partition_element_offsets().view(wp.uint32),
+                        expected.partition_element_offsets().view(wp.uint32),
+                        restriction_stats,
+                    ],
+                )
+                for lhs, rhs in (
+                    (actual._dof_partition_indices, expected._dof_partition_indices),
+                    (actual._dof_element_indices, expected._dof_element_indices),
+                    (actual._dof_indices_in_element, expected._dof_indices_in_element),
+                ):
+                    wp.launch(
+                        compare_restriction,
+                        dim=lhs.size,
+                        inputs=[lhs, rhs, actual.partition_element_offsets()[-1:], restriction_stats],
+                    )
+            return actual
+
+        material.make_point_restriction = make_restriction
 
         initialize = Environment._init_contact_buffers
 
@@ -230,6 +274,14 @@ def main():
             if opts.visible:
                 sys.argv.append("--visible")
         benchmark()
+        if opts.verify_point_restriction:
+            mismatch, compared = map(int, restriction_stats.numpy())
+            report = {"mismatches": mismatch, "arrays_compared": compared}
+            (opts.output_dir / "restriction_verification.json").write_text(
+                json.dumps(report, indent=2), encoding="utf-8"
+            )
+            if mismatch or compared == 0:
+                raise AssertionError(report)
         return
 
     wp.set_device("cuda:0")

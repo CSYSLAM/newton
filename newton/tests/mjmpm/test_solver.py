@@ -488,6 +488,89 @@ class TestMJMPMMaterial(unittest.TestCase):
                             wp.capture_launch(capture.graph)
                             np.testing.assert_array_equal(actual.numpy().view(np.uint32), expected)
 
+    def test_pic_point_restriction_matches_general(self):
+        """Direct adjacency retains clipping, partition ordering and multi-cell sample identity."""
+        import warp.fem as fem  # noqa: PLC0415
+
+        from newton._src.solvers.mjmpm.mpm.point_restriction import make_point_restriction  # noqa: PLC0415
+
+        class RestrictionPicQuadrature(fem.PicQuadrature):
+            """Isolate generated argument types from other tests' PIC geometries."""
+
+        class PartitionPicQuadrature(RestrictionPicQuadrature):
+            """Give Warp's generated point topology a distinct name for the partition argument type."""
+
+        devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        for device in devices:
+            with self.subTest(device=device), wp.ScopedDevice(device):
+                grid = fem.Grid3D(res=wp.vec3i(3, 3, 3))
+                for partial in (False, True):
+                    geometry_partition = (
+                        fem.LinearGeometryPartition(grid, partition_rank=0, partition_count=2, device=device)
+                        if partial
+                        else None
+                    )
+                    domain = fem.Cells(geometry=grid) if geometry_partition is None else fem.Cells(geometry_partition)
+                    cell_ids = wp.array([[0, 0], [0, 1], [7, -1], [12, -1 if partial else 13], [-1, -1]], dtype=int)
+                    coords = wp.full((5, 2), wp.vec3(0.5), dtype=wp.vec3)
+                    pic_type = PartitionPicQuadrature if partial else RestrictionPicQuadrature
+                    pic = pic_type(domain, positions=(cell_ids, coords), use_domain_element_indices=True)
+                    for cap in (1, 8):
+                        for environment_first in (False, True):
+                            with self.subTest(partial=partial, cap=cap, environment_first=environment_first):
+                                basis = fem.PointBasisSpace(
+                                    pic, max_nodes_per_element=cap, use_evaluation_point_index=True
+                                )
+                                partition = fem.make_space_partition(
+                                    space_topology=basis.topology,
+                                    geometry_partition=domain.geometry_partition,
+                                    with_halo=False,
+                                    max_node_count=basis.topology.node_count(),
+                                    environment_first=environment_first,
+                                )
+                                reference = fem.make_space_restriction(partition, domain, device=device)
+                                actual = make_point_restriction(partition, domain, device=device)
+                                offsets = reference.partition_element_offsets().numpy()
+                                total = int(offsets[-1])
+                                np.testing.assert_array_equal(actual.partition_element_offsets().numpy(), offsets)
+                                for a, b in (
+                                    (actual._dof_partition_indices, reference._dof_partition_indices),
+                                    (actual._dof_element_indices, reference._dof_element_indices),
+                                    (actual._dof_indices_in_element, reference._dof_indices_in_element),
+                                ):
+                                    np.testing.assert_array_equal(a.numpy()[:total], b.numpy()[:total])
+                                self.assertEqual(actual.node_count_sync(), reference.node_count_sync())
+                                if device != "cpu":
+                                    self.assertLessEqual(
+                                        actual.total_node_element_count(), pic.evaluation_point_count()
+                                    )
+                                    with wp.ScopedCapture(force_module_load=False) as capture:
+                                        actual.rebuild(device=device)
+                                    for _ in range(3):
+                                        wp.capture_launch(capture.graph)
+                                        np.testing.assert_array_equal(
+                                            actual.partition_element_offsets().numpy(), offsets
+                                        )
+                                        np.testing.assert_array_equal(
+                                            actual._dof_element_indices.numpy()[:total],
+                                            reference._dof_element_indices.numpy()[:total],
+                                        )
+
+                empty_domain = fem.Cells(grid)
+                empty_pic = RestrictionPicQuadrature(
+                    empty_domain,
+                    positions=(wp.full((2, 2), -1, dtype=int), wp.full((2, 2), wp.vec3(0.5), dtype=wp.vec3)),
+                    use_domain_element_indices=True,
+                )
+                empty_basis = fem.PointBasisSpace(empty_pic, max_nodes_per_element=8, use_evaluation_point_index=True)
+                empty_partition = fem.make_space_partition(space_topology=empty_basis.topology)
+                empty = make_point_restriction(empty_partition, empty_domain, device=device)
+                empty_reference = fem.make_space_restriction(empty_partition, empty_domain, device=device)
+                np.testing.assert_array_equal(
+                    empty.partition_element_offsets().numpy(), empty_reference.partition_element_offsets().numpy()
+                )
+                self.assertEqual(empty.node_count_sync(), 0)
+
     def test_fused_rigid_mobility_matches_reference(self):
         """Preserve combined link and constrained-body feedback as active collider rows change."""
         import warp.sparse as sparse  # noqa: PLC0415
