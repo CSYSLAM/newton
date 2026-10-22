@@ -701,3 +701,72 @@ Raw evidence and rejected source snapshots are under
 `C:/Users/Administrator/Documents/Blender/RicePour/target_25fps`.
 Remaining gates are the unresolved strict comparison and repeated
 matched-protocol performance pairs. The original 25 FPS target remains open.
+
+### 2.10 Specializing articulated triangular substitutions
+
+The main optimization in 2.9 was committed and pushed as `ae6df576`.
+Subsequent work first tested restoring scalar point-response and tangent
+arithmetic inside the cooperative contact sweep. This reduced the strict
+same-input threshold violations from seven to two components over 35,640
+arrays, with maximum twist difference `1.10e-5`. It still failed the
+comparison and made representative frozen contact solves roughly 40-60%
+slower than the retained precomputed-response path. Revert that experiment;
+do not relax the comparison threshold. Its source, JSON and logs remain in
+`target_25fps/ordered_response_verify` and `ordered_response_micro_repeat`.
+
+The next candidate targets `K^-1 J^T` and `H^-1 b` in the articulated
+mobility calculation. Generate a CUDA kernel specialized to the model's
+fixed DOF count for systems with 1-32 DOFs. Unroll the two triangular
+substitutions, retain intermediate column entries in a local fixed vector,
+and write the completed column once. Each multiply/subtract and division
+retains scalar loop order. The factorization, matrix, constraint Hessian,
+integrator and coupling law remain unchanged. CPU and larger systems use
+their original kernels. Kernels are generated during solver initialization,
+before graph capture; repeated execution does not generate code.
+
+A preliminary dynamic-length local-vector variant saved about 10% in the
+24-DOF microbenchmark. The retained fixed-size specialization saves more:
+
+| DOFs | operation | scalar ms | specialized ms |
+|---|---|---:|---:|
+| 7 | Jacobian RHS | 0.00655 | 0.00380 |
+| 7 | in-place RHS | 0.00655 | 0.00380 |
+| 24 | Jacobian RHS | 0.02686 | 0.00946 |
+| 24 | in-place RHS | 0.02706 | 0.00944 |
+| 32 | Jacobian RHS | 0.04285 | 0.01805 |
+| 32 | in-place RHS | 0.04169 | 0.01710 |
+
+These are CUDA-event medians of seven alternating captured measurements,
+ten fresh substitutions per capture, three worlds and 144 RHS columns.
+Both outputs compare bitwise with the scalar reference. This is a local
+linear-algebra speedup, not a 2.8x frame speedup. The verification test adds
+1-DOF coverage and repeated graph replay, and uses separate out-of-place
+and in-place cases.
+
+Two alternating 990-frame physics-acceptance pairs retain all physical
+settings from 2.9. Both variants use the cooperative GS and display changes
+from `ae6df576`; only triangular substitution changes:
+
+| pair | scalar median ms | specialized median ms | scalar mean ms | specialized mean ms | scalar p90 ms | specialized p90 ms |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 32.008 | 31.723 | 32.224 | 32.167 | 37.336 | 37.680 |
+| 2 | 31.936 | 31.628 | 32.655 | 32.034 | 38.388 | 37.386 |
+
+The median frame metric improves about 0.9% in each pair. Mean and p90
+benefits are less consistent; pair 1 p90 regresses. All four trajectories
+pass: 100% rice in pot, 0% spilled; slip 3.32-3.43 mm, turn 3.06-4.37
+degrees, full finger load 1.63-1.68 N and empty load about 1.10 N.
+This small optimization does not establish that the 25 FPS display target
+has been met. It also does not resolve the cooperative GS strict numerical
+comparison recorded in 2.9.
+
+Reproduce complete-task comparisons with
+`scripts/benchmark_mjmpm_sweeps.py full --cooperative --column-solver
+reference --output-dir <directory>` and `--column-solver local`.
+The microbenchmark and raw outputs are archived under `target_25fps`
+(`probe_triangular.py`, `triangular_reference_1/2`,
+`triangular_local_1/2` and `mjmpm_triangular_specialized.log` in the user's
+home directory). The retained specialization passes all **52 MJMPM tests**
+in 129.26 s, including bitwise substitution comparisons and graph replay.
+All pre-commit checks and `git diff --check` pass. Suite duration includes
+compilation and is not a performance measurement.

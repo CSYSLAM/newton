@@ -454,6 +454,40 @@ class TestMJMPMMaterial(unittest.TestCase):
                         wp.capture_launch(capture.graph)
                         np.testing.assert_array_equal(actual.numpy().view(np.uint32), expected)
 
+    def test_specialized_articulated_substitution_matches_reference(self):
+        """Unrolled substitution preserves factor arithmetic and captured in-place replay."""
+        from newton._src.solvers.mjmpm.coupling import articulated  # noqa: PLC0415
+
+        if not wp.is_cuda_available():
+            self.skipTest("Requires CUDA specialization")
+        with wp.ScopedDevice("cuda:0"):
+            rng = np.random.default_rng(29)
+            for size in (1, 7, 24, 32):
+                basis = rng.normal(size=(3, size, size)).astype(np.float32)
+                factors = np.linalg.cholesky(basis @ basis.transpose(0, 2, 1) + np.eye(size))
+                factor = wp.array(factors, dtype=float)
+                rhs = wp.array(rng.normal(size=(3, 17, size)).astype(np.float32), dtype=float)
+                initial = wp.array(rng.normal(size=(3, size, 17)).astype(np.float32), dtype=float)
+                for inplace in (False, True):
+                    with self.subTest(size=size, inplace=inplace):
+                        reference = wp.clone(initial)
+                        actual = wp.clone(initial)
+                        if inplace:
+                            wp.launch(articulated._solve_in_place, dim=(3, 17), inputs=[size, factor, reference])
+                        else:
+                            wp.launch(articulated._solve_columns, dim=(3, 17), inputs=[size, factor, rhs, reference])
+                        specialized = articulated._make_local_column_solver(size, inplace)
+                        inputs = [size, factor, actual if inplace else rhs, actual]
+                        wp.launch(specialized, dim=(3, 17), inputs=inputs)
+                        expected = reference.numpy().view(np.uint32)
+                        np.testing.assert_array_equal(actual.numpy().view(np.uint32), expected)
+                        with wp.ScopedCapture(force_module_load=False) as capture:
+                            wp.copy(actual, initial)
+                            wp.launch(specialized, dim=(3, 17), inputs=inputs)
+                        for _ in range(3):
+                            wp.capture_launch(capture.graph)
+                            np.testing.assert_array_equal(actual.numpy().view(np.uint32), expected)
+
     def test_fused_rigid_mobility_matches_reference(self):
         """Preserve combined link and constrained-body feedback as active collider rows change."""
         import warp.sparse as sparse  # noqa: PLC0415

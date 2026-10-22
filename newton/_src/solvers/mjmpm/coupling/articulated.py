@@ -237,6 +237,40 @@ def _solve_columns(
         solution[world, i, column] = value / factor[world, i, i]
 
 
+def _make_local_column_solver(size, inplace):
+    """Specialize small substitutions so intermediate entries can live in registers."""
+    values_type = wp.types.vector(length=size, dtype=wp.float32)
+
+    @wp.kernel(enable_backward=False, module="unique", module_options={"max_unroll": 32})
+    def solve(
+        nv: int,
+        factor: wp.array3d[float],
+        rhs: wp.array3d[float],
+        output: wp.array3d[float],
+    ):
+        world, column = wp.tid()
+        x = values_type()
+        for i in range(wp.static(size)):
+            value = float(0.0)
+            if wp.static(inplace):
+                value = rhs[world, i, column]
+            else:
+                value = rhs[world, column, i]
+            for k in range(i):
+                value -= factor[world, i, k] * x[k]
+            x[i] = value / factor[world, i, i]
+        for step in range(wp.static(size)):
+            i = wp.static(size) - 1 - step
+            value = x[i]
+            for k in range(i + 1, wp.static(size)):
+                value -= factor[world, k, i] * x[k]
+            x[i] = value / factor[world, i, i]
+        for i in range(wp.static(size)):
+            output[world, i, column] = x[i]
+
+    return solve
+
+
 @wp.kernel(enable_backward=False)
 def _multiply(
     nv: int,
@@ -324,6 +358,11 @@ class LinkMobility:
         self._solution = wp.zeros((self.world_count, nv, size), dtype=float, device=device)
         self.mobility = wp.zeros((self.world_count, size, size), dtype=float, device=device)
         self._integrator = int(m.opt.integrator)
+        self._local_columns = None
+        self._local_in_place = None
+        if device.is_cuda and 0 < self.nv <= 32:
+            self._local_columns = _make_local_column_solver(self.nv, False)
+            self._local_in_place = _make_local_column_solver(self.nv, True)
 
     def update(self) -> None:
         """Evaluate the mobility at the configuration of the latest MuJoCo step."""
@@ -400,7 +439,7 @@ class LinkMobility:
             size = 6 * self.link_count
             # H^-1 M K^-1 J^T, column by column.
             wp.launch(
-                _solve_columns,
+                self._local_columns if self._local_columns is not None else _solve_columns,
                 dim=(self.world_count, size),
                 inputs=[self.nv, self._constrained, self._jacobian],
                 outputs=[self._constrained_solution],
@@ -411,11 +450,13 @@ class LinkMobility:
                 inputs=[self.nv, self._mass, self._constrained_solution],
                 outputs=[self._solution],
             )
+            inputs = [self.nv, self._h, self._solution]
+            if self._local_in_place is not None:
+                inputs.append(self._solution)
             wp.launch(
-                _solve_in_place,
+                self._local_in_place if self._local_in_place is not None else _solve_in_place,
                 dim=(self.world_count, size),
-                inputs=[self.nv, self._h],
-                outputs=[self._solution],
+                inputs=inputs,
             )
             wp.launch(
                 _project,

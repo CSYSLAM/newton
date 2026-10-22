@@ -132,6 +132,7 @@ def main():
     parser.add_argument("--variant", choices=("baseline", "current"), default="current")
     parser.add_argument("--reference", default="a84a6331")
     parser.add_argument("--feedback", choices=("reference", "fused"), default="fused")
+    parser.add_argument("--column-solver", choices=("reference", "local"), default="local")
     parser.add_argument("--properties", choices=("reference", "cached"), default="cached")
     parser.add_argument("--batch-opaque", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--visible", action="store_true")
@@ -173,6 +174,7 @@ def main():
         (opts.output_dir / "report.json").write_text(json.dumps(records, indent=2), encoding="utf-8")
         return
     if opts.mode in ("full", "display"):
+        from newton._src.solvers.mjmpm.coupling import articulated  # noqa: PLC0415
         from newton._src.solvers.mjmpm.environment import Environment  # noqa: PLC0415
         from newton._src.solvers.mjmpm.mpm import solve_rheology as rheology  # noqa: PLC0415
 
@@ -183,6 +185,15 @@ def main():
             env._use_cooperative_rigid_buckets = opts.cooperative and opts.variant == "current"
 
         Environment._init_contact_buffers = init
+        initialize_mobility = articulated.LinkMobility.__init__
+
+        def init_mobility(mobility, *a, **kw):
+            initialize_mobility(mobility, *a, **kw)
+            if opts.column_solver == "reference" or opts.variant == "baseline":
+                mobility._local_columns = None
+                mobility._local_in_place = None
+
+        articulated.LinkMobility.__init__ = init_mobility
         rheology._FUSE_RIGIDITY_FEEDBACK = opts.feedback == "fused" and opts.variant == "current"
         initialize_example = Example.__init__
         from newton.examples.mjmpm.support.rice_cooker_visuals import RiceCookerVisuals  # noqa: PLC0415
@@ -202,8 +213,6 @@ def main():
 
         Example.__init__ = init_example
         if opts.variant == "baseline":
-            from newton._src.solvers.mjmpm.coupling import articulated  # noqa: PLC0415
-
             articulated._factor_matrix = lambda nv, matrix: wp.launch(
                 articulated._cholesky, dim=matrix.shape[0], inputs=[nv, matrix]
             )
