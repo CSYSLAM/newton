@@ -143,6 +143,7 @@ def main():
     parser.add_argument("--feedback", choices=("reference", "fused"), default="fused")
     parser.add_argument("--column-solver", choices=("reference", "local"), default="local")
     parser.add_argument("--point-restriction", choices=("general", "direct"), default="direct")
+    parser.add_argument("--force-resolve", choices=("full", "cached"), default="cached")
     parser.add_argument("--verify-point-restriction", action="store_true")
     parser.add_argument("--properties", choices=("reference", "cached"), default="cached")
     parser.add_argument("--batch-opaque", action=argparse.BooleanOptionalAction, default=True)
@@ -150,6 +151,10 @@ def main():
     parser.add_argument("--timing", choices=("synchronized", "native"), default="synchronized")
     parser.add_argument("--output-dir", type=Path, required=True)
     opts = parser.parse_args()
+    if opts.force_resolve == "full" or opts.variant == "baseline":
+        from newton._src.solvers.mjmpm.mujoco.solver_mujoco import SolverMuJoCo  # noqa: PLC0415
+
+        SolverMuJoCo._coupling_prepare_force_resolve = lambda self: None
     opts.output_dir.mkdir(parents=True, exist_ok=True)
     baseline = load_baseline(opts.output_dir, opts.reference)
     if opts.mode == "frozen":

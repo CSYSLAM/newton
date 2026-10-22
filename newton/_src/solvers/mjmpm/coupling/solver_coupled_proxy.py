@@ -1401,6 +1401,11 @@ class SolverCoupledProxy(SolverCoupled):
                 for proxy in body_proxies:
                     self._add_body_force_input(src, proxy.source_local_to_proxy_global, proxy.coupling_forces)
                 self._notify_input_state_update(src, StateFlags.BODY_F, dt=dt)
+            # This final source pass has the same step-start coordinates and
+            # timestep as its preceding pass; only the harvested force changes.
+            prepare = getattr(src.solver, "_coupling_prepare_force_resolve", None)
+            if prepare is not None and src.substeps == 1 and not self._entry_has_body_proxy_overrides(src.name):
+                prepare()
             self._step_entry(src, control, contacts, dt)
 
     def _reset_aitken_iteration_state(self) -> None:

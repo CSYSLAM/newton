@@ -1,0 +1,1 @@
+Reuse MuJoCo position and velocity derivatives during eligible same-step MJMPM force feedback resolves, while retaining the full force, constraint, and integration solve and falling back for unsupported configurations.

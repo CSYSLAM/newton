@@ -124,6 +124,7 @@ def main():
         )
 
     samples = []
+    framebuffer_history = []
     started = None
     texture_inventory = []
     try:
@@ -145,6 +146,9 @@ def main():
                 if opts.timing == "synchronized":
                     viewer.renderer.gl.glFinish()
                     wp.synchronize_device(example.model.device)
+                resolution = list(viewer.renderer.window.get_framebuffer_size())
+                if not framebuffer_history or framebuffer_history[-1]["resolution"] != resolution:
+                    framebuffer_history.append({"frame": frame, "resolution": resolution})
             rendered = time.perf_counter()
             if frame == 0 and opts.case != "none":
                 texture_inventory = [
@@ -208,6 +212,7 @@ def main():
             "framebuffer_resolution": list(viewer.renderer.window.get_framebuffer_size())
             if opts.case != "none"
             else None,
+            "framebuffer_history": framebuffer_history,
             "timing": opts.timing,
             "visible": opts.visible,
             "fps": len(samples) / elapsed,

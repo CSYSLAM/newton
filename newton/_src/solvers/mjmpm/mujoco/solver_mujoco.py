@@ -4770,6 +4770,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         self._initial_model_sync = False
         self.update_data_interval = update_data_interval
         self._step = 0
+        self._coupling_kinematics_ready = False
+        self._coupling_reuse_kinematics = False
 
         if self.mjw_model is not None:
             self.mjw_model.opt.run_collision_detection = use_mujoco_contacts
@@ -4815,8 +4817,15 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
 
     @event_scope
     def _mujoco_warp_step(self):
+        reuse = self._coupling_reuse_kinematics
+        self._coupling_reuse_kinematics = False
+        if reuse:
+            self._coupling_force_step()
+            return
+        self._coupling_kinematics_ready = False
         if not self._use_speculative_contacts:
             self._mujoco_warp.step(self.mjw_model, self.mjw_data)
+            self._coupling_kinematics_ready = True
             return
         model, data = self.mjw_model, self.mjw_data
         if model.opt.integrator not in (
@@ -5029,6 +5038,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         time carry over. Restoring them makes a repeated solve of the same
         step depend only on the step-start state and its inputs.
         """
+        self._coupling_kinematics_ready = False
+        self._coupling_reuse_kinematics = False
         if self.update_data_interval != 1:
             raise ValueError("Repeated coupling passes require update_data_interval=1")
         self._iteration_step = self._step
@@ -5045,6 +5056,54 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             wp.copy(copy, source)
         self._iteration_buffers = buffers
         self._iteration_sources = sources
+
+    def _coupling_prepare_force_resolve(self) -> None:
+        """Reuse derivatives only when the proxy repeats the identical step start.
+
+        The caller must restore iteration state and provide the same qpos,
+        qvel, model, and timestep as the preceding full pass. Only forces and
+        controls may change. Normal steps never select this path.
+        """
+        self._coupling_reuse_kinematics = False
+        if self.use_mujoco_cpu or not self._coupling_kinematics_ready or self._use_speculative_contacts:
+            return
+        from mujoco_warp._src.types import EnableBit, IntegratorType
+
+        model = self.mjw_model
+        if (
+            self.update_data_interval != 1
+            or not model.opt.run_collision_detection
+            or model.opt.integrator not in (IntegratorType.EULER, IntegratorType.IMPLICITFAST)
+            or model.opt.enableflags & EnableBit.SLEEP
+            or model.na
+            or model.nmocap
+            or model.nflex
+            or model.flg_adhesion
+            or model.nsensordata
+            or any(vars(model.callback).values())
+        ):
+            return
+        self._coupling_reuse_kinematics = True
+
+    def _coupling_force_step(self) -> None:
+        """Run the force-dependent tail of MJWarp forward() and its integrator.
+
+        In particular, public step2() uses a different mass solve by default;
+        retain forward()'s fused factorization and solve here.
+        """
+        from mujoco_warp._src import forward, smooth, solver
+        from mujoco_warp._src.types import IntegratorType
+
+        model, data = self.mjw_model, self.mjw_data
+        forward.fwd_actuation(model, data)
+        forward.fwd_acceleration(model, data, factorize=True)
+        solver.solve(model, data)
+        if model.opt.run_rne_postconstraint:
+            smooth.rne_postconstraint(model, data)
+        if model.opt.integrator == IntegratorType.IMPLICITFAST:
+            forward.implicit(model, data)
+        else:
+            forward.euler(model, data)
 
     def coupling_restore_iteration_state(self) -> None:
         """Restore the data saved by :meth:`coupling_save_iteration_state`."""
@@ -5108,6 +5167,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 joint-state quantities are reset. If ``None``, all are reset.
                 The internal MuJoCo buffers are always cleared regardless.
         """
+        self._coupling_kinematics_ready = False
+        self._coupling_reuse_kinematics = False
         if state is None:
             raise ValueError("'state' argument is required.")
 
@@ -5616,6 +5677,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
 
     @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
+        self._coupling_kinematics_ready = False
+        self._coupling_reuse_kinematics = False
         if self.use_mujoco_cpu:
             self._notify_model_changed(flags)
         else:

@@ -881,3 +881,104 @@ implementation makes that test fail in all eight CUDA subcases, while
 the retained implementation passes the updated test. This verifies the
 storage improvement as well as the meaningful-map equivalence.
 All pre-commit checks, Ruff formatting and `git diff --check` pass.
+
+### 2.12 Same-step MuJoCo force resolve (28 FPS target)
+
+The new target is **28 FPS during grasp through pour**, with the original
+1,478 grains, six substeps, 60/60 rigid sweeps, MPM cap 50, tolerances, and
+complete appearance. Whole-task FPS is reported separately.
+
+The final proxy source resolve restores the same step-start joint positions
+and velocities and changes only feedback forces. Reuse the preceding
+MuJoCo pass's position/velocity derivatives, mass matrix, and contact
+Jacobians. Recompute actuation, smooth acceleration using the original
+fused factor-and-solve, all constraints, requested postconstraint body
+forces, and integration. There is no delayed material impulse or skipped
+contact solve. Public `step2()` defaults to a different mass solve, so the
+retained implementation calls the force-dependent forward tail explicitly.
+
+This is enabled only for a single-substep proxy source without incoming
+body proxy overrides, using GPU Euler/implicitfast, ordinary internal
+contacts, and per-step input synchronization. CPU, speculative/external
+contacts, sleeping, actuator activation state, mocap, flex, adhesion,
+sensors, callbacks, and other integrators retain full recomputation.
+Normal steps always recompute; save/model-change/reset invalidate reuse.
+
+Validation:
+
+- A damped articulated chain touching the ground matches the full solve
+  bit for bit under changed external force for Euler and implicitfast,
+  including joint/body state, acceleration, mass factor, contact force,
+  and three captured graph replays. Unsupported-state guards and model
+  invalidation are checked separately.
+- Full-task shadow verification restores every nonempty MJWarp data array
+  before its reference solve. With deterministic **force accumulation**
+  in the diagnostic only, all **100,980 arrays across 5,940 resolves**
+  match bit for bit, including positions, velocities, accelerations,
+  passive/bias/actuator/smooth forces, factors, constraint forces/state,
+  solver iteration counts, time, and active row counts. Collision
+  detection and the production solver's default determinism are retained.
+- Without controlling atomic force accumulation, even full-versus-full
+  repeated solves show differing bits, originating in passive gravity
+  compensation. Those differences alone do not establish a cache error.
+  Do not describe production trajectories as globally bitwise deterministic.
+- Full physical acceptance passes: 100% of grains in pot, 0% spilled;
+  cup slip 3.37 mm / 3.81 degrees; full/empty load 1.65/1.10 N; peak
+  grain speed 1.95 m/s. The separate deterministic shadow trajectory also
+  passes (3.40 mm / 4.05 degrees, 1.69/1.10 N).
+- All 55 MJMPM/geometry tests pass in 117.34 s. After completing the fallback
+  guards, the full 55-test suite passes again in 113.35 s.
+
+One synchronized offscreen 1920x1080 pair (framebuffer history stays
+1920x1080 throughout both runs) gives:
+
+| metric | full source recompute | cached force resolve |
+|---|---:|---:|
+| whole-task FPS | 25.97 | 26.47 |
+| grasp through pour FPS | 24.43 | 25.27 |
+| action physics ms | 33.23 | 31.86 |
+| action rendering ms | 7.70 | 7.72 |
+
+This is a modest solver improvement, not evidence that 28 FPS has been
+reached. The native visible-window measurements are recorded separately.
+With both visible framebuffers remaining 1920x1080 throughout the native
+pair, action FPS is 20.67 -> 20.86 and whole-task FPS 21.02 -> 21.17.
+This small difference does not establish a reliable visible-window gain.
+The measured native frame tail includes driver/display scheduling and
+cannot be interpreted as isolated rendering time. In particular, the
+approximately 5 ms native `step_ms` is CPU submission, not physics time.
+An additional visible synchronized run is also only 20.75 action FPS
+(21.06 whole task), with 32.71 ms physics and 15.48 ms render/presentation
+per action frame. Merely adding synchronization does not remove the
+visible-window cost, so no synchronization workaround is retained.
+All raw reports are under `RicePour/target_28fps`; same-input verification
+and the initial headless physical result are under `target_25fps`.
+
+Reproduction (prefix commands with `uv run --no-sync python -B`):
+
+```text
+scripts/verify_mjmpm_force_resolve.py --deterministic --output <verification.json>
+scripts/verify_mjmpm_force_resolve.py --control --output <full_vs_full.json>
+scripts/benchmark_mjmpm_sweeps.py display --cooperative --force-resolve full --output-dir <before>
+scripts/benchmark_mjmpm_sweeps.py display --cooperative --force-resolve cached --output-dir <after>
+```
+
+Add `--visible --timing native` for the real window. Framebuffer changes
+are now recorded by frame instead of reporting only the last size.
+
+Rejected experiment: replacing the rigid GS per-contact warp barrier with
+one barrier per sweep preserved all three outputs bit for bit on 12
+frozen inputs, but slowed most snapshots by roughly 3–8%. It remains an
+external prototype; production synchronization is unchanged.
+
+The final captured phase profile still contains **12 MuJoCo solves and
+12 rigid GS solves per frame**. Source MuJoCo cost is approximately
+2.86 ms in carry and 2.78 ms in pour (the preceding profile was about
+4.0 ms). Remaining major costs are cooperative rigid sweeps (11.10 / 7.02
+ms), MPM main solve (9.12 / 11.00 ms), and collision (5.19 / 5.53 ms).
+Overlapped material preparation must not be added to those totals as
+independent serial work. Particle-term assembly alone is 3.73 ms in
+carry versus 0.97 ms during pour, making repeated particle-to-grid
+integration a useful next investigation. Any fused mass/velocity/APIC
+gather must preserve FEM accumulation precision, contribution order,
+and unsupported-basis fallbacks before it is eligible for adoption.

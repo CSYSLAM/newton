@@ -1542,6 +1542,100 @@ def _run_coupled(model, steps, dt, record, **kwargs):
 
 
 class TestMJMPMArticulatedResponse(unittest.TestCase):
+    def test_force_resolve_reuses_identical_step_start(self):
+        """Match full Euler/implicitfast solves, including contacts and graph replay."""
+        from newton._src.solvers.mjmpm.mujoco.solver_mujoco import SolverMuJoCo  # noqa: PLC0415
+
+        for device in wp.get_cuda_devices():
+            for integrator in ("euler", "implicitfast"):
+                with self.subTest(device=device, integrator=integrator):
+                    builder = newton.ModelBuilder()
+                    SolverMuJoCo.register_custom_attributes(builder)
+                    builder.add_ground_plane()
+                    base = builder.add_link(mass=2.0, inertia=wp.mat33(np.eye(3) * 0.02))
+                    builder.add_shape_box(base, hx=0.1, hy=0.1, hz=0.05)
+                    j0 = builder.add_joint_prismatic(parent=-1, child=base, axis=(0.0, 0.0, 1.0))
+                    arm = builder.add_link(mass=0.5, inertia=wp.mat33(np.eye(3) * 0.01))
+                    builder.add_shape_capsule(arm, radius=0.02, half_height=0.12)
+                    j1 = builder.add_joint_revolute(
+                        parent=base,
+                        child=arm,
+                        axis=(0.0, 1.0, 0.0),
+                        parent_xform=wp.transform(wp.vec3(0.0, 0.0, 0.05), wp.quat_identity()),
+                        child_xform=wp.transform(wp.vec3(0.0, 0.0, -0.12), wp.quat_identity()),
+                        target_ke=30.0,
+                        target_kd=2.0,
+                    )
+                    builder.add_articulation([j0, j1])
+                    builder.joint_q[:] = [0.049, 0.4]
+                    builder.joint_qd[:] = [-0.2, -0.5]
+                    model = builder.finalize(device=device)
+                    actual = SolverMuJoCo(model, integrator=integrator)
+                    reference = SolverMuJoCo(model, integrator=integrator)
+                    start, output, expected = model.state(), model.state(), model.state()
+                    newton.eval_fk(model, start.joint_q, start.joint_qd, start)
+                    control = model.control()
+                    force = np.zeros((model.body_count, 6), dtype=np.float32)
+                    force[arm] = [1.0, -0.3, 2.0, 0.2, 0.1, -0.4]
+                    loaded = model.state()
+                    loaded.assign(start)
+                    loaded.body_f.assign(force)
+
+                    def solve(
+                        actual=actual,
+                        output=output,
+                        reference=reference,
+                        expected=expected,
+                        start=start,
+                        control=control,
+                        loaded=loaded,
+                    ):
+                        for solver, result in ((actual, output), (reference, expected)):
+                            solver.coupling_save_iteration_state()
+                            solver.step(start, result, control, None, 0.002)
+                            solver.coupling_restore_iteration_state()
+                            if solver is actual:
+                                solver._coupling_prepare_force_resolve()
+                                self.assertTrue(solver._coupling_reuse_kinematics)
+                            solver.step(loaded, result, control, None, 0.002)
+
+                    def check(actual=actual, output=output, reference=reference, expected=expected):
+                        for name in ("joint_q", "joint_qd", "body_q", "body_qd"):
+                            np.testing.assert_array_equal(
+                                getattr(output, name).numpy(), getattr(expected, name).numpy()
+                            )
+                        for name in ("qacc", "qacc_smooth", "qfrc_smooth", "qfrc_passive", "M", "qLD"):
+                            np.testing.assert_array_equal(
+                                getattr(actual.mjw_data, name).numpy(), getattr(reference.mjw_data, name).numpy()
+                            )
+                        np.testing.assert_array_equal(
+                            actual.mjw_data.efc.force.numpy(), reference.mjw_data.efc.force.numpy()
+                        )
+
+                    solve()
+                    check()
+                    with wp.ScopedCapture(device=device) as capture:
+                        solve()
+                    for _ in range(3):
+                        wp.capture_launch(capture.graph)
+                        check()
+                    # A force resolve must fall back when backend state can
+                    # change outside the restored rigid coordinates.
+                    for name, unsupported in (("na", 1), ("nmocap", 1), ("nflex", 1), ("nsensordata", 1)):
+                        original = getattr(actual.mjw_model, name)
+                        setattr(actual.mjw_model, name, unsupported)
+                        actual._coupling_prepare_force_resolve()
+                        self.assertFalse(actual._coupling_reuse_kinematics)
+                        setattr(actual.mjw_model, name, original)
+                    actual.mjw_model.callback.control = lambda m, d: None
+                    actual._coupling_prepare_force_resolve()
+                    self.assertFalse(actual._coupling_reuse_kinematics)
+                    actual.mjw_model.callback.control = None
+                    actual.notify_model_changed(newton.ModelFlags.JOINT_DOF_FORCE_PROPERTIES)
+                    self.assertFalse(actual._coupling_kinematics_ready)
+                    actual._coupling_prepare_force_resolve()
+                    self.assertFalse(actual._coupling_reuse_kinematics)
+
     def test_mujoco_owned_free_body_material_momentum(self):
         """Transfer material momentum to a MuJoCo-owned free body without double applying feedback."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
