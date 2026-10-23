@@ -631,6 +631,18 @@ If you run the examples from a source checkout with uv, use
   </tr>
   <tr>
     <td align="center" width="33%">
+      <a href="newton/examples/mjmpm/example_mjmpm_w1_bread_three_pieces.py">
+        <img width="320" src="docs/images/examples/example_mjmpm_w1_bread_three_pieces.jpg" alt="W1 MJMPM Two Cuts and Three Bread Pieces">
+      </a>
+    </td>
+    <td colspan="2">
+      <b>W1 MJMPM two bread cuts (experimental)</b><br>
+      The W1 cuts one side of the particle loaf, withdraws and moves to the opposite side, then cuts again to leave three coherent pieces with elastic recoil and permanent indentation.<br>
+      <code>python -m newton.examples mjmpm_w1_bread_three_pieces</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
       <a href="newton/examples/mjmpm/example_mjmpm_push_sand.py">
         <img width="320" src="docs/images/examples/example_mjmpm_push_sand.jpg" alt="MuJoCo–MPM Sand Push">
       </a>

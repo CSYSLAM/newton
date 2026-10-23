@@ -334,7 +334,7 @@ class Example(W1MJMPMScene):
             flush=True,
         )
 
-    def test_post_step(self):
+    def _check_material_and_grip(self):
         self.check_finite()
         speed = float(np.linalg.norm(self.state_0.particle_qd.numpy(), axis=1).max())
         self.peak_speed = max(self.peak_speed, speed)
@@ -344,17 +344,20 @@ class Example(W1MJMPMScene):
         self.minimum_grip_clearance = min(self.minimum_grip_clearance, clearance)
         if clearance < -0.000001:
             raise AssertionError(f"Fingers intersect the knife handle/rivets: {clearance * 1000:.3f} mm clearance")
+
+    def test_post_step(self):
+        self._check_material_and_grip()
         if self.sim_time >= 7.0:
             labels, sizes = self.cohesion.components()
             detached = count_detached_samples(self.state_0.particle_q.numpy(), labels, SPACING)
             if len(sizes) != 2 or detached:
                 raise AssertionError(f"A cut piece lost coherence: sizes={sizes.tolist()}, detached={detached}")
 
-    def test_final(self):
+    def _check_final_state(self, required_frames):
         self.check_finite()
         self.solver.check_capacity_status()
-        if self.frame < 660:
-            raise AssertionError("Run 660 frames to cover cutting and withdrawal")
+        if self.frame < required_frames:
+            raise AssertionError(f"Run {required_frames} frames to cover cutting and withdrawal")
         if np.min(self.state_0.particle_q.numpy()[:, 2]) < BOARD_TOP - 0.006:
             raise AssertionError("Bread penetrated the chopping board")
         if self.knife not in self.solver.ownership.mujoco_bodies:
@@ -364,6 +367,9 @@ class Example(W1MJMPMScene):
             or float(self.model.particle_mass.numpy().sum()) != self.initial_mass
         ):
             raise AssertionError("Cutting must preserve every material sample and its mass")
+
+    def test_final(self):
+        self._check_final_state(660)
         metrics = np.array(self.metrics)
         before = metrics[(metrics[:, 0] >= 2.0) & (metrics[:, 0] <= 3.0)]
         loaded = metrics[(metrics[:, 0] >= 7.8) & (metrics[:, 0] <= 8.6)]
