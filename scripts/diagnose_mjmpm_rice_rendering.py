@@ -37,6 +37,7 @@ def main():
     parser.add_argument("--width", type=int, default=1920)
     parser.add_argument("--height", type=int, default=1080)
     parser.add_argument("--timing", choices=("synchronized", "native"), default="synchronized")
+    parser.add_argument("--event-poll", choices=("nonblocking", "wait"), default="nonblocking")
     parser.add_argument(
         "--visible", action="store_true", help="Measure the actual desktop window instead of offscreen rendering"
     )
@@ -127,8 +128,23 @@ def main():
     framebuffer_history = []
     started = None
     texture_inventory = []
+    event_poll_samples = []
+    original_event_step = None
+    current_frame = -1
+    if opts.visible and opts.case != "none":
+        event_loop = viewer.renderer.app.platform_event_loop
+        original_event_step = event_loop.step
+
+        def event_step(timeout=None):
+            begin = time.perf_counter()
+            result = original_event_step(0.001 if opts.event_poll == "wait" else 0.0)
+            event_poll_samples.append((current_frame, (time.perf_counter() - begin) * 1000))
+            return result
+
+        event_loop.step = event_step
     try:
         for frame in range(opts.frames):
+            current_frame = frame
             if opts.timing == "synchronized" or frame == opts.warmup:
                 wp.synchronize_device(example.model.device)
             if frame == opts.warmup:
@@ -193,6 +209,9 @@ def main():
                     "frame_p50_ms": float(np.median(total)),
                     "frame_p90_ms": float(np.percentile(total, 90)),
                 }
+                polls = [ms for frame, ms in event_poll_samples if max(first, opts.warmup) <= frame < last]
+                if polls:
+                    phase_metrics[name]["event_poll_ms"] = float(np.mean(polls))
         inventory = []
         if opts.case != "none":
             for name, obj in viewer.objects.items():
@@ -215,6 +234,7 @@ def main():
             "framebuffer_history": framebuffer_history,
             "timing": opts.timing,
             "visible": opts.visible,
+            "event_poll": opts.event_poll if opts.visible else None,
             "fps": len(samples) / elapsed,
             "step_ms": float(values[:, 0].mean()),
             "validation_ms": float(values[:, 1].mean()),
@@ -238,6 +258,8 @@ def main():
         (opts.output_dir / f"{opts.case}.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(json.dumps({k: v for k, v in report.items() if k != "frame_timings_ms"}), flush=True)
     finally:
+        if original_event_step is not None:
+            event_loop.step = original_event_step
         if encoder is not None:
             encoder.stdin.close()
             returncode = encoder.wait()

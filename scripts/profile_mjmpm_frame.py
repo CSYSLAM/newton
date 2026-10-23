@@ -13,8 +13,8 @@ import warp as wp
 
 from newton._src.solvers.mjmpm.coupling import articulated
 from newton._src.solvers.mjmpm.mpm import solve_rheology as rheology
+from newton._src.solvers.mjmpm.rigid import contact_space, warp_sweeps
 from newton._src.solvers.mjmpm.rigid import kernels as rigid
-from newton._src.solvers.mjmpm.rigid import warp_sweeps
 from newton.examples.mjmpm.example_mjmpm_w1_rice_cooker import Example
 from newton.viewer import ViewerNull
 
@@ -101,6 +101,15 @@ def main():
     holder = SimpleNamespace(call=original_launch)
     events.wrap(holder, "call", "cooperative_sweeps")
     launch_calls[warp_sweeps.solve_contact_buckets_cooperative] = holder.call
+    for kernel, name in (
+        (contact_space.build_delassus, "contact_space_build"),
+        (contact_space.solve, "contact_space_sweeps"),
+        (contact_space.finish, "contact_space_finish"),
+        (contact_space.check_consistency, "contact_space_check"),
+    ):
+        holder = SimpleNamespace(call=original_launch)
+        events.wrap(holder, "call", name)
+        launch_calls[kernel] = holder.call
 
     def launch(*a, **kw):
         kernel = kw.get("kernel", a[0] if a else None)

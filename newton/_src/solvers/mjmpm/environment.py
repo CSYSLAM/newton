@@ -109,6 +109,9 @@ class Environment(SolverBase, CouplingInterface):
         self._link_count = 0
         self._contacted_links = None
         self._contacted_count = None
+        self._contact_space = None
+        self._contact_space_skip = None
+        self._recovering_contacts = False
         self.rigid_impulses = wp.zeros(model.body_count, dtype=wp.spatial_vector, device=model.device)
         self.material_impulses = wp.zeros_like(self.rigid_impulses)
         self.work = model.state()
@@ -220,6 +223,8 @@ class Environment(SolverBase, CouplingInterface):
         self._bucket_fallback = wp.zeros(self._bucket_count, dtype=int, device=device)
         self._use_local_rigid_buckets = True
         self._use_cooperative_rigid_buckets = True
+        self._use_contact_space = True
+        self._contact_space_recovery_only = False
         # Jacobi sweeps: contact counts for mass splitting and two wrench
         # accumulators, each cleared by the sweep that does not write it.
         self._body_contacts = wp.zeros(body_count, dtype=int, device=device)
@@ -365,6 +370,19 @@ class Environment(SolverBase, CouplingInterface):
             )
 
     def _solve_contacts_gauss_seidel(self, work):
+        if (
+            self._use_contact_space
+            and self._constrained_material
+            and self._contact_space is not None
+            and self._use_local_rigid_buckets
+            and self._use_cooperative_rigid_buckets
+            and (self._recovering_contacts or not self._contact_space_recovery_only)
+        ):
+            self._contact_space.run(self, work, lambda: self._solve_contacts_gauss_seidel_sweeps(work))
+            return
+        self._solve_contacts_gauss_seidel_sweeps(work)
+
+    def _solve_contacts_gauss_seidel_sweeps(self, work):
         model = self.model
         c = self.contacts
         capacity = c.rigid_contact_max
@@ -419,7 +437,7 @@ class Environment(SolverBase, CouplingInterface):
                 wp.launch(
                     solve_contact_buckets_cooperative,
                     dim=(self._bucket_count, 32),
-                    inputs=[*inputs, self._packed_contacts, self._bucket_fallback],
+                    inputs=[*inputs, self._packed_contacts, self._bucket_fallback, self._contact_space_skip],
                     device=model.device,
                     block_dim=32,
                 )
@@ -544,6 +562,10 @@ class Environment(SolverBase, CouplingInterface):
         capacity = self.contacts.rigid_contact_max
         self._point_mobility = wp.zeros(capacity, dtype=wp.mat33, device=device)
         self._link_responses = wp.zeros((capacity, kernels.MAX_RESPONSE_LINKS), dtype=kernels.mat63, device=device)
+        if device.is_cuda and self._single_bucket and self._constrained_material:
+            from newton._src.solvers.mjmpm.rigid.contact_space import ContactSpaceBuffers  # noqa: PLC0415
+
+            self._contact_space = ContactSpaceBuffers(model.body_count, capacity, device)
         if self.material is not None:
             self.material.enable_articulated_response(self._mobility, self._link_body, self._link_slot)
 
@@ -708,7 +730,11 @@ class Environment(SolverBase, CouplingInterface):
             device=model.device,
         )
         self.rigid_impulses.zero_()
-        self._solve_rigid_contacts(work, dt)
+        self._recovering_contacts = True
+        try:
+            self._solve_rigid_contacts(work, dt)
+        finally:
+            self._recovering_contacts = False
         wp.launch(
             response.diagnose,
             dim=model.body_count,

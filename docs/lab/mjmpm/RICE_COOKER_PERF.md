@@ -982,3 +982,141 @@ carry versus 0.97 ms during pour, making repeated particle-to-grid
 integration a useful next investigation. Any fused mass/velocity/APIC
 gather must preserve FEM accumulation precision, contribution order,
 and unsupported-basis fallbacks before it is eligible for adoption.
+
+### 2.13 Contact-space rigid GS with guarded reference fallback
+
+The recovery experiment first tried a direct frozen sticking-state solve.
+It failed the friction-cone test on the carry input; an unconstrained
+least-squares allocation of redundant reactions is insufficient. A CPU
+semismooth Newton experiment also did not converge reliably on that input
+within 12 iterations. Neither is in production.
+
+The retained method instead precomputes the contact-point Delassus matrix,
+`D = J B J^T`, using the same independent masses/inertias and the full
+articulated contact responses. Each lane holds one or two relative point
+velocities. Each sequential contact impulse updates those point velocities
+directly through D, and body twists/wrenches are reconstructed at the end.
+Normal compliance, friction projection, contact order, warm-start phase,
+and all **60/60 sweeps** remain. No contacts are merged or discarded.
+
+An early recovery-only prototype improves frozen solves by 16–32%, including
+matrix construction, but gives only 1–4% in the initial whole-frame trial.
+Applying the method to both existing rigid passes gives a larger benefit.
+It is now selected for CUDA, articulated, single-bucket, constrained-material
+environments. CPU, Jacobi, non-material, other coupling modes, and multi-bucket
+environments keep their original path. More than 64 valid contacts, contacts
+between linked bodies, or multiple articulation worlds in one bucket also
+fall back. Storage for D is bounded by `64 * 9 * 64` floats (144 KiB), plus
+fixed input backups and a few small arrays.
+
+Before accepting a candidate, device kernels check the friction cone and
+compare propagated point velocities with the reconstructed body velocities
+at `1e-5 * (1 + max(point_speed))`. On rejection the original inputs are
+restored before running the original sweeps. Decisions use device predicates
+inside kernels, retaining material-side-stream overlap. An attempted CUDA
+conditional graph branch in the first pass failed because that capture still
+has unjoined material work; the retained implementation uses no such branch.
+
+Validation:
+
+- Twelve frozen inputs: maximum twist difference 6.6e-6, contact impulse
+  difference 6.9e-7, and body wrench difference about 2e-7 in the initial
+  prototype. These are floating-point comparisons, not bitwise equivalence.
+- Initial full recovery verification at a uniform 1e-5 scale found 49 twist
+  components above that threshold, maximum 3.27e-5. Force maxima remained
+  below 3.8e-6. Do not describe that stricter comparison as passing.
+- Retained full-task verification checks both passes: **35,640 arrays over
+  11,880 solves**, zero violations at the documented absolute tolerances
+  `[1e-4, 1e-5, 1e-5]` for twists, contact impulses, and body wrenches,
+  respectively (all also use 1e-5 relative tolerance). Observed maxima are
+  `[2.50e-5, 2.03e-6, 1.69e-6]`. The first pass enters MPM; its effect is
+  additionally checked by independent full trajectories and existing tests.
+- Of 11,880 attempts, 11,866 meet the capacity/topology bound and pass the
+  numerical guard. Fourteen capacity/topology fallbacks use the old solver.
+- Captured unit cases cover hard/soft contact, cold/warm starts, changing
+  contact counts 19/35/65/0, and forced numerical rejection. Capacity and
+  numerical fallbacks match the reference arrays bit for bit. Disabling
+  rollback produces four expected array-equivalence failures, with no
+  runtime errors, demonstrating that the rollback test is effective.
+- All **56 MJMPM/geometry/contact-space tests pass** in 124.29 s, including
+  the existing light-box/material stability and loaded-tray cases.
+
+Headless complete-task pairs (milliseconds; checks and settings unchanged):
+
+| pair | reference median / mean / p90 | contact-space median / mean / p90 |
+|---|---|---|
+| all -> reference | 29.67 / 29.88 / 34.96 | 27.32 / 28.05 / 33.78 |
+| reference -> all | 29.32 / 29.49 / 34.36 | 27.13 / 28.45 / 34.05 |
+
+Mean improvement is **3.6–6.2%**; median improvement is about 7.5–8%.
+All trajectories pass: 100% of rice in pot, 0% spilled; new-path slip
+3.29–3.32 mm, grip rotation 2.87–3.05 degrees, full/empty loads approximately
+1.66/1.10 N, and peak grain speed 1.90–1.93 m/s.
+
+One synchronized offscreen 1920x1080 pair retains the entire appearance:
+action FPS **25.12 -> 26.18**, whole-task FPS **26.64 -> 27.77**. Rendering
+stays approximately 7.76/7.79 ms per action frame; physics 32.04 -> 30.41 ms.
+
+The first native-window pair with the old timed event wait does not show a
+visible gain: action FPS 20.94 -> 20.44, with nearly identical median frame
+times but a larger tail. Investigation below identifies the major window
+penalty. With nonblocking polling in both variants, action FPS is
+**23.87 -> 25.04**. Both action windows remain 1920x1080; the reference
+resizes to 1920x1061 at frame 983, outside the action interval. Therefore do
+not use that pair's whole-task averages as a matched-resolution comparison.
+
+Captured carry/pour phase profile, in milliseconds per frame:
+
+| phase | preceding body-space profile | new contact-space profile |
+|---|---|---|
+| rigid contact total | 12.25 / 8.21 | 9.89 / 7.21 |
+| primary sweep kernels | 11.10 / 7.02 | 7.20 / 4.63 |
+| contact matrix construction | — | 0.14 / 0.16 |
+| body reconstruction | included above | 0.54 / 0.38 |
+
+These profiles follow separate trajectories and are not isolated same-input
+kernel timings. Overlapped preparation and nested phases must not be added
+as independent serial costs. Raw artifacts are in `RicePour/target_28fps`,
+with the initial frozen/CPU prototypes preserved in `target_25fps`.
+
+Reproduction (prefix with `uv run --no-sync python -B`):
+
+```text
+scripts/verify_mjmpm_contact_space.py --mode all --output <verification.json>
+scripts/benchmark_mjmpm_sweeps.py full --cooperative --contact-space reference --output-dir <before>
+scripts/benchmark_mjmpm_sweeps.py full --cooperative --contact-space all --output-dir <after>
+```
+
+### 2.14 Nonblocking window event polling
+
+`RendererGL.update()` manually polls pyglet's platform event loop on every
+visible frame. Its previous `step(0.001)` becomes a one-millisecond
+`MsgWaitForMultipleObjects` timeout on this Windows backend. During the
+measured action, that nominal wait actually consumes **8.85 ms on average**;
+the complete renderer update takes 8.90 ms, and `present()` only 0.04 ms.
+This identifies the main previously unexplained window penalty in these
+runs, rather than attributing it to drawing or swap presentation alone.
+
+Use `step(0.0)` to process pending events without waiting. Clock updates,
+window-event dispatch, UI, camera controls, drawing, presentation, and vsync
+settings remain. No system timer settings or simulation settings change.
+The event-poll average drops to **0.029 ms**. In a same-resolution native
+pair with contact-space enabled in both variants:
+
+| metric | timed wait | nonblocking |
+|---|---:|---:|
+| grasp through pour FPS | 20.63 | 25.44 |
+| whole-task FPS | 21.04 | 26.66 |
+| event poll mean, action ms | 8.85 | 0.029 |
+
+Both framebuffers remain 1920x1080 for the full run, with all textures,
+geometry, transparency, 1,478 rice instances, and physical settings retained.
+A subsequent native nonblocking run gives 25.04 action / 26.43 whole-task
+FPS. **Sustained action 28 FPS is still not established.**
+
+The event-poll regression test fails on the old code and passes after the
+change. It verifies queued-event delivery, clock/window dispatch order,
+nonblocking polling, and the headless bypass. All **32 viewer controls,
+rendering-pause, and loading-splash tests pass**. Diagnostics now report event
+polling time and support `--event-poll wait` to reproduce the old wait,
+or `--event-poll nonblocking` for the retained behavior.

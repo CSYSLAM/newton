@@ -144,11 +144,13 @@ def main():
     parser.add_argument("--column-solver", choices=("reference", "local"), default="local")
     parser.add_argument("--point-restriction", choices=("general", "direct"), default="direct")
     parser.add_argument("--force-resolve", choices=("full", "cached"), default="cached")
+    parser.add_argument("--contact-space", choices=("reference", "recovery", "all"), default="all")
     parser.add_argument("--verify-point-restriction", action="store_true")
     parser.add_argument("--properties", choices=("reference", "cached"), default="cached")
     parser.add_argument("--batch-opaque", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--visible", action="store_true")
     parser.add_argument("--timing", choices=("synchronized", "native"), default="synchronized")
+    parser.add_argument("--event-poll", choices=("nonblocking", "wait"), default="nonblocking")
     parser.add_argument("--output-dir", type=Path, required=True)
     opts = parser.parse_args()
     if opts.force_resolve == "full" or opts.variant == "baseline":
@@ -232,6 +234,8 @@ def main():
         def init(env):
             initialize(env)
             env._use_cooperative_rigid_buckets = opts.cooperative and opts.variant == "current"
+            env._use_contact_space = opts.contact_space != "reference" and opts.variant == "current"
+            env._contact_space_recovery_only = opts.contact_space != "all"
 
         Environment._init_contact_buffers = init
         initialize_mobility = articulated.LinkMobility.__init__
@@ -245,6 +249,7 @@ def main():
         articulated.LinkMobility.__init__ = init_mobility
         rheology._FUSE_RIGIDITY_FEEDBACK = opts.feedback == "fused" and opts.variant == "current"
         initialize_example = Example.__init__
+        examples = []
         from newton.examples.mjmpm.support.rice_cooker_visuals import RiceCookerVisuals  # noqa: PLC0415
 
         initialize_visuals = RiceCookerVisuals.__init__
@@ -257,6 +262,7 @@ def main():
 
         def init_example(example, *a, **kw):
             initialize_example(example, *a, **kw)
+            examples.append(example)
             if example.visuals is not None and (opts.properties == "reference" or opts.variant == "baseline"):
                 example.visuals._reuse_instance_properties = False
 
@@ -275,10 +281,24 @@ def main():
         else:
             from scripts.diagnose_mjmpm_rice_rendering import main as benchmark  # noqa: PLC0415
 
-            sys.argv = [sys.argv[0], "full", "--output-dir", str(opts.output_dir), "--timing", opts.timing]
+            sys.argv = [
+                sys.argv[0],
+                "full",
+                "--output-dir",
+                str(opts.output_dir),
+                "--timing",
+                opts.timing,
+                "--event-poll",
+                opts.event_poll,
+            ]
             if opts.visible:
                 sys.argv.append("--visible")
         benchmark()
+        if opts.contact_space != "reference":
+            env = examples[-1].solver.environment
+            report = {"mode": opts.contact_space, "counts": env._contact_space.stats.numpy().tolist()}
+            (opts.output_dir / "contact_space.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+            print(json.dumps(report), flush=True)
         if opts.verify_point_restriction:
             mismatch, compared = map(int, restriction_stats.numpy())
             report = {"mismatches": mismatch, "arrays_compared": compared}

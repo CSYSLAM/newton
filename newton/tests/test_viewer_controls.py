@@ -8,12 +8,43 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from newton._src.viewer.gl.opengl import RendererGL
 from newton._src.viewer.viewer_gl import ViewerGL
 from newton._src.viewer.viewer_gui import ViewerGui
 from newton._src.viewer.viewer_null import ViewerNull
 from newton.tests.unittest_utils import patch_sys_module
 
 _Vec3 = namedtuple("_Vec3", ("x", "y", "z"))
+
+
+class TestViewerEventPolling(unittest.TestCase):
+    def test_processes_events_without_waiting_between_frames(self):
+        """Drain queued events without imposing a timer wait on the frame loop."""
+        events = []
+        pending = [lambda: events.append("posted")]
+
+        def step(timeout):
+            self.assertEqual(timeout, 0.0)
+            events.append("poll")
+            while pending:
+                pending.pop(0)()
+
+        renderer = SimpleNamespace(
+            _make_current=lambda: events.append("current"),
+            headless=False,
+            app=SimpleNamespace(platform_event_loop=SimpleNamespace(step=step)),
+            window=SimpleNamespace(dispatch_events=lambda: events.append("window")),
+        )
+        pyglet = SimpleNamespace(clock=SimpleNamespace(tick=lambda: events.append("tick")))
+        with patch_sys_module("pyglet", pyglet):
+            RendererGL.update(renderer)
+        self.assertEqual(events, ["current", "tick", "poll", "posted", "window"])
+
+    def test_headless_update_skips_window_events(self):
+        events = []
+        renderer = SimpleNamespace(_make_current=lambda: events.append("current"), headless=True)
+        RendererGL.update(renderer)
+        self.assertEqual(events, ["current"])
 
 
 def _make_gl_state(paused: bool = False, step_requested: bool = False) -> "ViewerGL":

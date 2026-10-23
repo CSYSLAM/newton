@@ -1,0 +1,1 @@
+Accelerate bounded CUDA rigid-contact sweeps in articulated MJMPM material environments using precomputed contact-point responses, preserving contact order and iteration counts with device-side consistency checks and reference fallback.

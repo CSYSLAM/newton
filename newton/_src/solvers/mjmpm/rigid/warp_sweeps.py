@@ -67,6 +67,7 @@ def solve_contact_buckets_cooperative(
     iterations: int,
     packed: wp.array[PackedContact],
     fallback: wp.array[int],
+    skip: wp.array[int] = None,
 ):
     """Sweep contacts in order, distributing independent body responses over one CUDA warp."""
     bucket, lane = wp.tid()
@@ -74,6 +75,8 @@ def solve_contact_buckets_cooperative(
     last = end[bucket]
     if lane == 0:
         fallback[bucket] = 0
+    if skip and skip[0]:
+        return
     link_count = int(0)
     if link_body:
         link_count = link_body.shape[1]

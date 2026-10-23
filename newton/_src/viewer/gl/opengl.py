@@ -1371,7 +1371,9 @@ class RendererGL:
 
             pyglet.clock.tick()
 
-            self.app.platform_event_loop.step(0.001)  # 1ms app polling latency
+            # The caller owns the frame loop. Poll queued events without
+            # sleeping; a short timed wait can consume a scheduler tick.
+            self.app.platform_event_loop.step(0.0)
             try:
                 self.window.dispatch_events()
             except (ctypes.ArgumentError, TypeError):
