@@ -477,8 +477,12 @@ class W1MJMPMScene:
             )
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
+            self.before_substep()
             self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
+
+    def before_substep(self):
+        """Apply task-specific impulses before the coupled contact solve."""
 
     def step(self):
         targets, finger_target = self.plan(self.sim_time + self.frame_dt)

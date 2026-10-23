@@ -618,6 +618,19 @@ If you run the examples from a source checkout with uv, use
   </tr>
   <tr>
     <td align="center" width="33%">
+      <a href="newton/examples/mjmpm/example_mjmpm_w1_bread_cut.py">
+        <img width="320" src="docs/images/examples/example_mjmpm_w1_bread_cut.jpg" alt="W1 MJMPM Bread Cutting">
+      </a>
+    </td>
+    <td colspan="2">
+      <b>W1 MJMPM bread cutting (experimental)</b><br>
+      A dynamic W1 wrist holds a chef knife and cuts an MPM loaf with cuttable elastoplastic cohesion into two coherent pieces. Bread uses live particles; the knife and board use Blender assets.<br>
+      <code>python -m newton.examples mjmpm_w1_bread_cut</code><br>
+      <code>python -m newton.examples mjmpm_w1_bread_cut --visual-style particles</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
       <a href="newton/examples/mjmpm/example_mjmpm_push_sand.py">
         <img width="320" src="docs/images/examples/example_mjmpm_push_sand.jpg" alt="MuJoCo–MPM Sand Push">
       </a>
