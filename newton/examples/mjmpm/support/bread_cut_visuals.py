@@ -9,6 +9,8 @@ import numpy as np
 import warp as wp
 from scipy.spatial import cKDTree
 
+from newton.viewer import ViewerGL
+
 
 @wp.kernel
 def _skin(
@@ -77,6 +79,54 @@ def embedding(points, rest, candidates, *, neighbors=16):
     return ids.astype(np.int32), coefficients.astype(np.float32)
 
 
+def group_visual_parts(archive, manifest, *, batch_opaque=True):
+    """Concatenate adjacent opaque meshes sharing a parent and material.
+
+    Preserve triangle and material order, including the offset bevel and
+    engraved lettering. Deforming bread patches remain separate.
+    """
+    groups = []
+    for part in manifest:
+        key = part["key"]
+        material = (
+            part["parent"],
+            part["side"],
+            tuple(part["color"]),
+            part["roughness"],
+            part["metallic"],
+            part["texture"],
+            part.get("opacity", 1.0),
+        )
+        merge = (
+            batch_opaque
+            and part["parent"] != "bread"
+            and part.get("opacity", 1.0) == 1.0
+            and groups
+            and groups[-1]["material"] == material
+        )
+        if not merge:
+            groups.append(
+                {"part": part, "material": material, "count": 0, "points": [], "normals": [], "uvs": [], "indices": []}
+            )
+        group = groups[-1]
+        points = archive[key + "_points"]
+        group["points"].append(points)
+        group["normals"].append(archive[key + "_normals"].astype(np.float32))
+        group["uvs"].append(archive[key + "_uvs"])
+        group["indices"].append(archive[key + "_indices"].astype(np.int32) + group["count"])
+        group["count"] += len(points)
+    return [
+        (
+            g["part"],
+            np.concatenate(g["points"]),
+            np.concatenate(g["normals"]),
+            np.concatenate(g["uvs"]),
+            np.concatenate(g["indices"]),
+        )
+        for g in groups
+    ]
+
+
 class BreadCutVisuals:
     """Render authored board/tool meshes and deform the loaf skin from particles.
 
@@ -85,10 +135,13 @@ class BreadCutVisuals:
     topology is specific to this example; it is not arbitrary mesh cutting.
     """
 
-    def __init__(self, viewer, *, device, rest, center, cut_y, tool_body, tool_local, render_bread=False):
+    def __init__(
+        self, viewer, *, device, rest, center, cut_y, tool_body, tool_local, render_bread=False, batch_opaque=True
+    ):
         from PIL import Image  # noqa: PLC0415
 
         self.viewer = viewer
+        self.reuse_properties = isinstance(viewer, ViewerGL)
         self.device = device
         self.tool_body, self.tool_local = tool_body, tool_local
         self.tool_pose = wp.empty(1, dtype=wp.transform, device=device)
@@ -106,20 +159,19 @@ class BreadCutVisuals:
         textures = {name: np.array(Image.open(path / name).convert("RGB")) for name in names}
         crust_atlas = np.concatenate((textures["crust.jpg"], textures["crumb.jpg"]), axis=1)
         with np.load(path / "visuals.npz", allow_pickle=False) as archive:
-            for part in manifest:
+            for part, points, normals, host_uv, host_indices in group_visual_parts(
+                archive, manifest, batch_opaque=batch_opaque
+            ):
                 key = part["key"]
-                points = archive[key + "_points"].copy()
-                normals = archive[key + "_normals"].astype(np.float32)
-                indices = wp.array(archive[key + "_indices"], dtype=int, device=device)
+                indices = wp.array(host_indices, dtype=int, device=device)
                 name = "/bread_cut/" + key
                 skin = part["parent"] == "bread"
-                if skin:
-                    points += center
-                vertices = wp.array(points, dtype=wp.vec3, device=device)
+                host_points = points + center if skin else points
+                vertices = wp.array(host_points, dtype=wp.vec3, device=device)
                 vertex_normals = wp.array(normals, dtype=wp.vec3, device=device)
                 if skin:
                     candidates = np.flatnonzero((rest[:, 1] < cut_y) if part["side"] < 0 else (rest[:, 1] >= cut_y))
-                    ids, coefficients = embedding(points, rest, candidates)
+                    ids, coefficients = embedding(host_points, rest, candidates)
                     self.skins.append(
                         (
                             vertices,
@@ -138,7 +190,7 @@ class BreadCutVisuals:
                     dtype=wp.vec4,
                     device=device,
                 )
-                uv = wp.array(archive[key + "_uvs"], dtype=wp.vec2, device=device)
+                uv = wp.array(host_uv, dtype=wp.vec2, device=device)
                 texture = textures[part["texture"]] if part["texture"] else None
                 if skin and part["texture"] == "crust.jpg":
                     self.crust_uvs.append((self.skins[-1][3], self.skins[-1][4], wp.clone(uv), uv))
@@ -197,5 +249,8 @@ class BreadCutVisuals:
             else:
                 pose = self.board_pose
             if not self.logged or part["parent"] == "knife":
-                self.viewer.log_instances(name + "/instance", name, pose, self.scale, color, material)
+                reuse = self.logged and self.reuse_properties
+                self.viewer.log_instances(
+                    name + "/instance", name, pose, self.scale, None if reuse else color, None if reuse else material
+                )
         self.logged = True

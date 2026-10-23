@@ -361,9 +361,10 @@ def apply_rigidity_operator(rigidity_operator, delta_collider_impulse, collider_
         articulation = rigidity_operator[2]
         independent = rigidity_operator[3]
         body_count = independent.body_count
+        # The mobility kernel scales with body count, not collider row count.
         if (
             0 < body_count <= 64
-            and J.nrow <= 4096
+            and J.nrow <= 8192
             and J.ncol == 2 * body_count
             and J.nnz * J.block_size <= 128 * J.shape[0]
         ):

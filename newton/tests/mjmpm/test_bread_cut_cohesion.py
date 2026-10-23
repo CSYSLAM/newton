@@ -12,6 +12,48 @@ from newton.examples.mjmpm.support.bread_cut_cohesion import CuttableCohesion, c
 
 
 class TestBreadCutCohesion(unittest.TestCase):
+    def test_connection_product_matches_dense_operator_after_cuts(self):
+        rest = (
+            np.stack(np.meshgrid(np.arange(3), np.arange(2), np.arange(2), indexing="ij"), axis=-1).reshape(-1, 3)
+            * 0.005
+        )
+        rng = np.random.default_rng(53)
+        for device in [wp.get_device("cpu"), *wp.get_cuda_devices()[:1]]:
+            with self.subTest(device=device.alias), wp.ScopedDevice(device):
+                cohesion = CuttableCohesion(
+                    rest, mass=3.5e-5, spacing=0.005, device=device, tool_pose=wp.transform_identity()
+                )
+                pairs = cohesion.pairs.numpy()
+                directions = rng.normal(size=(len(pairs), 3)).astype(np.float32)
+                directions /= np.linalg.norm(directions, axis=1)[:, None]
+                coefficients = rng.uniform(0.1, 4, size=len(pairs)).astype(np.float32)
+                coefficients[::3] = 0  # Severed edges remain in the adjacency.
+                cohesion.directions.assign(directions)
+                cohesion.coefficients.assign(coefficients)
+                matrix = np.eye(3 * len(rest))
+                for (i, j), n, c in zip(pairs, directions, coefficients, strict=True):
+                    block = float(c) * np.outer(n.astype(float), n.astype(float))
+                    for a, b, sign in ((i, i, 1), (j, j, 1), (i, j, -1), (j, i, -1)):
+                        matrix[3 * a : 3 * a + 3, 3 * b : 3 * b + 3] += sign * block
+                host_x = rng.normal(size=(len(rest), 3)).astype(np.float32)
+                host_y = rng.normal(size=(len(rest), 3)).astype(np.float32)
+                x = wp.array(host_x, dtype=wp.vec3)
+                y = wp.array(host_y, dtype=wp.vec3)
+                output = wp.empty_like(x)
+                alpha, beta = -0.7, 0.3
+                expected = alpha * (matrix @ host_x.ravel()).reshape(-1, 3) + beta * host_y
+                cohesion._matvec(x, y, output, alpha, beta)
+                np.testing.assert_allclose(output.numpy(), expected, rtol=3e-6, atol=3e-6)
+                # CG aliases y and z. Capture and replay must preserve this.
+                y.assign(host_y)
+                if device.is_cuda:
+                    with wp.ScopedCapture() as capture:
+                        cohesion._matvec(x, y, y, alpha, beta)
+                    wp.capture_launch(capture.graph)
+                else:
+                    cohesion._matvec(x, y, y, alpha, beta)
+                np.testing.assert_allclose(y.numpy(), expected, rtol=3e-6, atol=3e-6)
+
     def test_local_compression_retains_plastic_shape_without_position_projection(self):
         rest = np.array([[0, 0, 0], [0.005, 0, 0]], dtype=float)
         for device in [wp.get_device("cpu"), *wp.get_cuda_devices()[:1]]:

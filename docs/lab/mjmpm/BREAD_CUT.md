@@ -128,3 +128,6 @@ tested post-cut frame. The retained notch is 1.94 mm, lateral recovery is
 clearance is 0.399 mm. All eight relevant unit/geometry tests and pre-commit
 checks passed. The existing rice-cooker scene also passed a six-frame CUDA
 graph smoke check with finite state and valid capacities.
+
+For shared rice-scene optimizations, measured bottlenecks and reproduction
+commands, see [the performance investigation](BREAD_CUT_PERF.md).

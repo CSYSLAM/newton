@@ -4,6 +4,7 @@
 """Small physical acceptance cases for the independent MJMPM backend."""
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
@@ -572,13 +573,14 @@ class TestMJMPMMaterial(unittest.TestCase):
                 self.assertEqual(empty.node_count_sync(), 0)
 
     def test_fused_rigid_mobility_matches_reference(self):
-        """Preserve combined link and constrained-body feedback as active collider rows change."""
+        """Preserve captured feedback beyond 4096 rows as active collider rows change."""
         import warp.sparse as sparse  # noqa: PLC0415
 
         from newton._src.solvers.mjmpm.mpm import contact_solver_kernels as contacts  # noqa: PLC0415
         from newton._src.solvers.mjmpm.mpm import solve_rheology as rheology  # noqa: PLC0415
 
         devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        node_count = 4104
         for device in devices:
             with self.subTest(device=device), wp.ScopedDevice(device):
                 rng = np.random.default_rng(17)
@@ -586,14 +588,14 @@ class TestMJMPMMaterial(unittest.TestCase):
                 mobility = wp.array((basis @ basis.T)[None], dtype=float)
                 independent_matrix = np.zeros((3, 6, 6), dtype=np.float32)
                 independent_matrix[2] = np.diag([0.0, 0.25, 0.5, 1.0, 2.0, 3.0])
-                initial_velocity = wp.array(rng.normal(size=(6, 3)).astype(np.float32), dtype=wp.vec3)
+                initial_velocity = wp.array(rng.normal(size=(node_count, 3)).astype(np.float32), dtype=wp.vec3)
                 initial_accumulated = wp.array(rng.normal(size=(3, 6)).astype(np.float32), dtype=wp.spatial_vector)
-                impulse = wp.array(rng.normal(size=(6, 3)).astype(np.float32), dtype=wp.vec3)
+                impulse = wp.array(rng.normal(size=(node_count, 3)).astype(np.float32), dtype=wp.vec3)
                 saved_flag = rheology._FUSE_RIGIDITY_FEEDBACK
                 try:
                     for active in ("all", "free", "empty"):
                         rows, columns, values = [], [], []
-                        for node in range(6):
+                        for node in range(node_count):
                             body = node % 3
                             r = rng.normal(size=3).astype(np.float32)
                             cross = np.array([[0, -r[2], r[1]], [r[2], 0, -r[0]], [-r[1], r[0], 0]])
@@ -603,7 +605,7 @@ class TestMJMPMMaterial(unittest.TestCase):
                                 keep = active == "all" or (active == "free" and body == 2)
                                 values.append(value if keep else np.zeros((3, 3)))
                         jacobian = sparse.bsr_from_triplets(
-                            6,
+                            node_count,
                             6,
                             wp.array(rows, dtype=int),
                             wp.array(columns, dtype=int),
@@ -653,7 +655,16 @@ class TestMJMPMMaterial(unittest.TestCase):
                         outputs = (velocity, body_delta, independent.velocity_delta)
                         evaluate(False)
                         expected = [a.numpy().view(np.uint32).copy() for a in outputs]
-                        evaluate(True)
+                        with patch.object(wp, "launch", wraps=wp.launch) as launches:
+                            evaluate(True)
+                        if device != "cpu":
+                            kernels = [
+                                call.kwargs.get("kernel", call.args[0] if call.args else None)
+                                for call in launches.call_args_list
+                            ]
+                            self.assertTrue(
+                                any(getattr(kernel, "key", "") == "apply_mobility_feedback" for kernel in kernels)
+                            )
                         for a, b in zip(outputs, expected, strict=True):
                             np.testing.assert_array_equal(a.numpy().view(np.uint32), b)
                         if device != "cpu":

@@ -166,6 +166,29 @@ def _connection_product(
 
 
 @wp.kernel
+def _gather_product(
+    degree: wp.array[int],
+    edges: wp.array2d[int],
+    neighbors: wp.array2d[int],
+    directions: wp.array[wp.vec3],
+    coefficients: wp.array[float],
+    x: wp.array[wp.vec3],
+    y: wp.array[wp.vec3],
+    z: wp.array[wp.vec3],
+    alpha: float,
+    beta: float,
+):
+    i = wp.tid()
+    xi = x[i]
+    value = xi
+    for k in range(degree[i]):
+        edge = edges[k, i]
+        n = directions[edge]
+        value += coefficients[edge] * wp.dot(n, xi - x[neighbors[k, i]]) * n
+    z[i] = alpha * value + beta * y[i]
+
+
+@wp.kernel
 def _precondition(
     inverse: wp.array[wp.mat33],
     x: wp.array[wp.vec3],
@@ -237,6 +260,19 @@ class CuttableCohesion:
         self.stiffness = stiffness
         self.damping = 0.002
         pairs, lengths = make_connections(rest, spacing)
+        # Slot-major adjacency coalesces neighboring particles' reads. Each
+        # particle owns its output, avoiding scatter atomics in every CG step.
+        degree = np.bincount(pairs.ravel(), minlength=self.count).astype(np.int32)
+        nodes = pairs.T.ravel()
+        order = np.argsort(nodes, kind="stable")
+        slots = np.arange(len(nodes)) - np.repeat(np.cumsum(degree) - degree, degree)
+        edges = np.zeros((int(degree.max(initial=0)), self.count), dtype=np.int32)
+        neighbors = np.zeros_like(edges)
+        edges[slots, nodes[order]] = np.tile(np.arange(len(pairs)), 2)[order]
+        neighbors[slots, nodes[order]] = pairs[:, ::-1].T.ravel()[order]
+        self.degree = wp.array(degree, dtype=int, device=device)
+        self.edges = wp.array(edges, dtype=int, device=device)
+        self.neighbors = wp.array(neighbors, dtype=int, device=device)
         self.pairs = wp.array(pairs, dtype=wp.vec2i, device=device)
         self.lengths = wp.array(lengths, dtype=float, device=device)
         self.initial_lengths = wp.clone(self.lengths)
@@ -265,6 +301,25 @@ class CuttableCohesion:
         )
 
     def _matvec(self, x, y, z, alpha, beta):
+        wp.launch(
+            _gather_product,
+            self.count,
+            [
+                self.degree,
+                self.edges,
+                self.neighbors,
+                self.directions,
+                self.coefficients,
+                x,
+                y,
+                z,
+                float(alpha),
+                float(beta),
+            ],
+            device=self.device,
+        )
+
+    def _matvec_scatter(self, x, y, z, alpha, beta):
         wp.launch(_identity_product, self.count, [x, y, z, float(alpha), float(beta)], device=self.device)
         wp.launch(
             _connection_product,

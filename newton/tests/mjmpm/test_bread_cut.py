@@ -12,10 +12,31 @@ import warp as wp
 
 from newton.examples.mjmpm.support.bread_cut_geometry import blade_mesh
 from newton.examples.mjmpm.support.bread_cut_material import apply_damage, damage_at_blade
-from newton.examples.mjmpm.support.bread_cut_visuals import BreadCutVisuals, _skin, embedding
+from newton.examples.mjmpm.support.bread_cut_visuals import BreadCutVisuals, _skin, embedding, group_visual_parts
 
 
 class TestBreadCut(unittest.TestCase):
+    def test_opaque_batching_preserves_triangles_and_material_order(self):
+        asset = Path(__file__).resolve().parents[2] / "examples/mjmpm/assets/bread_cut/visuals.npz"
+        with np.load(asset) as archive:
+            manifest = [p for p in json.loads(str(archive["manifest"])) if p["parent"] != "bread"]
+            reference = group_visual_parts(archive, manifest, batch_opaque=False)
+            batched = group_visual_parts(archive, manifest)
+        self.assertLess(len(batched), len(reference))
+        for slot in (1, 2, 3):
+            expected = np.concatenate([g[slot][g[4]] for g in reference])
+            actual = np.concatenate([g[slot][g[4]] for g in batched])
+            np.testing.assert_array_equal(actual, expected)
+
+        def materials(groups):
+            return [
+                (p["parent"], tuple(p["color"]), p["roughness"], p["metallic"], p["texture"])
+                for p, _v, _n, _uv, indices in groups
+                for _ in range(len(indices) // 3)
+            ]
+
+        self.assertEqual(materials(reference), materials(batched))
+
     def test_default_assets_do_not_render_a_predefined_bread_cut(self):
         class MeshRecorder:
             def __init__(self):
