@@ -1,0 +1,1 @@
+Speed up MJMPM Gauss-Seidel material solves by spreading each strain color's nodes over all CUDA blocks instead of filling the first blocks. Results are unchanged; the W1 bread-cutting example runs about 8% faster while cutting.

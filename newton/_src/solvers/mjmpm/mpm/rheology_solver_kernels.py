@@ -788,6 +788,21 @@ def apply_velocity_delta(
     strain[tau_i] = delta_stress
 
 
+@wp.func
+def _lane_major_index(thread: int, launch_dim: int):
+    """Spread the first entries of a color over every block rather than filling the first blocks.
+
+    Entry ``k`` goes to lane ``k // block_count`` of block ``k % block_count``.
+    Small colors then occupy all multiprocessors, while large colors still fill
+    whole warps. With a single block this is the identity.
+    """
+    block_size = wp.block_dim()
+    block_count = launch_dim // block_size
+    if block_count <= 1 or block_count * block_size != launch_dim:
+        return thread
+    return (thread % block_size) * block_count + thread // block_size
+
+
 @wp.kernel
 def apply_stress_gs(
     color: int,
@@ -807,7 +822,7 @@ def apply_stress_gs(
     strain matrix is not assembled
     """
 
-    i = wp.tid()
+    i = _lane_major_index(wp.tid(), launch_dim)
     color_beg = color_offsets[color] + i
     color_end = color_offsets[color + 1]
 
@@ -1018,7 +1033,7 @@ def make_gs_solve_kernel(
         local_stress: wp.array[vec6],
         delta_correction: wp.array[vec6],
     ):
-        i = wp.tid()
+        i = _lane_major_index(wp.tid(), launch_dim)
         color_beg = color_offsets[color] + i
         color_end = color_offsets[color + 1]
 

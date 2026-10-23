@@ -4,6 +4,7 @@
 """Small physical acceptance cases for the independent MJMPM backend."""
 
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 import numpy as np
@@ -425,6 +426,14 @@ class TestMJMPMRigid(unittest.TestCase):
                             articulated, 40, 0.001, cooperative=True, relaxation=0.5, articulated_response=True
                         )
                         self.assertEqual(fallback, 0)
+
+
+@wp.kernel
+def _count_mismatches(a: wp.array[Any], b: wp.array[Any], count: wp.array[int]):
+    i = wp.tid()
+    d = a[i] - b[i]
+    if wp.dot(d, d) != 0.0:
+        wp.atomic_add(count, 0, 1)
 
 
 class TestMJMPMMaterial(unittest.TestCase):
@@ -2227,6 +2236,117 @@ class TestMJMPMCUDA(unittest.TestCase):
             Material._build_strain_eigenbasis = build
         self.assertGreater(stats["calls"], 0)
         self.assertGreater(stats["nodes"], 0)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA required")
+    def test_lane_major_color_mapping_matches_single_block(self):
+        """Spread strain colors over all blocks with the result of the identity (single-block) mapping."""
+        from newton._src.solvers.mjmpm.mpm import solve_rheology  # noqa: PLC0415
+
+        gs = solve_rheology._GaussSeidelSolver
+        stats = {"solves": 0, "guesses": 0}
+        mismatches = wp.zeros(1, dtype=int, device="cuda:0")
+
+        def single_block(kernel, args):
+            # Same kernel and arguments; one block makes the lane-major map the identity.
+            dim = 256
+            return wp.launch(kernel, dim=dim, inputs=[0, dim, *args], block_dim=dim, record_cmd=True)
+
+        def check(run_production, run_reference, arrays, buffers):
+            saved, expected = buffers
+            for array, value in zip(arrays, saved, strict=True):
+                wp.copy(value, array)
+            run_reference()
+            for array, value in zip(arrays, expected, strict=True):
+                wp.copy(value, array)
+            for array, value in zip(arrays, saved, strict=True):
+                wp.copy(array, value)
+            run_production()
+            for array, value in zip(arrays, expected, strict=True):
+                wp.launch(_count_mismatches, dim=array.shape[0], inputs=[array, value, mismatches])
+
+        def colors(command):
+            def run():
+                for color in range(self_ref[0].color_count):
+                    command.set_param_at_index(0, color)
+                    command.launch()
+
+            return run
+
+        self_ref = [None]
+        original = gs.apply_initial_guess, gs.solve
+
+        def apply_initial_guess(solver):
+            # Allocate outside the captured solve loop.
+            self_ref[0] = solver
+            solved = [solver.momentum.velocity, solver.rheology.stress, solver.delta_stress]
+            solver._check_buffers = ([wp.empty_like(a) for a in solved], [wp.empty_like(a) for a in solved])
+            solver._reference_apply = single_block(solve_rheology.apply_stress_gs, solver.apply_stress_args)
+            solver._reference_solve = single_block(solver.solve_kernel, solver.solve_args)
+            stats["guesses"] += 1
+            check(
+                lambda: original[0](solver),
+                colors(solver._reference_apply),
+                solved[:1],
+                (solver._check_buffers[0][:1], solver._check_buffers[1][:1]),
+            )
+
+        def solve(solver):
+            self_ref[0] = solver
+            stats["solves"] += 1
+            check(
+                lambda: original[1](solver),
+                colors(solver._reference_solve),
+                [solver.momentum.velocity, solver.rheology.stress, solver.delta_stress],
+                solver._check_buffers,
+            )
+
+        gs.apply_initial_guess, gs.solve = apply_initial_guess, solve
+        try:
+            builder = newton.ModelBuilder()
+            SolverMJMPM.register_custom_attributes(builder)
+            builder.add_particle_grid(
+                pos=wp.vec3(-0.05, -0.05, 0.005),
+                rot=wp.quat_identity(),
+                vel=wp.vec3(0.3, 0.0, 0.0),
+                dim_x=12,
+                dim_y=12,
+                dim_z=10,
+                cell_x=0.01,
+                cell_y=0.01,
+                cell_z=0.01,
+                mass=0.0016,
+                jitter=0.0,
+                radius_mean=0.005,
+                custom_attributes={"mpm:friction": 0.5},
+            )
+            body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.16), wp.quat_identity()))
+            builder.add_shape_box(body, hx=0.03, hy=0.03, hz=0.03, cfg=newton.ModelBuilder.ShapeConfig(density=500.0))
+            builder.add_ground_plane()
+            model = builder.finalize(device="cuda:0")
+            solver = SolverMJMPM(
+                model,
+                mpm_options={
+                    "grid_type": "fixed",
+                    "voxel_size": 0.01,
+                    "grid_padding": 6,
+                    "max_active_cell_count": 4096,
+                    "max_iterations": 20,
+                    "solver": "gs",
+                    "strain_basis": "P0",
+                },
+            )
+            state = model.state()
+            for _ in range(5):
+                solver.step(state, state, None, None, 1.0 / 240.0)
+            with wp.ScopedCapture() as capture:
+                solver.step(state, state, None, None, 1.0 / 240.0)
+            for _ in range(5):
+                wp.capture_launch(capture.graph)
+        finally:
+            gs.apply_initial_guess, gs.solve = original
+        self.assertGreater(stats["guesses"], 0)
+        self.assertGreater(stats["solves"], 0)
+        self.assertEqual(int(mismatches.numpy()[0]), 0)
 
     def _check_graph_matches_eager(self, collider_basis, iterations):
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))

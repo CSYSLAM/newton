@@ -1120,3 +1120,24 @@ nonblocking polling, and the headless bypass. All **32 viewer controls,
 rendering-pause, and loading-splash tests pass**. Diagnostics now report event
 polling time and support `--event-poll wait` to reproduce the old wait,
 or `--event-poll nonblocking` for the retained behavior.
+
+### 2.15 Lane-major Gauss-Seidel color mapping
+
+Driven by the bread example (see `BREAD_CUT_PERF.md`): the strain-color GS
+kernels now spread each color's entries over all blocks (32-thread blocks,
+same total threads), with a bitwise same-input test against a single-block
+identity launch. In rice a color holds only 24-41 strain nodes, and the
+rheology loop is small, so the gain is small. At frame 515 one iteration
+drops from about 46 to 38 us (two timing-only recaptures each).
+
+Three alternating `scripts/benchmark_mjmpm_sweeps.py full --cooperative`
+pairs, A = `14d3e9e6` worktree, B = lane-major:
+
+| run | A median / mean / p90 | B median / mean / p90 |
+| --- | --- | --- |
+| 1 | 27.61 / 28.88 / 34.32 | 27.33 / 28.22 / 33.84 |
+| 2 | 27.69 / 28.89 / 35.65 | 27.38 / 28.21 / 33.56 |
+| 3 | 27.60 / 28.36 / 34.30 | 27.01 / 28.00 / 33.81 |
+
+Median -1.0%, mean -2.3%, p90 -1.5%; every pair improves and all six runs
+pass (100% in pot, 0% spilled, slip 3.30-3.36 mm, turn 2.70-3.61 degrees).

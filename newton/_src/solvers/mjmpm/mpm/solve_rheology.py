@@ -810,67 +810,64 @@ class _GaussSeidelSolver(_RheologySolver):
         self.color_count = self.rheology.color_offsets.shape[0] - 1
 
         if self.device.is_cuda:
-            color_block_count = self.device.sm_count * 2
+            color_block_count = self.device.sm_count * 4
         else:
             color_block_count = 1
-        color_block_dim = 64
+        # Colors of small scenes hold few strain nodes; the kernels map them
+        # lane-major so that narrow warps spread them over all multiprocessors.
+        color_block_dim = 32
         color_launch_dim = color_block_count * color_block_dim
 
+        # Arguments after (color, launch_dim), kept to relaunch with another layout.
+        self.apply_stress_args = [
+            self.rheology.color_offsets,
+            self.rheology.color_blocks,
+            self.rheology.strain_mat.offsets,
+            self.rheology.strain_mat.columns,
+            self.rheology.strain_mat.values.view(dtype=mat13),
+            self.momentum.inv_volume,
+            self.rheology.stress,
+            self.momentum.velocity,
+        ]
         self.apply_stress_launch = wp.launch(
             kernel=apply_stress_gs,
             dim=color_launch_dim,
-            inputs=[
-                0,  # color
-                color_launch_dim,
-                self.rheology.color_offsets,
-                self.rheology.color_blocks,
-                self.rheology.strain_mat.offsets,
-                self.rheology.strain_mat.columns,
-                self.rheology.strain_mat.values.view(dtype=mat13),
-                self.momentum.inv_volume,
-                self.rheology.stress,
-            ],
-            outputs=[
-                self.momentum.velocity,
-            ],
+            inputs=[0, color_launch_dim, *self.apply_stress_args],  # color
             block_dim=color_block_dim,
             max_blocks=color_block_count,
             record_cmd=True,
         )
 
         # Solve kernel
-        gs_kernel = make_gs_solve_kernel(
+        self.solve_kernel = make_gs_solve_kernel(
             has_viscosity=self.rheology.has_viscosity,
             has_dilatancy=self.rheology.has_dilatancy,
             has_compliance_mat=self.rheology.compliance_mat.nnz > 0,
             strain_velocity_node_count=self.rheology.strain_velocity_node_count,
         )
+        self.solve_args = [
+            self.rheology.color_offsets,
+            self.rheology.color_blocks,
+            self.rheology.yield_params,
+            self.rheology.strain_node_volume,
+            self.rheology.compliance_mat.offsets,
+            self.rheology.compliance_mat.columns,
+            self.rheology.compliance_mat.values,
+            self.rheology.strain_mat.offsets,
+            self.rheology.strain_mat.columns,
+            self.rheology.strain_mat.values.view(dtype=mat13),
+            self.delassus_operator.delassus_diagonal,
+            self.delassus_operator.delassus_rotation,
+            self.momentum.inv_volume,
+            self.rheology.elastic_strain_delta,
+            self.momentum.velocity,
+            self.rheology.stress,
+            self.delta_stress,
+        ]
         self.solve_local_launch = wp.launch(
-            kernel=gs_kernel,
+            kernel=self.solve_kernel,
             dim=color_launch_dim,
-            inputs=[
-                0,  # color
-                color_launch_dim,
-                self.rheology.color_offsets,
-                self.rheology.color_blocks,
-                self.rheology.yield_params,
-                self.rheology.strain_node_volume,
-                self.rheology.compliance_mat.offsets,
-                self.rheology.compliance_mat.columns,
-                self.rheology.compliance_mat.values,
-                self.rheology.strain_mat.offsets,
-                self.rheology.strain_mat.columns,
-                self.rheology.strain_mat.values.view(dtype=mat13),
-                self.delassus_operator.delassus_diagonal,
-                self.delassus_operator.delassus_rotation,
-                self.momentum.inv_volume,
-                self.rheology.elastic_strain_delta,
-            ],
-            outputs=[
-                self.momentum.velocity,
-                self.rheology.stress,
-                self.delta_stress,
-            ],
+            inputs=[0, color_launch_dim, *self.solve_args],  # color
             block_dim=color_block_dim,
             max_blocks=color_block_count,
             record_cmd=True,

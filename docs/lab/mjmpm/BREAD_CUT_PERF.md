@@ -195,3 +195,110 @@ uv run --no-sync python -B scripts/profile_mjmpm_bread.py --render --connection-
 uv run --no-sync python -B scripts/profile_mjmpm_bread.py --render --output physics_optimized_display.json
 uv run --no-sync python -B -m unittest discover -s newton/tests/mjmpm
 ```
+
+## Lane-major Gauss-Seidel color mapping (kept)
+
+### Why the MPM loop dominates cutting
+
+Device-side iteration counts per solve over the default trajectory
+(CUDA graph replay; the loop checks convergence every 5 iterations, so
+counts are 1 + 5k and 51 means the 50-iteration cap):
+
+| phase (frames) | solves | mean iterations | at cap |
+| --- | ---: | ---: | ---: |
+| idle (60-120) | 360 | 6.9 | 0% |
+| cut (240-420) | 1,080 | 50.2 | 92.8% |
+| separate (432-492) | 360 | 50.8 | 98.9% |
+| withdraw (492-576) | 504 | 38.1 | 62.9% |
+
+Residual histories (sqrt(l2)/scale and sqrt(linf) after each check, frame
+300): linf stays around 1e-2 to 5e-3 against the 1e-4 tolerance and falls
+only from about 1.1e-2 to 1.0e-2 over the last 25 iterations. Idle solves
+meet the tolerance at the first check (l2 about 5e-8, linf about 1e-6).
+Cutting solves therefore end at the iteration cap, and the cap, not the
+tolerance, defines their result; keeping the result means keeping all 50
+iterations and making each one cheaper.
+
+### Cost of one iteration (frame 300, timing-only substitutions)
+
+The trajectory runs normally to frame 299, then the frame graph is
+recaptured with one part replaced by a no-op; results of those variants are
+not physical.
+
+| variant | loop ms/frame | us per iteration |
+| --- | ---: | ---: |
+| production | 18.31 | 59.8 |
+| contact solve (subgrid) removed | 14.22 | 46.5 |
+| rigidity feedback map removed | 16.09 | 52.6 |
+
+So about 46 us of an iteration is the eight strain-color GS launches plus
+the residual check, 6 us the collider friction solve and 7 us the rigidity
+feedback.
+
+Each color holds 530-584 strain nodes (4,440 in total at frames 100, 300 and
+460). The color kernel launched `sm_count * 2` blocks of 64 threads and
+assigned entry `k` to thread `k`, so a color's ~580 active threads filled
+only the first ~10 blocks: two busy warps on each of ten multiprocessors
+while the other 26 idled. The node solve is compute heavy (a 256-thread
+single block running all colors took 191 us per iteration, and 1,024
+threads exceed the register budget), so spreading entries matters:
+
+| launch (same kernel, same 4,608 threads unless noted) | loop ms/frame | us per iteration |
+| --- | ---: | ---: |
+| 64-thread blocks, entry k -> thread k (production) | 18.38 | 60.1 |
+| 32-thread blocks | 16.33 | 53.4 |
+| 16-thread blocks | 15.00 | 49.0 |
+| 8-thread blocks | 14.78 | 48.3 |
+| lane-major map, 64-thread blocks | 15.61 | 51.0 |
+| lane-major map, 32-thread blocks (kept) | 15.09 | 49.3 |
+| all colors in one 256-thread block (barriers) | 58.61 | 191.5 |
+| all colors in one 512-thread block | 61.05 | 199.5 |
+
+The earlier `--gs-blocks` experiment changed the number of blocks, not
+their size, so the active entries stayed in the first blocks. Narrow blocks
+alone halve warp occupancy once a color exceeds the launched threads; the
+lane-major map keeps full warps for large colors and spreads small ones.
+
+### Change
+
+`_lane_major_index` (`rheology_solver_kernels.py`) assigns color entry `k`
+to lane `k // block_count` of block `k % block_count`, falling back to the
+identity for a single block or a launch dimension that is not a multiple of
+the block size. Both the GS solve kernel and `apply_stress_gs` use it, and
+`_GaussSeidelSolver` launches `sm_count * 4` blocks of 32 threads (the same
+4,608 threads as before). Every strain node is still solved by exactly one
+thread per color with unchanged arithmetic, and colors are conflict free,
+so the result does not depend on which thread handles a node. CPU launches
+use one block and keep the identity map. The solver also keeps both kernels'
+argument lists so that tests can relaunch them in another layout.
+
+### Validation
+
+- `test_lane_major_color_mapping_matches_single_block` runs every
+  `apply_initial_guess` and `solve` of a sand-and-box scene (4,096-cell
+  grid, eager steps and CUDA graph replay) through the production launch and
+  through a single 256-thread block (identity map) on the same inputs, and
+  counts differing elements on device: zero. With the map deliberately made
+  non-bijective it reports 816,865 mismatches.
+- Bread `--validate` (all 660 frames of `test_post_step` and `test_final`):
+  pieces of 2,204 and 5,172 samples, zero detached, 1.93 mm notch, 3.47 mm
+  recoil, 9.83 mm opening, 0.399 mm minimum grip clearance, peak sampled
+  speed 1.21 m/s (earlier validation runs: 1.911 / 3.448 / 9.771 / 0.399 mm,
+  1.01 m/s; parallel floating-point evaluation varies run to run).
+- All 75 MJMPM tests pass (396.5 s, includes compilation).
+
+### Timing
+
+Three alternating physics-only pairs of `scripts/profile_mjmpm_bread.py`
+(synchronized wall time, acceptance checks outside the timed step). A ran
+the unchanged `14d3e9e6` from a separate worktree, B the working tree:
+
+| run | A cut | A separate | A whole warm | B cut | B separate | B whole warm |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 39.76 | 39.85 | 32.65 | 36.79 | 37.12 | 30.63 |
+| 2 | 39.74 | 39.99 | 32.91 | 36.58 | 36.88 | 30.61 |
+| 3 | 39.66 | 39.92 | 32.60 | 36.54 | 36.85 | 30.27 |
+| median | 39.74 | 39.92 | 32.65 | 36.58 | 36.88 | 30.61 |
+
+Cutting frames **-7.9%**, separation -7.6%, whole warm trajectory -6.2%;
+every pair improves.
