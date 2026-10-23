@@ -1124,7 +1124,7 @@ or `--event-poll nonblocking` for the retained behavior.
 ### 2.15 Lane-major Gauss-Seidel color mapping
 
 Driven by the bread example (see `BREAD_CUT_PERF.md`): the strain-color GS
-kernels now spread each color's entries over all blocks (32-thread blocks,
+kernels now spread each small color's entries over all blocks (32-thread blocks,
 same total threads), with a bitwise same-input test against a single-block
 identity launch. In rice a color holds only 24-41 strain nodes, and the
 rheology loop is small, so the gain is small. At frame 515 one iteration

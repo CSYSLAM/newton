@@ -789,16 +789,18 @@ def apply_velocity_delta(
 
 
 @wp.func
-def _lane_major_index(thread: int, launch_dim: int):
-    """Spread the first entries of a color over every block rather than filling the first blocks.
+def _color_entry_index(thread: int, launch_dim: int, entry_count: int):
+    """Thread-to-entry map of one color: lane-major for colors much smaller than the launch.
 
-    Entry ``k`` goes to lane ``k // block_count`` of block ``k % block_count``.
-    Small colors then occupy all multiprocessors, while large colors still fill
-    whole warps. With a single block this is the identity.
+    With the identity map a small color fills only the first blocks; lane-major
+    assigns entry ``k`` to lane ``k // block_count`` of block ``k % block_count``
+    so that it spreads over every multiprocessor. Beyond a quarter of the
+    launch the identity map's coalesced reads win (measured on sand piles), so
+    larger colors keep it. Both maps are bijections.
     """
     block_size = wp.block_dim()
     block_count = launch_dim // block_size
-    if block_count <= 1 or block_count * block_size != launch_dim:
+    if 4 * entry_count > launch_dim or block_count <= 1 or block_count * block_size != launch_dim:
         return thread
     return (thread % block_size) * block_count + thread // block_size
 
@@ -822,9 +824,9 @@ def apply_stress_gs(
     strain matrix is not assembled
     """
 
-    i = _lane_major_index(wp.tid(), launch_dim)
-    color_beg = color_offsets[color] + i
     color_end = color_offsets[color + 1]
+    i = _color_entry_index(wp.tid(), launch_dim, color_end - color_offsets[color])
+    color_beg = color_offsets[color] + i
 
     for color_offset in range(color_beg, color_end, launch_dim):
         beg, end = color_blocks[0, color_offset], color_blocks[1, color_offset]
@@ -1033,9 +1035,9 @@ def make_gs_solve_kernel(
         local_stress: wp.array[vec6],
         delta_correction: wp.array[vec6],
     ):
-        i = _lane_major_index(wp.tid(), launch_dim)
-        color_beg = color_offsets[color] + i
         color_end = color_offsets[color + 1]
+        i = _color_entry_index(wp.tid(), launch_dim, color_end - color_offsets[color])
+        color_beg = color_offsets[color] + i
 
         for color_offset in range(color_beg, color_end, launch_dim):
             beg, end = color_blocks[0, color_offset], color_blocks[1, color_offset]

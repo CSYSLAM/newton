@@ -261,10 +261,11 @@ lane-major map keeps full warps for large colors and spreads small ones.
 
 ### Change
 
-`_lane_major_index` (`rheology_solver_kernels.py`) assigns color entry `k`
-to lane `k // block_count` of block `k % block_count`, falling back to the
-identity for a single block or a launch dimension that is not a multiple of
-the block size. Both the GS solve kernel and `apply_stress_gs` use it, and
+`_color_entry_index` (`rheology_solver_kernels.py`) assigns color entry `k`
+to lane `k // block_count` of block `k % block_count` for colors of at most a
+quarter of the launch, and keeps the identity map for larger colors, a
+single block, or a launch dimension that is not a multiple of the block size
+(see the large-scene measurements below). Both the GS solve kernel and `apply_stress_gs` use it, and
 `_GaussSeidelSolver` launches `sm_count * 4` blocks of 32 threads (the same
 4,608 threads as before). Every strain node is still solved by exactly one
 thread per color with unchanged arithmetic, and colors are conflict free,
@@ -302,3 +303,46 @@ the unchanged `14d3e9e6` from a separate worktree, B the working tree:
 
 Cutting frames **-7.9%**, separation -7.6%, whole warm trajectory -6.2%;
 every pair improves.
+
+### Large scenes and the size threshold
+
+Lane-major spreads small colors but gives adjacent lanes entries
+`block_count` apart, losing the identity map's coalesced reads. Sand piles
+(1 cm particles and voxels, P0, GS, 50-iteration cap reached in every solve)
+measured per iteration in the captured loop, A = `14d3e9e6` worktree:
+
+| particles | entries per color | A | lane-major for every color |
+| ---: | --- | ---: | ---: |
+| 8,000 | 1,000 | 49.2 us | 41.9 us |
+| 12,167 | 1,331-1,728 | 49.6 us | 47.8 us |
+| 15,625 | 1,728-2,197 | 50.0 us | 53.0 us |
+| 19,683 | 2,197-2,744 | 50.6 us | 58.2 us |
+| 27,000 | 2,160-2,535 | 62.3 us | 66.0 us |
+| 64,000 | 5,780 | 104.9 us | 133.6 us |
+
+Lane-major wins only while a color fills a small fraction of the 4,608
+launched threads. The kept kernel therefore chooses per color, on device,
+from the color's entry count: lane-major when `4 * entries <= launch_dim`
+(here at most 1,152 entries), otherwise the original identity map. Both are
+bijections, so either choice leaves the result unchanged. Final alternating
+pairs (two each):
+
+| particles | entries per color | A | kept |
+| ---: | --- | ---: | ---: |
+| 8,000 | 1,000 | 49.3 / 49.2 us | 41.7 / 41.9 us |
+| 15,625 | 1,728-2,197 | 50.2 / 49.9 us | 50.3 / 50.3 us |
+| 27,000 | 2,160-2,535 | 62.7 / 62.1 us | 57.4 / 57.2 us |
+| 64,000 | 5,780 | 105.7 / 105.0 us | 102.7 / 101.3 us |
+| 125,000 | 12,100 | 214.7 / 212.9 us | 211.2 / 213.5 us |
+
+No size is slower; above the threshold the 32-thread blocks with the identity
+map are equal or slightly faster than the previous 64-thread blocks.
+Bread colors (530-584 entries) and rice colors (24-41) stay lane-major.
+
+With the threshold, bread `--validate` passes again (2,204 / 5,172 samples,
+zero detached, 1.915 mm notch, 3.477 mm recoil, 9.792 mm opening, 0.399 mm
+clearance, peak 0.62 m/s). The machine ran slower overall in this later
+session (A cut frame 44.48 ms versus 39.7 ms earlier); one alternating pair
+then gives cut 44.48 -> 40.21 ms (-9.6%) and whole warm 36.09 -> 33.23 ms.
+A rice pair is within noise (median 27.68 -> 27.92 ms, mean 29.02 -> 28.92
+ms, p90 34.75 -> 34.38 ms), both passing. All 75 MJMPM tests pass.
