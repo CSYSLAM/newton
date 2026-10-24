@@ -1420,6 +1420,14 @@ add_example_test(
     use_viewer=True,
 )
 
+add_example_test(
+    TestMPMExamples,
+    name="mjmpm.example_mjmpm_teapot_fill",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 165},
+    use_viewer=True,
+)
+
 
 add_basic_example_test(
     name="basic.example_basic_plotting",

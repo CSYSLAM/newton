@@ -656,6 +656,18 @@ If you run the examples from a source checkout with uv, use
   </tr>
   <tr>
     <td align="center" width="33%">
+      <a href="newton/examples/mjmpm/example_mjmpm_teapot_fill.py">
+        <img width="320" src="docs/images/examples/example_mjmpm_teapot_fill.jpg" alt="MJMPM Utah Teapot Water Pour">
+      </a>
+    </td>
+    <td colspan="2">
+      <b>MJMPM teapot water pour (experimental)</b><br>
+      A MuJoCo-driven Utah Teapot tilts and lifts while MPM water particles pour into a shallow bowl. The water reacts on the teapot through two-way coupling.<br>
+      <code>python -m newton.examples mjmpm_teapot_fill</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
       <a href="newton/examples/mjmpm/example_mjmpm_hand_grasp.py">
         <img width="320" src="docs/images/examples/example_mjmpm_hand_grasp.jpg" alt="MuJoCo–MPM Hand Grasp">
       </a>
