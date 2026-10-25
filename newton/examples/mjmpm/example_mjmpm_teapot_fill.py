@@ -370,15 +370,20 @@ class Example(W1MJMPMScene):
         self.solver.check_capacity_status()
         if self.sim_time < 14.9:
             raise AssertionError("Run through grasp, pour, and three seconds of settling")
-        pose = self.state_0.body_q.numpy()[self.teapot]
+        body_q = self.state_0.body_q.numpy()
+        pose = body_q[self.teapot]
         up = np.asarray(wp.quat_rotate(wp.quat(*pose[3:]), wp.vec3(0.0, 0.0, 1.0)))
         final_tilt = float(np.arccos(np.clip(up[2], -1.0, 1.0)))
         if pose[2] < TABLE_Z + 0.13 or not np.deg2rad(60.0) < final_tilt < np.deg2rad(100.0):
             raise AssertionError(
                 f"Teapot lost its pouring pose: height {pose[2]:.3f}m, tilt {np.rad2deg(final_tilt):.0f}deg"
             )
+        handle = np.asarray(wp.transform_point(wp.transform(*pose), wp.vec3(*HANDLE_CENTER)))
+        grasp_error = float(np.linalg.norm(handle - self.tcp_positions(body_q)[1]))
+        if grasp_error > 0.10:
+            raise AssertionError(f"Teapot slipped from the gripper: handle-TCP distance {grasp_error:.3f}m")
         fraction = self.water_in_bowl()
-        if fraction < 0.7:
+        if fraction < 0.85:
             points = self.state_0.particle_q.numpy()[self.water_begin : self.water_end]
             low = points[(points[:, 2] > TABLE_Z - 0.01) & (points[:, 2] < TABLE_Z + 0.055)]
             center = np.median(low[:, :2], axis=0) if len(low) else np.array((np.nan, np.nan))

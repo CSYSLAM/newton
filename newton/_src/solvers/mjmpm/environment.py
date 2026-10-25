@@ -269,93 +269,99 @@ class Environment(SolverBase, CouplingInterface):
         capacity = c.rigid_contact_max
         if capacity == 0:
             return
-        wp.launch(
-            kernels.prepare_contact_bodies,
-            dim=model.body_count,
-            inputs=[work.body_q, model.body_com, model.body_inv_mass, model.body_inv_inertia, model.body_flags],
-            outputs=[self._contact_center, self._contact_mass_inv, self._contact_inertia_inv],
-            device=model.device,
-        )
-        wp.launch(
-            kernels.prepare_contacts,
-            dim=capacity,
-            inputs=[
-                c.rigid_contact_count,
-                c.rigid_contact_shape0,
-                c.rigid_contact_shape1,
-                c.rigid_contact_point0,
-                c.rigid_contact_point1,
-                c.rigid_contact_normal,
-                c.rigid_contact_margin0,
-                c.rigid_contact_margin1,
-                model.shape_body,
-                model.shape_material_mu,
-                model.shape_material_ke,
-                model.shape_material_kd,
-                self.rigid_contact_hard,
-                work.body_q,
-                model.body_world,
-                model.body_flags,
-                self._contact_center,
-                self._contact_mass_inv,
-                self._contact_inertia_inv,
-                model.world_count,
-                self._single_bucket,
-                self._link_slot,
-                self._link_count,
-                self._mobility,
-                c.rigid_contact_match_index if self.rigid_warm_start else None,
-                self._previous_impulses,
-                dt,
-            ],
-            outputs=[
-                self._contact_bodies,
-                self._contact_ra,
-                self._contact_rb,
-                self._contact_normal,
-                self._contact_params,
-                self._contact_keys,
-                self._contact_ids,
-                self.contact_impulses,
-            ],
-            device=model.device,
-        )
+        reuse_prepared = self._reuse_recovery_contact_geometry()
+        # The material solve changes velocities, but body poses and contact
+        # geometry are unchanged until drift. Reuse their prepared data for
+        # the current-load reaction solve.
+        if not reuse_prepared:
+            wp.launch(
+                kernels.prepare_contact_bodies,
+                dim=model.body_count,
+                inputs=[work.body_q, model.body_com, model.body_inv_mass, model.body_inv_inertia, model.body_flags],
+                outputs=[self._contact_center, self._contact_mass_inv, self._contact_inertia_inv],
+                device=model.device,
+            )
+            wp.launch(
+                kernels.prepare_contacts,
+                dim=capacity,
+                inputs=[
+                    c.rigid_contact_count,
+                    c.rigid_contact_shape0,
+                    c.rigid_contact_shape1,
+                    c.rigid_contact_point0,
+                    c.rigid_contact_point1,
+                    c.rigid_contact_normal,
+                    c.rigid_contact_margin0,
+                    c.rigid_contact_margin1,
+                    model.shape_body,
+                    model.shape_material_mu,
+                    model.shape_material_ke,
+                    model.shape_material_kd,
+                    self.rigid_contact_hard,
+                    work.body_q,
+                    model.body_world,
+                    model.body_flags,
+                    self._contact_center,
+                    self._contact_mass_inv,
+                    self._contact_inertia_inv,
+                    model.world_count,
+                    self._single_bucket,
+                    self._link_slot,
+                    self._link_count,
+                    self._mobility,
+                    c.rigid_contact_match_index if self.rigid_warm_start else None,
+                    self._previous_impulses,
+                    dt,
+                ],
+                outputs=[
+                    self._contact_bodies,
+                    self._contact_ra,
+                    self._contact_rb,
+                    self._contact_normal,
+                    self._contact_params,
+                    self._contact_keys,
+                    self._contact_ids,
+                    self.contact_impulses,
+                ],
+                device=model.device,
+            )
         if self._mobility is not None:
             wp.copy(self._qd_before_contacts, work.body_qd)
-            self._contacted.zero_()
-            wp.launch(
-                kernels.mark_contacted_links,
-                dim=capacity,
-                inputs=[c.rigid_contact_count, self._contact_bodies, self._link_slot],
-                outputs=[self._contacted],
-                device=model.device,
-            )
-            wp.launch(
-                kernels.compact_contacted_links,
-                dim=self._link_body.shape[0],
-                inputs=[self._contacted, self._link_count],
-                outputs=[self._contacted_links, self._contacted_count],
-                device=model.device,
-            )
-            if self.rigid_solver == "gauss_seidel":
+            if not reuse_prepared:
+                self._contacted.zero_()
                 wp.launch(
-                    kernels.prepare_link_contact_responses,
-                    dim=(capacity, kernels.MAX_RESPONSE_LINKS),
-                    inputs=[
-                        c.rigid_contact_count,
-                        self._contact_bodies,
-                        self._contact_ra,
-                        self._contact_rb,
-                        self._contact_mass_inv,
-                        self._link_slot,
-                        self._link_count,
-                        self._mobility,
-                        self._contacted_links,
-                        self._contacted_count,
-                    ],
-                    outputs=[self._point_mobility, self._link_responses],
+                    kernels.mark_contacted_links,
+                    dim=capacity,
+                    inputs=[c.rigid_contact_count, self._contact_bodies, self._link_slot],
+                    outputs=[self._contacted],
                     device=model.device,
                 )
+                wp.launch(
+                    kernels.compact_contacted_links,
+                    dim=self._link_body.shape[0],
+                    inputs=[self._contacted, self._link_count],
+                    outputs=[self._contacted_links, self._contacted_count],
+                    device=model.device,
+                )
+                if self.rigid_solver == "gauss_seidel":
+                    wp.launch(
+                        kernels.prepare_link_contact_responses,
+                        dim=(capacity, kernels.MAX_RESPONSE_LINKS),
+                        inputs=[
+                            c.rigid_contact_count,
+                            self._contact_bodies,
+                            self._contact_ra,
+                            self._contact_rb,
+                            self._contact_mass_inv,
+                            self._link_slot,
+                            self._link_count,
+                            self._mobility,
+                            self._contacted_links,
+                            self._contacted_count,
+                        ],
+                        outputs=[self._point_mobility, self._link_responses],
+                        device=model.device,
+                    )
         if self.rigid_solver == "jacobi":
             self._solve_contacts_jacobi(work, capacity)
         else:
@@ -378,9 +384,26 @@ class Environment(SolverBase, CouplingInterface):
             and self._use_cooperative_rigid_buckets
             and (self._recovering_contacts or not self._contact_space_recovery_only)
         ):
-            self._contact_space.run(self, work, lambda: self._solve_contacts_gauss_seidel_sweeps(work))
+            self._contact_space.run(
+                self,
+                work,
+                lambda: self._solve_contacts_gauss_seidel_sweeps(work),
+                reuse_geometry=self._reuse_recovery_contact_geometry(),
+            )
             return
         self._solve_contacts_gauss_seidel_sweeps(work)
+
+    def _reuse_recovery_contact_geometry(self):
+        return (
+            self._recovering_contacts
+            and self._use_contact_space
+            and self._constrained_material
+            and self._contact_space is not None
+            and self._use_local_rigid_buckets
+            and self._use_cooperative_rigid_buckets
+            and self.rigid_solver == "gauss_seidel"
+            and not self._contact_space_recovery_only
+        )
 
     def _solve_contacts_gauss_seidel_sweeps(self, work):
         model = self.model
@@ -732,6 +755,11 @@ class Environment(SolverBase, CouplingInterface):
         self.rigid_impulses.zero_()
         self._recovering_contacts = True
         try:
+            if self._reuse_recovery_contact_geometry():
+                # The first contact-space solve saved the warm-start impulses
+                # before updating them. Match the original recovery solve's
+                # starting point while keeping its unchanged geometry.
+                wp.copy(self.contact_impulses, self._contact_space.before_impulses)
             self._solve_rigid_contacts(work, dt)
         finally:
             self._recovering_contacts = False

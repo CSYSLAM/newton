@@ -373,27 +373,28 @@ class ContactSpaceBuffers:
         self.before_wrench = wp.empty(body_count, dtype=wp.spatial_vector, device=device)
         self.velocity_tolerance = 1.0e-5
 
-    def run(self, env, work, fallback):
+    def run(self, env, work, fallback, *, reuse_geometry=False):
         """Issue candidates and reference sweeps without pausing a forked capture.
 
         ``fallback`` must honor ``env._contact_space_skip`` in its cooperative
         kernel, so accepted candidates are not solved or applied twice.
         """
-        wp.launch(
-            compact,
-            dim=1,
-            inputs=[
-                env.contacts.rigid_contact_count,
-                env._contact_bodies,
-                env._link_slot,
-                env._link_count,
-                env._contacted_count,
-                self.ids,
-                self.count,
-                self.enabled,
-                self.stats,
-            ],
-        )
+        if not reuse_geometry:
+            wp.launch(
+                compact,
+                dim=1,
+                inputs=[
+                    env.contacts.rigid_contact_count,
+                    env._contact_bodies,
+                    env._link_slot,
+                    env._link_count,
+                    env._contacted_count,
+                    self.ids,
+                    self.count,
+                    self.enabled,
+                    self.stats,
+                ],
+            )
 
         outputs = (work.body_qd, env.contact_impulses, env.rigid_impulses)
         before = (self.before_velocity, self.before_impulses, self.before_wrench)
@@ -413,7 +414,10 @@ class ContactSpaceBuffers:
             env._contacted_count,
             env._link_responses,
         ]
-        wp.launch(build_delassus, dim=(CAPACITY, CAPACITY), inputs=[*shared, self.matrix, self.diagonal, self.enabled])
+        if not reuse_geometry:
+            wp.launch(
+                build_delassus, dim=(CAPACITY, CAPACITY), inputs=[*shared, self.matrix, self.diagonal, self.enabled]
+            )
         wp.launch(
             solve,
             dim=32,
