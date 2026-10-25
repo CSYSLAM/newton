@@ -1424,7 +1424,7 @@ add_example_test(
     TestMPMExamples,
     name="mjmpm.example_mjmpm_teapot_fill",
     devices=cuda_test_devices,
-    test_options={"num-frames": 165},
+    test_options={"num-frames": 900},
     use_viewer=True,
 )
 
