@@ -12,7 +12,13 @@ import warp as wp
 
 from newton.examples.mjmpm.support.bread_cut_geometry import blade_mesh
 from newton.examples.mjmpm.support.bread_cut_material import apply_damage, damage_at_blade
-from newton.examples.mjmpm.support.bread_cut_visuals import BreadCutVisuals, _skin, embedding, group_visual_parts
+from newton.examples.mjmpm.support.bread_cut_visuals import (
+    BreadCutVisuals,
+    _skin,
+    embedding,
+    group_visual_parts,
+    limit_particle_radii_at_blade,
+)
 
 
 class TestBreadCut(unittest.TestCase):
@@ -70,6 +76,7 @@ class TestBreadCut(unittest.TestCase):
         self.assertFalse(viewer.meshes & forbidden)
 
     def test_visual_and_physical_blade_match(self):
+        """Match the blade geometry and keep exterior display spheres clear of its faces."""
         points, faces = blade_mesh()
         # Every physical edge belongs to exactly two triangles, and outward
         # orientation gives the inertia builder a positive enclosed volume.
@@ -87,6 +94,37 @@ class TestBreadCut(unittest.TestCase):
             )
             visual = np.unique(archive[part["key"] + "_points"], axis=0)
         np.testing.assert_allclose(visual, np.unique(points, axis=0), atol=1.0e-7)
+        for device in [wp.get_device("cpu"), *wp.get_cuda_devices()[:1]]:
+            with self.subTest(device=device.alias), wp.ScopedDevice(device):
+                mesh = wp.Mesh(points=wp.array(points, dtype=wp.vec3), indices=wp.array(faces.ravel(), dtype=int))
+                pose = wp.transform(wp.vec3(0.4, -0.2, 0.9), wp.quat_from_axis_angle(wp.vec3(0, 0, 1), 0.7))
+                offset = wp.transform(wp.vec3(0.02, 0, 0.01), wp.quat_identity())
+                world = wp.mul(pose, offset)
+                local = [[0.12, 0.0045, -0.02], [0.12, -0.0045, -0.02], [0.12, 0.02, -0.02], [0.12, 0, -0.02]]
+                positions = wp.array([wp.transform_point(world, wp.vec3(*p)) for p in local], dtype=wp.vec3)
+                original = positions.numpy().copy()
+                radii = wp.empty(4, dtype=float)
+                clearances = wp.empty(4, dtype=float)
+                wp.launch(
+                    limit_particle_radii_at_blade,
+                    4,
+                    [positions, wp.array([pose], dtype=wp.transform), 0, offset, mesh.id, 0.00285, radii, clearances],
+                )
+                # This point projects inside the authored heel/spine triangle.
+                # Its plane includes the slight taper along the blade length.
+                triangle = points[[9, 16, 17]]
+                normal = np.cross(triangle[1] - triangle[0], triangle[2] - triangle[0])
+                gap = abs(np.dot(np.asarray(local[0]) - triangle[0], normal)) / np.linalg.norm(normal)
+                np.testing.assert_allclose(radii.numpy(), [gap - 0.00005, gap - 0.00005, 0.00285, 0.00285], atol=1e-6)
+                np.testing.assert_array_equal(positions.numpy(), original)
+                self.assertLess(clearances.numpy()[3], 0.0)
+                distant = wp.array([wp.transform(wp.vec3(2, 2, 2), wp.quat_identity())], dtype=wp.transform)
+                wp.launch(
+                    limit_particle_radii_at_blade,
+                    4,
+                    [positions, distant, 0, offset, mesh.id, 0.00285, radii, clearances],
+                )
+                np.testing.assert_allclose(radii.numpy(), 0.00285)
 
     def test_blade_damage_is_local_and_irreversible(self):
         devices = [wp.get_device("cpu"), *wp.get_cuda_devices()[:1]]

@@ -52,6 +52,9 @@ class Example(W1MJMPMScene):
     camera_pitch = -30.5
     camera_yaw = 144.16
     home_offset = np.zeros(3)
+    cut_separation = 0.018
+    saw_forward = 0.015
+    saw_backward = -0.010
 
     def initial_targets(self):
         return np.array(((0.40, 0.24, TABLE_Z + 0.18), HANDLE))
@@ -147,15 +150,15 @@ class Example(W1MJMPMScene):
         above = grasp.copy()
         above[1] = CUT_Y
         cut = above + np.array((0.0, 0.0, -0.073))
-        separated = cut + np.array((0.0, -0.018, 0.0))
+        separated = cut + np.array((0.0, -self.cut_separation, 0.0))
         # A small sawing stroke keeps the blade from only compressing the loaf.
         return [
             (0.0, self.home, (FINGER_OPEN, FINGER_OPEN)),
             (1.3, np.array((left, grasp)), (FINGER_OPEN, FINGER_OPEN)),
             (2.2, np.array((left, grasp)), (FINGER_OPEN, HANDLE_GRIP)),
             (2.7, np.array((left, above)), (FINGER_OPEN, HANDLE_GRIP)),
-            (4.5, np.array((left, cut + np.array((0.015, 0.0, 0.035)))), (FINGER_OPEN, HANDLE_GRIP)),
-            (5.7, np.array((left, cut + np.array((-0.010, 0.0, 0.015)))), (FINGER_OPEN, HANDLE_GRIP)),
+            (4.5, np.array((left, cut + np.array((self.saw_forward, 0.0, 0.035)))), (FINGER_OPEN, HANDLE_GRIP)),
+            (5.7, np.array((left, cut + np.array((self.saw_backward, 0.0, 0.015)))), (FINGER_OPEN, HANDLE_GRIP)),
             (6.8, np.array((left, cut)), (FINGER_OPEN, HANDLE_GRIP)),
             (7.2, np.array((left, cut)), (FINGER_OPEN, HANDLE_GRIP)),
             (8.2, np.array((left, separated)), (FINGER_OPEN, HANDLE_GRIP)),

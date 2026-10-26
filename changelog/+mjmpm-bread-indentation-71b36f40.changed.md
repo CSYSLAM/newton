@@ -1,0 +1,1 @@
+Deepen retained deformation in the two-cut W1 bread example and reduce blade/particle display overlap. Existing example commands remain valid; use `--young-modulus 4000 --cut-plastic-yield 0.005` for the previous material settings.

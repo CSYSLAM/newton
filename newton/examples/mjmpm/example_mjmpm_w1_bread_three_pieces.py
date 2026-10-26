@@ -23,6 +23,7 @@ from newton.examples.mjmpm.example_mjmpm_w1_bread_cut import (
     Example as SingleCutExample,
 )
 from newton.examples.mjmpm.support.bread_cut_cohesion import count_detached_samples
+from newton.examples.mjmpm.support.bread_cut_visuals import limit_particle_radii_at_blade
 from newton.examples.mjmpm.support.w1_two_way import FINGER_OPEN
 
 SECOND_CUT_Y = -0.205
@@ -31,6 +32,22 @@ TOTAL_FRAMES = 1200
 
 class Example(SingleCutExample):
     metric_columns = ("time_s", "cut_index", "opening_m", "cut_surface_z_m", "knife_z_m")
+    cut_separation = 0.010
+    saw_forward = 0.008
+    saw_backward = -0.005
+
+    def initial_targets(self):
+        targets = super().initial_targets()
+        # Fit the loaf and the sawing stroke on the straight blade segment.
+        targets[1, 0] += 0.0225
+        return targets
+
+    def configure_model(self, model):
+        super().configure_model(model)
+        margin = model.shape_margin.numpy()
+        # A small collision skin reduces subgrid contact error at the blade.
+        margin[self.knife_shapes[1]] = 0.0015
+        model.shape_margin.assign(margin)
 
     def __init__(self, viewer, args):
         if args.bread_render != "particles":
@@ -38,32 +55,66 @@ class Example(SingleCutExample):
                 "Two cuts require particle rendering; the optional single-cut skin cannot represent three pieces"
             )
         super().__init__(viewer, args)
+        self.blade_mesh = self.model.shape_source[self.knife_shapes[1]].finalize(self.model.device)
+        self.blade_clearances = wp.empty(len(self.rest), dtype=float, device=self.model.device)
+        self.minimum_blade_clearance = np.inf
+        self._blade_display_frame = -1
         self.cut_history = [[], []]
         self.observed_piece_counts = set()
 
     def _keyframes(self):
-        # Keep the entire first stroke and withdrawal exactly as authored.
+        # Reuse the first stroke's timings and sawing pattern.
         frames = super()._keyframes()[:-1]
+        fingers = (FINGER_OPEN, HANDLE_GRIP)
+        release = np.array((0.0, 0.004, 0.0))
+        # Withdraw into the opened kerf instead of dragging the pushed slice.
+        first_release = frames[-2][1].copy()
+        first_release[1] += release + np.array((0.0, 0.0, 0.030))
+        frames[-1][1][1] += release
+        frames.insert(-1, (8.6, first_release, fingers))
         left, grasp = self.initial_targets()
         above = grasp.copy()
         above[1] = SECOND_CUT_Y
         cut = above + np.array((0.0, 0.0, -0.073))
-        separated = cut + np.array((0.0, 0.018, 0.0))
-        fingers = (FINGER_OPEN, HANDLE_GRIP)
+        separated = cut + np.array((0.0, self.cut_separation, 0.0))
         frames.extend(
             [
                 (10.3, frames[-1][1].copy(), fingers),
                 (11.6, np.array((left, above)), fingers),
-                (13.4, np.array((left, cut + np.array((0.015, 0.0, 0.035)))), fingers),
-                (14.6, np.array((left, cut + np.array((-0.010, 0.0, 0.015)))), fingers),
+                (13.4, np.array((left, cut + np.array((self.saw_forward, 0.0, 0.035)))), fingers),
+                (14.6, np.array((left, cut + np.array((self.saw_backward, 0.0, 0.015)))), fingers),
                 (15.7, np.array((left, cut)), fingers),
                 (16.1, np.array((left, cut)), fingers),
                 (17.1, np.array((left, separated)), fingers),
-                (18.5, np.array((left, separated + np.array((0.0, 0.0, 0.133)))), fingers),
-                (20.0, np.array((left, separated + np.array((0.0, 0.0, 0.133)))), fingers),
+                (17.5, np.array((left, separated - release + np.array((0.0, 0.0, 0.030)))), fingers),
+                (18.5, np.array((left, separated - release + np.array((0.0, 0.0, 0.133)))), fingers),
+                (20.0, np.array((left, separated - release + np.array((0.0, 0.0, 0.133)))), fingers),
             ]
         )
         return frames
+
+    def _update_blade_display(self):
+        if self._blade_display_frame == self.frame:
+            return
+        wp.launch(
+            limit_particle_radii_at_blade,
+            dim=len(self.rest),
+            inputs=[
+                self.state_0.particle_q,
+                self.state_0.body_q,
+                self.knife,
+                self.knife_local,
+                self.blade_mesh,
+                0.57 * SPACING,
+            ],
+            outputs=[self.radii, self.blade_clearances],
+            device=self.model.device,
+        )
+        self._blade_display_frame = self.frame
+
+    def render(self):
+        self._update_blade_display()
+        super().render()
 
     def after_step(self):
         if self.frame % 30:
@@ -85,6 +136,11 @@ class Example(SingleCutExample):
 
     def test_post_step(self):
         self._check_material_and_grip()
+        self._update_blade_display()
+        clearance = float(self.blade_clearances.numpy().min())
+        self.minimum_blade_clearance = min(self.minimum_blade_clearance, clearance)
+        if clearance < -0.0001:
+            raise AssertionError(f"Bread penetrated the knife at {self.sim_time:.3f}s: {clearance * 1000:.3f} mm")
         labels, sizes = self.cohesion.components()
         self.observed_piece_counts.add(len(sizes))
         expected = (
@@ -122,8 +178,8 @@ class Example(SingleCutExample):
                 raise AssertionError(
                     f"Cut {index + 1} lost opening/recoil: {opening * 1000:.3f}/{recoil * 1000:.3f} mm"
                 )
-            if self.args.blade_damage and notch < 0.0015:
-                raise AssertionError(f"Cut {index + 1} lost permanent indentation: {notch * 1000:.3f} mm")
+            if self.args.blade_damage and notch < 0.003:
+                raise AssertionError(f"Cut {index + 1} retained only {notch * 1000:.3f} mm indentation; require 3 mm")
             cuts.append({"opening_mm": opening * 1000, "recoil_mm": recoil * 1000, "notch_mm": notch * 1000})
         self.validation = {
             "fragment_particle_counts": sorted(sizes.tolist()),
@@ -132,6 +188,7 @@ class Example(SingleCutExample):
             "observed_piece_counts": sorted(self.observed_piece_counts),
             "cuts": cuts,
             "minimum_visual_grip_clearance_mm": self.minimum_grip_clearance * 1000,
+            "minimum_blade_center_clearance_mm": self.minimum_blade_clearance * 1000,
             "peak_particle_speed_m_s": self.peak_speed,
         }
         print(f"[BreadThreePieces] PASS: {self.validation}", flush=True)
@@ -141,7 +198,9 @@ class Example(SingleCutExample):
         parser = SingleCutExample.create_parser()
         # The optional single-cut surface has a predefined topology and cannot
         # represent this second cut. Render the actual material particles.
-        parser.set_defaults(num_frames=TOTAL_FRAMES, bread_render="particles")
+        parser.set_defaults(
+            num_frames=TOTAL_FRAMES, bread_render="particles", young_modulus=1500.0, cut_plastic_yield=0.002
+        )
         return parser
 
 

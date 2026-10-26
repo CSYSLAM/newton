@@ -38,3 +38,10 @@ speedup has not been established.
 See the [isolated transfer probe](CK_MPM_PROBE.md) for the two-grid P2G
 measurements and the decision to keep CK outside the production solver.
 Its transfer timings do not establish an MJMPM application speedup.
+
+## Two-cut bread deformation and contact (2026-10-26)
+
+See [bread indentation and blade contact](BREAD_THREE_PIECES_DEFORMATION.md)
+for the softer material, straight-edge placement, kerf withdrawal, exterior
+particle glyph bounds, and per-frame physical clearance check. This is scene
+and display tuning, not a solver performance optimization.

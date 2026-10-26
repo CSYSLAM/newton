@@ -13,6 +13,37 @@ from newton.viewer import ViewerGL
 
 
 @wp.kernel
+def limit_particle_radii_at_blade(
+    particles: wp.array[wp.vec3],
+    body_q: wp.array[wp.transform],
+    body: int,
+    tool_local: wp.transform,
+    mesh: wp.uint64,
+    full_radius: float,
+    radii: wp.array[float],
+    clearances: wp.array[float],
+):
+    """Fit display spheres outside the blade without moving material samples."""
+    i = wp.tid()
+    tool = wp.mul(body_q[body], tool_local)
+    point = wp.transform_point(wp.transform_inverse(tool), particles[i])
+    radius = full_radius
+    # Also cover centers inside the 12 mm spine for contact validation.
+    query_distance = wp.max(full_radius, 0.010)
+    query = wp.mesh_query_point(mesh, point, query_distance)
+    distance = query_distance
+    # An interior center remains visible at full size: glyph adjustment must
+    # not conceal a physical penetration. Only exterior glyphs are trimmed.
+    if query.result:
+        closest = wp.mesh_eval_position(mesh, query.face, query.u, query.v)
+        distance = query.sign * wp.length(point - closest)
+        if query.sign > 0.0:
+            radius = wp.min(radius, wp.max(0.0, distance - 0.00005))
+    radii[i] = radius
+    clearances[i] = distance
+
+
+@wp.kernel
 def _skin(
     particles: wp.array[wp.vec3],
     ids: wp.array2d[int],

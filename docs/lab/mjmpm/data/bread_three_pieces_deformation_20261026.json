@@ -1,0 +1,109 @@
+{
+  "date": "2026-10-26",
+  "device": "RTX 5060 Ti",
+  "warp_version": "1.18.0",
+  "baseline_commit": "0e81b4cf",
+  "frames": 1200,
+  "resolution": [
+    1280,
+    720
+  ],
+  "baseline_validation": {
+    "fragment_particle_counts": [
+      1992,
+      2204,
+      3180
+    ],
+    "detached_samples": 0,
+    "particle_count": 7376,
+    "observed_piece_counts": [
+      1,
+      2,
+      3
+    ],
+    "cuts": [
+      {
+        "opening_mm": 9.759014588107089,
+        "recoil_mm": 3.6139902453752453,
+        "notch_mm": 2.1241819486021996
+      },
+      {
+        "opening_mm": 10.73785638003228,
+        "recoil_mm": 3.4248913937019836,
+        "notch_mm": 1.6333147650584579
+      }
+    ],
+    "minimum_visual_grip_clearance_mm": 0.39937999099493027,
+    "peak_particle_speed_m_s": 0.7357484102249146
+  },
+  "updated_video_validation": {
+    "fragment_particle_counts": [
+      2199,
+      2204,
+      2973
+    ],
+    "detached_samples": 0,
+    "particle_count": 7376,
+    "observed_piece_counts": [
+      1,
+      2,
+      3
+    ],
+    "cuts": [
+      {
+        "opening_mm": 7.0535418772347445,
+        "recoil_mm": 4.541166298544382,
+        "notch_mm": 5.1858555525541306
+      },
+      {
+        "opening_mm": 7.190952134675937,
+        "recoil_mm": 6.397775895659276,
+        "notch_mm": 5.009069107472897
+      }
+    ],
+    "minimum_visual_grip_clearance_mm": 0.36817416548728943,
+    "minimum_blade_center_clearance_mm": 0.09920552838593721,
+    "peak_particle_speed_m_s": 0.3829250633716583
+  },
+  "updated_video_clearance_frames": 1200,
+  "updated_video_inside_center_frames": 0,
+  "updated_video_minimum_clearance_mm": 0.09920553117990494,
+  "material": {
+    "young_modulus_Pa": 1500,
+    "cut_plastic_yield": 0.002,
+    "cut_separation_m": 0.01,
+    "blade_margin_m": 0.0015,
+    "saw_forward_m": 0.008,
+    "saw_backward_m": -0.005
+  },
+  "checks": "per-frame example acceptance plus independent signed-distance probe; no surface reconstruction",
+  "updated_repeat_validation": {
+    "fragment_particle_counts": [
+      2199,
+      2204,
+      2973
+    ],
+    "detached_samples": 0,
+    "particle_count": 7376,
+    "observed_piece_counts": [
+      1,
+      2,
+      3
+    ],
+    "cuts": [
+      {
+        "opening_mm": 6.941298083939129,
+        "recoil_mm": 4.681548076355733,
+        "notch_mm": 5.293271504342556
+      },
+      {
+        "opening_mm": 7.201734776579347,
+        "recoil_mm": 6.345227993321865,
+        "notch_mm": 4.973174538463354
+      }
+    ],
+    "minimum_visual_grip_clearance_mm": 0.36817509680986404,
+    "minimum_blade_center_clearance_mm": 0.26532361516729,
+    "peak_particle_speed_m_s": 0.36955583095550537
+  }
+}

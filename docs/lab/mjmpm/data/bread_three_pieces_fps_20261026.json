@@ -1,0 +1,210 @@
+{
+  "pairs": [
+    {
+      "round": 2,
+      "baseline_fps": 25.88145933371275,
+      "approved_fps": 25.187338285274507,
+      "change_percent": -2.6819239189271427,
+      "baseline_step_diagnostic_ms": 33.900860526315796,
+      "approved_step_diagnostic_ms": 34.59196578947369,
+      "baseline_render_diagnostic_ms": 6.2473210526315786,
+      "approved_render_diagnostic_ms": 6.724731578947369
+    },
+    {
+      "round": 4,
+      "baseline_fps": 24.931413026673802,
+      "approved_fps": 25.7042201542646,
+      "change_percent": 3.099732561343327,
+      "baseline_step_diagnostic_ms": 35.223534210526324,
+      "approved_step_diagnostic_ms": 33.76894210526316,
+      "baseline_render_diagnostic_ms": 6.497247368421052,
+      "approved_render_diagnostic_ms": 6.09421842105263
+    },
+    {
+      "round": 5,
+      "baseline_fps": 24.403831730391197,
+      "approved_fps": 24.536210205414783,
+      "change_percent": 0.5424495484400937,
+      "baseline_step_diagnostic_ms": 36.01364210526316,
+      "approved_step_diagnostic_ms": 35.69218157894736,
+      "baseline_render_diagnostic_ms": 6.46597894736842,
+      "approved_render_diagnostic_ms": 6.739957894736841
+    }
+  ],
+  "failed_runs": [
+    "approved_r1.json",
+    "approved_r3.json",
+    "approved_r4.json",
+    "approved_r5.json"
+  ],
+  "per_frame_audit_runs": [
+    {
+      "run": "approved_r4.json",
+      "errors": [
+        {
+          "frame": 484,
+          "message": "Bread penetrated the knife at 8.067s: -0.116 mm"
+        },
+        {
+          "frame": 491,
+          "message": "Bread penetrated the knife at 8.183s: -0.115 mm"
+        }
+      ]
+    },
+    {
+      "run": "approved_r5.json",
+      "errors": [
+        {
+          "frame": 489,
+          "message": "Bread penetrated the knife at 8.150s: -0.144 mm"
+        },
+        {
+          "frame": 490,
+          "message": "Bread penetrated the knife at 8.167s: -0.332 mm"
+        },
+        {
+          "frame": 491,
+          "message": "Bread penetrated the knife at 8.183s: -0.428 mm"
+        },
+        {
+          "frame": 492,
+          "message": "Bread penetrated the knife at 8.200s: -0.490 mm"
+        },
+        {
+          "frame": 493,
+          "message": "Bread penetrated the knife at 8.217s: -0.455 mm"
+        },
+        {
+          "frame": 494,
+          "message": "Bread penetrated the knife at 8.233s: -0.345 mm"
+        },
+        {
+          "frame": 495,
+          "message": "Bread penetrated the knife at 8.250s: -0.305 mm"
+        },
+        {
+          "frame": 496,
+          "message": "Bread penetrated the knife at 8.267s: -0.236 mm"
+        },
+        {
+          "frame": 497,
+          "message": "Bread penetrated the knife at 8.283s: -0.273 mm"
+        },
+        {
+          "frame": 498,
+          "message": "Bread penetrated the knife at 8.300s: -0.262 mm"
+        }
+      ]
+    }
+  ],
+  "method": "Full simulation + headless GL + glFinish + device fence; 1280x720; warmup=60; acceptance outside timer",
+  "component_method": "Step/render samples ONLY on existing every-30-frame synchronized production diagnostics; no extra phase fences",
+  "baseline_mean_fps": 25.072234696925914,
+  "approved_mean_fps": 25.14258954831796,
+  "paired_change_percent": 0.2921261823772008,
+  "paired_95_percent_ci": [
+    -6.664669011977012,
+    7.767449557473604
+  ],
+  "source_protocol": {
+    "head": "0e81b4cf9a720b83f29f5880f263a56f380d87f6",
+    "source_hashes": {
+      "newton/examples/mjmpm/example_mjmpm_w1_bread_cut.py": {
+        "baseline": "f62ee2e3bd6ea8d78023e35f45534af2869c99f0bbe9ee37110763b737748c52",
+        "approved": "690d48700dd954ed3362efc0d631755d66cf8bd7d509f577e41bcba3883de1c1"
+      },
+      "newton/examples/mjmpm/example_mjmpm_w1_bread_three_pieces.py": {
+        "baseline": "d2566cbc0f845b361f49aebce64750756b6f85f9dd57de28e517da8d1ffc2078",
+        "approved": "e4bd23bcc517c97b05918c468a6c9fc043917c593b1d3df162f80e579c87a7e1"
+      },
+      "newton/examples/mjmpm/support/bread_cut_visuals.py": {
+        "baseline": "a5911d00610a887a8192cdd8861a50f6c8c06aa05f1a40144a9a3b00f729e0ee",
+        "approved": "0a141120db1d16c9b839bc140710eda3037c4dbc4d537a32d9e0fafcfa4d3a9d"
+      }
+    }
+  },
+  "glyph_kernel": {
+    "measurement": "CUDA events; 100 calls/graph x 10 replays; 5 timing samples; frozen particle/tool inputs; launch overhead excluded",
+    "results": [
+      {
+        "frame": 270,
+        "particles": 7376,
+        "median_ms_per_call": 0.027925823211669924,
+        "samples_ms": [
+          0.02814508819580078,
+          0.024386240005493165,
+          0.027925823211669924,
+          0.028419744491577147,
+          0.02438694381713867
+        ]
+      },
+      {
+        "frame": 390,
+        "particles": 7376,
+        "median_ms_per_call": 0.03461215972900391,
+        "samples_ms": [
+          0.03440860748291016,
+          0.03462844848632812,
+          0.03461215972900391,
+          0.03409891128540039,
+          0.03462704086303711
+        ]
+      },
+      {
+        "frame": 450,
+        "particles": 7376,
+        "median_ms_per_call": 0.03461686325073242,
+        "samples_ms": [
+          0.034540126800537106,
+          0.034851585388183594,
+          0.03534131240844727,
+          0.03461686325073242,
+          0.03356412887573242
+        ]
+      },
+      {
+        "frame": 930,
+        "particles": 7376,
+        "median_ms_per_call": 0.03508841705322266,
+        "samples_ms": [
+          0.03534912109375,
+          0.031495071411132815,
+          0.035305374145507815,
+          0.034826400756835935,
+          0.03508841705322266
+        ]
+      },
+      {
+        "frame": 1026,
+        "particles": 7376,
+        "median_ms_per_call": 0.0292608642578125,
+        "samples_ms": [
+          0.029341184616088867,
+          0.0292608642578125,
+          0.028111072540283204,
+          0.025930656433105468,
+          0.029517696380615233
+        ]
+      },
+      {
+        "frame": 1200,
+        "particles": 7376,
+        "median_ms_per_call": 0.0015440640449523927,
+        "samples_ms": [
+          0.0015427199602127074,
+          0.0015483200550079346,
+          0.0015440640449523927,
+          0.0018112000226974487,
+          0.0015437439680099487
+        ]
+      }
+    ]
+  },
+  "validation_policy": "Pairs 2,4,5 are complete finite trajectories passing final scene checks. Pair 2 passed all per-frame checks; pairs 4 and 5 logged transient per-frame audit errors without aborting. Aborted partial runs 1 and 3 are excluded.",
+  "component_average_ms": {
+    "baseline_step_diagnostic_ms": 35.04601228070176,
+    "approved_step_diagnostic_ms": 34.68436315789474,
+    "baseline_render_diagnostic_ms": 6.403515789473683,
+    "approved_render_diagnostic_ms": 6.51963596491228
+  }
+}
