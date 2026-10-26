@@ -39,3 +39,16 @@
 uv run --extra examples -m newton.examples mjmpm_teapot_fill --viewer gl --headless --num-frames 900 --report-fps
 uv run --extra dev -m newton.tests -k mjmpm_teapot_fill
 ```
+
+## 2026-10-26: visibility of water settled in the bowl
+
+An every-30-frame trace through the 900-frame teapot run showed the bowl count
+rise from 239 particles at frame 480 to 2,603 at frame 720 and remain at 2,603
+through frame 900. All 2,831 particles remained active in that run. The GL
+captures showed water at the bottom of the bowl, partly hidden by its opaque
+white mesh. The bowl now renders at 0.55 opacity while keeping the same
+collision mesh. The test also checks at each 30-frame sample that a previously
+filled bowl does not abruptly lose over half its particle count. A full GL
+headless test run passed with 2,448/2,831 particles in the bowl and 29.9 FPS;
+the settled water remained visible in its final screenshot. These runs differ
+slightly because the coupled simulation is not bitwise deterministic.

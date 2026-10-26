@@ -163,12 +163,14 @@ class Example(W1MJMPMScene):
         clearance = np.maximum(bowl_min - teapot_max, teapot_min - bowl_max)
         if clearance.max() < 0.01:
             raise ValueError("The teapot and bowl need at least 10 mm of clearance at startup")
+        # Settled water sits below the near rim; translucency keeps it visible.
         bowl = builder.add_shape_mesh(
             -1,
             xform=wp.transform(wp.vec3(*BOWL_CENTER), wp.quat_identity()),
             mesh=newton.Mesh(vertices, faces.ravel(), compute_inertia=False, is_solid=False),
             cfg=newton.ModelBuilder.ShapeConfig(ke=2.0e4, kd=100.0, mu=0.2),
             color=(0.93, 0.94, 0.91),
+            opacity=0.55,
             label="catch_bowl",
         )
         # The bowl receives MPM water but must not interfere with the nearby
@@ -244,6 +246,7 @@ class Example(W1MJMPMScene):
         self.peak_lift = 0.0
         self.peak_tilt = 0.0
         self.bowl_particle_count = 0
+        self.peak_bowl_particle_count = 0
         self.retired_particle_count = 0
         self.pour_end_particle_count = 0
         mpm_model = self.solver.environment.material._mpm_model
@@ -285,6 +288,13 @@ class Example(W1MJMPMScene):
         self._retire_invalid_after_step()
         if self.frame % 30 == 0:
             self.bowl_particle_count = self.water_in_bowl_count()
+            if self.args.test and self.peak_bowl_particle_count > 100:
+                if self.bowl_particle_count < 0.5 * self.peak_bowl_particle_count:
+                    raise AssertionError(
+                        f"Water disappeared from the bowl at frame {self.frame}: "
+                        f"{self.bowl_particle_count} remain after a peak of {self.peak_bowl_particle_count}"
+                    )
+            self.peak_bowl_particle_count = max(self.peak_bowl_particle_count, self.bowl_particle_count)
             flags = self.mpm_particle_flags.numpy()[self.water_begin : self.water_end]
             self.retired_particle_count = int(np.count_nonzero((flags & int(newton.ParticleFlags.ACTIVE)) == 0))
             if self.frame == 720:
