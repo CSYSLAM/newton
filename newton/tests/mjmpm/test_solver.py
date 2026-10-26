@@ -582,7 +582,7 @@ class TestMJMPMMaterial(unittest.TestCase):
                 self.assertEqual(empty.node_count_sync(), 0)
 
     def test_fused_rigid_mobility_matches_reference(self):
-        """Preserve captured feedback beyond 4096 rows as active collider rows change."""
+        """Preserve feedback bits beyond 4096 rows across CUDA layouts and changing active rows."""
         import warp.sparse as sparse  # noqa: PLC0415
 
         from newton._src.solvers.mjmpm.mpm import contact_solver_kernels as contacts  # noqa: PLC0415
@@ -595,12 +595,14 @@ class TestMJMPMMaterial(unittest.TestCase):
                 rng = np.random.default_rng(17)
                 basis = rng.normal(size=(12, 12)).astype(np.float32)
                 mobility = wp.array((basis @ basis.T)[None], dtype=float)
-                independent_matrix = np.zeros((3, 6, 6), dtype=np.float32)
-                independent_matrix[2] = np.diag([0.0, 0.25, 0.5, 1.0, 2.0, 3.0])
+                independent_matrix = np.zeros((6, 6, 6), dtype=np.float32)
+                independent_basis = rng.normal(size=(5, 5)).astype(np.float32)
+                independent_matrix[2, 1:, 1:] = independent_basis @ independent_basis.T
                 initial_velocity = wp.array(rng.normal(size=(node_count, 3)).astype(np.float32), dtype=wp.vec3)
-                initial_accumulated = wp.array(rng.normal(size=(3, 6)).astype(np.float32), dtype=wp.spatial_vector)
+                initial_accumulated = wp.array(rng.normal(size=(6, 6)).astype(np.float32), dtype=wp.spatial_vector)
                 impulse = wp.array(rng.normal(size=(node_count, 3)).astype(np.float32), dtype=wp.vec3)
                 saved_flag = rheology._FUSE_RIGIDITY_FEEDBACK
+                saved_rows = rheology._MOBILITY_ROW_PARALLEL
                 try:
                     for active in ("all", "free", "empty"):
                         rows, columns, values = [], [], []
@@ -615,18 +617,18 @@ class TestMJMPMMaterial(unittest.TestCase):
                                 values.append(value if keep else np.zeros((3, 3)))
                         jacobian = sparse.bsr_from_triplets(
                             node_count,
-                            6,
+                            12,
                             wp.array(rows, dtype=int),
                             wp.array(columns, dtype=int),
                             wp.array(np.asarray(values, dtype=np.float32), dtype=wp.mat33),
                         )
                         inverse = sparse.bsr_transposed(jacobian)
                         articulation = contacts.ArticulatedRigidity(
-                            body_count=3,
+                            body_count=6,
                             link_body=wp.array([[0, 1]], dtype=int),
-                            link_slot=wp.array([0, 1, -1], dtype=int),
+                            link_slot=wp.array([0, 1, -1, -1, -1, -1], dtype=int),
                             mobility=mobility,
-                            wrenches=wp.empty(18, dtype=float),
+                            wrenches=wp.empty(36, dtype=float),
                             active_links=wp.empty((1, 2), dtype=int),
                             active_count=wp.empty(1, dtype=int),
                         )
@@ -637,14 +639,14 @@ class TestMJMPMMaterial(unittest.TestCase):
                             outputs=[articulation.active_links, articulation.active_count],
                         )
                         independent = contacts.IndependentRigidity(
-                            body_count=3,
-                            enabled=wp.array([0, 0, 1], dtype=int),
+                            body_count=6,
+                            enabled=wp.array([0, 0, 1, 0, 0, 0], dtype=int),
                             mobility=wp.array(independent_matrix, dtype=contacts.mat66),
                             velocity_delta=wp.empty_like(initial_accumulated),
                         )
                         operator = (jacobian, inverse, articulation, independent)
                         velocity = wp.empty_like(initial_velocity)
-                        body_delta = wp.empty(18, dtype=float)
+                        body_delta = wp.empty(36, dtype=float)
 
                         def evaluate(
                             fused,
@@ -664,27 +666,37 @@ class TestMJMPMMaterial(unittest.TestCase):
                         outputs = (velocity, body_delta, independent.velocity_delta)
                         evaluate(False)
                         expected = [a.numpy().view(np.uint32).copy() for a in outputs]
-                        with patch.object(wp, "launch", wraps=wp.launch) as launches:
-                            evaluate(True)
-                        if device != "cpu":
-                            kernels = [
-                                call.kwargs.get("kernel", call.args[0] if call.args else None)
-                                for call in launches.call_args_list
-                            ]
-                            self.assertTrue(
-                                any(getattr(kernel, "key", "") == "apply_mobility_feedback" for kernel in kernels)
-                            )
-                        for a, b in zip(outputs, expected, strict=True):
-                            np.testing.assert_array_equal(a.numpy().view(np.uint32), b)
-                        if device != "cpu":
-                            with wp.ScopedCapture(force_module_load=False) as capture:
+                        for layout in ("compact", "rows") if device != "cpu" else ("compact",):
+                            rheology._MOBILITY_ROW_PARALLEL = layout == "rows"
+                            with (
+                                patch.object(wp, "launch", wraps=wp.launch) as launches,
+                                patch.object(wp, "launch_tiled", wraps=wp.launch_tiled) as tiled_launches,
+                            ):
                                 evaluate(True)
-                            for _ in range(3):
-                                wp.capture_launch(capture.graph)
-                                for a, b in zip(outputs, expected, strict=True):
-                                    np.testing.assert_array_equal(a.numpy().view(np.uint32), b)
+                            if device != "cpu":
+                                kernels = [
+                                    call.kwargs.get("kernel", call.args[0] if call.args else None)
+                                    for call in [*launches.call_args_list, *tiled_launches.call_args_list]
+                                ]
+                                expected_kernel = (
+                                    "apply_mobility_feedback_rows" if layout == "rows" else "apply_mobility_feedback"
+                                )
+                                self.assertTrue(
+                                    any(getattr(kernel, "key", "") == expected_kernel for kernel in kernels),
+                                    f"Expected fused kernel {expected_kernel} for layout {layout}",
+                                )
+                            for a, b in zip(outputs, expected, strict=True):
+                                np.testing.assert_array_equal(a.numpy().view(np.uint32), b)
+                            if device != "cpu":
+                                with wp.ScopedCapture(force_module_load=False) as capture:
+                                    evaluate(True)
+                                for _ in range(3):
+                                    wp.capture_launch(capture.graph)
+                                    for a, b in zip(outputs, expected, strict=True):
+                                        np.testing.assert_array_equal(a.numpy().view(np.uint32), b)
                 finally:
                     rheology._FUSE_RIGIDITY_FEEDBACK = saved_flag
+                    rheology._MOBILITY_ROW_PARALLEL = saved_rows
 
     def test_rigid_coupling_assembly_matches_triplets(self):
         """Preserve sorted blocks, zero pruning, and operator values as captured contacts change."""

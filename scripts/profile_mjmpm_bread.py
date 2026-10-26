@@ -34,6 +34,7 @@ def main():
     parser.add_argument("--cg-loop", choices=("fixed", "conditional"), default="fixed")
     parser.add_argument("--connection-product", choices=("gather", "scatter"), default="gather")
     parser.add_argument("--rigidity-feedback", choices=("auto", "reference"), default="auto")
+    parser.add_argument("--mobility-layout", choices=("compact", "rows"), default="rows")
     parser.add_argument(
         "--gs-blocks", type=int, default=0, help="Experimental GS block count; zero retains the production launch"
     )
@@ -43,6 +44,7 @@ def main():
     options.output.parent.mkdir(parents=True, exist_ok=True)
     if options.rigidity_feedback == "reference":
         rheology._FUSE_RIGIDITY_FEEDBACK = False
+    rheology._MOBILITY_ROW_PARALLEL = options.mobility_layout == "rows"
     if options.gs_blocks:
         original_init = rheology._GaussSeidelSolver.__init__
 
@@ -209,6 +211,7 @@ def main():
         "cg_loop": options.cg_loop,
         "connection_product": options.connection_product,
         "rigidity_feedback": options.rigidity_feedback,
+        "mobility_layout": options.mobility_layout,
         "gs_blocks": options.gs_blocks,
         "empty_collision": options.empty_collision,
         "visual_batches": len(example.visuals.parts),

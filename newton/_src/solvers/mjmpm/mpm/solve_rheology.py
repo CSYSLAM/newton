@@ -66,6 +66,7 @@ logger = logging.getLogger(__name__)
 _TILED_SUM_BLOCK_DIM = 512
 _STRESS_DOF_COUNT = 6
 _FUSE_RIGIDITY_FEEDBACK = True
+_MOBILITY_ROW_PARALLEL = True
 
 
 @wp.kernel
@@ -368,27 +369,42 @@ def apply_rigidity_operator(rigidity_operator, delta_collider_impulse, collider_
             and J.ncol == 2 * body_count
             and J.nnz * J.block_size <= 128 * J.shape[0]
         ):
-            from newton._src.solvers.mjmpm.mpm.rigidity_feedback import apply_mobility_feedback  # noqa: PLC0415
+            from newton._src.solvers.mjmpm.mpm.rigidity_feedback import (  # noqa: PLC0415
+                apply_mobility_feedback,
+                apply_mobility_feedback_rows,
+            )
 
             sp.bsr_mv(IJtm, x=delta_collider_impulse, y=articulation.wrenches, alpha=-1.0, beta=0.0)
-            wp.launch(
-                apply_mobility_feedback,
-                dim=body_count,
-                inputs=[
-                    IJtm.offsets,
-                    articulation.link_slot,
-                    articulation.link_body,
-                    articulation.active_links,
-                    articulation.active_count,
-                    articulation.mobility,
-                    independent.enabled,
-                    independent.mobility,
-                    articulation.wrenches,
-                    independent.velocity_delta,
-                    delta_body_qd,
-                ],
-                device=J.values.device,
-            )
+            mobility_inputs = [
+                IJtm.offsets,
+                articulation.link_slot,
+                articulation.link_body,
+                articulation.active_links,
+                articulation.active_count,
+                articulation.mobility,
+                independent.enabled,
+                independent.mobility,
+                articulation.wrenches,
+                independent.velocity_delta,
+                delta_body_qd,
+            ]
+            if _MOBILITY_ROW_PARALLEL and body_count >= 4:
+                # Distribute bodies across SMs and map their six twist rows
+                # to independent lanes, retaining each row's sum order.
+                wp.launch_tiled(
+                    apply_mobility_feedback_rows,
+                    dim=(body_count,),
+                    inputs=mobility_inputs,
+                    block_dim=32,
+                    device=J.values.device,
+                )
+            else:
+                wp.launch(
+                    apply_mobility_feedback,
+                    dim=body_count,
+                    inputs=mobility_inputs,
+                    device=J.values.device,
+                )
             sp.bsr_mv(J, x=delta_body_qd, y=collider_velocity, alpha=1.0, beta=1.0)
             return
     sp.bsr_mv(IJtm, x=delta_collider_impulse, y=delta_body_qd, alpha=-1.0, beta=0.0)

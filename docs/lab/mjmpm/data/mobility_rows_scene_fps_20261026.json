@@ -1,0 +1,94 @@
+{
+  "water": {
+    "pairs": [
+      {
+        "round": 2,
+        "compact_fps": 30.555945012496238,
+        "rows_fps": 31.31666791995475,
+        "change_percent": 2.4896068740384303
+      },
+      {
+        "round": 3,
+        "compact_fps": 31.7195970701877,
+        "rows_fps": 31.895698514202675,
+        "change_percent": 0.5551818442879553
+      },
+      {
+        "round": 4,
+        "compact_fps": 31.57374399167157,
+        "rows_fps": 31.425489379045054,
+        "change_percent": -0.46955030947746224
+      }
+    ],
+    "failed_runs": [
+      "water_r1_compact.json"
+    ],
+    "compact_mean_fps": 31.283095358118505,
+    "rows_mean_fps": 31.54595193773416,
+    "paired_geometric_change_percent": 0.8509707923328258,
+    "paired_95_percent_ci": [
+      -2.8062410877776873,
+      4.64579643371479
+    ]
+  },
+  "rice": {
+    "pairs": [
+      {
+        "round": 1,
+        "compact_fps": 27.36934612104131,
+        "rows_fps": 27.977060519080844,
+        "change_percent": 2.220419864442169
+      },
+      {
+        "round": 2,
+        "compact_fps": 27.80348686817398,
+        "rows_fps": 27.817003574748178,
+        "change_percent": 0.04861514902172459
+      },
+      {
+        "round": 3,
+        "compact_fps": 28.015396876535082,
+        "rows_fps": 28.007761571118337,
+        "change_percent": -0.027253961278483896
+      }
+    ],
+    "failed_runs": [],
+    "compact_mean_fps": 27.729409955250123,
+    "rows_mean_fps": 27.933941888315786,
+    "paired_geometric_change_percent": 0.7418962271417313,
+    "paired_95_percent_ci": [
+      -2.368430600284442,
+      3.9513112187026
+    ]
+  },
+  "bread": {
+    "pairs": [
+      {
+        "round": 1,
+        "compact_fps": 26.603608708578367,
+        "rows_fps": 26.724645832686026,
+        "change_percent": 0.4549650591900045
+      },
+      {
+        "round": 2,
+        "compact_fps": 26.02878225296618,
+        "rows_fps": 26.68554455147216,
+        "change_percent": 2.5232156161709485
+      },
+      {
+        "round": 3,
+        "compact_fps": 26.533924425378192,
+        "rows_fps": 26.21748286995665,
+        "change_percent": -1.1925923596845855
+      }
+    ],
+    "failed_runs": [],
+    "compact_mean_fps": 26.38877179564091,
+    "rows_mean_fps": 26.542557751371614,
+    "paired_geometric_change_percent": 0.5837239020145718,
+    "paired_95_percent_ci": [
+      -3.93251197100622,
+      5.312272877826229
+    ]
+  }
+}

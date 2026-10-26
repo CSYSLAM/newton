@@ -22,3 +22,19 @@
 ## Mesh SDF collision culling (2026-10-26)
 
 See [edge group culling](EDGE_GROUP_CULLING.md) for the solver-level algorithm, measured teapot speedup, and contact equivalence check.
+
+## Rigid mobility rows (2026-10-26)
+
+See [parallel rigid mobility feedback](MOBILITY_ROW_PARALLEL.md) for the
+CUDA layout, bitwise checks, identical-input kernel timings, and the limits
+of the full-scene performance result.
+The synchronized simulation plus GL A/B test found mean FPS changes of
++0.85% (water), +0.74% (rice), and +0.58% (two-cut bread); all three
+run-paired confidence intervals include zero, so a stable application
+speedup has not been established.
+
+## CK-MPM transfer feasibility (2026-10-26)
+
+See the [isolated transfer probe](CK_MPM_PROBE.md) for the two-grid P2G
+measurements and the decision to keep CK outside the production solver.
+Its transfer timings do not establish an MJMPM application speedup.
