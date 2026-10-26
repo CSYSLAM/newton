@@ -2853,6 +2853,8 @@ class CollisionPipeline:
             narrow_phase_extension_kwargs.update(
                 mesh_edge_centers=model.mesh_edge_centers,
                 mesh_edge_halves=model.mesh_edge_halves,
+                mesh_edge_group_bounds=model.mesh_edge_group_bounds,
+                mesh_edge_order=model.mesh_edge_order,
                 shape_support_data=model._shape_support_data,
                 support_lut=model._convex_support_lut,
                 support_vertex_offsets=model._convex_support_vertex_offsets,

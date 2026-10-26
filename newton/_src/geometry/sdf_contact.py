@@ -1340,6 +1340,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         mesh_edge_indices: wp.array[wp.vec2i],
         mesh_edge_centers: wp.array[wp.vec4],
         mesh_edge_halves: wp.array[wp.vec4],
+        mesh_edge_group_bounds: wp.array[wp.vec4],
+        mesh_edge_order: wp.array[wp.int32],
         shape_edge_range: wp.array[wp.vec2i],
         writer_data: Any,
         total_num_blocks: int,
@@ -1355,6 +1357,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         # each thread ``t`` evaluates ``progress[0] + t`` and the counter
         # advances by ``wp.block_dim()`` per pass.
         progress = wp.tile_zeros(shape=1, dtype=int, storage="shared")
+        skip_group = wp.tile_zeros(shape=1, dtype=int, storage="shared")
 
         # Strided loop over pairs
         for pair_idx in range(block_id, pair_count, total_num_blocks):
@@ -1503,15 +1506,54 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     capacity = wp.block_dim()
                     while wp.tile_extract(progress, 0) < num_edges and wp.tile_stack_count(edge_stack) < capacity:
                         base_edge_idx = wp.tile_extract(progress, 0)
+                        # A group sphere encloses every segment in this tile. Its
+                        # separation from the SDF box is a conservative rejection
+                        # test for all 128 per-edge queries.
+                        if wp.static(use_precomputed_edge_data):
+                            if (
+                                base_edge_idx % 128 == 0
+                                and base_edge_idx + 128 <= num_edges
+                                and not sdf_is_heightfield
+                                and not use_bvh_for_sdf
+                                and mesh_edge_group_bounds.shape[0] > 1
+                                and mesh_edge_order.shape[0] > 1
+                            ):
+                                reject = False
+                                if t == 0:
+                                    group_center, group_radius = get_mesh_edge_bounding_sphere_specialized(
+                                        mesh_id_tri,
+                                        mesh_edge_indices,
+                                        mesh_edge_group_bounds,
+                                        edge_range_tri,
+                                        mesh_scale_tri,
+                                        X_mesh_to_sdf,
+                                        inv_sdf_scale,
+                                        edge_radius_scale,
+                                        base_edge_idx,
+                                    )
+                                    group_clamped = wp.min(wp.max(group_center, sdf_aabb_lower), sdf_aabb_upper)
+                                    group_clearance = group_radius + contact_threshold_unscaled
+                                    reject = (
+                                        wp.length_sq(group_center - group_clamped) > group_clearance * group_clearance
+                                    )
+                                wp.tile_scatter_masked(skip_group, 0, int(reject), t == 0)
+                                if wp.tile_extract(skip_group, 0) != 0:
+                                    wp.tile_scatter_masked(progress, 0, base_edge_idx + 128, t == 0)
+                                    continue
                         edge_idx = base_edge_idx + t
+                        source_edge_idx = edge_idx
+                        # Traversal is spatial, while ownership and contact IDs
+                        # continue to use the original edge index.
+                        if wp.static(use_precomputed_edge_data):
+                            if edge_idx < num_edges and mesh_edge_order.shape[0] > 1 and not tri_is_hfield:
+                                source_edge_idx = mesh_edge_order[edge_range_tri[0] + edge_idx]
                         add_edge = False
                         midpoint_sdf = float(0.0)
-
                         if edge_idx < num_edges:
                             if wp.static(enable_heightfields):
                                 if tri_type == GeoType.HFIELD:
                                     v0_scaled, v1_scaled = get_edge_from_heightfield(
-                                        hfd_tri, heightfield_elevations, X_mesh_to_sdf, edge_idx
+                                        hfd_tri, heightfield_elevations, X_mesh_to_sdf, source_edge_idx
                                     )
                                     v0_cull = wp.cw_mul(v0_scaled, inv_sdf_scale)
                                     v1_cull = wp.cw_mul(v1_scaled, inv_sdf_scale)
@@ -1526,7 +1568,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         X_mesh_to_sdf,
                                         inv_sdf_scale,
                                         edge_radius_scale,
-                                        edge_idx,
+                                        source_edge_idx,
                                     )
                             else:
                                 bsphere_center, bsphere_radius = get_mesh_edge_bounding_sphere_specialized(
@@ -1538,7 +1580,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     X_mesh_to_sdf,
                                     inv_sdf_scale,
                                     edge_radius_scale,
-                                    edge_idx,
+                                    source_edge_idx,
                                 )
 
                             threshold = bsphere_radius + contact_threshold_unscaled
@@ -1570,7 +1612,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     add_edge = midpoint_sdf <= culling_radius
 
                         cull_result = EdgeCullResult()
-                        cull_result.edge_idx = edge_idx
+                        cull_result.edge_idx = source_edge_idx
                         cull_result.midpoint_sdf = midpoint_sdf
                         wp.tile_stack_push(edge_stack, cull_result, add_edge)
                         wp.tile_scatter_masked(progress, 0, base_edge_idx + capacity, t == 0)
@@ -1743,7 +1785,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     contact_data.gap_sum = gap_sum
                                 contact_data.sort_sub_key = (my_edge_idx << 2) | (mode << 1)
 
-                                writer_func(contact_data, writer_data, -1)
+                                wp.static(writer_func)(contact_data, writer_data, -1)
 
                     # Defensive cooperative reset before the next outer
                     # iteration. The drain loop above already left the
@@ -1794,6 +1836,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         mesh_edge_indices: wp.array[wp.vec2i],
         mesh_edge_centers: wp.array[wp.vec4],
         mesh_edge_halves: wp.array[wp.vec4],
+        mesh_edge_group_bounds: wp.array[wp.vec4],
+        mesh_edge_order: wp.array[wp.int32],
         shape_edge_range: wp.array[wp.vec2i],
         block_offsets: wp.array[wp.int32],
         reducer_data: GlobalContactReducerData,
@@ -1819,6 +1863,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         # each thread ``t`` evaluates ``progress[0] + t`` and the counter
         # advances by ``wp.block_dim()`` per pass.
         progress = wp.tile_zeros(shape=1, dtype=int, storage="shared")
+        skip_group = wp.tile_zeros(shape=1, dtype=int, storage="shared")
 
         for combo_idx in range(block_id, total_combos, total_num_blocks):
             lo = int(0)
@@ -1946,7 +1991,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                 edge_range_tri = shape_edge_range[tri_shape]
                 num_edges = get_edge_count(tri_type, edge_range_tri, hfd_tri)
-                chunk_size = (num_edges + blocks_for_pair - 1) // blocks_for_pair
+                chunk_size = ((num_edges + blocks_for_pair - 1) // blocks_for_pair + 127) // 128 * 128
                 edge_start = block_in_pair * chunk_size
                 edge_end = wp.min(edge_start + chunk_size, num_edges)
 
@@ -1965,15 +2010,50 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     capacity = wp.block_dim()
                     while wp.tile_extract(progress, 0) < edge_end and wp.tile_stack_count(edge_stack) < capacity:
                         base_edge_idx = wp.tile_extract(progress, 0)
+                        # Keep this group rejection in sync with the non-reduced kernel.
+                        if wp.static(use_precomputed_edge_data):
+                            if (
+                                base_edge_idx % 128 == 0
+                                and base_edge_idx + 128 <= edge_end
+                                and not sdf_is_heightfield
+                                and not use_bvh_for_sdf
+                                and mesh_edge_group_bounds.shape[0] > 1
+                                and mesh_edge_order.shape[0] > 1
+                            ):
+                                reject = False
+                                if t == 0:
+                                    group_center, group_radius = get_mesh_edge_bounding_sphere_specialized(
+                                        mesh_id_tri,
+                                        mesh_edge_indices,
+                                        mesh_edge_group_bounds,
+                                        edge_range_tri,
+                                        mesh_scale_tri,
+                                        X_mesh_to_sdf,
+                                        inv_sdf_scale,
+                                        edge_radius_scale,
+                                        base_edge_idx,
+                                    )
+                                    group_clamped = wp.min(wp.max(group_center, sdf_aabb_lower), sdf_aabb_upper)
+                                    group_clearance = group_radius + contact_threshold_unscaled
+                                    reject = (
+                                        wp.length_sq(group_center - group_clamped) > group_clearance * group_clearance
+                                    )
+                                wp.tile_scatter_masked(skip_group, 0, int(reject), t == 0)
+                                if wp.tile_extract(skip_group, 0) != 0:
+                                    wp.tile_scatter_masked(progress, 0, base_edge_idx + 128, t == 0)
+                                    continue
                         edge_idx = base_edge_idx + t
+                        source_edge_idx = edge_idx
+                        if wp.static(use_precomputed_edge_data):
+                            if edge_idx < edge_end and mesh_edge_order.shape[0] > 1 and not tri_is_hfield:
+                                source_edge_idx = mesh_edge_order[edge_range_tri[0] + edge_idx]
                         add_edge = False
                         midpoint_sdf = float(0.0)
-
                         if edge_idx < edge_end:
                             if wp.static(enable_heightfields):
                                 if tri_type == GeoType.HFIELD:
                                     v0_scaled, v1_scaled = get_edge_from_heightfield(
-                                        hfd_tri, heightfield_elevations, X_mesh_to_sdf, edge_idx
+                                        hfd_tri, heightfield_elevations, X_mesh_to_sdf, source_edge_idx
                                     )
                                     v0_cull = wp.cw_mul(v0_scaled, inv_sdf_scale)
                                     v1_cull = wp.cw_mul(v1_scaled, inv_sdf_scale)
@@ -1988,7 +2068,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         X_mesh_to_sdf,
                                         inv_sdf_scale,
                                         edge_radius_scale,
-                                        edge_idx,
+                                        source_edge_idx,
                                     )
                             else:
                                 bsphere_center, bsphere_radius = get_mesh_edge_bounding_sphere_specialized(
@@ -2000,7 +2080,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     X_mesh_to_sdf,
                                     inv_sdf_scale,
                                     edge_radius_scale,
-                                    edge_idx,
+                                    source_edge_idx,
                                 )
 
                             threshold = bsphere_radius + contact_threshold_unscaled
@@ -2032,7 +2112,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     add_edge = midpoint_sdf <= culling_radius
 
                         cull_result = EdgeCullResult()
-                        cull_result.edge_idx = edge_idx
+                        cull_result.edge_idx = source_edge_idx
                         cull_result.midpoint_sdf = midpoint_sdf
                         wp.tile_stack_push(edge_stack, cull_result, add_edge)
                         wp.tile_scatter_masked(progress, 0, base_edge_idx + capacity, t == 0)

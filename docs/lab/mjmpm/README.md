@@ -2,6 +2,8 @@
 
 日期：2026-10-19。实现分支：`feature/mjmpm-independent`。
 
+当前分支后续的性能工作见 [优化索引](OPTIMIZATIONS.md)，各场景测量分别见[米锅](RICE_COOKER_PERF.md)、[面包切割](BREAD_CUT_PERF.md)和[倒水](TEAPOT_PERF.md)记录。
+
 ## 版本与代码边界
 
 - 工作基线：`e50f0d0e5807c3b1b9ee0848c18eee25e77673e7`。

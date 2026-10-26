@@ -725,6 +725,61 @@ def test_mesh_mesh_sdf_vs_sdf(_test, device, broad_phase: str):
     )
 
 
+def test_mesh_sdf_edge_group_contacts(test, device):
+    """Preserve mesh contact geometry and IDs when spatial edge culling is enabled."""
+    mesh = newton.Mesh.create_sphere(0.5, num_latitudes=12, num_longitudes=12, compute_normals=False, compute_uvs=False)
+    mesh.build_sdf(max_resolution=24, device=device)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    builder.add_shape_mesh(-1, mesh=mesh)
+    body = builder.add_body(xform=wp.transform(wp.vec3(0.7, 0.0, 0.0), wp.quat_identity()))
+    builder.add_shape_mesh(body, mesh=mesh)
+    model = builder.finalize(device=device)
+    test.assertIsNotNone(model.mesh_edge_order)
+    test.assertIsNotNone(model.mesh_edge_group_bounds)
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn", deterministic=True, rigid_contact_max=1024)
+    state = model.state()
+    contacts = pipeline.contacts()
+
+    def snapshot():
+        pipeline.collide(state, contacts)
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        return {
+            name: getattr(contacts, f"rigid_contact_{name}").numpy()[:count].copy()
+            for name in ("shape0", "shape1", "point0", "point1", "normal", "tids")
+        }
+
+    optimized = snapshot()
+    test.assertGreater(len(optimized["shape0"]), 0)
+
+    edge_range = model.shape_edge_range.numpy()[0]
+    edge_order = model.mesh_edge_order.numpy()
+    test.assertGreater(edge_range[1], 128)
+    test.assertTrue(np.any(edge_order[: edge_range[1]] != np.arange(edge_range[1])))
+
+    saved_order = model.mesh_edge_order
+    saved_bounds = model.mesh_edge_group_bounds
+    identity_order = wp.array(np.arange(saved_order.shape[0], dtype=np.int32), device=device)
+    model.mesh_edge_order = identity_order
+    model.mesh_edge_group_bounds = wp.zeros(1, dtype=wp.vec4, device=device)
+    try:
+        original = snapshot()
+    finally:
+        model.mesh_edge_order = saved_order
+        model.mesh_edge_group_bounds = saved_bounds
+
+    for name in optimized:
+        np.testing.assert_array_equal(optimized[name], original[name], err_msg=f"Mismatched mesh contact {name}")
+
+
+add_function_test(
+    TestCollisionPipeline,
+    "test_mesh_sdf_edge_group_contacts",
+    test_mesh_sdf_edge_group_contacts,
+    devices=get_cuda_test_devices(mode="basic"),
+    check_output=False,
+)
+
+
 def test_mesh_mesh_sdf_vs_bvh(_test, device, broad_phase: str):
     """Test mesh-mesh collision where first mesh has SDF, second uses BVH."""
     # Mixed SDF/BVH mode has slightly more asymmetric contact behavior, use higher tolerance

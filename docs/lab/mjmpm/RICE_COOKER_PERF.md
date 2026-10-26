@@ -534,6 +534,10 @@ measurements). Raw JSON and logs are under
 
 ### 2.8 Reusing contact preparation during reaction recovery (reverted)
 
+This section describes the 2026-10-21 candidate, which was reverted on the
+rice-cooker workload. A later, narrower contact-space matrix reuse was kept
+for constrained MJMPM coupling; see [the teapot record](TEAPOT_PERF.md).
+
 Tested reusing the first rigid solve's body transforms, contact geometry,
 bucket ordering, and articulated contact responses in the second solve of
 the same substep. Neither MPM nor the material impulse application changes

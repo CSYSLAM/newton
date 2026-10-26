@@ -872,6 +872,10 @@ class Model:
         collision applies :attr:`shape_scale` when reading them. Component ``w``
         is a unitless internal endpoint-ownership code.
         """
+        self.mesh_edge_group_bounds: wp.array[wp.vec4] | None = None
+        """Packed bounds for consecutive spatial groups of collision edges [m]."""
+        self.mesh_edge_order: wp.array[wp.int32] | None = None
+        """Original edge indices in spatial traversal order, local to each shape."""
         self.shape_edge_range: wp.array[wp.vec2i] | None = None
         """Per-shape (start, count) into mesh edge arrays, shape [shape_count]. (-1,0) if no edges."""
         self._shape_mesh_properties: wp.array[wp.int32] | None = None

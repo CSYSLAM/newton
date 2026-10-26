@@ -14840,8 +14840,11 @@ class ModelBuilder:
             edge_chunks = []
             edge_center_chunks = []
             edge_half_chunks = []
+            edge_group_chunks = []
+            edge_order_chunks = []
             edge_offset = 0
             edge_cache = {}  # mesh python id → (start, count)
+            build_edge_groups = bool(compact_texture_sdf_data)
 
             for i in range(len(self.shape_type)):
                 if (
@@ -14869,10 +14872,10 @@ class ModelBuilder:
                             edges = mesh.edges  # lazily computed and cached on the Mesh
                         start = edge_offset
                         count = len(edges)
-                        edge_chunks.append(edges)
                         if count > 0:
                             # Unscaled: kernels apply the live shape_scale when reading these edges.
                             vertices = np.asarray(mesh.vertices, dtype=np.float32)
+                            edge_chunks.append(edges)
                             edge_v0 = vertices[edges[:, 0]]
                             edge_v1 = vertices[edges[:, 1]]
                             edge_halves = np.ascontiguousarray((edge_v1 - edge_v0) * 0.5, dtype=np.float32)
@@ -14895,6 +14898,31 @@ class ModelBuilder:
                             edge_half_chunks.append(
                                 np.ascontiguousarray(np.concatenate((edge_halves, corner_ownership), axis=1))
                             )
+                            if build_edge_groups:
+                                lower = edge_centers.min(axis=0)
+                                span = np.maximum(edge_centers.max(axis=0) - lower, 1.0e-9)
+                                quantized = np.clip((edge_centers - lower) / span * 1023.0, 0.0, 1023.0).astype(
+                                    np.uint32
+                                )
+                                codes = np.zeros(count, dtype=np.uint32)
+                                for bit in range(10):
+                                    for axis in range(3):
+                                        codes |= ((quantized[:, axis] >> bit) & 1) << (3 * bit + axis)
+                                edge_order = np.argsort(codes, kind="stable").astype(np.int32)
+                                edge_order_chunks.append(edge_order)
+                                # Store each 128-edge bound at the first edge slot.
+                                group_bounds = np.zeros((count, 4), dtype=np.float32)
+                                for group_start in range(0, count, 128):
+                                    indices = edge_order[group_start : group_start + 128]
+                                    centers = edge_centers[indices]
+                                    radii = edge_radii[indices]
+                                    lower = np.min(centers - radii, axis=0)
+                                    upper = np.max(centers + radii, axis=0)
+                                    group_bounds[group_start, :3] = (lower + upper) * 0.5
+                                    group_bounds[group_start, 3] = np.linalg.norm(upper - lower) * 0.5 + 1.0e-6
+                                edge_group_chunks.append(group_bounds)
+                        else:
+                            edge_chunks.append(edges)
                         edge_offset += count
                         entry = (start, count)
                         edge_cache[mesh_key] = entry
@@ -14921,6 +14949,16 @@ class ModelBuilder:
                 wp.array(np.concatenate(edge_half_chunks), dtype=wp.vec4, device=device)
                 if edge_offset > 0
                 else wp.zeros(1, dtype=wp.vec4, device=device)
+            )
+            m.mesh_edge_group_bounds = (
+                wp.array(np.concatenate(edge_group_chunks), dtype=wp.vec4, device=device)
+                if edge_group_chunks
+                else wp.zeros(1, dtype=wp.vec4, device=device)
+            )
+            m.mesh_edge_order = (
+                wp.array(np.concatenate(edge_order_chunks), dtype=wp.int32, device=device)
+                if edge_order_chunks
+                else wp.zeros(1, dtype=wp.int32, device=device)
             )
 
             # ---------------------
