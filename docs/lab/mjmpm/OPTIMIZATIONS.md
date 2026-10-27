@@ -45,3 +45,13 @@ See [bread indentation and blade contact](BREAD_THREE_PIECES_DEFORMATION.md)
 for the softer material, straight-edge placement, kerf withdrawal, exterior
 particle glyph bounds, and per-frame physical clearance check. This is scene
 and display tuning, not a solver performance optimization.
+
+## Cooperative GS investigation and local metric fix (2026-10-27)
+
+See the [completed GS investigation](GS_COOPERATIVE_PROBE.md) for the
+eight-lane candidate, identical-input checks, scale tests, and full GL results.
+The performance candidate was rejected and removed from the checkout: no
+stable application FPS gain was established. Retain only the independently
+verified positive local metric fallback and its two regression tests, which
+address the Inf/NaN path found while diagnosing water loss. This retained
+change is a stability fix, not a demonstrated performance improvement.

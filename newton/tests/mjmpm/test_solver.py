@@ -437,6 +437,139 @@ def _count_mismatches(a: wp.array[Any], b: wp.array[Any], count: wp.array[int]):
 
 
 class TestMJMPMMaterial(unittest.TestCase):
+    def test_delassus_metric_stays_finite_at_rank_deficiency(self):
+        """Avoid zero-eigenvalue divisions for a regularized rank-deficient gradient Gram matrix."""
+        from newton._src.solvers.mjmpm.mpm import rheology_solver_kernels as kernels  # noqa: PLC0415
+
+        for device in ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else []):
+            with self.subTest(device=device), wp.ScopedDevice(device):
+                weights = np.zeros((8, 3), dtype=np.float32)
+                weights[:, 0] = np.tile([-1000.0, 1000.0], 4)
+                diagonal = wp.empty(1, dtype=kernels.vec6)
+                rotation = wp.empty(1, dtype=kernels.mat55)
+                command = wp.launch(
+                    kernels.compute_delassus_diagonal,
+                    1,
+                    inputs=[
+                        wp.array([0, 8], dtype=int),
+                        wp.array(np.arange(8), dtype=int),
+                        wp.array(weights, dtype=wp.vec3),
+                        wp.ones(8),
+                        wp.zeros(2, dtype=int),
+                        wp.empty(0, dtype=int),
+                        wp.empty(0, dtype=kernels.mat66),
+                        wp.zeros(1, dtype=int),
+                        wp.empty((0, 0)),
+                        True,
+                    ],
+                    outputs=[rotation, diagonal],
+                    record_cmd=True,
+                )
+                command.launch()
+                self.assertTrue(np.isfinite(diagonal.numpy()).all())
+                self.assertGreater(float(diagonal.numpy().min()), 0.0)
+                if device != "cpu":
+                    with wp.ScopedCapture() as capture:
+                        command.launch()
+                    wp.capture_launch(capture.graph)
+                    self.assertTrue(np.isfinite(diagonal.numpy()).all())
+                    self.assertGreater(float(diagonal.numpy().min()), 0.0)
+
+    def test_delassus_metric_stays_positive_at_large_mass_ratios(self):
+        """Keep the local metric positive when QR loses small positive eigenvalues."""
+        from newton._src.solvers.mjmpm.mpm import rheology_solver_kernels as kernels  # noqa: PLC0415
+
+        # One real eight-node water stencil: occupied nodes border nearly empty
+        # nodes. Its positive eigenvalues span more than eight orders of magnitude.
+        weights = np.array(
+            [
+                [-2.0480690002441406, -0.37017956376075745, -0.2302890121936798],
+                [0.0, 0.0, 0.2302890121936798],
+                [-1.2441127300262451, 0.37017956376075745, -0.13989055156707764],
+                [0.0, 0.0, 0.13989055156707764],
+                [2.0480690002441406, -2.922002077102661, -1.8177798986434937],
+                [0.0, 0.0, 1.8177798986434937],
+                [1.2441127300262451, 2.922002077102661, -1.1042221784591675],
+                [0.0, 0.0, 1.1042221784591675],
+            ],
+            dtype=np.float32,
+        )
+        inverse_mass = np.array(
+            [
+                0.0003302798140794039,
+                240000.0,
+                0.0002097161195706576,
+                240000.0,
+                0.00044488281127996743,
+                240000.0,
+                0.000277885323157534,
+                240000.0,
+            ],
+            dtype=np.float32,
+        )
+        # Independent double-precision symmetric-gradient Gram matrix.
+        reference = np.eye(6) * float(kernels._DELASSUS_PROXIMAL_REG)
+        for (x, y, z), mass in zip(weights.astype(float), inverse_mass.astype(float), strict=True):
+            gradient = np.array(
+                [
+                    np.sqrt(2.0 / 3.0) * np.array([x, y, z]),
+                    [x, -y, 0.0],
+                    np.array([-x, -y, 2.0 * z]) / np.sqrt(3.0),
+                    [0.0, z, y],
+                    [z, 0.0, x],
+                    [y, x, 0.0],
+                ]
+            )
+            reference += mass * gradient @ gradient.T
+        self.assertGreater(float(np.linalg.eigvalsh(reference).min()), 0.0)
+
+        for device in ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else []):
+            with self.subTest(device=device), wp.ScopedDevice(device):
+                diagonal = wp.empty(1, dtype=kernels.vec6)
+                rotation = wp.empty(1, dtype=kernels.mat55)
+                inputs = [
+                    wp.array([0, 8], dtype=int),
+                    wp.array(np.arange(8), dtype=int),
+                    wp.array(weights, dtype=wp.vec3),
+                    wp.array(inverse_mass),
+                    wp.zeros(2, dtype=int),
+                    wp.empty(0, dtype=int),
+                    wp.empty(0, dtype=kernels.mat66),
+                    wp.zeros(1, dtype=int),
+                    wp.empty((0, 0)),
+                ]
+                for majorize in (False, True):
+                    command = wp.launch(
+                        kernels.compute_delassus_diagonal,
+                        1,
+                        inputs=[*inputs, majorize],
+                        outputs=[rotation, diagonal],
+                        record_cmd=True,
+                    )
+
+                    def check(diagonal=diagonal, rotation=rotation, majorize=majorize):
+                        values = diagonal.numpy()[0].astype(float)
+                        self.assertTrue(np.isfinite(values).all())
+                        self.assertGreater(float(values.min()), 0.0)
+                        transform = np.eye(6)
+                        transform[1:, 1:] = rotation.numpy()[0].T
+                        np.testing.assert_allclose(transform @ transform.T, np.eye(6), atol=1.0e-6)
+                        if majorize:
+                            bound = transform.T @ np.diag(values) @ transform
+                            # Forming and rotating a metric of this magnitude in
+                            # float32 loses a few ulps even with a valid QR factor.
+                            tolerance = 1.0e-6 * float(np.linalg.norm(reference, ord=2))
+                            self.assertGreaterEqual(float(np.linalg.eigvalsh(bound - reference).min()), -tolerance)
+
+                    command.launch()
+                    check()
+                    if device != "cpu":
+                        with wp.ScopedCapture() as capture:
+                            command.launch()
+                        for _ in range(3):
+                            wp.capture_launch(capture.graph)
+                            check()
+
     def test_cooperative_articulated_factor_matches_reference(self):
         """Parallel rows retain the scalar factors, including clamped zero pivots and graph replay."""
         from newton._src.solvers.mjmpm.coupling import articulated  # noqa: PLC0415

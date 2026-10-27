@@ -224,11 +224,24 @@ def compute_delassus_diagonal(
 
     diag, ev = symmetric_eigenvalues_qr(diag_block, _DELASSUS_PROXIMAL_REG * 0.1)
 
-    if not (wp.ddot(ev, ev) < 1.0e16 and wp.length_sq(diag) < 1.0e16):
-        diag = wp.get_diag(diag_block)
+    if not (wp.ddot(ev, ev) < 1.0e16 and wp.length_sq(diag) < 1.0e16 and wp.min(diag) > 0.0):
+        # QR may lose small positive eigenvalues at large nodal mass ratios.
+        # Bound the original symmetric block by its absolute row sums instead
+        # of dividing by a nonpositive eigenvalue. Include the removed normal
+        # coupling and pad the six-term float32 sums against roundoff.
+        diag = vec6(0.0)
+        for i in range(6):
+            row_sum = float(0.0)
+            for j in range(6):
+                row_sum += wp.abs(diag_block[i, j])
+            if i == 0:
+                for j in range(1, 6):
+                    row_sum += wp.abs(coupling[j])
+            else:
+                row_sum += wp.abs(coupling[i])
+            diag[i] = wp.max(_DELASSUS_PROXIMAL_REG, row_sum * 1.000001)
         ev = wp.identity(n=6, dtype=float)
-
-    if majorize:
+    elif majorize:
         # W = [[a, g^T], [g, D]] <= (1 + sqrt(g^T D^-1 g / a)) diag(a, D).
         coupling = ev @ coupling
         rho_sq = float(0.0)
