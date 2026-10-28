@@ -668,6 +668,18 @@ If you run the examples from a source checkout with uv, use
   </tr>
   <tr>
     <td align="center" width="33%">
+      <a href="newton/examples/mjmpm/example_mjmpm_wuliangye_pour.py">
+        <img width="320" src="docs/images/examples/example_mjmpm_wuliangye_pour.jpg" alt="W1 pouring liquid from a Wuliangye bottle into a stemmed glass">
+      </a>
+    </td>
+    <td colspan="2">
+      <b>W1 Wuliangye pour (experimental)</b><br>
+      The W1 robot grasps a stylized bottle, pours visible MPM liquid particles into a translucent stemmed glass, and returns the bottle to the table. Includes original Blender props and two-way rigid/material coupling.<br>
+      <code>python -m newton.examples mjmpm_wuliangye_pour</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
       <a href="newton/examples/mjmpm/example_mjmpm_hand_grasp.py">
         <img width="320" src="docs/images/examples/example_mjmpm_hand_grasp.jpg" alt="MuJoCo–MPM Hand Grasp">
       </a>

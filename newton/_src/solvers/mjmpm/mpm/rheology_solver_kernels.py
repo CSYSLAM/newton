@@ -268,6 +268,7 @@ def preprocess_stress_and_strain(
     strain_rhs: wp.array[vec6],
     stress: wp.array[vec6],
     yield_stress: wp.array[YieldParamVec],
+    allow_negative_offset: bool,
 ):
     """Prepare stress and strain for the rheology solve.
 
@@ -282,13 +283,14 @@ def preprocess_stress_and_strain(
     yield_params = yield_stress[tau_i]
     offset = unilateral_strain_offset[tau_i]
 
-    if offset > 0.0:
+    if offset > 0.0 or (allow_negative_offset and offset < 0.0):
         # add unilateral strain offset to strain rhs
         # will be removed in postprocess_stress_and_strain
         b = strain_rhs[tau_i]
         b += unilateral_offset_to_strain_rhs(offset)
         strain_rhs[tau_i] = b
 
+    if offset > 0.0:
         yield_params[1] = 0.0  # disable cohesion if offset > 0 (not compact)
         yield_stress[tau_i] = yield_params
 

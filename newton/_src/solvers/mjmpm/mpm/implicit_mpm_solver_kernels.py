@@ -495,6 +495,7 @@ def strain_delta_form(
 @wp.kernel
 def compute_unilateral_strain_offset(
     max_fraction: float,
+    density_correction: float,
     particle_volume: wp.array[float],
     collider_volume: wp.array[float],
     node_volume: wp.array[float],
@@ -503,8 +504,14 @@ def compute_unilateral_strain_offset(
     i = wp.tid()
 
     spherical_part = max_fraction * (node_volume[i] - collider_volume[i]) - particle_volume[i]
-    spherical_part = wp.max(spherical_part, 0.0)
-    unilateral_strain_offset[i] = spherical_part
+    offset = wp.max(spherical_part, 0.0)
+    if density_correction > 0.0:
+        # A negative RHS asks the pressure solve to expand an overfilled cell.
+        # Bound the feedback so a highly compressed cell cannot request an
+        # arbitrarily large strain increment in a single step.
+        excess = wp.max(wp.min(spherical_part, 0.0), -0.25 * particle_volume[i])
+        offset += density_correction * excess
+    unilateral_strain_offset[i] = offset
 
 
 @wp.func

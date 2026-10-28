@@ -513,6 +513,7 @@ class RheologyData:
     has_viscosity: bool = False
     has_dilatancy: bool = False
     strain_velocity_node_count: int = -1
+    density_correction: bool = False
 
 
 @dataclass
@@ -673,6 +674,7 @@ class _DelassusOperator:
                 self.rheology.elastic_strain_delta,
                 self.rheology.stress,
                 self.rheology.yield_params,
+                self.rheology.density_correction,
             ],
         )
 

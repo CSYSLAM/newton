@@ -2074,6 +2074,28 @@ class ViewerGL(ViewerBase):
         self.renderer.present()
 
     @override
+    def clear_all_layers(self) -> None:
+        """Clear the scene and reset opt-in transparent reflections."""
+        super().clear_all_layers()
+        self.set_transparent_reflections(False)
+
+    def set_transparent_reflections(self, enabled: bool) -> None:
+        """Enable experimental thin-glass reflections for translucent dielectrics.
+
+        Disabled by default. When enabled, nonmetal surfaces with opacity
+        strictly between zero and one gain environment reflections and
+        angle-dependent coverage using a fixed refractive index of 1.5.
+        Base opacity controls residual haze. Opaque surfaces, metals, and
+        fully invisible surfaces retain their original shading.
+
+        Clearing all layers resets this option, including example switches.
+        This is a viewer-wide approximation, intended for scenes whose
+        translucent objects are glass. It does not trace scene reflections,
+        refract the background, or model thickness-dependent absorption.
+        """
+        self.renderer.transparent_reflections = bool(enabled)
+
+    @override
     def set_rendering_paused(self, paused: bool) -> None:
         """See :meth:`newton.viewer.ViewerBase.set_rendering_paused`."""
         if bool(paused) == self.is_rendering_paused():

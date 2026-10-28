@@ -136,6 +136,7 @@ uniform vec3 sun_direction;
 uniform sampler2D shadow_map;
 uniform sampler2D env_map;
 uniform float env_intensity;
+uniform bool transparent_reflections;
 uniform sampler2D albedo_map;
 
 uniform vec3 fogColor;
@@ -436,6 +437,23 @@ void main()
     vec3 env_spec = env_color * env_F * env_intensity;
     color += env_spec * metallic;
 
+#ifdef ENABLE_TRANSPARENCY
+    float alpha = clamp(Opacity, 0.0, 1.0);
+    // Optional thin-glass approximation. Keep reflected light independent of
+    // base opacity, and increase coverage at grazing angles (IOR ~1.5).
+    // This uses the environment, not scene refraction or multiple scattering.
+    if (transparent_reflections && alpha > 0.0 && alpha < 1.0 && metallic == 0.0)
+    {
+        float fresnel = 0.04 + 0.96 * pow(1.0 - NdotV, 5.0);
+        float glass_alpha = alpha + (1.0 - alpha) * fresnel;
+        vec3 reflected = env_color * fresnel * env_intensity;
+        reflected += (1.0 - shadow) * spotAttenuation * spec * specular_scale * light_color * NdotL * 3.0;
+        vec3 scattered = ambient + (1.0 - shadow) * spotAttenuation * diffuse * diffuse_scale * light_color * NdotL * 3.0;
+        color = (reflected + scattered * alpha) / max(glass_alpha, 1e-5);
+        alpha = glass_alpha;
+    }
+#endif
+
     // fog
     float dist = length(camera_to_fragment);
     float fog_start = 20.0;
@@ -453,7 +471,6 @@ void main()
     color = pow(color, vec3(1.0 / 2.2));
 
 #ifdef ENABLE_TRANSPARENCY
-    float alpha = clamp(Opacity, 0.0, 1.0);
     if (oit_enabled)
     {
         // Weighted-blended OIT (McGuire & Bavoil 2013, eq. 9). The published
@@ -659,6 +676,7 @@ class ShaderShape(ShaderGL):
             self.loc_albedo_map = self._get_uniform_location("albedo_map")
             self.loc_env_map = self._get_uniform_location("env_map")
             self.loc_env_intensity = self._get_uniform_location("env_intensity")
+            self.loc_transparent_reflections = self._get_uniform_location("transparent_reflections")
             self.loc_fog_color = self._get_uniform_location("fogColor")
             self.loc_up_axis = self._get_uniform_location("up_axis")
             self.loc_sun_direction = self._get_uniform_location("sun_direction")
@@ -706,6 +724,7 @@ class ShaderShape(ShaderGL):
         light_space_matrix: np.ndarray | None = None,
         env_texture: int | None = None,
         env_intensity: float = 1.0,
+        transparent_reflections: bool = False,
         shadow_radius: float = 3.0,
         diffuse_scale: float = 1.0,
         specular_scale: float = 1.0,
@@ -770,6 +789,7 @@ class ShaderShape(ShaderGL):
                 self._gl.glBindTexture(self._gl.GL_TEXTURE_2D, RendererGL.get_fallback_texture())
             self._gl.glUniform1i(self.loc_env_map, 2)
             self._gl.glUniform1f(self.loc_env_intensity, float(env_intensity))
+            self._gl.glUniform1i(self.loc_transparent_reflections, int(transparent_reflections))
 
 
 class ShaderSky(ShaderGL):

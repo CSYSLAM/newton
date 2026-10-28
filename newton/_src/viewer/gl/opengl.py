@@ -1249,6 +1249,7 @@ class RendererGL:
 
         self._env_texture = None
         self._env_intensity = 1.0
+        self.transparent_reflections = False
         self._env_path = None
         self._env_texture_obj = None
 
@@ -2163,6 +2164,7 @@ class RendererGL:
             ground_color=self.ambient_ground,
             env_texture=self._env_texture,
             env_intensity=self._env_intensity,
+            transparent_reflections=self.transparent_reflections,
             shadow_radius=self.shadow_radius,
             diffuse_scale=self.diffuse_scale,
             specular_scale=self.specular_scale,

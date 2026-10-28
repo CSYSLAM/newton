@@ -949,6 +949,18 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         # material / background
         critical_fraction: float = 0.0
         """Fraction for particles under which the yield surface collapses."""
+        density_correction: float = 0.0
+        """Experimental per-step relaxation of excess particle volume (0 to 1).
+
+        Zero preserves the existing velocity-level incompressibility solve.
+        Positive values add a bounded expansion target to its pressure RHS,
+        using particle volume and the unoccupied collider volume in each cell.
+        Requires P0 strain, critical_fraction=1, warmstart_mode="none", and
+        non-compliant material without hardening. Intended for incompressible
+        liquids; it is not an energy-conserving integration scheme. Correction
+        is capped at 25% of particle volume before applying this multiplier,
+        and its effective relaxation rate depends on the simulation timestep.
+        """
         air_drag: float = 1.0
         """Numerical drag for the background air."""
 
@@ -1450,6 +1462,14 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         if self._initial_particle_count == 0:
             raise ValueError("SolverImplicitMPM requires at least one particle.")
 
+        self.density_correction = float(config.density_correction)
+        if not np.isfinite(self.density_correction) or not 0.0 <= self.density_correction <= 1.0:
+            raise ValueError("density_correction must be finite and between 0 and 1")
+        if self.density_correction > 0.0 and (
+            config.strain_basis != "P0" or config.critical_fraction != 1.0 or config.warmstart_mode != "none"
+        ):
+            raise ValueError("density_correction requires P0 strain, critical_fraction=1, and warmstart_mode='none'")
+
         self._separate_worlds = bool(config.separate_worlds and self._initial_world_count > 1)
         self._environment_count = self._initial_world_count if self._separate_worlds else 1
         self._particle_environment = model.particle_world if self._separate_worlds else None
@@ -1483,6 +1503,8 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             self._particle_world_ranges = particle_world_ranges
 
         self._mpm_model = ImplicitMPMModel(model, config)
+        if self.density_correction > 0.0 and (self._mpm_model.has_compliant_particles or self._mpm_model.has_hardening):
+            raise ValueError("density_correction requires non-compliant material without hardening")
 
         self.max_iterations = config.max_iterations
         self.tolerance = float(config.tolerance)
@@ -3564,6 +3586,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                     dim=scratch.strain_node_count,
                     inputs=[
                         mpm_model.critical_fraction,
+                        self.density_correction,
                         scratch.strain_node_particle_volume,
                         scratch.strain_node_collider_volume,
                         scratch.strain_node_volume,
@@ -3822,6 +3845,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 has_viscosity=self._mpm_model.has_viscosity,
                 has_dilatancy=self._mpm_model.has_dilatancy,
                 strain_velocity_node_count=-1 if self._separate_worlds else self._velocity_nodes_per_strain_sample,
+                density_correction=self.density_correction > 0.0,
             )
             collision_data = CollisionData(
                 collider_mat=scratch.collider_matrix,
