@@ -208,10 +208,15 @@ class Example(W1MJMPMScene):
             "air_drag": 1.0e-3,
             "transfer_scheme": "pic",
             "integration_scheme": "pic",
+            "advection_order": 2,
             "tolerance": 1.0e-4,
-            "critical_fraction": 1.0,
-            "density_correction": 0.1,
-            "warmstart_mode": "none",
+            # Resolve the velocity divergence within each cell and reduce
+            # transport compression instead of continually expanding noisy
+            # cell particle counts with density feedback.
+            "critical_fraction": 0.0,
+            "density_correction": 0.0,
+            "warmstart_mode": "particles",
+            "project_particle_contacts": True,
         }
 
     def _sample(self, time):
@@ -306,6 +311,18 @@ class Example(W1MJMPMScene):
             (np.linalg.norm(points[:, :2], axis=1) < radius + 0.002) & (points[:, 2] > 0.093) & (points[:, 2] < 0.197)
         )
 
+    def bottle_mask(self):
+        """Locate liquid inside the bottle in its current body frame."""
+        pose = self.state_0.body_q.numpy()[self.bottle]
+        points = self.state_0.particle_q.numpy()[self.liquid_begin : self.liquid_end]
+        local = (points - pose[:3]) @ np.asarray(wp.quat_to_matrix(wp.quat(*pose[3:]))).reshape(3, 3)
+        radius = 0.8 * np.interp(
+            local[:, 2],
+            [0.015, 0.070, 0.099, 0.125, 0.140, 0.180],
+            [0.040, 0.042, 0.038, 0.021, 0.014, 0.014],
+        )
+        return (np.linalg.norm(local[:, :2], axis=1) < radius + 0.002) & (local[:, 2] > 0.012) & (local[:, 2] < 0.183)
+
     def glass_volume_estimate(self):
         """Compare reference volume with a settled, level-surface cavity estimate.
 
@@ -327,6 +344,19 @@ class Example(W1MJMPMScene):
         return reference, float(volume)
 
     def after_step(self):
+        if self.args.test and (self.frame in (120, 240) or (self.frame >= 1200 and self.frame % 30 == 0)):
+            velocities = self.state_0.particle_qd.numpy()[self.liquid_begin : self.liquid_end]
+            if self.frame >= 1200:
+                velocities = velocities[self.glass_mask()]
+            if len(velocities):
+                rms = float(np.sqrt(np.mean(np.sum(velocities**2, axis=1))))
+                if rms > 0.005:
+                    raise AssertionError(f"Settled liquid still moving at frame {self.frame}: RMS={rms:.4f} m/s")
+        # The bottle stays upright through the lift/transfer until 6.5 s.
+        if self.args.test and self.frame <= 390:
+            escaped = int(np.count_nonzero(~self.bottle_mask()))
+            if escaped:
+                raise AssertionError(f"{escaped} liquid particles leaked before pouring at frame {self.frame}")
         if self.frame in (120, 240):
             pose = self.state_0.body_q.numpy()[self.bottle]
             points = self.state_0.particle_q.numpy()[self.liquid_begin : self.liquid_end]
@@ -368,19 +398,10 @@ class Example(W1MJMPMScene):
             raise AssertionError(f"Bottle grasp failed: lift={self.peak_lift:.3f}, slip={self.max_grasp_error:.3f}m")
         if np.linalg.norm(pose[:3] - BOTTLE_CENTER) > 0.03 or up[2] < 0.97:
             raise AssertionError(f"Bottle was not returned upright: {pose}")
-        points = self.state_0.particle_q.numpy()[self.liquid_begin : self.liquid_end]
-        local = (points - pose[:3]) @ np.asarray(wp.quat_to_matrix(wp.quat(*pose[3:]))).reshape(3, 3)
-        radius = 0.8 * np.interp(
-            local[:, 2],
-            [0.015, 0.070, 0.099, 0.125, 0.140, 0.180],
-            [0.040, 0.042, 0.038, 0.021, 0.014, 0.014],
-        )
-        in_bottle = (
-            (np.linalg.norm(local[:, :2], axis=1) < radius + 0.002) & (local[:, 2] > 0.012) & (local[:, 2] < 0.183)
-        )
+        in_bottle = self.bottle_mask()
         escaped = int(np.count_nonzero(~(in_bottle | self.glass_mask())))
         print(f"[WuliangyePour] delivery={fraction:.1%}, escaped={escaped}/{self.count}", flush=True)
-        if escaped > 0.005 * self.count:
+        if escaped:
             raise AssertionError(f"{escaped} liquid particles escaped both vessels")
         flags = self.model.particle_flags.numpy()[self.liquid_begin : self.liquid_end]
         if not np.all(flags & int(newton.ParticleFlags.ACTIVE)):
@@ -439,9 +460,9 @@ class Example(W1MJMPMScene):
             coupling_iterations=1,
             # Keep about two particles per voxel axis with the coarser fill.
             voxel_size=0.006,
-            strain_basis="P0",
+            strain_basis="Q1d",
             mpm_solver="gs",
-            iterations=256,
+            iterations=64,
             stall_tolerance=0.0,
             rigid_material_coupling="constrained",
         )

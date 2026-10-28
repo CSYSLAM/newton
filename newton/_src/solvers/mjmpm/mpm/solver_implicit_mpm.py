@@ -945,6 +945,15 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         """Transfer scheme to use for particle-grid transfers."""
         integration_scheme: Literal["pic", "gimp"] = "pic"
         """Integration scheme controlling shape-function support."""
+        advection_order: int = 1
+        """Particle position integration order: 1 (Euler) or 2 (explicit midpoint).
+
+        Midpoint advection reduces transport-induced volume error in liquids.
+        It samples the frozen solved velocity field twice, extending it by the
+        nearest active-grid boundary value outside the grid. It does not change
+        velocity/gradient transfer, provide CCD, or guarantee volume conservation.
+        The default retains the existing Euler update.
+        """
 
         # material / background
         critical_fraction: float = 0.0
@@ -967,6 +976,15 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         # experimental
         collider_normal_from_sdf_gradient: bool = False
         """Compute collider normals from sdf gradient rather than closest point"""
+        project_particle_contacts: bool = False
+        """Project residual particle penetration after grid-to-particle transfer.
+
+        Opt-in discrete contact stabilization for thin containers. Corrects
+        position, velocity and velocity gradient using the collider mesh;
+        opposite velocity impulses are included in collider feedback.
+        This is not continuous collision detection or an energy-conserving
+        integrator. It cannot recover particles already beyond a thin wall.
+        """
         collider_basis: _MPMColliderBasisName = "S2"
         """Collider basis function. Defaults to ``"S2"``; pass ``"Q1"``
         to restore the previous trilinear collider basis. Common values are
@@ -1463,6 +1481,9 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             raise ValueError("SolverImplicitMPM requires at least one particle.")
 
         self.density_correction = float(config.density_correction)
+        if config.advection_order not in (1, 2):
+            raise ValueError("advection_order must be 1 or 2")
+        self.advection_order = int(config.advection_order)
         if not np.isfinite(self.density_correction) or not 0.0 <= self.density_correction <= 1.0:
             raise ValueError("density_correction must be finite and between 0 and 1")
         if self.density_correction > 0.0 and (
@@ -1552,6 +1573,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         self.gimp = config.integration_scheme == "gimp"
         self.collider_normal_from_sdf_gradient = config.collider_normal_from_sdf_gradient
         self.collider_basis = config.collider_basis
+        self.project_particle_contacts = config.project_particle_contacts
         self._iteration_snapshots = {}
         self._independent_rigidity = None
         self._articulated_rigidity = None
@@ -2290,11 +2312,20 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             state = self._scratchpad
 
         cell_volume = self._mpm_model.voxel_size**3
-        return (
+        result = (
             -cell_volume * state.impulse_field.dof_values,
             state.collider_position_field.dof_values,
             state.collider_ids,
         )
+        if self.project_particle_contacts and hasattr(state, "particle_contact_reactions"):
+            combined = []
+            for grid, particles in zip(result, state.particle_contact_reactions, strict=True):
+                values = wp.empty(grid.shape[0] + particles.shape[0], dtype=grid.dtype, device=grid.device)
+                wp.copy(values, grid, count=grid.shape[0])
+                wp.copy(values, particles, dest_offset=grid.shape[0], count=particles.shape[0])
+                combined.append(values)
+            return tuple(combined)
+        return result
 
     @property
     def collider_body_index(self) -> wp.array:
@@ -2340,6 +2371,9 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 state_out.particle_q,
                 state_out.particle_qd,
                 state_out.mpm.particle_qd_grad,
+                None,
+                None,
+                None,
             ],
             device=state_in.particle_q.device,
         )
@@ -3134,6 +3168,36 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
         # Update and advect particles
         self._update_particles(state_in, state_out, dt, pic, scratch)
+
+        if self.project_particle_contacts:
+            model = self.model
+            # Keep these with the step's other feedback fields. Each step
+            # owns its arrays, including repeated passes and graph capture.
+            reactions = (
+                wp.empty(model.particle_count, dtype=wp.vec3, device=model.device),
+                wp.empty(model.particle_count, dtype=wp.vec3, device=model.device),
+                wp.empty(model.particle_count, dtype=int, device=model.device),
+            )
+            wp.launch(
+                project_outside_collider,
+                dim=model.particle_count,
+                inputs=[
+                    state_out.particle_q,
+                    state_out.particle_qd,
+                    state_out.mpm.particle_qd_grad,
+                    self._mpm_model.particle_flags,
+                    model.particle_mass,
+                    self._particle_environment,
+                    self._mpm_model.collider,
+                    state_in.body_q,
+                    state_in.body_qd if self.collider_velocity_mode == "forward" else None,
+                    last_step_data.body_q_prev if self.collider_velocity_mode == "backward" else None,
+                    dt,
+                ],
+                outputs=[state_out.particle_q, state_out.particle_qd, state_out.mpm.particle_qd_grad, *reactions],
+                device=model.device,
+            )
+            state_out.particle_contact_reactions = reactions
 
         # Save data for next step or further processing
         self._save_data(state_in, scratch, last_step_data, state_out)
@@ -3952,6 +4016,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                     "vel_grad": state_out.mpm.particle_qd_grad,
                     "dt": dt,
                     "max_vel": model.particle_max_velocity,
+                    "advection_order": self.advection_order,
                 },
                 fields={
                     "grid_vel": scratch.velocity_field,

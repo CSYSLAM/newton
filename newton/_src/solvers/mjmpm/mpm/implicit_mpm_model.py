@@ -243,7 +243,14 @@ def _create_body_collider_mesh(
         ],
     )
 
-    return wp.Mesh(collider_points, collider_indices, wp.zeros_like(collider_points)), face_material_ids
+    # These meshes are fixed in the body's frame. Amortize a higher-quality
+    # build over repeated distance/normal queries: CUDA's default LBVH can
+    # traverse poorly when a large static surface shares a mesh with small,
+    # detailed shapes. Externally supplied deformable meshes keep their BVH.
+    return (
+        wp.Mesh(collider_points, collider_indices, wp.zeros_like(collider_points), bvh_constructor="sah"),
+        face_material_ids,
+    )
 
 
 @wp.struct

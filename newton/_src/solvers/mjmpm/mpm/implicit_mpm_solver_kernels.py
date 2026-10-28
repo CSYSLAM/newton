@@ -339,6 +339,7 @@ def advect_particles(
     grid_vel: fem.Field,
     dt: float,
     max_vel: float,
+    advection_order: int,
     particle_flags: wp.array[wp.int32],
     particle_volume: wp.array[float],
     pos: wp.array[wp.vec3],
@@ -356,6 +357,20 @@ def advect_particles(
     p_vel_grad = fem.grad(grid_vel, s)
 
     delta_pos = dt * p_vel_cfl
+    if advection_order == 2:
+        # Integrate through the frozen velocity field at its midpoint. Query
+        # the original environment even when worlds overlap in space.
+        # Lookup extends the field by its nearest active-grid boundary value.
+        midpoint = fem.lookup(domain, domain(s) + 0.5 * delta_pos, fem.environment_index(domain, s))
+        if midpoint.element_index != fem.NULL_ELEMENT_INDEX:
+            midpoint_vel = grid_vel(midpoint)
+            midpoint_speed_sq = wp.length_sq(midpoint_vel)
+            midpoint_vel = wp.where(
+                midpoint_speed_sq > max_vel * max_vel,
+                midpoint_vel * max_vel / wp.sqrt(midpoint_speed_sq),
+                midpoint_vel,
+            )
+            delta_pos = dt * midpoint_vel
 
     gimp_weight = s.qp_weight * fem.measure(domain, s) / particle_volume[s.qp_index]
     wp.atomic_add(pos, s.qp_index, gimp_weight * delta_pos)

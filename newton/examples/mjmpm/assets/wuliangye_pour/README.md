@@ -77,10 +77,85 @@ because the bottle walls separate the fingers from the contained liquid;
 forces still reach the robot through the free bottle and its rigid contacts.
 The geometry and trajectory are designed together for this example.
 
-### Current liquid density feedback configuration
+### Current settled-liquid configuration (2026-10-28)
 
-The default keeps 10,062 particles, a 6 mm grid, four substeps, PIC transfer,
-particle-based contact, and CUDA graph execution. It now uses P0 strain,
+The default retains 10,062 particles, their reference volume and display size,
+the 6 mm grid, four substeps, PIC transfer, particle contact projection and CUDA
+graphs. It uses Q1d strain, particle stress warm starts, 64 GS iterations and
+explicit midpoint particle advection (`advection_order=2`). Cell-density
+feedback and the unilateral void offset are disabled. Q1d resolves eight strain
+modes per cell instead of P0's single constant mode; iteration counts between
+these discretizations are not directly comparable. Geometry, grasp and pour
+trajectory are unchanged.
+
+The previous P0 density-feedback preset sustained numerical motion: bottle RMS
+speed was 38.1 mm/s at frame 240 and glass RMS speed was 30.2 mm/s at frame 1320.
+Disabling contact projection did not remove this motion. Weakening density
+feedback reduced motion but collapsed the fill. Increasing P0 iterations to
+1,024 did not resolve it either. The coarse cell-volume feedback continuously
+requests expansion as discrete particle counts change.
+
+Removing feedback with P1d and particle warm starts made the liquid quiet but
+left only about 181 ml in the cup's level estimate for 310 ml of reference
+material. The retained change also addresses transport error: Euler advection
+can change material volume even in a divergence-free extensional velocity
+field. Midpoint advection reduces that error, while Q1d improves the resolved
+divergence constraint. It samples the solved, frozen velocity field at the
+midpoint, using the nearest active-grid boundary value outside the grid and
+an explicit environment index for overlapping worlds. Velocity/gradient
+transfer and collider reaction accounting remain unchanged. This is not CCD,
+an exact volume-preserving map, or a second-order integrator for the complete
+coupled simulation. Other scenes retain Euler advection by default.
+
+Complete synchronized GL validation on the RTX 5060 Ti, 1280x900, 1,320 frames:
+
+| Measurement | Previous projection preset | Current midpoint/Q1d preset |
+| --- | ---: | ---: |
+| Mean simulation + GL FPS, after 60 warmup frames | 13.47 | 16.12 |
+| Final escaped particles | 0 | 0 |
+| Delivered particles | 9,967 / 10,062 | 9,829 / 10,062 |
+| Cup level volume estimate | 287.0 ml | 287.3 ml |
+| Cup particle reference volume | 311.5 ml | 307.2 ml |
+
+The current GL recording measured bottle/glass RMS speeds of 0.70/0.70 mm/s,
+and respective RMS displacements of 0.224/0.238 mm over the preceding half
+second. The earlier motion measurements came from the same preset in a
+separate null-viewer diagnostic, rather than from the earlier GL recording.
+These are reductions in numerical motion, not frozen particles. The simulation
+still advances through the full 22-second sequence and stops at its usual end.
+The final level estimate is 6.5% below reference; the existing 10% volume
+tolerance, 95% delivery requirement and zero-escape checks were not relaxed.
+The new test-mode settled-motion check requires RMS speed below 5 mm/s at
+frames 120, 240 and every 30 frames from 1200 through 1320.
+
+FPS includes synchronized simulation and GL rendering, excluding image readback
+and encoding. The 60 FPS video playback rate is not simulation throughput.
+The requested 25 FPS has not been reached. The full recording passed grasp,
+return pose, active flags, capacity, liquid retention and per-frame initial
+containment checks. A midpoint lookup prototype using a distance-limited sample
+hint leaked one particle during transfer and was rejected; the retained lookup
+uses the explicit world index. No particles are hidden, removed or frozen.
+
+Results and rejected probes are outside the checkout under
+`E:/csy_work/CG/Engine/newton-results/wuliangye-pour/stability/`.
+The complete video and measurement report are
+`final_video/wuliangye_pour.mp4` and `final_video/wuliangye_pour.json`.
+`test_advection.py` covers analytical extensional-flow volume error, unchanged
+Euler behavior and velocity/gradient transfer, inactive particles, speed limits,
+overlapping worlds and CUDA graph replay on CPU/CUDA as applicable.
+The combined 78-test MJMPM regression suite passed in 144.0 seconds, covering
+the material/rigid solver, contact space, bread cutting/cohesion, density
+feedback, collider BVH, contact projection and advection. Restoring the previous
+P0/Euler/feedback preset fails the new settled-motion assertion at frame 120
+(38.2 mm/s RMS), confirming that the check detects the reported behavior.
+A separate complete `--viewer null --test` run through the normal example
+entry point also passed: 99.1% delivery, zero escaped particles, 311.8 ml
+reference versus 289.2 ml level estimate, and 3.8 mm maximum grasp offset.
+
+### Previous liquid density feedback configuration
+
+That preset kept 10,062 particles, a 6 mm grid, four substeps, PIC transfer,
+particle-based contact, and CUDA graph execution. It used P0 strain,
 GS with a 256-iteration budget, `critical_fraction=1`,
 `density_correction=0.1`, and no stress warm start. The liquid explicitly
 disables plastic hardening/softening rates. The particle count and radius,
@@ -345,6 +420,123 @@ outer graph capture is only a stability workaround, not a fix for the CUDA
 fault. Further work must address discretization/convergence and graph safety,
 then rerun the complete grasp/pour/return and containment checks; simply
 reducing particles or iterations would not meet the requested behavior.
+
+## Rigid collider BVH optimization (2026-10-28)
+
+MJMPM now builds its shape-derived rigid collider meshes with SAH BVHs.
+CUDA's default LBVH performed poorly on the merged scene mesh containing
+both large surfaces and detailed small vessels. The geometry, closest-point
+queries, averaged normals and material assignment are unchanged. Externally
+supplied deformable meshes retain their original BVHs. SAH may cost more to
+build once; the benefit is repeated simulation queries.
+
+On the RTX 5060 Ti, the complete 1,320-frame, 1280x900 GL recording improved
+from **10.49 to 13.66 FPS (30.3%)**, including simulation and synchronized
+rendering after 60 warmup frames, excluding readback and encoding. Playback
+remains 60 Hz. This does not meet the 25 FPS target. Both runs use 10,062
+particles, four substeps, 256 GS iterations, density correction 0.1, and the
+same assets, grid, trajectory, grasp and rendering settings.
+
+| Complete recording | Previous LBVH | SAH |
+| --- | ---: | ---: |
+| Particles in glass | 9,925 (98.6%) | 9,934 (98.7%) |
+| Escaped particles | 24 | 28 |
+| Cup level volume estimate | 286.8 ml | 286.3 ml |
+| Reference volume of particles in cup | 310.2 ml | 310.4 ml |
+| Maximum grasp offset | 3.94 mm | 3.90 mm |
+
+Both recordings pass the complete final checks. The level estimate integrates
+the cup cavity profile to the measured liquid height; it is not an exact
+volume-conservation measurement. BVH traversal order changes floating-point
+roundoff, so trajectories are not promised bitwise identical.
+
+A fixed late-pour snapshot measured the original collider-query batch at
+9.65 ms with LBVH and 0.325 ms with SAH. Its largest signed-distance difference
+was 5.6e-9 m and normal-component difference 1.4e-6, with identical hit and
+material results. This roughly 30-fold query speedup is not the overall FPS
+gain. A separate synthetic test covers CPU/CUDA, mixed-scale geometry,
+per-face materials, rigid transforms and CUDA graph replay; its large-plane
+closest-point roundoff can amplify normal differences beyond this snapshot.
+
+Temporal nearest-face hints, smaller contact basis capacity, and alternative
+GS launch layouts did not justify additional changes and were not retained.
+Diagnostic scripts and recordings remain outside the checkout under
+`E:/csy_work/CG/Engine/newton-results/wuliangye-pour/perf_preserve/`.
+The candidate video is `sah_video/wuliangye_pour.mp4`, accompanied by timing
+JSON, validation logs and preview frames.
+
+All 73 MJMPM regression tests passed in 120.4 seconds, covering solver and
+contact-space behavior, bread cutting/cohesion, density feedback and the new
+collider-query comparison.
+The final production code also passed a separate 1,320-frame GL
+`--headless --test` run, including per-step finite-state checks: delivery
+98.8%, 29 escaped particles, 286.5 ml level estimate versus 310.7 ml reference,
+and 3.6 mm maximum grasp offset.
+
+## Initial bottle leakage correction (2026-10-28)
+
+The BVH comparison above missed a defect: its final containment allowance
+accepted a few dozen particles that had leaked before pouring. Passing those
+checks did not establish unchanged initial containment. In matched 270-frame
+probes, both the previous LBVH and SAH leaked through the bottle boundary:
+23 and 28 particles respectively at frame 270. LBVH already had an escaped
+particle at frame 110. Thus reverting BVH construction alone does not fix it.
+
+Grid contact and PIC transfer leave residual particle penetration at the
+bottle's bottom/side junction. Tracking individual particles also revealed
+particles entering the glass normally and subsequently penetrating its lower
+wall. Margin-only and thicker-shell trials were not robust: an extended
+upright check failed at frame 290 with a 1.5 mm margin, and a thicker-shell
+full recording still had seven escaped particles. These geometry and margin
+trials are not retained; the earlier one-escaped-particle video in `leak_fix`
+is a rejected candidate, not the final fix.
+
+The example now opts into `project_particle_contacts`, using the existing
+MJMPM mesh-based contact projection after particle advection. It corrects
+residual penetration, contact velocity and velocity gradient. Opposite
+velocity-correction impulses and their contact points join the normal
+collider feedback, so free bodies receive the reaction as well. The option
+defaults to false for other scenes. This is discrete contact stabilization,
+not continuous collision detection or an energy-conserving integration
+scheme; it cannot recover a particle that has already crossed a thin wall.
+
+Particle count, mass, time steps, solver iterations, mesh assets, margins,
+rendering and trajectory remain unchanged. Projection does change physical
+particle positions and velocities at contact; particles are neither hidden
+nor deleted, and missed pours are not moved into the glass.
+
+Test mode now rejects any particle outside the bottle **every frame** up to
+frame 390, when the upright grasp/lift/transfer ends and tilting starts. The
+final test requires **zero** particles outside both vessels, replacing the
+former 0.5% allowance. It uses the existing containment tolerances, including
+2 mm radial bottle tolerance and a 12 mm minimum local height below its
+15 mm floor. This detects escaped particles, not zero mathematical contact
+penetration.
+
+The production version with reaction impulses passed a full 1,320-frame GL
+`--headless --test` run with zero escaped particles, 99.1% delivery, 286.9 ml
+cup level estimate versus 311.8 ml reference, and 3.8 mm maximum grasp offset.
+Settled bottle height remains about 95 mm. Final production artifacts are in
+`E:/csy_work/CG/Engine/newton-results/wuliangye-pour/perf_preserve/leak_reaction/`.
+New CPU/CUDA tests cover moving-wall velocity response, equal-and-opposite
+impulses, inactive/kinematic particles, feedback collection, CUDA graph replay
+and free-body linear momentum. Position stabilization is not claimed to
+conserve energy or angular momentum exactly.
+All 76 MJMPM regression tests passed together, including solver, articulated
+coupling, contact space, bread cutting, density feedback, BVH and projection
+coverage. The new projection integration fixtures use S2 collision space to
+avoid a Warp point-basis specialization cache collision when mixed with other
+test fixtures in one process; the full pouring checks exercise `pic1024`.
+The final production recording independently passed with **0/10,062 escaped
+particles**, 99.1% delivery, 287.0 ml cup level estimate versus 311.5 ml
+reference, and 3.63 mm maximum grasp offset. Mean synchronized simulation
+plus GL throughput is **13.47 FPS**, retaining most of the 13.66 FPS SAH
+speedup while fixing penetration (the pre-SAH baseline was 10.49 FPS).
+The 22-second, 1,320-frame video is `leak_reaction/wuliangye_pour.mp4`.
+Disabling only `project_particle_contacts` reproduces the regression: the
+new initial-containment assertion fails at frame 99 with one escaped particle
+(`disabled_regression.log`). Both complete production runs with it enabled
+finish with zero escaped particles.
 
 ## Historical results for the 4,342-particle version
 

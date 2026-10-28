@@ -431,6 +431,9 @@ def project_outside_collider(
     positions_out: wp.array[wp.vec3],
     velocities_out: wp.array[wp.vec3],
     velocity_gradients_out: wp.array[wp.mat33],
+    reaction_impulses: wp.array[wp.vec3],
+    reaction_positions: wp.array[wp.vec3],
+    reaction_collider_ids: wp.array[int],
 ):
     """Project particles outside colliders and apply Coulomb response.
 
@@ -455,8 +458,16 @@ def project_outside_collider(
         positions_out: Output particle positions.
         velocities_out: Output particle velocities.
         velocity_gradients_out: Output particle velocity gradients.
+        reaction_impulses: Optional opposite velocity-correction impulses.
+        reaction_positions: Optional world-space contact positions.
+        reaction_collider_ids: Optional stable collider IDs, or -1 without contact.
     """
     i = wp.tid()
+
+    if reaction_impulses:
+        reaction_impulses[i] = wp.vec3(0.0)
+        reaction_positions[i] = wp.vec3(0.0)
+        reaction_collider_ids[i] = -1
 
     pos_adv = positions[i]
     p_vel = velocities[i]
@@ -473,7 +484,7 @@ def project_outside_collider(
         environment_index = particle_environment[i]
 
     # project outside of collider
-    sdf, sdf_gradient, sdf_vel, _collider_id, material_id = collision_sdf(
+    sdf, sdf_gradient, sdf_vel, collider_id, material_id = collision_sdf(
         pos_adv, environment_index, collider, body_q, body_qd, body_q_prev, dt
     )
 
@@ -482,6 +493,11 @@ def project_outside_collider(
         # remove normal vel
         friction = collider.material_friction[material_id]
         delta_vel = solve_coulomb_isotropic(friction, sdf_gradient, p_vel - sdf_vel) + sdf_vel - p_vel
+
+        if reaction_impulses:
+            reaction_impulses[i] = -particle_mass[i] * delta_vel
+            reaction_positions[i] = pos_adv - sdf * sdf_gradient
+            reaction_collider_ids[i] = collider_id
 
         p_vel += delta_vel
         pos_adv += delta_vel * dt
