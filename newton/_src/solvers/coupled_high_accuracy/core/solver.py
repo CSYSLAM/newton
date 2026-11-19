@@ -35,6 +35,7 @@ from .kernels import affine as affine_kernels
 from .kernels import affine_block as affine_block_kernels
 from .kernels import cloth as cloth_kernels
 from .kernels import drag as drag_kernels
+from .kernels import hard_contacts as hard_contact_kernels
 from .kernels import joints as joint_kernels
 from .kernels import pcg as pcg_kernels
 from .kernels import rigid_contacts as rigid_contact_kernels
@@ -116,9 +117,25 @@ class Solver(BodyPrecompute):
         return dict(self._launches)
 
     def reserve_rigid_contact_capacity(self, capacity: int) -> None:
+        """Grow the hard-contact history, keeping existing entries and zeroing the new tail."""
         if not self._initialized or capacity <= self.hard_capacity:
             return
-        raise _not_ported("hard rigid contacts")
+        for name, dtype in self._HARD_BUFFERS:
+            old = getattr(self, name)
+            new = self._zeros(capacity, dtype)
+            if self.hard_capacity:
+                wp.copy(new, old, count=self.hard_capacity)
+            setattr(self, name, new)
+        self.hard_capacity = capacity
+
+    _HARD_BUFFERS = (
+        ("hard_penalty", wp.float32),
+        ("hard_dual", wp.vec3),
+        ("hard_anchor", wp.vec3),
+        ("hard_previous_penalty", wp.float32),
+        ("hard_previous_dual", wp.vec3),
+        ("hard_previous_normal", wp.vec3),
+    )
 
     def reset_joint_drive_state(self, stream: Any = None, mask: Span = Span()) -> None:  # noqa: B008
         # External affine-state edits invalidate hard-contact history even without joint drives.
@@ -317,6 +334,8 @@ class Solver(BodyPrecompute):
         self.count = count
         self.per_world = model.particle_count
         self.hard_capacity = 0
+        for name, dtype in self._HARD_BUFFERS:
+            setattr(self, name, self._empty(dtype))
         self.drive_total = 0
         self.cable_count = 0
         if not count:
@@ -749,9 +768,10 @@ class Solver(BodyPrecompute):
             raise _not_ported("full-surface soft contacts")
         hard = rigid and config.rigid_contact_hard
         rolling = rigid and self.rolling
-        if hard:
-            raise _not_ported("hard rigid contacts")
+        if hard and config.rigid_contact_history and not contact.match_index.size:
+            raise ValueError("hard-contact history requires collision match indices")
         self._rigid = rigid
+        self._hard = hard
         self._rolling = rolling
         if contact.soft_max_count:
             if not surface and (
@@ -867,6 +887,16 @@ class Solver(BodyPrecompute):
         body_indices = v["affine_body_indices"]
         body_masses = v["body_masses"]
         rows_total = count
+        body_block_flag = bodies and block and config.affine_body_block_preconditioner
+        self._contact_block = hard and body_block_flag and config.affine_body_contact_block_preconditioner
+        if hard:
+            self.reserve_rigid_contact_capacity(contact.max_count)
+            launch(
+                "hard_initialize",
+                hard_contact_kernels.initialize_hard_contacts,
+                contact.max_count,
+                [self._hard_view(contact, q_in, inverse_dt)],
+            )
 
         if self._inertial_templates():
             entries = self.max_entries * per_world
@@ -1139,7 +1169,9 @@ class Solver(BodyPrecompute):
                         per_world,
                     ],
                 )
-            if rigid:
+            if hard:
+                self._hard_evaluate(contact, q_in, inverse_dt, force=self.rhs, scalar=self.diagonal)
+            elif rigid:
                 self._rigid_contact(contact, q_in, qd_in, inverse_dt, force=self.rhs, scalar=self.diagonal)
             if rolling:
                 self._launch_rolling(
@@ -1681,6 +1713,13 @@ class Solver(BodyPrecompute):
                     )
             # The native host updates state_in.q in place, even when state_out owns a separate allocation.
             launch("apply", step_kernels.apply_nonlinear_step, count, [q_in, q_out, self.solution])
+            if hard:
+                launch(
+                    "hard_update",
+                    hard_contact_kernels.update_hard_contact_duals,
+                    contact.max_count,
+                    [self._hard_view(contact, q_out, inverse_dt)],
+                )
             if self.distance_total:
                 launch(
                     "distance_update",
@@ -1768,13 +1807,16 @@ class Solver(BodyPrecompute):
                 )
             wp.copy(q_in, q_out, count=count)
 
-        self.hard_previous_count.zero_()
+        if not hard:
+            self.hard_previous_count.zero_()
         if not config.nonlinear_iterations:
             wp.copy(q_out, q_in, count=count)
         # Report contact wrenches from the final solved pose before the velocity update.
         if contact.contact_force.size and (rigid or particle_contact):
             wrenches = self._view(contact.contact_force, wp.spatial_vector)
-        if contact.contact_force.size and rigid:
+        if contact.contact_force.size and hard:
+            self._hard_evaluate(contact, q_in, inverse_dt, contact_force=wrenches[: contact.max_count])
+        elif contact.contact_force.size and rigid:
             self._rigid_contact(contact, q_in, qd_in, inverse_dt, contact_force=wrenches[: contact.max_count])
         if contact.contact_force.size and rolling:
             self._launch_rolling(
@@ -1787,6 +1829,13 @@ class Solver(BodyPrecompute):
             )
         if contact.contact_force.size and particle_contact:
             self._soft_contact(contact, q_in, qd_in, inverse_dt, surface, contact_force=wrenches[contact.max_count :])
+        if hard:
+            launch(
+                "hard_snapshot",
+                hard_contact_kernels.snapshot_hard_contacts,
+                contact.max_count,
+                [self._hard_view(contact, q_in, inverse_dt)],
+            )
         launch("velocity", step_kernels.update_velocity, count, [inverse_dt, self.previous, q_out, qd_out])
         if self.drive_total:
             launch(
@@ -1970,6 +2019,93 @@ class Solver(BodyPrecompute):
         view.inertia = self._view(model.body_inertia_tensors, wp.float32, 9 * self.body_count)
         view.epsilon = self._config.rolling_friction_velocity_epsilon
         self._launch(key, kernel, contact.max_count, [view, *outputs])
+
+    def _hard_view(self, contact: Contact, x: wp.array, inverse_dt: float):
+        rigid = self._rigid_view(contact, x, self._empty(wp.vec3), inverse_dt)
+        view = hard_contact_kernels.HardContactView()
+        for name in (
+            "count",
+            "capacity",
+            "shape0",
+            "shape1",
+            "point0",
+            "point1",
+            "offset0",
+            "offset1",
+            "normal",
+            "margin0",
+            "margin1",
+            "shape_body",
+            "shape_type",
+            "shape_scale",
+            "local_shape_count",
+            "shapes_per_world",
+            "worlds",
+            "body_ids",
+            "body_indices",
+            "body_com",
+            "particles_per_world",
+            "x",
+            "previous",
+            "inv_dt",
+        ):
+            setattr(view, name, getattr(rigid, name))
+        view.shape_transform = rigid.transform
+        view.shape_ke = rigid.ke
+        view.shape_kd = rigid.kd
+        view.shape_mu = rigid.mu
+        view.match = self._view(contact.match_index, wp.int32, contact.max_count)
+        view.body_count = self.body_count
+        config = self._config
+        view.alpha = config.rigid_contact_alpha
+        view.beta = config.rigid_contact_beta
+        view.gamma = config.rigid_contact_gamma
+        view.start = config.rigid_contact_k_start
+        view.history = int(config.rigid_contact_history)
+        view.exact_friction = int(config.rigid_contact_sliding_tangent)
+        view.reset = int(contact.history_refresh)
+        view.penalty = self.hard_penalty
+        view.dual = self.hard_dual
+        view.anchor = self.hard_anchor
+        view.previous_penalty = self.hard_previous_penalty
+        view.previous_dual = self.hard_previous_dual
+        view.previous_normal = self.hard_previous_normal
+        view.previous_count = self.hard_previous_count
+        return view
+
+    def _hard_evaluate(
+        self,
+        contact,
+        x,
+        inverse_dt,
+        force=None,
+        scalar=None,
+        direction=None,
+        product=None,
+        system=None,
+        precond=None,
+        affine_blocks=None,
+        contact_force=None,
+    ) -> None:
+        def arg(value, dtype):
+            return value if value is not None else self._empty(dtype)
+
+        self._launch(
+            "hard_evaluate",
+            hard_contact_kernels.evaluate_hard_contacts,
+            contact.max_count,
+            [
+                self._hard_view(contact, x, inverse_dt),
+                arg(force, wp.vec3),
+                arg(scalar, wp.float32),
+                arg(direction, wp.vec3),
+                arg(product, wp.vec3),
+                arg(system, wp.mat33),
+                arg(precond, wp.mat33),
+                arg(affine_blocks, wp.float32),
+                arg(contact_force, wp.spatial_vector),
+            ],
+        )
 
     def _rigid_contact(self, contact, x, velocity, inverse_dt, force=None, scalar=None, contact_force=None) -> None:
         self._launch(
@@ -2310,7 +2446,18 @@ class Solver(BodyPrecompute):
         # The native solver retains A and inverts its separate cache in place.
         if block_matrix:
             wp.copy(self.preconditioner_blocks, self.blocks, count=count)
-        if self._rigid and self._config.enable_collision_hessian_non_diagonal:
+        if self._contact_block:
+            self.affine_blocks.zero_()
+        if self._hard:
+            self._hard_evaluate(
+                self._contact,
+                q_in,
+                inverse_dt,
+                system=self.blocks,
+                precond=self.preconditioner_blocks,
+                affine_blocks=self.affine_blocks if self._contact_block else None,
+            )
+        elif self._rigid and self._config.enable_collision_hessian_non_diagonal:
             self._rigid_tangent(self._contact, q_in, inverse_dt, system=self.blocks, precond=self.preconditioner_blocks)
         if self._particle_contact and (not pd or self._config.enable_collision_hessian_non_diagonal):
             self._soft_contact(
@@ -2476,7 +2623,7 @@ class Solver(BodyPrecompute):
                         self.body_rotation,
                         body_so3_alpha,
                         self.affine_enabled,
-                        self._empty(wp.float32),
+                        self.affine_blocks if self._contact_block else self._empty(wp.float32),
                         self.affine_blocks,
                         self.affine_valid,
                         bodies_per_world,
@@ -2502,7 +2649,7 @@ class Solver(BodyPrecompute):
                         self.body_rotation,
                         body_so3_alpha,
                         self.affine_enabled,
-                        self._empty(wp.float32),
+                        self.affine_blocks if self._contact_block else self._empty(wp.float32),
                         self.affine_blocks,
                         self.affine_valid,
                         bodies_per_world,
@@ -2672,7 +2819,9 @@ class Solver(BodyPrecompute):
                     per_world,
                 ],
             )
-        if self._rigid and self._config.enable_collision_hessian_non_diagonal:
+        if self._hard:
+            self._hard_evaluate(self._contact, q_in, inverse_dt, direction=self.direction, product=self.contact_product)
+        elif self._rigid and self._config.enable_collision_hessian_non_diagonal:
             self._rigid_tangent(self._contact, q_in, inverse_dt, direction=self.direction, product=self.contact_product)
         if self._contact_product:
             self._soft_contact_product(self._contact, q_in, self._qd_in, inverse_dt, self._surface)

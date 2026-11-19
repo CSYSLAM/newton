@@ -333,7 +333,15 @@ def cloth_ground(steps: int, options: dict[str, str]) -> Iterator[Any]:
     solver.config.linear_iterations = int(options.get("linear", 50))
     if options.get("diagonal"):
         solver.config.enable_collision_hessian_non_diagonal = False
-    yield from _run_contacts(model, solver, steps)
+    pipeline_options = {}
+    if options.get("hard"):
+        solver.config.rigid_contact_hard = True
+        solver.config.rigid_contact_beta = float(options.get("beta", 0.0))
+        solver.config.rigid_contact_sliding_tangent = bool(options.get("sliding"))
+        if options.get("history"):
+            solver.config.rigid_contact_history = True
+            pipeline_options["contact_matching"] = "sticky"
+    yield from _run_contacts(model, solver, steps, **pipeline_options)
 
 
 @scene
@@ -394,4 +402,12 @@ def boxes_on_ground(steps: int, options: dict[str, str]) -> Iterator[Any]:
         solver.config.rigid_contact_friction_epsilon = float(options["epsilon"])
     if options.get("diagonal"):
         solver.config.enable_collision_hessian_non_diagonal = False
-    yield from _run_contacts(model, solver, steps)
+    pipeline_options = {}
+    if options.get("hard"):
+        solver.config.rigid_contact_hard = True
+        solver.config.rigid_contact_beta = float(options.get("beta", 0.0))
+        solver.config.rigid_contact_sliding_tangent = bool(options.get("sliding"))
+        if options.get("history"):
+            solver.config.rigid_contact_history = True
+            pipeline_options["contact_matching"] = "sticky"
+    yield from _run_contacts(model, solver, steps, **pipeline_options)
