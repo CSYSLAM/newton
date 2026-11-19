@@ -2206,7 +2206,12 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
         view.kind = soft.particle_kind
         view.transform = soft.shape_transform
         view.ke, view.kd, view.kf, view.mu = soft.global_ke, soft.global_kd, soft.global_kf, soft.global_mu
-        self._launch(key, kernel, contact.soft_max_count, [view, *outputs])
+        view.stride = self._surface_threads(contact.soft_max_count)
+        self._launch(key, kernel, view.stride, [view, *outputs])
+
+    def _surface_threads(self, capacity: int) -> int:
+        """Grid cap shared by every surface kernel: max(1, SM count) x 256 threads."""
+        return min(capacity, max(1, self.device.sm_count) * 256)
 
     def _launch_rolling(
         self, key: str, kernel: Any, contact: Contact, x: wp.array, inverse_dt: float, outputs: list
@@ -3097,10 +3102,11 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
             launch(
                 "surface_tangent_cached",
                 surface_contact_kernels.multiply_cached_surface_contact_tangent,
-                self._contact.soft_max_count,
+                self._surface_threads(self._contact.soft_max_count),
                 [
                     self._view(self._contact.soft_count, wp.int32, 1),
                     self._contact.soft_max_count,
+                    self._surface_threads(self._contact.soft_max_count),
                     self.surface_tangent_cache,
                     self.direction,
                     product,

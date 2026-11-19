@@ -31,6 +31,9 @@ vec7f = wp.types.vector(length=7, dtype=wp.float32)
 class SurfaceContactView:
     count: wp.array[wp.int32]
     capacity: int
+    # Launched threads: surface kernels grid-stride over the contacts with at most SM count x 256 threads, as natively,
+    # instead of one mostly idle thread per capacity slot.
+    stride: int
     indices: wp.array[wp.vec3i]
     barycentric: wp.array[wp.vec3]
     shape: wp.array[wp.int32]
@@ -283,89 +286,83 @@ def contact_count(v: SurfaceContactView):
 def evaluate_surface_contact_force(
     v: SurfaceContactView, force: wp.array[wp.vec3], contact_force: wp.array[wp.spatial_vector]
 ):
-    i = wp.tid()
-    if i >= contact_count(v):
-        return
-    c = surface_contact(v, i)
-    if contact_force.shape[0] > 0:
-        contact_force[i] = c.wrench
-    if force.shape[0] == 0:
-        return
-    t = c.tangent
-    for j in range(t.normal_entries):
-        wp.atomic_add(force, t.normal_targets[j], t.normal_weights[j] * c.normal_force)
-    for j in range(t.friction_entries):
-        wp.atomic_add(force, t.friction_targets[j], t.friction_weights[j] * c.friction_force)
+    for i in range(wp.tid(), contact_count(v), v.stride):
+        c = surface_contact(v, i)
+        if contact_force.shape[0] > 0:
+            contact_force[i] = c.wrench
+        if force.shape[0] > 0:
+            t = c.tangent
+            for j in range(t.normal_entries):
+                wp.atomic_add(force, t.normal_targets[j], t.normal_weights[j] * c.normal_force)
+            for j in range(t.friction_entries):
+                wp.atomic_add(force, t.friction_targets[j], t.friction_weights[j] * c.friction_force)
 
 
 @wp.kernel
 def add_surface_contact_stiffness_scale(v: SurfaceContactView, scale: wp.array[float]):
-    i = wp.tid()
-    if i >= contact_count(v):
-        return
-    c = surface_contact(v, i)
-    t = c.tangent
-    for j in range(t.normal_entries):
-        w = t.normal_weights[j]
-        wp.atomic_add(scale, t.normal_targets[j], (w * w) * c.stiffness_sum)
+    for i in range(wp.tid(), contact_count(v), v.stride):
+        c = surface_contact(v, i)
+        t = c.tangent
+        for j in range(t.normal_entries):
+            w = t.normal_weights[j]
+            wp.atomic_add(scale, t.normal_targets[j], (w * w) * c.stiffness_sum)
 
 
 @wp.kernel
 def add_surface_contact_preconditioner(v: SurfaceContactView, blocks: wp.array[wp.mat33]):
-    i = wp.tid()
-    if i >= contact_count(v):
-        return
-    t = surface_contact(v, i).tangent
-    for j in range(t.normal_entries):
-        w = t.normal_weights[j]
-        wp.atomic_add(blocks, t.normal_targets[j], t.normal_matrix * (w * w))
-    for j in range(t.friction_entries):
-        w = t.friction_weights[j]
-        wp.atomic_add(blocks, t.friction_targets[j], t.friction_matrix * (w * w))
+    for i in range(wp.tid(), contact_count(v), v.stride):
+        t = surface_contact(v, i).tangent
+        for j in range(t.normal_entries):
+            w = t.normal_weights[j]
+            wp.atomic_add(blocks, t.normal_targets[j], t.normal_matrix * (w * w))
+        for j in range(t.friction_entries):
+            w = t.friction_weights[j]
+            wp.atomic_add(blocks, t.friction_targets[j], t.friction_matrix * (w * w))
 
 
 @wp.func
 def surface_tangent_product(t: SurfaceTangent, direction: wp.array[wp.vec3], product: wp.array[wp.vec3]):
+    # Constant trip counts let the compiler unroll and keep the seven-entry lists in registers; dynamic indexing
+    # would spill them to local memory.
     total = wp.vec3(0.0)
-    for j in range(t.normal_entries):
-        total = t.normal_weights[j] * direction[t.normal_targets[j]] + total
+    for j in range(7):
+        if j < t.normal_entries:
+            total = t.normal_weights[j] * direction[t.normal_targets[j]] + total
     value = t.normal_matrix * total
-    for j in range(t.normal_entries):
-        wp.atomic_add(product, t.normal_targets[j], t.normal_weights[j] * value)
+    for j in range(7):
+        if j < t.normal_entries:
+            wp.atomic_add(product, t.normal_targets[j], t.normal_weights[j] * value)
     total = wp.vec3(0.0)
-    for j in range(t.friction_entries):
-        total = t.friction_weights[j] * direction[t.friction_targets[j]] + total
+    for j in range(7):
+        if j < t.friction_entries:
+            total = t.friction_weights[j] * direction[t.friction_targets[j]] + total
     value = t.friction_matrix * total
-    for j in range(t.friction_entries):
-        wp.atomic_add(product, t.friction_targets[j], t.friction_weights[j] * value)
+    for j in range(7):
+        if j < t.friction_entries:
+            wp.atomic_add(product, t.friction_targets[j], t.friction_weights[j] * value)
 
 
 @wp.kernel
 def multiply_surface_contact_tangent(v: SurfaceContactView, direction: wp.array[wp.vec3], product: wp.array[wp.vec3]):
-    i = wp.tid()
-    if i >= contact_count(v):
-        return
-    surface_tangent_product(surface_contact(v, i).tangent, direction, product)
+    for i in range(wp.tid(), contact_count(v), v.stride):
+        surface_tangent_product(surface_contact(v, i).tangent, direction, product)
 
 
 @wp.kernel
 def cache_surface_contact_tangent(v: SurfaceContactView, cache: wp.array[SurfaceTangent]):
     """Evaluate each contact's Jacobians and matrices once per Newton iteration (not in the reference SDK)."""
-    i = wp.tid()
-    if i >= contact_count(v):
-        return
-    cache[i] = surface_contact(v, i).tangent
+    for i in range(wp.tid(), contact_count(v), v.stride):
+        cache[i] = surface_contact(v, i).tangent
 
 
 @wp.kernel
 def multiply_cached_surface_contact_tangent(
     count: wp.array[wp.int32],
     capacity: int,
+    stride: int,
     cache: wp.array[SurfaceTangent],
     direction: wp.array[wp.vec3],
     product: wp.array[wp.vec3],
 ):
-    i = wp.tid()
-    if i >= wp.min(capacity, wp.max(count[0], 0)):
-        return
-    surface_tangent_product(cache[i], direction, product)
+    for i in range(wp.tid(), wp.min(capacity, wp.max(count[0], 0)), stride):
+        surface_tangent_product(cache[i], direction, product)
