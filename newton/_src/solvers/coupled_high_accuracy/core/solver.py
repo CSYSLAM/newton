@@ -32,11 +32,13 @@ from .api import (
 )
 from .bodies import BodyPrecompute
 from .cables import CableHost
+from .fluid import FluidHost
 from .kernels import affine as affine_kernels
 from .kernels import affine_block as affine_block_kernels
 from .kernels import cables as cable_kernels
 from .kernels import cloth as cloth_kernels
 from .kernels import drag as drag_kernels
+from .kernels import fluid as fluid_kernels
 from .kernels import hard_contacts as hard_contact_kernels
 from .kernels import joints as joint_kernels
 from .kernels import pcg as pcg_kernels
@@ -92,7 +94,7 @@ def _resolve_stream(stream: Any, device: wp.context.Device) -> wp.Stream | None:
     raise TypeError("Expected a CUDA stream integer, CUDA Stream Protocol object, or None")
 
 
-class Solver(BodyPrecompute, SelfCollisionHost, CableHost):
+class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost):
     """Implicit Newton solver for particles, cloth, soft bodies and affine rigid bodies."""
 
     def __init__(self) -> None:
@@ -250,7 +252,6 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost):
 
     def _reject_unported(self, model: Model) -> None:
         unported = {
-            "fluid particles": model.fluid_particle_count,
             "granular particles": model.granular_particle_count or model.granular_bond_count,
         }
         for feature, present in unported.items():
@@ -333,6 +334,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost):
             setattr(self, name, self._empty(dtype))
         self.drive_total = 0
         self.cable_count = 0
+        self.fluid_rows = 0
         if not count:
             self._initialized = True
             return
@@ -465,6 +467,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost):
         self.numerator = self._zeros(_MAX_LINEAR_ITERATIONS * self.group_count, wp.float32)
         # Built even with self-collision disabled, as natively.
         self._precompute_self_particle_pairs()
+        self._precompute_fluid()
         wp.synchronize_device(self.device)
         self._initialized = True
 
@@ -789,6 +792,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost):
         self._contact_product = contact_product
         self_collision = bool(config.enable_self_collision and self.self_capacity)
         self._self = self_collision
+        self._dt = dt
         self._validate_cable_config()
 
         pd = config.nonlinear_solver == NonlinearSolver.PD_NEWTON
@@ -819,6 +823,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost):
             or bool(self.tetrahedron_count)
             or drag
             or body_tangent
+            or bool(self.fluid_rows)
         )
         # The PD branch ignores the body-block option when it selects the scalar matrix.
         body_block = bodies and block and config.affine_body_block_preconditioner
@@ -839,6 +844,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost):
             or bool(self.tetrahedron_count)
             or drag
             or body_tangent
+            or bool(self.fluid_rows)
         )
         reference_pcg = config.reference_linear_schedule
         # Joint-owned cable models (every particle an affine proxy) evaluate cables with the drive terms.
@@ -1196,6 +1202,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost):
                     per_world,
                 ],
             )
+            if self.fluid_rows:
+                self._accumulate_fluid(q_in, dt)
             if drag:
                 launch(
                     "drag_force",
@@ -1797,6 +1805,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost):
                             self.residual,
                         ],
                     )
+            if self.fluid_rows:
+                self._limit_fluid(dt)
             # The native host updates state_in.q in place, even when state_out owns a separate allocation.
             launch("apply", step_kernels.apply_nonlinear_step, count, [q_in, q_out, self.solution])
             if self.cable_count and self._cable_ramping():
@@ -2688,6 +2698,13 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost):
                 count,
                 [self.self_diagonal, self.preconditioner_blocks],
             )
+        if self.fluid_rows:
+            launch(
+                "fluid_12add_diagonal",
+                fluid_kernels.add_diagonal,
+                count,
+                [self.fluid_diagonal, self.preconditioner_blocks],
+            )
         if self._surface:
             self._surface_launch(
                 "surface_preconditioner",
@@ -3015,6 +3032,19 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost):
                 inverse_dt,
                 [self.direction, product],
             )
+        if self.fluid_rows:
+            launch(
+                "fluid_13multiply_rows",
+                fluid_kernels.multiply_rows,
+                self.fluid_rows,
+                [
+                    self._fluid_view(self._dt),
+                    self.fluid_gradients,
+                    self.fluid_weights,
+                    self.direction,
+                    product,
+                ],
+            )
         if self._hard:
             self._hard_evaluate(self._contact, q_in, inverse_dt, direction=self.direction, product=self.contact_product)
         elif self._rigid and self._config.enable_collision_hessian_non_diagonal:
@@ -3138,6 +3168,18 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost):
         ):
             raise ValueError("hard-contact penalty ramp and seed must be finite and non-negative")
         self._validate_cable_config()
+        self._validate_fluid_config()
+
+    def _validate_fluid_config(self) -> None:
+        config = self._config
+        if self.fluid_rows and (
+            not math.isfinite(config.fluid_relaxation)
+            or config.fluid_relaxation <= 0.0
+            or config.fluid_relaxation > 1.0
+            or not math.isfinite(config.fluid_max_step_ratio)
+            or config.fluid_max_step_ratio < 0.0
+        ):
+            raise ValueError("fluid relaxation must be in (0, 1] and maximum step ratio finite and non-negative")
 
     def _validate_cable_config(self) -> None:
         config = self._config

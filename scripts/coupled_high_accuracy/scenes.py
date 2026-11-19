@@ -545,3 +545,41 @@ def cable(steps: int, options: dict[str, str]) -> Iterator[Any]:
         solver.config.cable_linear_k_start = 10.0
         solver.config.cable_angular_k_start = 5.0
     yield from _run_bodies(model, solver, steps)
+
+
+@scene
+def fluid_drop(steps: int, options: dict[str, str]) -> Iterator[Any]:
+    """A block of SPH fluid particles falling onto a sampled static floor (options: framework, viscosity=,
+    overflow=1 for more than 64 neighbours per particle)."""
+    spacing = 0.02
+    side = 6
+    grid = np.stack(np.meshgrid(*(np.arange(side),) * 3, indexing="ij"), -1).reshape(-1, 3)
+    points = grid * spacing + np.array([0.0, 0.0, 0.05])
+    density = 1000.0
+    mass = density * spacing**3
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    builder.add_particles(
+        pos=points.tolist(),
+        vel=[(0.0, 0.0, 0.0)] * len(points),
+        mass=[mass] * len(points),
+        radius=[spacing * 0.5] * len(points),
+    )
+    model = builder.finalize(device="cuda:0")
+    floor = np.stack(np.meshgrid(np.arange(-3, side + 3), np.arange(-3, side + 3), indexing="ij"), -1).reshape(-1, 2)
+    boundary = np.column_stack([floor * spacing, np.zeros(len(floor))]).astype(np.float32)
+    smoothing = spacing * (3.0 if options.get("overflow") else 2.0)
+    s3d.configure_fluid(
+        model,
+        np.arange(len(points), dtype=np.int32),
+        smoothing_radius=smoothing,
+        rest_density=density,
+        bulk_modulus=2.0e4,
+        viscosity=float(options.get("viscosity", 0.0)),
+        boundary_positions=boundary,
+        boundary_volumes=np.full(len(boundary), spacing**3, dtype=np.float32),
+    )
+    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver.config.nonlinear_solver = _framework(options)
+    solver.config.nonlinear_iterations = int(options.get("iterations", 4))
+    solver.config.linear_iterations = int(options.get("linear", 50))
+    yield from _run(model, solver, steps)
