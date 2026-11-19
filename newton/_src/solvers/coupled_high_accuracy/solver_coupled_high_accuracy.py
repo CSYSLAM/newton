@@ -590,12 +590,14 @@ def _clear_fixed_affine_body_velocities(
 
 
 class SolverCoupledHighAccuracy(_newton.solvers.SolverBase, CouplingInterface):
-    """Expose the native Style3D Sim solver through Newton's solver interface.
+    """High-accuracy coupled implicit solver (a Warp port of Style3D Sim) behind Newton's solver interface.
 
-    The adapter passes Newton-owned Warp CUDA arrays to Style3D Sim as non-owning
+    The adapter passes Newton-owned Warp CUDA arrays to the solver core as non-owning
     device-memory spans. Newton continues to own every model and state array.
+    The core runs in Warp by default; ``NEWTON_CHA_BACKEND=native`` selects the original
+    CUDA extension for comparison.
 
-    The native solver supports particles, tetrahedral soft bodies, Style3D
+    The solver supports particles, tetrahedral soft bodies, Style3D
     cloth, dynamic affine bodies, and rigid and soft contacts from Newton's
     collision pipeline.
     Newton ball, revolute, prismatic, fixed, free, and equivalent D6 joints are
@@ -603,8 +605,9 @@ class SolverCoupledHighAccuracy(_newton.solvers.SolverBase, CouplingInterface):
     joints retain their stretch, shear, discrete bend/twist, and Dahl materials
     in both the Newton and projective-dynamics frameworks.
     Joint controls and Newton collision-pipeline contacts are passed to the
-    native backend. Native work uses Newton's active CUDA stream and can
-    therefore participate in graph capture.
+    solver core. It works on Newton's active CUDA stream and can therefore
+    participate in graph capture; outside a caller's capture it replays each
+    step from its own cached CUDA graph.
     """
 
     SUPPORTED_OBSERVABLES = frozenset(

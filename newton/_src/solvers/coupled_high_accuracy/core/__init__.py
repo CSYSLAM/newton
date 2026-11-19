@@ -6,8 +6,9 @@
 Two interchangeable backends expose the same API (``Model``, ``State``, ``Control``, ``Contact``, ``Config``,
 ``Span``, ``Solver`` and the enums):
 
-* ``warp``: the pure Warp implementation in this package.
-* ``native``: the original CUDA extension, kept only as a comparison oracle while porting (see :mod:`.native`).
+* ``warp`` (default): the pure Warp implementation in this package.
+* ``native``: the original CUDA extension, kept as a comparison oracle (see :mod:`.native`); it needs a local
+  engineRTS build.
 
 The backend is chosen once per process with ``NEWTON_CHA_BACKEND``.
 """
@@ -16,7 +17,7 @@ from __future__ import annotations
 
 import os
 
-BACKEND = os.environ.get("NEWTON_CHA_BACKEND", "native").strip().lower()
+BACKEND = os.environ.get("NEWTON_CHA_BACKEND", "warp").strip().lower()
 
 if BACKEND == "native":
     from .native import load as _load_native
