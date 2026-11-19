@@ -3,14 +3,14 @@
 
 """Preconditioned conjugate gradient kernels (native ``kernels/pcg.cu`` and ``revisions/pcg_23fb797.cu``).
 
-CG coefficients are accumulated separately per coefficient group (world) with atomics. The native fused kernels
-aggregate a warp's contribution with shuffles before one atomic; here every row adds its own term, which only changes
-the floating-point summation order the native code already leaves to unordered atomics.
+CG coefficients are accumulated separately per coefficient group (world). The reducing kernels are launched tiled and
+sum a block's rows before one atomic when they share a group (native kernels do the same per warp with shuffles);
+this only changes the floating-point summation order, which the native code already leaves to unordered atomics.
 """
 
 import warp as wp
 
-from .common import coefficient_world, guarded_ratio
+from .common import REDUCE_BLOCK, block_world_add, coefficient_world, guarded_ratio
 
 # The solver never differentiates through its kernels; skipping the adjoints halves compile time.
 wp.set_module_options({"enable_backward": False})
@@ -186,16 +186,24 @@ def precondition_and_reduce_block(
     world: wp.array[wp.int32],
     particles_per_world: int,
     numerator: wp.array[float],
+    count: int,
 ):
     """z = M r (or keep a precomputed z) and add z . r to the row's coefficient group numerator."""
-    i = wp.tid()
-    value = wp.vec3(0.0)
-    if precomputed != 0:
-        value = z[i]
-    else:
-        value = inverse[i] * residual[i]
-    z[i] = value
-    wp.atomic_add(numerator, coefficient_world(i, world, particles_per_world), wp.dot(value, residual[i]))
+    block, lane = wp.tid()
+    i = block * REDUCE_BLOCK + lane
+    valid = i < count
+    w = int(0)
+    dot = float(0.0)
+    if valid:
+        value = wp.vec3(0.0)
+        if precomputed != 0:
+            value = z[i]
+        else:
+            value = inverse[i] * residual[i]
+        z[i] = value
+        w = coefficient_world(i, world, particles_per_world)
+        dot = wp.dot(value, residual[i])
+    block_world_add(numerator, w, dot, valid, lane)
 
 
 @wp.kernel
@@ -207,16 +215,24 @@ def precondition_and_reduce_scalar(
     world: wp.array[wp.int32],
     particles_per_world: int,
     numerator: wp.array[float],
+    count: int,
 ):
     """Scalar-preconditioner variant of precondition_and_reduce_block."""
-    i = wp.tid()
-    value = wp.vec3(0.0)
-    if precomputed != 0:
-        value = z[i]
-    else:
-        value = inverse[i] * residual[i]
-    z[i] = value
-    wp.atomic_add(numerator, coefficient_world(i, world, particles_per_world), wp.dot(value, residual[i]))
+    block, lane = wp.tid()
+    i = block * REDUCE_BLOCK + lane
+    valid = i < count
+    w = int(0)
+    dot = float(0.0)
+    if valid:
+        value = wp.vec3(0.0)
+        if precomputed != 0:
+            value = z[i]
+        else:
+            value = inverse[i] * residual[i]
+        z[i] = value
+        w = coefficient_world(i, world, particles_per_world)
+        dot = wp.dot(value, residual[i])
+    block_world_add(numerator, w, dot, valid, lane)
 
 
 @wp.kernel
@@ -292,17 +308,24 @@ def fused_update_and_precondition(
     inverse: wp.array[wp.mat33],
     z: wp.array[wp.vec3],
     next_numerator: wp.array[float],
+    count: int,
 ):
     """update_solution_and_residual of one iteration followed by the block preconditioning of the next."""
-    i = wp.tid()
-    w = coefficient_world(i, world, particles_per_world)
-    alpha = guarded_ratio(numerator[w], denominator[w])
-    r = residual[i] - alpha * product[i]
-    residual[i] = r
-    solution[i] = solution[i] + alpha * direction[i]
-    value = inverse[i] * r
-    z[i] = value
-    wp.atomic_add(next_numerator, w, wp.dot(value, r))
+    block, lane = wp.tid()
+    i = block * REDUCE_BLOCK + lane
+    valid = i < count
+    w = int(0)
+    dot = float(0.0)
+    if valid:
+        w = coefficient_world(i, world, particles_per_world)
+        alpha = guarded_ratio(numerator[w], denominator[w])
+        r = residual[i] - alpha * product[i]
+        residual[i] = r
+        solution[i] = solution[i] + alpha * direction[i]
+        value = inverse[i] * r
+        z[i] = value
+        dot = wp.dot(value, r)
+    block_world_add(next_numerator, w, dot, valid, lane)
 
 
 @wp.kernel
@@ -322,14 +345,21 @@ def multiply_block_matrix_and_reduce(
     rows_per_world: int,
 ):
     """A p = D p + ELL p (+ extra) for the block matrix, adding p . A p to the row's group denominator."""
-    i = wp.tid()
-    value = diagonal[i] * direction[i] + ell_product_block(
-        row_count, columns, values, max_count, direction, i, count, rows_per_world
-    )
-    if extra.shape[0] > 0:
-        value = value + extra[i]
-    product[i] = value
-    wp.atomic_add(denominator, coefficient_world(i, world, particles_per_world), wp.dot(value, direction[i]))
+    block, lane = wp.tid()
+    i = block * REDUCE_BLOCK + lane
+    valid = i < count
+    w = int(0)
+    dot = float(0.0)
+    if valid:
+        value = diagonal[i] * direction[i] + ell_product_block(
+            row_count, columns, values, max_count, direction, i, count, rows_per_world
+        )
+        if extra.shape[0] > 0:
+            value = value + extra[i]
+        product[i] = value
+        w = coefficient_world(i, world, particles_per_world)
+        dot = wp.dot(value, direction[i])
+    block_world_add(denominator, w, dot, valid, lane)
 
 
 @wp.kernel
@@ -349,14 +379,21 @@ def multiply_scalar_matrix_and_reduce(
     rows_per_world: int,
 ):
     """multiply_block_matrix_and_reduce with a scalar ELL matrix and a scalar diagonal."""
-    i = wp.tid()
-    value = diagonal[i] * direction[i] + ell_product_scalar(
-        row_count, columns, values, max_count, direction, i, count, rows_per_world
-    )
-    if extra.shape[0] > 0:
-        value = value + extra[i]
-    product[i] = value
-    wp.atomic_add(denominator, coefficient_world(i, world, particles_per_world), wp.dot(value, direction[i]))
+    block, lane = wp.tid()
+    i = block * REDUCE_BLOCK + lane
+    valid = i < count
+    w = int(0)
+    dot = float(0.0)
+    if valid:
+        value = diagonal[i] * direction[i] + ell_product_scalar(
+            row_count, columns, values, max_count, direction, i, count, rows_per_world
+        )
+        if extra.shape[0] > 0:
+            value = value + extra[i]
+        product[i] = value
+        w = coefficient_world(i, world, particles_per_world)
+        dot = wp.dot(value, direction[i])
+    block_world_add(denominator, w, dot, valid, lane)
 
 
 @wp.kernel
@@ -376,14 +413,21 @@ def multiply_scalar_block_matrix_and_reduce(
     rows_per_world: int,
 ):
     """multiply_block_matrix_and_reduce with a scalar ELL matrix and 3x3 diagonal blocks."""
-    i = wp.tid()
-    value = diagonal[i] * direction[i] + ell_product_scalar(
-        row_count, columns, values, max_count, direction, i, count, rows_per_world
-    )
-    if extra.shape[0] > 0:
-        value = value + extra[i]
-    product[i] = value
-    wp.atomic_add(denominator, coefficient_world(i, world, particles_per_world), wp.dot(value, direction[i]))
+    block, lane = wp.tid()
+    i = block * REDUCE_BLOCK + lane
+    valid = i < count
+    w = int(0)
+    dot = float(0.0)
+    if valid:
+        value = diagonal[i] * direction[i] + ell_product_scalar(
+            row_count, columns, values, max_count, direction, i, count, rows_per_world
+        )
+        if extra.shape[0] > 0:
+            value = value + extra[i]
+        product[i] = value
+        w = coefficient_world(i, world, particles_per_world)
+        dot = wp.dot(value, direction[i])
+    block_world_add(denominator, w, dot, valid, lane)
 
 
 @wp.kernel

@@ -406,3 +406,68 @@ def multiply_rolling_contact_tangent(v: RollingContactView, direction: wp.array[
         (v.inv_dt * c.coefficient[2]) * total[2],
     )
     rolling_scatter(c, scale, product)
+
+
+@wp.struct
+class RollingTangentCache:
+    """Rolling-friction Jacobians fixed during a Newton iteration's linear solve, in flat arrays: six targets per
+    contact and their three gradient rows (index ``(contact * 6 + entry) * 3 + direction``). Passing the
+    ``RollingContact`` struct by value spills its 54-float gradient to a 1 KB stack per thread."""
+
+    entries: wp.array[wp.int32]
+    targets: wp.array[wp.int32]
+    gradient: wp.array[wp.vec3]
+    scale: wp.array[wp.vec3]
+
+
+@wp.kernel
+def cache_rolling_contact_tangent(v: RollingContactView, cache: RollingTangentCache):
+    """Evaluate each active contact's rolling geometry once per Newton iteration."""
+    i = wp.tid()
+    if v.count.shape[0] == 0 or i >= v.capacity or i >= wp.max(v.count[0], 0):
+        return
+    c = rolling_contact(v, i)
+    cache.entries[i] = c.entries
+    for at in range(c.entries):
+        cache.targets[i * 6 + at] = c.targets[at]
+        base = (i * 6 + at) * 3
+        cache.gradient[base] = c.g0[at]
+        cache.gradient[base + 1] = c.g1[at]
+        cache.gradient[base + 2] = c.g2[at]
+    cache.scale[i] = wp.vec3(v.inv_dt * c.coefficient[0], v.inv_dt * c.coefficient[1], v.inv_dt * c.coefficient[2])
+
+
+@wp.kernel
+def multiply_cached_rolling_contact_tangent(
+    count: wp.array[wp.int32],
+    capacity: int,
+    cache: RollingTangentCache,
+    direction: wp.array[wp.vec3],
+    product: wp.array[wp.vec3],
+):
+    """The arithmetic of ``multiply_rolling_contact_tangent`` from the cached Jacobians."""
+    i = wp.tid()
+    if count.shape[0] == 0 or i >= capacity or i >= wp.max(count[0], 0):
+        return
+    entries = cache.entries[i]
+    if entries == 0:
+        return
+    total = wp.vec3(0.0)
+    for at in range(entries):
+        p = direction[cache.targets[i * 6 + at]]
+        base = (i * 6 + at) * 3
+        total = wp.vec3(
+            contact_dot(cache.gradient[base], p) + total[0],
+            contact_dot(cache.gradient[base + 1], p) + total[1],
+            contact_dot(cache.gradient[base + 2], p) + total[2],
+        )
+    s = cache.scale[i]
+    scale = wp.vec3(s[0] * total[0], s[1] * total[1], s[2] * total[2])
+    for at in range(entries):
+        base = (i * 6 + at) * 3
+        wp.atomic_add(
+            product,
+            cache.targets[i * 6 + at],
+            scale[2] * cache.gradient[base + 2]
+            + (scale[0] * cache.gradient[base] + scale[1] * cache.gradient[base + 1]),
+        )

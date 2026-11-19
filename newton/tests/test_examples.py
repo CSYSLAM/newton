@@ -2163,6 +2163,42 @@ for example_name in (
     )
 
 
+class TestCoupledHighAccuracyExamples(unittest.TestCase):
+    pass
+
+
+# engineRTS examples whose originals do not pass their own --test run at default settings: no test_final, or a
+# check the original already misses (each port reproduces the original's outcome; see the example README).
+_CHA_UNCHECKED_EXAMPLES = {
+    "example_cha_basic_joints",
+    "example_cha_basic_shapes",
+    "example_cha_body_point_line",
+    "example_cha_body_spring",
+    "example_cha_joints",
+    "example_cha_cable_bend_twist_analytic",
+    "example_cha_cable_cross_slide_table",
+    "example_cha_cable_torsion_material_mapping",
+    "example_cha_cloth_h1_free",
+    "example_cha_robot_anymal_d",
+    "example_cha_robot_cartpole",
+    "example_cha_robot_h1",
+    # Needs ONNX Runtime for its walking policy.
+    "example_cha_robot_microduck",
+    # Interactive only: integrates directly and runs a ViewerGL window until it is closed.
+    "example_cha_rigidbody_integrators",
+}
+for _cha_name in sorted(newton.examples.get_examples().values()):
+    if not _cha_name.startswith("newton.examples.coupled_high_accuracy."):
+        continue
+    _cha_short = _cha_name.removeprefix("newton.examples.")
+    add_example_test(
+        TestCoupledHighAccuracyExamples,
+        name=_cha_short,
+        devices=[] if _cha_short.split(".")[-1] in _CHA_UNCHECKED_EXAMPLES else cuda_test_devices,
+        use_viewer=True,
+    )
+
+
 class TestAutoDiscoveredExamples(unittest.TestCase):
     pass
 

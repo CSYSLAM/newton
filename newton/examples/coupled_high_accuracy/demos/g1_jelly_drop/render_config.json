@@ -1,0 +1,167 @@
+{
+  "usd": "outputs/simulation.usdc",
+  "project": "outputs/g1_jelly_drop.blend",
+  "resolution": [
+    1920,
+    1080
+  ],
+  "simulation_fps": 60,
+  "video_fps": 30,
+  "frame_start": 0,
+  "frame_end": 240,
+  "samples": 256,
+  "adaptive_threshold": 0.01,
+  "preview_samples": 32,
+  "preview_percentage": 60,
+  "exposure": 0.0,
+  "view_transform": "ACES 2.0",
+  "look": "None",
+  "gamma": 1.3,
+  "motion_blur_shutter": 0.25,
+  "jelly": {
+    "transmission": 0.8,
+    "roughness": 0.13,
+    "ior": 1.38,
+    "subsurface": 0.025,
+    "coat": 0.28,
+    "subdivision": 2,
+    "absorption_density": 1.0
+  },
+  "camera": {
+    "fov": 30.0,
+    "fstop": 7.1,
+    "keys": [
+      {
+        "frame": 0,
+        "position": [
+          6.4,
+          -8.8,
+          5.4
+        ],
+        "target": [
+          0,
+          0,
+          1.35
+        ]
+      },
+      {
+        "frame": 24,
+        "position": [
+          6.4,
+          -8.8,
+          5.4
+        ],
+        "target": [
+          0,
+          0,
+          0.85
+        ]
+      },
+      {
+        "frame": 65,
+        "position": [
+          5.6,
+          -8.0,
+          4.3
+        ],
+        "target": [
+          0,
+          0,
+          0.1
+        ]
+      }
+    ]
+  },
+  "world_strength": 0.80,
+  "robot_metallic": 1.0,
+  "robot_roughness": 0.5,
+  "floor_metallic": 0.5,
+  "floor_roughness": 0.05,
+  "floor_color": [
+    0.9,
+    0.9,
+    0.9
+  ],
+  "lights": [
+    {
+      "name": "Key softbox",
+      "position": [
+        2,
+        -7,
+        11.5
+      ],
+      "target": [
+        0,
+        0,
+        0.5
+      ],
+      "energy": 4100,
+      "size": 4.0,
+      "color": [
+        1.0,
+        0.9,
+        0.78
+      ]
+    },
+    {
+      "name": "Cool fill",
+      "position": [
+        -8,
+        -2,
+        5.3
+      ],
+      "target": [
+        0,
+        0,
+        0.7
+      ],
+      "energy": 600,
+      "size": 6.0,
+      "color": [
+        0.65,
+        0.81,
+        1.0
+      ]
+    },
+    {
+      "name": "Rim softbox",
+      "position": [
+        2.0,
+        8.0,
+        9.6
+      ],
+      "target": [
+        0,
+        0,
+        0.4
+      ],
+      "energy": 1800,
+      "size": 6.0,
+      "color": [
+        0.9,
+        0.95,
+        1.0
+      ]
+    },
+    {
+      "name": "Front strip",
+      "position": [
+        6,
+        -10,
+        4.2
+      ],
+      "target": [
+        0,
+        0,
+        1
+      ],
+      "energy": 640,
+      "size": 4.0,
+      "color": [
+        1.0,
+        0.98,
+        0.95
+      ]
+    }
+  ]
+}

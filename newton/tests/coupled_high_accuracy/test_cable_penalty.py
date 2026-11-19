@@ -261,9 +261,7 @@ def test_invalid_cable_penalty_config_is_rejected(name, value):
     ],
 )
 def test_example_helper_preserves_vbd_penalty_option_precedence(monkeypatch, options, expected):
-    path = Path(__file__).resolve().parents[2] / "examples" / "coupled_high_accuracy" / "cable" / "cable_utils.py"
-    if not path.is_file():
-        pytest.skip("The cable examples have not been ported yet")
+    path = Path(__file__).resolve().parents[2] / "examples" / "coupled_high_accuracy" / "cable_utils.py"
     spec = importlib.util.spec_from_file_location("_penalty_example_helper", path)
     helper = importlib.util.module_from_spec(spec)
     # Dataclasses resolves its defining module while the helper is executing.
@@ -271,7 +269,9 @@ def test_example_helper_preserves_vbd_penalty_option_precedence(monkeypatch, opt
 
     monkeypatch.setitem(sys.modules, spec.name, helper)
     spec.loader.exec_module(helper)
-    monkeypatch.setattr(helper.s3d, "NewtonSolver", lambda model: SimpleNamespace(config=SimpleNamespace()))
+    monkeypatch.setattr(
+        helper.s3d, "SolverCoupledHighAccuracy", lambda model: SimpleNamespace(config=SimpleNamespace())
+    )
     solver = helper.create_cable_solver(argparse.Namespace(solver="synreal"), object(), **options)
     names = (
         "cable_linear_beta",

@@ -1,0 +1,434 @@
+{
+  "newton_version": "1.5.0",
+  "examples": [
+    {
+      "name": "example_cable_bundle_hysteresis",
+      "upstream": "cable/example_cable_bundle_hysteresis.py",
+      "num_frames": 100,
+      "defaults": {
+        "device": null,
+        "viewer": "gl",
+        "rerun_address": null,
+        "output_path": "output.usd",
+        "num_frames": 100,
+        "render_fps": null,
+        "headless": false,
+        "test": false,
+        "quiet": false,
+        "paused": false,
+        "benchmark": false,
+        "warp_config": [],
+        "realtime": false,
+        "segments": 40,
+        "no_dahl": false,
+        "eps_max": 2.0,
+        "tau": 0.1
+      },
+      "simulation": {
+        "fps": "60",
+        "sim_substeps": "10",
+        "sim_iterations": "5"
+      },
+      "test_final": true
+    },
+    {
+      "name": "example_cable_cross_slide_table",
+      "upstream": "cable/example_cable_cross_slide_table.py",
+      "num_frames": 100,
+      "defaults": {
+        "device": null,
+        "viewer": "gl",
+        "rerun_address": null,
+        "output_path": "output.usd",
+        "num_frames": 100,
+        "render_fps": null,
+        "headless": false,
+        "test": false,
+        "quiet": false,
+        "paused": false,
+        "benchmark": false,
+        "warp_config": [],
+        "realtime": false
+      },
+      "simulation": {
+        "sim_substeps": "10"
+      },
+      "test_final": true
+    },
+    {
+      "name": "example_cable_pile",
+      "upstream": "cable/example_cable_pile.py",
+      "num_frames": 100,
+      "defaults": {
+        "device": null,
+        "viewer": "gl",
+        "rerun_address": null,
+        "output_path": "output.usd",
+        "num_frames": 100,
+        "render_fps": null,
+        "headless": false,
+        "test": false,
+        "quiet": false,
+        "paused": false,
+        "benchmark": false,
+        "warp_config": [],
+        "realtime": false
+      },
+      "simulation": {
+        "fps": "60",
+        "sim_substeps": "10",
+        "sim_iterations": "5"
+      },
+      "test_final": true
+    },
+    {
+      "name": "example_cable_plectoneme",
+      "upstream": "cable/example_cable_plectoneme.py",
+      "num_frames": 780,
+      "defaults": {
+        "device": null,
+        "viewer": "gl",
+        "rerun_address": null,
+        "output_path": "output.usd",
+        "num_frames": 780,
+        "render_fps": null,
+        "headless": false,
+        "test": false,
+        "quiet": false,
+        "paused": false,
+        "benchmark": false,
+        "warp_config": [],
+        "realtime": false,
+        "iterations": null,
+        "substeps": null
+      },
+      "simulation": {
+        "fps": "self.FPS",
+        "sim_substeps": "int(getattr(args, 'substeps', None) or self.SIM_SUBSTEPS)",
+        "sim_iterations": "int(getattr(args, 'iterations', None) or self.SIM_ITERATIONS)"
+      },
+      "test_final": true
+    },
+    {
+      "name": "example_cable_twist",
+      "upstream": "cable/example_cable_twist.py",
+      "num_frames": 100,
+      "defaults": {
+        "device": null,
+        "viewer": "gl",
+        "rerun_address": null,
+        "output_path": "output.usd",
+        "num_frames": 100,
+        "render_fps": null,
+        "headless": false,
+        "test": false,
+        "quiet": false,
+        "paused": false,
+        "benchmark": false,
+        "warp_config": [],
+        "realtime": false
+      },
+      "simulation": {
+        "fps": "60",
+        "sim_substeps": "10",
+        "sim_iterations": "5"
+      },
+      "test_final": true
+    },
+    {
+      "name": "example_cable_y_junction",
+      "upstream": "cable/example_cable_y_junction.py",
+      "num_frames": 100,
+      "defaults": {
+        "device": null,
+        "viewer": "gl",
+        "rerun_address": null,
+        "output_path": "output.usd",
+        "num_frames": 100,
+        "render_fps": null,
+        "headless": false,
+        "test": false,
+        "quiet": false,
+        "paused": false,
+        "benchmark": false,
+        "warp_config": [],
+        "realtime": false
+      },
+      "simulation": {
+        "fps": "60",
+        "sim_substeps": "10",
+        "sim_iterations": "5"
+      },
+      "test_final": true
+    },
+    {
+      "name": "example_franka_cable_ik_pick_place",
+      "upstream": "multiphysics/example_franka_cable_ik_pick_place.py",
+      "num_frames": 400,
+      "defaults": {
+        "device": null,
+        "viewer": "gl",
+        "rerun_address": null,
+        "output_path": "output.usd",
+        "num_frames": 400,
+        "render_fps": null,
+        "headless": false,
+        "test": false,
+        "quiet": false,
+        "paused": false,
+        "benchmark": false,
+        "warp_config": [],
+        "realtime": false,
+        "coupled_view": "combined",
+        "world_count": 1,
+        "substeps": 10,
+        "proxy_iterations": 1,
+        "mass_scale": 1.0,
+        "coupling_mode": "lagged",
+        "payload_segments": 19,
+        "payload_radius": 0.005,
+        "vbd_iterations": 20,
+        "vbd_rigid_avbd_beta": 100.0,
+        "vbd_rigid_contact_k_start": 1000.0,
+        "mujoco_iterations": 100,
+        "mujoco_ls_iterations": 20,
+        "graph_capture": true
+      },
+      "simulation": {
+        "fps": "60",
+        "sim_substeps": "max(1, int(args.substeps))"
+      },
+      "test_final": true
+    },
+    {
+      "name": "example_mujoco_franka_vbd_cable_admm_solver",
+      "upstream": "multiphysics/example_mujoco_franka_vbd_cable_admm_solver.py",
+      "num_frames": 100,
+      "defaults": {
+        "device": null,
+        "viewer": "gl",
+        "rerun_address": null,
+        "output_path": "output.usd",
+        "num_frames": 100,
+        "render_fps": null,
+        "headless": false,
+        "test": false,
+        "quiet": false,
+        "paused": false,
+        "benchmark": false,
+        "warp_config": [],
+        "realtime": false,
+        "coupled_view": "combined",
+        "world_count": 8,
+        "substeps": 16,
+        "admm_iterations": 5,
+        "rho": 200.0,
+        "gamma": 0.001,
+        "baumgarte": 0.5,
+        "rigid_contact_matching": "latest",
+        "contact_matching_pos_threshold": null,
+        "contact_matching_normal_dot_threshold": null,
+        "contact_matching_force_scale": 0.9,
+        "payload_kind": "xpbd-chain",
+        "payload_segments": 11,
+        "payload_radius": 0.012,
+        "xpbd_iterations": 16,
+        "xpbd_joint_linear_relaxation": 0.9,
+        "xpbd_joint_angular_relaxation": 0.5,
+        "vbd_iterations": 8,
+        "mujoco_iterations": 12,
+        "mujoco_ls_iterations": 25,
+        "graph_capture": true
+      },
+      "simulation": {
+        "fps": "60",
+        "sim_substeps": "max(1, int(args.substeps))"
+      },
+      "test_final": true
+    },
+    {
+      "name": "example_cable_bend_stiffness",
+      "upstream": "vbd/example_cable_bend_stiffness.py",
+      "num_frames": 510,
+      "defaults": {
+        "device": null,
+        "viewer": "gl",
+        "rerun_address": null,
+        "output_path": "output.usd",
+        "num_frames": 510,
+        "render_fps": null,
+        "headless": false,
+        "test": false,
+        "quiet": false,
+        "paused": false,
+        "benchmark": false,
+        "warp_config": [],
+        "realtime": false
+      },
+      "simulation": {
+        "fps": "60",
+        "sim_substeps": "10",
+        "sim_iterations": "10"
+      },
+      "test_final": true
+    },
+    {
+      "name": "example_cable_bend_twist_analytic",
+      "upstream": "vbd/example_cable_bend_twist_analytic.py",
+      "num_frames": 390,
+      "defaults": {
+        "device": null,
+        "viewer": "gl",
+        "rerun_address": null,
+        "output_path": "output.usd",
+        "num_frames": 390,
+        "render_fps": null,
+        "headless": false,
+        "test": false,
+        "quiet": false,
+        "paused": false,
+        "benchmark": false,
+        "warp_config": [],
+        "realtime": false,
+        "cable_analytic_mode": "all"
+      },
+      "simulation": {
+        "fps": "60",
+        "sim_substeps": "10",
+        "sim_iterations": "10"
+      },
+      "test_final": true
+    },
+    {
+      "name": "example_cable_dahl_hysteresis",
+      "upstream": "vbd/example_cable_dahl_hysteresis.py",
+      "num_frames": 870,
+      "defaults": {
+        "device": null,
+        "viewer": "gl",
+        "rerun_address": null,
+        "output_path": "output.usd",
+        "num_frames": 870,
+        "render_fps": null,
+        "headless": false,
+        "test": false,
+        "quiet": false,
+        "paused": false,
+        "benchmark": false,
+        "warp_config": [],
+        "realtime": false,
+        "cable_dahl_mode": "all"
+      },
+      "simulation": {
+        "fps": "60",
+        "sim_substeps": "10",
+        "sim_iterations": "10"
+      },
+      "test_final": true
+    },
+    {
+      "name": "example_cable_michell_threshold",
+      "upstream": "vbd/example_cable_michell_threshold.py",
+      "num_frames": 360,
+      "defaults": {
+        "device": null,
+        "viewer": "gl",
+        "rerun_address": null,
+        "output_path": "output.usd",
+        "num_frames": 360,
+        "render_fps": null,
+        "headless": false,
+        "test": false,
+        "quiet": false,
+        "paused": false,
+        "benchmark": false,
+        "warp_config": [],
+        "realtime": false
+      },
+      "simulation": {
+        "fps": "self.FPS",
+        "sim_substeps": "8",
+        "sim_iterations": "28"
+      },
+      "test_final": true
+    },
+    {
+      "name": "example_cable_torsion_material_mapping",
+      "upstream": "vbd/example_cable_torsion_material_mapping.py",
+      "num_frames": 510,
+      "defaults": {
+        "device": null,
+        "viewer": "gl",
+        "rerun_address": null,
+        "output_path": "output.usd",
+        "num_frames": 510,
+        "render_fps": null,
+        "headless": false,
+        "test": false,
+        "quiet": false,
+        "paused": false,
+        "benchmark": false,
+        "warp_config": [],
+        "realtime": false
+      },
+      "simulation": {
+        "fps": "60",
+        "sim_substeps": "10",
+        "sim_iterations": "10"
+      },
+      "test_final": true
+    },
+    {
+      "name": "example_cable_twist_buckling",
+      "upstream": "vbd/example_cable_twist_buckling.py",
+      "num_frames": 630,
+      "defaults": {
+        "device": null,
+        "viewer": "gl",
+        "rerun_address": null,
+        "output_path": "output.usd",
+        "num_frames": 630,
+        "render_fps": null,
+        "headless": false,
+        "test": false,
+        "quiet": false,
+        "paused": false,
+        "benchmark": false,
+        "warp_config": [],
+        "realtime": false
+      },
+      "simulation": {
+        "fps": "self.FPS",
+        "sim_substeps": "int(params['substeps'])",
+        "sim_iterations": "int(params['iterations'])"
+      },
+      "test_final": true
+    },
+    {
+      "name": "example_cable_twist_transfer",
+      "upstream": "vbd/example_cable_twist_transfer.py",
+      "num_frames": 390,
+      "defaults": {
+        "device": null,
+        "viewer": "gl",
+        "rerun_address": null,
+        "output_path": "output.usd",
+        "num_frames": 390,
+        "render_fps": null,
+        "headless": false,
+        "test": false,
+        "quiet": false,
+        "paused": false,
+        "benchmark": false,
+        "warp_config": [],
+        "realtime": false
+      },
+      "simulation": {
+        "fps": "60",
+        "sim_substeps": "10",
+        "sim_iterations": "10"
+      },
+      "test_final": true
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "reference_video": "D:\\work\\video\\\u98de\u4e6620261028-161921.mp4",
+  "resolution": [
+    960,
+    544
+  ],
+  "camera": {
+    "position": [
+      2.6,
+      -3.3,
+      2.6
+    ],
+    "target": [
+      0.22,
+      0,
+      0.95
+    ],
+    "fov": 43,
+    "fstop": 8
+  },
+  "floor_color": [
+    0.21,
+    0.24,
+    0.3
+  ],
+  "carton_color": [
+    0.5,
+    0.25,
+    0.08
+  ],
+  "jelly_color": [
+    0.04,
+    0.18,
+    0.08
+  ],
+  "label_color": [
+    0.92,
+    0.92,
+    0.88
+  ],
+  "samples": 16,
+  "film_overrides": {
+    "normal_strength": 0.45,
+    "roughness": 0.25,
+    "ior": 1.25,
+    "transparency": 0.98,
+    "reflection": 0.035
+  },
+  "key_light_size": 6.0,
+  "strip_light_scale": 0.25,
+  "jelly_roughness": 0.55,
+  "jelly_coat": 0.03,
+  "jelly_transmission": 0.0,
+  "courier_color": [
+    0.32,
+    0.35,
+    0.39
+  ]
+}

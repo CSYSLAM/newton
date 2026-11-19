@@ -62,3 +62,30 @@ def atomic_add_block(
     if columns[lower * rows + row] != column:
         return
     wp.atomic_add(values, lower * rows + row, value)
+
+
+# Threads per block of the tiled reduction kernels.
+REDUCE_BLOCK = wp.constant(256)
+
+
+@wp.func
+def block_world_add(sums: wp.array[float], w: int, value: float, valid: bool, lane: int):
+    """Add value into sums[w] with one atomic per block when the block's valid rows share one coefficient group.
+
+    Native kernels reduce a warp with shuffles before their atomic (``warp_world_add``); per-row atomics into one
+    address serialise and dominate large systems. Every thread of the block must call this; rows past the end pass
+    ``valid = False``. Lane 0 is always a valid row, since blocks start below the row count.
+    """
+    first = wp.tile_extract(wp.tile(w), 0)
+    mismatch = 0
+    if valid and w != first:
+        mismatch = 1
+    if wp.tile_extract(wp.tile_max(wp.tile(mismatch)), 0) == 0:
+        contribution = float(0.0)
+        if valid:
+            contribution = value
+        total = wp.tile_extract(wp.tile_sum(wp.tile(contribution)), 0)
+        if lane == 0:
+            wp.atomic_add(sums, first, total)
+    elif valid:
+        wp.atomic_add(sums, w, value)

@@ -1,0 +1,114 @@
+name: go2
+asset:
+  source: newton
+  name: unitree_go2
+  relative_path: usd/go2.usda
+sdk_joint_names:
+  [FR_hip_joint, FR_thigh_joint, FR_calf_joint,
+   FL_hip_joint, FL_thigh_joint, FL_calf_joint,
+   RR_hip_joint, RR_thigh_joint, RR_calf_joint,
+   RL_hip_joint, RL_thigh_joint, RL_calf_joint]
+joint_ids_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+default_joint_pos: [-0.1, 0.8, -1.5, 0.1, 0.8, -1.5, -0.1, 1.0, -1.5, 0.1, 1.0, -1.5]
+stiffness: [25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25]
+damping: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+torque_limits: [23.4, 23.4, 23.4, 23.4, 23.4, 23.4, 23.4, 23.4, 23.4, 23.4, 23.4, 23.4]
+velocity_limits: [30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30]
+action_scale: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25]
+action_clip: 100.0
+joint_target_limits: null
+command_ranges:
+  lin_vel_x: [-0.3, 0.3]
+  lin_vel_y: [-0.1, 0.1]
+  ang_vel_z: [-1.0, 1.0]
+standing_probability: 0.05
+observations:
+  ang_vel_scale: 0.2
+  joint_vel_scale: 0.05
+  history_length: 1
+  use_gym_history: false
+simulation:
+  dt: 0.005
+  decimation: 4
+  episode_length_s: 20.0
+  initial_height: 0.4
+  fall_height: 0.0
+  fall_grace_s: 0.0
+  fall_confirm_s: 0.0
+  base_height_target: 0.28
+  base_height_sigma: 0.05
+  base_height_reward_scale: 0.0
+  contact_stiffness: 15000
+  contact_damping: 250
+  contact_friction: 1.0
+  solver_iterations: 30
+  linear_iterations: 10
+randomization:
+  static_friction: [0.3, 1.2]
+  dynamic_friction: [0.3, 1.2]
+  restitution: [0.0, 0.0]
+  base_mass_add: [0.0, 0.0]
+  link_mass_scale: [1.0, 1.0]
+  base_com: [0.0, 0.0]
+  stiffness_scale: [1.0, 1.0]
+  damping_scale: [1.0, 1.0]
+  motor_strength: [1.0, 1.0]
+  joint_zero_offset: [0.0, 0.0]
+  policy_delay_ticks: [0, 0]
+  push_interval_s: [5.0, 10.0]
+  push_velocity: [-0.5, 0.5]
+  reset_xy: [0.0, 0.0]
+  reset_joint_position: [0.0, 0.0]
+  observation_noise: {ang_vel: 0.2, gravity: 0.05, joint_pos: 0.01, joint_vel: 1.5}
+ppo:
+  bounded_actions: false
+  num_steps_per_env: 24
+  max_iterations: 50000
+  save_interval: 100
+  actor_hidden_dims: [512, 256, 128]
+  critic_hidden_dims: [512, 256, 128]
+  activation: elu
+  init_noise_std: 1.0
+  learning_rate: 0.001
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  clip_param: 0.2
+  gamma: 0.99
+  lam: 0.95
+  desired_kl: 0.01
+  schedule: adaptive
+  entropy_coef: 0.01
+
+unitree:
+  source_commit: 4960b84732b0c2ec593dccbfe963fda1bcd7b1e3
+  command_resampling_time_s: 10.0
+  command_limits:
+    lin_vel_x: [-1.0, 1.0]
+    lin_vel_y: [-0.4, 0.4]
+    ang_vel_z: [-1.0, 1.0]
+  command_curriculum_step: 0.1
+  command_curriculum_threshold: 0.8
+  reset_position_xy: [-0.5, 0.5]
+  reset_yaw: [-3.14, 3.14]
+  reset_joint_velocity: [-1.0, 1.0]
+  bad_orientation_angle: 0.8
+  soft_joint_pos_limit_factor: 0.9
+  foot_offset: [0.0, 0.0, -0.213]
+  torque_speed: {x1: 13.5, x2: 30.0, y1: 20.2, y2: 23.4}
+  rewards:
+    track_lin_vel_xy: 1.5
+    track_ang_vel_z: 0.75
+    lin_vel_z: -2.0
+    ang_vel_xy: -0.05
+    joint_vel: -0.001
+    joint_acc: -2.5e-7
+    joint_torques: -0.0002
+    action_rate: -0.05
+    joint_pos_limits: -10.0
+    energy: -0.00002
+    flat_orientation: -2.5
+    joint_pos: -0.4
+    feet_air_time: 0.1
+    air_time_variance: -1.0
+    feet_slide: -0.05
+    undesired_contacts: -1.0

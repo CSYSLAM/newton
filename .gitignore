@@ -76,3 +76,13 @@ docs/_static/viser/
 
 # Notebook checkpoints
 **/*.ipynb_checkpoints/
+
+# Coupled high-accuracy examples: local link to the engineRTS assets and demo outputs.
+newton/examples/coupled_high_accuracy/assets
+newton/examples/coupled_high_accuracy/build/
+newton/examples/coupled_high_accuracy/demos/**/outputs/
+# Demo preview image and render textures above the repository's 500 KB file limit; kept locally only.
+newton/examples/coupled_high_accuracy/demos/g1_jelly_drop/g1_jelly_drop.png
+newton/examples/coupled_high_accuracy/demos/piper_bag_transport/textures/crumpled_normal.png
+newton/examples/coupled_high_accuracy/demos/piper_bag_transport/textures/studio_softboxes.hdr
+

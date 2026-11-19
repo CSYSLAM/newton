@@ -238,6 +238,14 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
         wp.launch(kernel, dim=dim, inputs=inputs, device=self.device)
         self._launches[key] += 1
 
+    def _launch_reduce(self, key: str, kernel: Any, rows: int, inputs: list[Any]) -> None:
+        """Launch a block-reducing PCG kernel over ``rows`` rows (see ``common.block_world_add``)."""
+        if rows <= 0:
+            return
+        block = pcg_kernels.REDUCE_BLOCK
+        wp.launch_tiled(kernel, dim=[(rows + block - 1) // block], inputs=inputs, block_dim=block, device=self.device)
+        self._launches[key] += 1
+
     # ------------------------------------------------------------------------------------------------------------
     # Initialization
 
@@ -328,6 +336,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
         self.per_world = model.particle_count
         self.surface_tangent_cache = wp.zeros(0, dtype=surface_contact_kernels.SurfaceTangent, device=self.device)
         self.rigid_tangent_capacity = 0
+        self.rolling_tangent_capacity = 0
         self.hard_capacity = 0
         for name, dtype in self._HARD_BUFFERS:
             setattr(self, name, self._empty(dtype))
@@ -960,6 +969,13 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
             self.rigid_tangent_entries = self._zeros(n, wp.int32)
             self.rigid_tangent_normal = self._zeros(n, wp.vec3)
             self.rigid_tangent_stiffness = self._zeros(n, wp.vec2)
+        if rolling and self.rolling_tangent_capacity < contact.max_count:
+            n = contact.max_count
+            self.rolling_tangent_capacity = n
+            self.rolling_tangent_entries = self._zeros(n, wp.int32)
+            self.rolling_tangent_targets = self._zeros(6 * n, wp.int32)
+            self.rolling_tangent_gradient = self._zeros(18 * n, wp.vec3)
+            self.rolling_tangent_scale = self._zeros(n, wp.vec3)
         if self._cached_surface and self.surface_tangent_cache.shape[0] < contact.soft_max_count:
             self.surface_tangent_cache = wp.zeros(
                 contact.soft_max_count, dtype=surface_contact_kernels.SurfaceTangent, device=self.device
@@ -1668,6 +1684,15 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                     drag,
                 )
 
+            if rolling:
+                self._launch_rolling(
+                    "rolling_tangent_cache",
+                    rolling_contact_kernels.cache_rolling_contact_tangent,
+                    contact,
+                    q_in,
+                    inverse_dt,
+                    [self._rolling_tangent_cache()],
+                )
             if self._cached_rigid:
                 launch(
                     "rigid_tangent_cache",
@@ -1723,7 +1748,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                 # With the fused PCG the previous iteration's update already preconditioned this residual.
                 if not fused_pcg or k == 0:
                     if block:
-                        launch(
+                        self._launch_reduce(
                             "precondition",
                             pcg_kernels.precondition_and_reduce_block,
                             count,
@@ -1735,10 +1760,11 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                                 self.coefficient_world,
                                 per_group,
                                 numerator,
+                                count,
                             ],
                         )
                     else:
-                        launch(
+                        self._launch_reduce(
                             "scalar_precondition",
                             pcg_kernels.precondition_and_reduce_scalar,
                             count,
@@ -1750,6 +1776,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                                 self.coefficient_world,
                                 per_group,
                                 numerator,
+                                count,
                             ],
                         )
                 if fused_pcg:
@@ -1800,7 +1827,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                 )
                 extra = self.contact_product if extra_product else empty_v
                 if block_matrix:
-                    launch(
+                    self._launch_reduce(
                         "fused_multiply" if fused_pcg else "multiply",
                         pcg_kernels.multiply_block_matrix_and_reduce,
                         count,
@@ -1821,7 +1848,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                         ],
                     )
                 elif block:
-                    launch(
+                    self._launch_reduce(
                         "scalar_block_multiply",
                         pcg_kernels.multiply_scalar_block_matrix_and_reduce,
                         count,
@@ -1842,7 +1869,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                         ],
                     )
                 else:
-                    launch(
+                    self._launch_reduce(
                         "scalar_multiply",
                         pcg_kernels.multiply_scalar_matrix_and_reduce,
                         count,
@@ -1864,7 +1891,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                     )
                 if fused_pcg and k + 1 < iterations:
                     next_numerator = self.numerator[(k + 1) * group_count : (k + 2) * group_count]
-                    launch(
+                    self._launch_reduce(
                         "fused_update",
                         pcg_kernels.fused_update_and_precondition,
                         count,
@@ -1880,6 +1907,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                             self.inverse,
                             self.z,
                             next_numerator,
+                            count,
                         ],
                     )
                 else:
@@ -2374,6 +2402,14 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                 contact_force if contact_force is not None else self._empty(wp.spatial_vector),
             ],
         )
+
+    def _rolling_tangent_cache(self) -> Any:
+        cache = rolling_contact_kernels.RollingTangentCache()
+        cache.entries = self.rolling_tangent_entries
+        cache.targets = self.rolling_tangent_targets
+        cache.gradient = self.rolling_tangent_gradient
+        cache.scale = self.rolling_tangent_scale
+        return cache
 
     def _rigid_tangent_cache(self) -> Any:
         cache = rigid_contact_kernels.RigidTangentCache()
@@ -3228,13 +3264,17 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
         if self.cable_count and not self._joint_cable_step:
             self._evaluate_cables(q_in, inverse_dt, direction=self.direction, force=product)
         if self._rolling:
-            self._launch_rolling(
+            self._launch(
                 "rolling_tangent",
-                rolling_contact_kernels.multiply_rolling_contact_tangent,
-                self._contact,
-                q_in,
-                inverse_dt,
-                [self.direction, self.contact_product],
+                rolling_contact_kernels.multiply_cached_rolling_contact_tangent,
+                self._contact.max_count,
+                [
+                    self._view(self._contact.count, wp.int32, 1),
+                    self._contact.max_count,
+                    self._rolling_tangent_cache(),
+                    self.direction,
+                    self.contact_product,
+                ],
             )
         if drag:
             launch(
