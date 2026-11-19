@@ -509,3 +509,39 @@ def particle_pile(steps: int, options: dict[str, str]) -> Iterator[Any]:
     if options.get("diagonal"):
         solver.config.enable_collision_hessian_non_diagonal = False
     yield from _run_contacts(model, solver, steps)
+
+
+@scene
+def cable(steps: int, options: dict[str, str]) -> Iterator[Any]:
+    """A curved rod of capsule bodies pinned at its root, swinging under gravity (options: framework, body_block=1,
+    ramp=1 for penalty ramping, damping=)."""
+    from newton._src.solvers.coupled_high_accuracy.cable_material import register_cable_attributes  # noqa: PLC0415
+
+    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z)
+    register_cable_attributes(builder)
+    points = [wp.vec3(0.04 * k, 0.01 * k * k, 1.0 - 0.002 * k * k) for k in range(9)]
+    damping = float(options.get("damping", 0.0))
+    bodies, _ = builder.add_rod(
+        rod=newton.Rod(points, radius=0.01),
+        stretch_stiffness=2000.0,
+        shear_stiffness=1000.0,
+        bend_stiffness=0.5,
+        twist_stiffness=0.25,
+        stretch_damping=damping,
+        bend_damping=damping * 1.0e-3,
+    )
+    root = bodies[0]
+    builder.body_mass[root] = 0.0
+    builder.body_inv_mass[root] = 0.0
+    builder.body_inertia[root] = wp.mat33(0.0)
+    builder.body_inv_inertia[root] = wp.mat33(0.0)
+    builder.color()
+    model = builder.finalize(device="cuda:0")
+    solver = _body_solver(model, options)
+    if options.get("ramp"):
+        solver.config.cable_linear_beta = 100.0
+        solver.config.cable_angular_beta = 20.0
+        solver.config.cable_penalty_gamma = 0.5
+        solver.config.cable_linear_k_start = 10.0
+        solver.config.cable_angular_k_start = 5.0
+    yield from _run_bodies(model, solver, steps)

@@ -4,13 +4,16 @@
 """Twelve-DOF affine-body block preconditioner (native ``kernels/affine_block.cu``).
 
 Each body's 12x12 block (its four state rows: diagonal blocks, off-diagonal ELL entries between its own rows, and the
-SO(3) Gauss-Newton term) is inverted by a scaled Cholesky factorisation. Inverses are stored row-major, 144 floats
-per body state. Cable contributions are added by the cable port (P5).
+SO(3) Gauss-Newton term and the material tangents of the body's cables) is inverted by a scaled Cholesky
+factorisation. Inverses are stored row-major, 144 floats per body state.
 """
 
 import warp as wp
 
+from .cables import CableView
+
 mat1212 = wp.types.matrix(shape=(12, 12), dtype=wp.float32)
+mat312 = wp.types.matrix(shape=(3, 12), dtype=wp.float32)
 vec12 = wp.types.vector(length=12, dtype=wp.float32)
 
 
@@ -138,6 +141,62 @@ def add_so3_term(matrix: mat1212, r: wp.mat33, factor: float):
 
 
 @wp.func
+def add_cable_terms(
+    matrix: mat1212,
+    ids: wp.vec4i,
+    body: int,
+    per_world: int,
+    cables: CableView,
+    cable_offsets: wp.array[wp.int64],
+    cable_ids: wp.array[wp.int32],
+    inv_dt: float,
+):
+    """Add J^T W J of every active cable touching this body, restricted to the body's own twelve coordinates."""
+    local = body % per_world
+    world = body // per_world
+    begin = int(cable_offsets[local])
+    end = int(cable_offsets[local + 1])
+    for at in range(begin, end):
+        cable = cable_ids[at] + world * cables.per_world
+        local_cable = cable % cables.per_world
+        if cables.active.shape[0] > 0:
+            if cables.active[local_cable] == 0:
+                continue
+        linear = mat312()
+        angular = mat312()
+        for node in range(cables.count[cable]):
+            particle = cables.indices[cable * 8 + node]
+            for i in range(4):
+                if particle == ids[i]:
+                    jl = cables.linear[cable * 8 + node]
+                    ja = cables.angular[cable * 8 + node]
+                    for r in range(3):
+                        for c in range(3):
+                            linear[r, 3 * i + c] = jl[r, c] + linear[r, 3 * i + c]
+                            angular[r, 3 * i + c] = ja[r, c] + angular[r, 3 * i + c]
+        penalty = cables.base[local_cable]
+        if cables.penalty.shape[0] > 0:
+            penalty = cables.penalty[cable]
+        damping = cables.damping[local_cable]
+        stiffness = damping * inv_dt + penalty
+        lin = wp.vec3(stiffness[1], stiffness[1], stiffness[0])
+        ang = wp.vec3(stiffness[2], stiffness[2], stiffness[3])
+        if cables.bias.shape[0] > 0:
+            ang = ang + cables.bias[cable]
+        for row in range(12):
+            for col in range(12):
+                total = matrix[row, col]
+                for axis in range(3):
+                    term = (
+                        lin[axis] * linear[axis, row] * linear[axis, col]
+                        + (ang[axis] * angular[axis, row]) * angular[axis, col]
+                    )
+                    total = total + term
+                matrix[row, col] = total
+    return matrix
+
+
+@wp.func
 def active_rows(ids: wp.vec4i, mass: wp.array[float], flags: wp.array[wp.int32], particles_per_world: int):
     active = vec12()
     for i in range(4):
@@ -162,6 +221,10 @@ def build_affine_body_preconditioner_block(
     tile: int,
     rotation: wp.array[wp.mat33],
     alpha: float,
+    cables: CableView,
+    cable_offsets: wp.array[wp.int64],
+    cable_ids: wp.array[wp.int32],
+    inv_dt: float,
     enabled: wp.array[wp.int32],
     cache: wp.array[float],
     output: wp.array[float],
@@ -208,6 +271,7 @@ def build_affine_body_preconditioner_block(
                                 matrix[3 * i + r, 3 * j + c] = matrix[3 * i + r, 3 * j + c] + value[r, c]
     if alpha > 0.0:
         matrix = add_so3_term(matrix, rotation[body], (weight[body % per_world] * alpha) * 0.5)
+    matrix = add_cable_terms(matrix, ids, body, per_world, cables, cable_offsets, cable_ids, inv_dt)
     valid[body] = invert_affine_body(matrix, active_rows(ids, mass, flags, particles_per_world), output, body * 144)
 
 
@@ -225,6 +289,10 @@ def build_affine_body_preconditioner_scalar(
     tile: int,
     rotation: wp.array[wp.mat33],
     alpha: float,
+    cables: CableView,
+    cable_offsets: wp.array[wp.int64],
+    cable_ids: wp.array[wp.int32],
+    inv_dt: float,
     enabled: wp.array[wp.int32],
     cache: wp.array[float],
     output: wp.array[float],
@@ -275,6 +343,7 @@ def build_affine_body_preconditioner_scalar(
                                 matrix[3 * i + r, 3 * j + c] = matrix[3 * i + r, 3 * j + c] + add
     if alpha > 0.0:
         matrix = add_so3_term(matrix, rotation[body], (weight[body % per_world] * alpha) * 0.5)
+    matrix = add_cable_terms(matrix, ids, body, per_world, cables, cable_offsets, cable_ids, inv_dt)
     valid[body] = invert_affine_body(matrix, active_rows(ids, mass, flags, particles_per_world), output, body * 144)
 
 

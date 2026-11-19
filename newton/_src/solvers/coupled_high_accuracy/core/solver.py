@@ -31,8 +31,10 @@ from .api import (
     State,
 )
 from .bodies import BodyPrecompute
+from .cables import CableHost
 from .kernels import affine as affine_kernels
 from .kernels import affine_block as affine_block_kernels
+from .kernels import cables as cable_kernels
 from .kernels import cloth as cloth_kernels
 from .kernels import drag as drag_kernels
 from .kernels import hard_contacts as hard_contact_kernels
@@ -90,7 +92,7 @@ def _resolve_stream(stream: Any, device: wp.context.Device) -> wp.Stream | None:
     raise TypeError("Expected a CUDA stream integer, CUDA Stream Protocol object, or None")
 
 
-class Solver(BodyPrecompute, SelfCollisionHost):
+class Solver(BodyPrecompute, SelfCollisionHost, CableHost):
     """Implicit Newton solver for particles, cloth, soft bodies and affine rigid bodies."""
 
     def __init__(self) -> None:
@@ -161,16 +163,6 @@ class Solver(BodyPrecompute, SelfCollisionHost):
                     self.drive_total,
                     [self._view(mask, wp.int32, self.drive_total), self.drive_initialized],
                 )
-
-    def reset_cable_penalty_state(self, stream: Any = None, mask: Span = Span()) -> None:  # noqa: B008
-        if not self._initialized or not self.cable_count:
-            return
-        raise _not_ported("cables")
-
-    def copy_cable_penalties(self, output: Span, stream: Any = None) -> None:
-        if not self._initialized or not self.cable_count:
-            return
-        raise _not_ported("cables")
 
     def step(self, state_in: State, state_out: State, *args: Any, **kwargs: Any) -> None:
         """``step(in, out, dt[, stream])``, ``step(in, out, contact, dt[, stream])`` or
@@ -258,7 +250,6 @@ class Solver(BodyPrecompute, SelfCollisionHost):
 
     def _reject_unported(self, model: Model) -> None:
         unported = {
-            "cables": model.cable_count,
             "fluid particles": model.fluid_particle_count,
             "granular particles": model.granular_particle_count or model.granular_bond_count,
         }
@@ -400,6 +391,7 @@ class Solver(BodyPrecompute, SelfCollisionHost):
         self.target = self._zeros(count, wp.vec3)
         self.hard_previous_count = self._zeros(1, wp.int32)
         self.body_count = model.body_count
+        self._precompute_cables()
         self._precompute_drag()
         copies = count // self.per_world
         empty_f, empty_i = self._empty(wp.float32), self._empty(wp.int32)
@@ -797,6 +789,7 @@ class Solver(BodyPrecompute, SelfCollisionHost):
         self._contact_product = contact_product
         self_collision = bool(config.enable_self_collision and self.self_capacity)
         self._self = self_collision
+        self._validate_cable_config()
 
         pd = config.nonlinear_solver == NonlinearSolver.PD_NEWTON
         drag = bool(self.drag_count) and config.air_density > 0.0
@@ -812,6 +805,7 @@ class Solver(BodyPrecompute, SelfCollisionHost):
         body_tangent = (
             (bodies and alpha > 0.0 and not six_springs)
             or rigid
+            or bool(self.cable_count)
             or bool(self.drive_total)
             or (pd and joint_al_active and bool(self.joint_line_total))
         )
@@ -847,6 +841,33 @@ class Solver(BodyPrecompute, SelfCollisionHost):
             or body_tangent
         )
         reference_pcg = config.reference_linear_schedule
+        # Joint-owned cable models (every particle an affine proxy) evaluate cables with the drive terms.
+        m = model
+        joint_cable_step = bool(
+            m.cable_count
+            and m.body_count
+            and m.particle_count == m.body_count * 4
+            and m.joint_drive_count
+            and m.joint_body_spring_count
+            and m.body_spring_count == m.joint_body_spring_count
+            and m.body_point_line_count == m.joint_body_point_line_count
+            and not m.body_distance_constraint_count
+            and not m.spring_count
+            and not m.triangle_count
+            and not m.edge_count
+            and not m.tetrahedron_count
+            and not m.fluid_particle_count
+            and not m.granular_particle_count
+            and so3
+            and joint_al
+            and not pd
+            and not self_collision
+            and not self.drag_count
+            and not contact.soft_max_count
+            and not config.rigid_contact_hard
+            and count == self.body_state_count * 4
+        )
+        self._joint_cable_step = joint_cable_step
         # Surface contact Jacobians are evaluated once per Newton iteration instead of once per CG iteration.
         self._cached_surface = surface and extra_product and not reference_pcg
         if self._cached_surface and self.surface_tangent_cache.shape[0] < contact.soft_max_count:
@@ -910,6 +931,8 @@ class Solver(BodyPrecompute, SelfCollisionHost):
         # Query the pre-prediction positions once per step, before the prediction mutates them.
         if self_collision:
             self._begin_self(q_in)
+        if self.cable_count and self._cable_ramping():
+            self._prepare_cable_penalties(False, True)
         if hard:
             self.reserve_rigid_contact_capacity(contact.max_count)
             launch(
@@ -1146,6 +1169,10 @@ class Solver(BodyPrecompute, SelfCollisionHost):
             )
 
         for iteration in range(config.nonlinear_iterations):
+            if self.cable_count:
+                launch(
+                    "cable_prepare", cable_kernels.prepare_cable_tangents, self.cable_count, [self._cable_view(), q_in]
+                )
             # The native solver restores this cache on every iteration, including contact-free models.
             wp.copy(self.diagonal, self.base_diagonal, count=count)
             # With bodies the inertia couples through the unscaled mass non-diagonal cache (L1).
@@ -1386,10 +1413,15 @@ class Solver(BodyPrecompute, SelfCollisionHost):
                 )
                 if self.armature:
                     self._joint_armature(v, q_in, inverse_dt, empty_v, self.rhs, empty_m)
+                if joint_cable_step and self.cable_count:
+                    self._evaluate_cables(q_in, inverse_dt, force=self.rhs)
                 if self.angular_limits:
                     self._angular_limits(v, q_in, inverse_dt, empty_v, self.rhs, empty_m)
             if self_collision:
                 self._accumulate_self(q_in)
+            # Joint-owned cable schedules evaluate the cable force inside the drive block instead.
+            if self.cable_count and not joint_cable_step:
+                self._evaluate_cables(q_in, inverse_dt, force=self.rhs)
             if so3 and so3_alpha > 0.0:
                 launch(
                     "so3_force",
@@ -1767,6 +1799,13 @@ class Solver(BodyPrecompute, SelfCollisionHost):
                     )
             # The native host updates state_in.q in place, even when state_out owns a separate allocation.
             launch("apply", step_kernels.apply_nonlinear_step, count, [q_in, q_out, self.solution])
+            if self.cable_count and self._cable_ramping():
+                launch(
+                    "cable_penalty_update",
+                    cable_kernels.update_cable_penalties,
+                    self.cable_count,
+                    [self._cable_view(), q_out, config.cable_linear_beta, config.cable_angular_beta],
+                )
             if hard:
                 launch(
                     "hard_update",
@@ -2745,6 +2784,10 @@ class Solver(BodyPrecompute, SelfCollisionHost):
                         count,
                         self.body_rotation,
                         body_so3_alpha,
+                        self._cable_view(),
+                        self.affine_cable_offsets,
+                        self.affine_cable_ids,
+                        inverse_dt,
                         self.affine_enabled,
                         self.affine_blocks if self._contact_block else self._empty(wp.float32),
                         self.affine_blocks,
@@ -2771,6 +2814,10 @@ class Solver(BodyPrecompute, SelfCollisionHost):
                         per_world,
                         self.body_rotation,
                         body_so3_alpha,
+                        self._cable_view(),
+                        self.affine_cable_offsets,
+                        self.affine_cable_ids,
+                        inverse_dt,
                         self.affine_enabled,
                         self.affine_blocks if self._contact_block else self._empty(wp.float32),
                         self.affine_blocks,
@@ -2794,6 +2841,8 @@ class Solver(BodyPrecompute, SelfCollisionHost):
                     per_world,
                 ],
             )
+        if self.cable_count:
+            self._evaluate_cables(q_in, inverse_dt, diagonal=self.preconditioner_blocks)
         if self._rolling and not body_block:
             self._launch_rolling(
                 "rolling_preconditioner",
@@ -3011,8 +3060,12 @@ class Solver(BodyPrecompute, SelfCollisionHost):
             )
             if self.armature:
                 self._joint_armature(v, q_in, inverse_dt, self.direction, product, self._empty(wp.mat33))
+            if self._joint_cable_step and self.cable_count:
+                self._evaluate_cables(q_in, inverse_dt, direction=self.direction, force=product)
             if self.angular_limits:
                 self._angular_limits(v, q_in, inverse_dt, self.direction, product, self._empty(wp.mat33))
+        if self.cable_count and not self._joint_cable_step:
+            self._evaluate_cables(q_in, inverse_dt, direction=self.direction, force=product)
         if self._rolling:
             self._launch_rolling(
                 "rolling_tangent",
