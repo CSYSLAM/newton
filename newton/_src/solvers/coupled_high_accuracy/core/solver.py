@@ -37,6 +37,9 @@ from .kernels import cloth as cloth_kernels
 from .kernels import drag as drag_kernels
 from .kernels import joints as joint_kernels
 from .kernels import pcg as pcg_kernels
+from .kernels import rigid_contacts as rigid_contact_kernels
+from .kernels import rolling_contacts as rolling_contact_kernels
+from .kernels import soft_contacts as soft_contact_kernels
 from .kernels import springs as spring_kernels
 from .kernels import step as step_kernels
 from .kernels import tetrahedra as tetrahedron_kernels
@@ -236,7 +239,6 @@ class Solver(BodyPrecompute):
     def _reject_unported(self, model: Model) -> None:
         unported = {
             "cables": model.cable_count,
-            "shapes and contacts": model.shape_count,
             "fluid particles": model.fluid_particle_count,
             "granular particles": model.granular_particle_count or model.granular_bond_count,
         }
@@ -332,6 +334,32 @@ class Solver(BodyPrecompute):
             if np.any(self._read(model.particle_world, wp.int32, self.per_world) < -1):
                 raise ValueError("particle_world contains an invalid world index")
 
+        if model.shape_count:
+            n = model.shape_count
+            if np.any(self._read(model.shape_bodies, wp.int32, n) < -1):
+                raise ValueError("shape_bodies contains an invalid affine body id")
+            types = self._read(model.shape_types, wp.int32, n)
+            transforms = self._read(model.shape_transforms, wp.transform, n)
+            scales = self._read(model.shape_scales, wp.vec3, n)
+            for i in np.flatnonzero(types == 3):
+                if not np.all(np.isfinite(transforms[i][:3])) or not math.isfinite(scales[i][0]) or scales[i][0] <= 0.0:
+                    raise ValueError("sphere centers must be finite and sphere radii must be finite and positive")
+            for field in (
+                "shape_contact_stiffnesses",
+                "shape_contact_dampings",
+                "shape_frictions",
+                "shape_contact_friction_gains",
+                "shape_margins",
+            ):
+                values = self._read(getattr(model, field), wp.float32, n)
+                if not np.all(np.isfinite(values)) or np.any(values < 0.0):
+                    raise ValueError("shape contact materials and margins must be finite and non-negative")
+            for field in ("shape_rolling_frictions", "shape_torsional_frictions"):
+                span = getattr(model, field)
+                if span.size:
+                    values = self._read(span, wp.float32, n)
+                    if not np.all(np.isfinite(values)) or np.any(values < 0.0):
+                        raise ValueError(f"{field} must be finite and non-negative")
         # Radii are only checked when shapes or collision particles use them.
         if model.shape_count or model.collision_particle_count:
             self._require(model.particle_radii, self.per_world, "particle_radii")
@@ -339,6 +367,10 @@ class Solver(BodyPrecompute):
             if np.any(np.isnan(radii)) or np.any(radii < 0.0):
                 raise ValueError("particle radii must be non-negative and not NaN")
 
+        # Body-owned shapes only matter for contacts, which need affine bodies.
+        if model.shape_count and not (model.body_count or model.body_state_count):
+            if np.any(self._read(model.shape_bodies, wp.int32, model.shape_count) >= 0):
+                raise RuntimeError("Source shape host currently supports static shapes only")
         self.solution = self._zeros(count, wp.vec3)
         self.rhs = self._zeros(count, wp.vec3)
         self.previous = self._zeros(count, wp.vec3)
@@ -375,6 +407,13 @@ class Solver(BodyPrecompute):
         del empty_v, empty_m
         self._precompute_affine_blocks()
         self.rolling = False
+        if self.body_count:
+            # Rolling/torsional kernels run only when some shape has such friction.
+            for span in (model.shape_rolling_frictions, model.shape_torsional_frictions):
+                if span.ptr and span.size >= model.shape_count:
+                    self.rolling = self.rolling or bool(np.any(self._read(span, wp.float32, model.shape_count) != 0.0))
+            if self.rolling:
+                self._require(model.body_inertia_tensors, self.body_count, "body_inertia_tensors")
 
         self._precompute_springs()
         self._precompute_cloth()
@@ -702,8 +741,35 @@ class Solver(BodyPrecompute):
         if not (dt > 0.0) or not math.isfinite(dt):
             raise ValueError("dt must be finite and positive")
         self._validate_step_config()
-        if contact.soft_max_count or contact.max_count:
-            raise _not_ported("contacts")
+        surface = bool(contact.soft_max_count and contact.soft_indices.size and contact.soft_barycentric.size)
+        particle_contact = bool(contact.soft_max_count and (not surface or contact.soft_particle_only_shapes.size))
+        contact_product = particle_contact and config.enable_collision_hessian_non_diagonal
+        rigid = bool(self.body_count and contact.max_count and contact.count.size)
+        if surface:
+            raise _not_ported("full-surface soft contacts")
+        hard = rigid and config.rigid_contact_hard
+        rolling = rigid and self.rolling
+        if hard:
+            raise _not_ported("hard rigid contacts")
+        self._rigid = rigid
+        self._rolling = rolling
+        if contact.soft_max_count:
+            if not surface and (
+                contact.soft_indices.size or contact.soft_barycentric.size or contact.soft_particle_only_shapes.size
+            ):
+                raise RuntimeError("Partial surface-contact inputs have not been implemented")
+            if not model.shape_count:
+                raise ValueError("Soft contacts require model shapes")
+            self._require(contact.soft_count, 1, "soft_count")
+            if particle_contact and contact.soft_particle.size < contact.soft_max_count:
+                raise ValueError("soft contact arrays are smaller than soft_max_count")
+            for field in ("soft_shape", "soft_body_pos", "soft_body_vel", "soft_normal"):
+                self._require(getattr(contact, field), contact.soft_max_count, field)
+        self._particle_contact = particle_contact
+        self._contact = contact
+        self._surface = surface
+        self._qd_in = self._view(state_in.particle_qd, wp.vec3, count)
+        self._contact_product = contact_product
         if config.enable_self_collision and self.self_collision_primitives:
             raise _not_ported("self-collision")
 
@@ -720,11 +786,20 @@ class Solver(BodyPrecompute):
         joint_al_active = joint_al
         body_tangent = (
             (bodies and alpha > 0.0 and not six_springs)
+            or rigid
             or bool(self.drive_total)
             or (pd and joint_al_active and bool(self.joint_line_total))
         )
         block_matrix = not pd
-        block = block_matrix or self.bending_damping or bool(self.tetrahedron_count) or drag or body_tangent
+        block = (
+            block_matrix
+            or surface
+            or contact_product
+            or self.bending_damping
+            or bool(self.tetrahedron_count)
+            or drag
+            or body_tangent
+        )
         # The PD branch ignores the body-block option when it selects the scalar matrix.
         body_block = bodies and block and config.affine_body_block_preconditioner
         coupled_materials = (
@@ -736,7 +811,9 @@ class Solver(BodyPrecompute):
             and not config.affine_body_block_preconditioner
             and (not pd or not self.tetrahedron_count)
         )
-        extra_product = self.bending_damping or bool(self.tetrahedron_count) or drag or body_tangent
+        extra_product = (
+            surface or contact_product or self.bending_damping or bool(self.tetrahedron_count) or drag or body_tangent
+        )
         reference_pcg = config.reference_linear_schedule
         fused_pcg = block_matrix and not body_block and not reference_pcg
         if control.tetrahedron_activations.size and control.tetrahedron_activations.size < self.tetrahedron_count:
@@ -1062,6 +1139,19 @@ class Solver(BodyPrecompute):
                         per_world,
                     ],
                 )
+            if rigid:
+                self._rigid_contact(contact, q_in, qd_in, inverse_dt, force=self.rhs, scalar=self.diagonal)
+            if rolling:
+                self._launch_rolling(
+                    "rolling_force",
+                    rolling_contact_kernels.evaluate_rolling_contact_force,
+                    contact,
+                    q_in,
+                    inverse_dt,
+                    [self.rhs, self._empty(wp.spatial_vector)],
+                )
+            if particle_contact:
+                self._soft_contact(contact, q_in, qd_in, inverse_dt, surface, force=self.rhs, scalar=self.diagonal)
             # Force order: plain body springs (the kernel skips joint springs), distance constraints, AL joint
             # springs, point-lines, joint drive load, angular limits; finally SO(3).
             if self.body_spring_total:
@@ -1681,6 +1771,22 @@ class Solver(BodyPrecompute):
         self.hard_previous_count.zero_()
         if not config.nonlinear_iterations:
             wp.copy(q_out, q_in, count=count)
+        # Report contact wrenches from the final solved pose before the velocity update.
+        if contact.contact_force.size and (rigid or particle_contact):
+            wrenches = self._view(contact.contact_force, wp.spatial_vector)
+        if contact.contact_force.size and rigid:
+            self._rigid_contact(contact, q_in, qd_in, inverse_dt, contact_force=wrenches[: contact.max_count])
+        if contact.contact_force.size and rolling:
+            self._launch_rolling(
+                "rolling_force",
+                rolling_contact_kernels.evaluate_rolling_contact_force,
+                contact,
+                q_in,
+                inverse_dt,
+                [self._empty(wp.vec3), wrenches[: contact.max_count]],
+            )
+        if contact.contact_force.size and particle_contact:
+            self._soft_contact(contact, q_in, qd_in, inverse_dt, surface, contact_force=wrenches[contact.max_count :])
         launch("velocity", step_kernels.update_velocity, count, [inverse_dt, self.previous, q_out, qd_out])
         if self.drive_total:
             launch(
@@ -1707,6 +1813,198 @@ class Solver(BodyPrecompute):
                 ],
             )
         del rows_total
+
+    def _soft_view(self, contact: Contact, x: wp.array, velocity: wp.array, inverse_dt: float, filtered: bool):
+        model = self.model
+        view = soft_contact_kernels.SoftContactView()
+        view.count = self._view(contact.soft_count, wp.int32, 1)
+        view.capacity = contact.soft_max_count
+        view.particle = self._view(contact.soft_particle, wp.int32)
+        view.shape = self._view(contact.soft_shape, wp.int32)
+        view.body_pos = self._view(contact.soft_body_pos, wp.vec3)
+        view.body_vel = self._view(contact.soft_body_vel, wp.vec3)
+        view.normal = self._view(contact.soft_normal, wp.vec3)
+        view.radius = self._view(model.particle_radii, wp.float32, self.per_world)
+        view.mass = self._view(model.particle_masses, wp.float32, self.per_world)
+        view.particle_kind = self.body_kind if self.body_count else self.particle_kind
+        view.particles_per_world = self.per_world
+        view.total_particles = self.count
+        shapes = model.shape_count
+        view.shape_body = self._view(model.shape_bodies, wp.int32, shapes)
+        view.shape_type = self._view(model.shape_types, wp.int32, shapes)
+        view.shape_transform = self._view(model.shape_transforms, wp.transform, shapes)
+        view.shape_scale = self._view(model.shape_scales, wp.vec3, shapes)
+        view.shape_margin = self._view(model.shape_margins, wp.float32, shapes)
+        view.shape_ke = self._view(model.shape_contact_stiffnesses, wp.float32, shapes)
+        view.shape_kd = self._view(model.shape_contact_dampings, wp.float32, shapes)
+        view.shape_kf = self._view(model.shape_contact_friction_gains, wp.float32, shapes)
+        view.shape_mu = self._view(model.shape_frictions, wp.float32, shapes)
+        view.local_shape_count = shapes
+        view.shapes_per_world = model.shape_replicated_count
+        view.worlds = self.count // self.per_world
+        view.global_ke = model.soft_contact_stiffness
+        view.global_kd = model.soft_contact_damping
+        view.global_kf = model.soft_contact_friction_gain
+        view.global_mu = model.soft_contact_friction
+        if self.body_count:
+            view.body_ids = self._view(model.affine_body_ids, wp.int32, self.body_count)
+            view.body_indices = self._view(model.affine_body_indices, wp.vec4i, self.body_count)
+            view.body_com = self._view(model.body_centers_of_mass, wp.vec3, self.body_count)
+        else:
+            view.body_ids = self._empty(wp.int32)
+            view.body_indices = self._empty(wp.vec4i)
+            view.body_com = self._empty(wp.vec3)
+        view.x = x
+        view.velocity = velocity
+        view.previous = self.previous
+        view.inv_dt = inverse_dt
+        view.shape_filter = (
+            self._view(contact.soft_particle_only_shapes, wp.int32) if filtered else self._empty(wp.int32)
+        )
+        return view
+
+    def _soft_contact(
+        self,
+        contact,
+        x,
+        velocity,
+        inverse_dt,
+        filtered,
+        force=None,
+        scalar=None,
+        system=None,
+        precond=None,
+        contact_force=None,
+    ) -> None:
+        self._launch(
+            "soft_contact",
+            soft_contact_kernels.evaluate_soft_contact_force,
+            contact.soft_max_count,
+            [
+                self._soft_view(contact, x, velocity, inverse_dt, filtered),
+                force if force is not None else self._empty(wp.vec3),
+                scalar if scalar is not None else self._empty(wp.float32),
+                system if system is not None else self._empty(wp.mat33),
+                precond if precond is not None else self._empty(wp.mat33),
+                contact_force if contact_force is not None else self._empty(wp.spatial_vector),
+            ],
+        )
+
+    def _rigid_view(self, contact: Contact, x: wp.array, velocity: wp.array, inverse_dt: float):
+        model = self.model
+        view = rigid_contact_kernels.RigidContactView()
+        view.count = self._view(contact.count, wp.int32, 1)
+        view.capacity = contact.max_count
+        n = contact.max_count
+        view.shape0 = self._view(contact.shape0, wp.int32, n)
+        view.shape1 = self._view(contact.shape1, wp.int32, n)
+        view.point0 = self._view(contact.point0, wp.vec3, n)
+        view.point1 = self._view(contact.point1, wp.vec3, n)
+        view.offset0 = self._view(contact.offset0, wp.vec3)
+        view.offset1 = self._view(contact.offset1, wp.vec3)
+        view.normal = self._view(contact.normal, wp.vec3, n)
+        view.margin0 = self._view(contact.margin0, wp.float32, n)
+        view.margin1 = self._view(contact.margin1, wp.float32, n)
+        shapes = model.shape_count
+        view.shape_body = self._view(model.shape_bodies, wp.int32, shapes)
+        view.shape_type = self._view(model.shape_types, wp.int32, shapes)
+        view.transform = self._view(model.shape_transforms, wp.transform, shapes)
+        view.shape_scale = self._view(model.shape_scales, wp.vec3, shapes)
+        view.ke = self._view(model.shape_contact_stiffnesses, wp.float32, shapes)
+        view.kd = self._view(model.shape_contact_dampings, wp.float32, shapes)
+        view.kf = self._view(model.shape_contact_friction_gains, wp.float32, shapes)
+        view.mu = self._view(model.shape_frictions, wp.float32, shapes)
+        view.epsilon = self._config.rigid_contact_friction_epsilon
+        view.local_shape_count = shapes
+        view.shapes_per_world = model.shape_replicated_count
+        view.worlds = self.count // self.per_world
+        view.body_ids = self._view(model.affine_body_ids, wp.int32, self.body_count)
+        view.body_indices = self._view(model.affine_body_indices, wp.vec4i, self.body_count)
+        view.body_com = self._view(model.body_centers_of_mass, wp.vec3, self.body_count)
+        view.particles_per_world = self.per_world
+        view.x = x
+        view.velocity = velocity
+        view.previous = self.previous
+        view.inv_dt = inverse_dt
+        return view
+
+    def _launch_rolling(
+        self, key: str, kernel: Any, contact: Contact, x: wp.array, inverse_dt: float, outputs: list
+    ) -> None:
+        model = self.model
+        view = rolling_contact_kernels.RollingContactView()
+        rigid = self._rigid_view(contact, x, self._empty(wp.vec3), inverse_dt)
+        for name in (
+            "count",
+            "capacity",
+            "shape0",
+            "shape1",
+            "point0",
+            "point1",
+            "offset0",
+            "offset1",
+            "normal",
+            "margin0",
+            "margin1",
+            "shape_body",
+            "shape_type",
+            "transform",
+            "shape_scale",
+            "ke",
+            "kd",
+            "local_shape_count",
+            "shapes_per_world",
+            "worlds",
+            "body_ids",
+            "body_indices",
+            "body_com",
+            "particles_per_world",
+            "x",
+            "previous",
+            "inv_dt",
+        ):
+            setattr(view, name, getattr(rigid, name))
+        shapes = model.shape_count
+        view.rolling = self._view(model.shape_rolling_frictions, wp.float32, shapes)
+        view.torsional = self._view(model.shape_torsional_frictions, wp.float32, shapes)
+        view.inertia = self._view(model.body_inertia_tensors, wp.float32, 9 * self.body_count)
+        view.epsilon = self._config.rolling_friction_velocity_epsilon
+        self._launch(key, kernel, contact.max_count, [view, *outputs])
+
+    def _rigid_contact(self, contact, x, velocity, inverse_dt, force=None, scalar=None, contact_force=None) -> None:
+        self._launch(
+            "rigid_force",
+            rigid_contact_kernels.evaluate_contact_force,
+            contact.max_count,
+            [
+                self._rigid_view(contact, x, velocity, inverse_dt),
+                force if force is not None else self._empty(wp.vec3),
+                scalar if scalar is not None else self._empty(wp.float32),
+                contact_force if contact_force is not None else self._empty(wp.spatial_vector),
+            ],
+        )
+
+    def _rigid_tangent(self, contact, x, inverse_dt, direction=None, product=None, system=None, precond=None):
+        self._launch(
+            "rigid_tangent",
+            rigid_contact_kernels.evaluate_contact_tangent,
+            contact.max_count,
+            [
+                self._rigid_view(contact, x, self._empty(wp.vec3), inverse_dt),
+                direction if direction is not None else self._empty(wp.vec3),
+                product if product is not None else self._empty(wp.vec3),
+                system if system is not None else self._empty(wp.mat33),
+                precond if precond is not None else self._empty(wp.mat33),
+            ],
+        )
+
+    def _soft_contact_product(self, contact, x, velocity, inverse_dt, filtered) -> None:
+        self._launch(
+            "soft_contact_product",
+            soft_contact_kernels.multiply_soft_contact_hessian_off_diagonal,
+            contact.soft_max_count,
+            [self._soft_view(contact, x, velocity, inverse_dt, filtered), self.direction, self.contact_product],
+        )
 
     def _articulated_materials(self) -> bool:
         """Only joint-owned constraints share the mixed cloth/tetrahedron schedule of the robot demos."""
@@ -2012,6 +2310,18 @@ class Solver(BodyPrecompute):
         # The native solver retains A and inverts its separate cache in place.
         if block_matrix:
             wp.copy(self.preconditioner_blocks, self.blocks, count=count)
+        if self._rigid and self._config.enable_collision_hessian_non_diagonal:
+            self._rigid_tangent(self._contact, q_in, inverse_dt, system=self.blocks, precond=self.preconditioner_blocks)
+        if self._particle_contact and (not pd or self._config.enable_collision_hessian_non_diagonal):
+            self._soft_contact(
+                self._contact,
+                q_in,
+                self._qd_in,
+                inverse_dt,
+                self._surface,
+                system=self.blocks,
+                precond=self.preconditioner_blocks,
+            )
         # Without the full body block, SO(3) precedes tetrahedra/bending.
         if constitutive and so3_alpha > 0.0:
             launch(
@@ -2137,6 +2447,15 @@ class Solver(BodyPrecompute):
                     v, q_in, inverse_dt, self._empty(wp.vec3), self._empty(wp.vec3), self.preconditioner_blocks
                 )
         if body_block:
+            if self._rolling:
+                self._launch_rolling(
+                    "rolling_preconditioner",
+                    rolling_contact_kernels.add_rolling_contact_preconditioner,
+                    self._contact,
+                    q_in,
+                    inverse_dt,
+                    [self.preconditioner_blocks],
+                )
             # The body assembly adds SO(3) itself, before the per-particle copies do.
             if block_matrix:
                 launch(
@@ -2204,6 +2523,15 @@ class Solver(BodyPrecompute):
                     bodies_per_world,
                     per_world,
                 ],
+            )
+        if self._rolling and not body_block:
+            self._launch_rolling(
+                "rolling_preconditioner",
+                rolling_contact_kernels.add_rolling_contact_preconditioner,
+                self._contact,
+                q_in,
+                inverse_dt,
+                [self.preconditioner_blocks],
             )
         if drag:
             launch(
@@ -2344,6 +2672,10 @@ class Solver(BodyPrecompute):
                     per_world,
                 ],
             )
+        if self._rigid and self._config.enable_collision_hessian_non_diagonal:
+            self._rigid_tangent(self._contact, q_in, inverse_dt, direction=self.direction, product=self.contact_product)
+        if self._contact_product:
+            self._soft_contact_product(self._contact, q_in, self._qd_in, inverse_dt, self._surface)
         # The other PD joint-line schedules add it after the contact tangents, ahead of the drive terms.
         if pd and not coupled_materials and joint_al_active and self.joint_line_total and so3_alpha > 0.0:
             launch(
@@ -2385,6 +2717,15 @@ class Solver(BodyPrecompute):
                 self._joint_armature(v, q_in, inverse_dt, self.direction, product, self._empty(wp.mat33))
             if self.angular_limits:
                 self._angular_limits(v, q_in, inverse_dt, self.direction, product, self._empty(wp.mat33))
+        if self._rolling:
+            self._launch_rolling(
+                "rolling_tangent",
+                rolling_contact_kernels.multiply_rolling_contact_tangent,
+                self._contact,
+                q_in,
+                inverse_dt,
+                [self.direction, self.contact_product],
+            )
         if drag:
             launch(
                 "drag_tangent",

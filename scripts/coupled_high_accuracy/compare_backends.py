@@ -26,9 +26,12 @@ HERE = Path(__file__).resolve().parent
 FIELDS = ("particle_q", "particle_qd", "body_q", "body_qd")
 
 
-def record(scene_name: str, steps: int, options: dict[str, str], output: Path) -> None:
+def record(scene_name: str, steps: int, options: dict[str, str], output: Path, replay: Path | None = None) -> None:
     sys.path.insert(0, str(HERE))
     import scenes  # noqa: PLC0415
+
+    if replay is not None:
+        scenes.REPLAY = dict(np.load(replay))
 
     frames = {field: [] for field in FIELDS}
     for state in scenes.SCENES[scene_name](steps, options):
@@ -38,9 +41,13 @@ def record(scene_name: str, steps: int, options: dict[str, str], output: Path) -
     np.savez(output, **{field: np.stack(values) for field, values in frames.items() if values})
 
 
-def run_backend(backend: str, scene: str, steps: int, options: list[str], output: Path) -> None:
+def run_backend(
+    backend: str, scene: str, steps: int, options: list[str], output: Path, replay: Path | None = None
+) -> None:
     environment = dict(os.environ, NEWTON_CHA_BACKEND=backend)
     command = [sys.executable, __file__, scene, "--steps", str(steps), "--record", str(output)]
+    if replay is not None:
+        command += ["--replay-from", str(replay)]
     for option in options:
         command += ["--option", option]
     subprocess.run(command, check=True, env=environment)
@@ -62,6 +69,12 @@ def main() -> int:
         help="Two comma-separated backends, e.g. native,native for run-to-run noise.",
     )
     parser.add_argument("--record", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--replay-from", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--replay",
+        action="store_true",
+        help="Restart the second backend from the first backend's state every step (one-step differences).",
+    )
     args = parser.parse_args()
     if args.list or args.scene is None:
         for name in sorted(scenes.SCENES):
@@ -69,14 +82,17 @@ def main() -> int:
         return 0
     options = dict(option.split("=", 1) for option in args.option)
     if args.record:
-        record(args.scene, args.steps, options, args.record)
+        record(args.scene, args.steps, options, args.record, args.replay_from)
         return 0
 
     with tempfile.TemporaryDirectory() as directory:
         results = []
         for index, backend in enumerate(args.backends.split(",")):
             path = Path(directory) / f"{index}-{backend}.npz"
-            run_backend(backend, args.scene, args.steps, args.option, path)
+            replay = None
+            if args.replay and index == 1:
+                replay = next(Path(directory).glob("0-*.npz"))
+            run_backend(backend, args.scene, args.steps, args.option, path, replay)
             results.append(dict(np.load(path)))
     failed = False
     for field in FIELDS:

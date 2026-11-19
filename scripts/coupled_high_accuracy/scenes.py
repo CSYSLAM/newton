@@ -15,6 +15,18 @@ import newton
 from newton.solvers import coupled_high_accuracy as s3d
 
 SCENES: dict[str, Callable[[int, dict[str, str]], Iterator[Any]]] = {}
+# Set by compare_backends.py --replay: recorded states every step restarts from (one-step comparison).
+REPLAY: dict[str, np.ndarray] | None = None
+
+
+def _restart(state, step: int) -> None:
+    """Overwrite the state with the replayed state before step `step` (the recorded state after step - 1)."""
+    if REPLAY is None or step == 0:
+        return
+    for field in ("particle_q", "particle_qd", "body_q", "body_qd"):
+        array = getattr(state, field, None)
+        if array is not None and field in REPLAY and REPLAY[field].size:
+            array.assign(REPLAY[field][step - 1])
 
 
 def scene(function):
@@ -29,7 +41,8 @@ def _framework(options: dict[str, str]):
 def _run(model, solver, steps: int, dt: float = 1.0 / 240.0) -> Iterator[Any]:
     state_in, state_out = model.state(), model.state()
     control = model.control()
-    for _ in range(steps):
+    for step in range(steps):
+        _restart(state_in, step)
         state_in.clear_forces()
         solver.step(state_in, state_out, control, None, dt)
         state_in, state_out = state_out, state_in
@@ -188,7 +201,10 @@ def _run_bodies(model, solver, steps: int, dt: float = 1.0 / 240.0, control=None
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
     solver.sync_affine_body_state(state_in)
     control = control or model.control()
-    for _ in range(steps):
+    for step in range(steps):
+        _restart(state_in, step)
+        if REPLAY is not None and step:
+            solver.sync_affine_body_state(state_in)
         state_in.clear_forces()
         solver.step(state_in, state_out, control, None, dt)
         state_in, state_out = state_out, state_in
@@ -263,3 +279,119 @@ def pendulum(steps: int, options: dict[str, str]) -> Iterator[Any]:
     builder.add_articulation(list(range(builder.joint_count)))
     model = builder.finalize(device="cuda:0")
     yield from _run_bodies(model, _body_solver(model, options), steps)
+
+
+def _run_contacts(model, solver, steps: int, dt: float = 1.0 / 240.0, **pipeline_options) -> Iterator[Any]:
+    state_in, state_out = model.state(), model.state()
+    if model.joint_count:
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
+    if model.body_count:
+        solver.sync_affine_body_state(state_in)
+    pipeline = newton.CollisionPipeline(model, **pipeline_options)
+    contacts = pipeline.contacts()
+    control = model.control()
+    for step in range(steps):
+        _restart(state_in, step)
+        state_in.clear_forces()
+        pipeline.collide(state_in, contacts)
+        solver.step(state_in, state_out, control, contacts, dt)
+        state_in, state_out = state_out, state_in
+        yield state_in
+
+
+@scene
+def cloth_ground(steps: int, options: dict[str, str]) -> Iterator[Any]:
+    """A cloth grid dropped on the ground plane and a static sphere (options: framework, friction=, diagonal=1)."""
+    from newton.solvers import style3d  # noqa: PLC0415
+
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    newton.solvers.SolverStyle3D.register_custom_attributes(builder)
+    builder.add_ground_plane()
+    builder.add_shape_sphere(body=-1, xform=wp.transform(wp.vec3(0.2, 0.15, 0.05), wp.quat_identity()), radius=0.06)
+    style3d.add_cloth_grid(
+        builder,
+        pos=wp.vec3(0.0, 0.0, 0.12),
+        rot=wp.quat_identity(),
+        dim_x=8,
+        dim_y=6,
+        cell_x=0.05,
+        cell_y=0.05,
+        vel=wp.vec3(0.1, 0.0, -0.5),
+        mass=0.02,
+        particle_radius=0.01,
+        tri_aniso_ke=wp.vec3(2.0e3, 1.0e3, 3.0e2),
+        edge_aniso_ke=wp.vec3(1.0e-3),
+        edge_kd=0.0,
+    )
+    model = builder.finalize(device="cuda:0")
+    model.soft_contact_ke = 2.0e3
+    model.soft_contact_kd = 5.0
+    model.soft_contact_mu = float(options.get("friction", 0.5))
+    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver.config.nonlinear_solver = _framework(options)
+    solver.config.nonlinear_iterations = int(options.get("iterations", 4))
+    solver.config.linear_iterations = int(options.get("linear", 50))
+    if options.get("diagonal"):
+        solver.config.enable_collision_hessian_non_diagonal = False
+    yield from _run_contacts(model, solver, steps)
+
+
+@scene
+def particles_on_body(steps: int, options: dict[str, str]) -> Iterator[Any]:
+    """Particles hitting a sphere and a box attached to a free affine body, without gravity (options: framework)."""
+    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+    _shape_friction(builder, options)
+    body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.5), wp.quat_identity()))
+    builder.add_shape_sphere(body=body, radius=0.1)
+    builder.add_shape_box(
+        body=body, xform=wp.transform(wp.vec3(0.25, 0.0, 0.0), wp.quat_identity()), hx=0.05, hy=0.05, hz=0.05
+    )
+    for index in range(6):
+        builder.add_particle(
+            pos=wp.vec3(-0.05 + 0.06 * index, 0.01 * index, 0.72), vel=wp.vec3(0.0, 0.0, -1.0), mass=0.05, radius=0.02
+        )
+    model = builder.finalize(device="cuda:0")
+    model.soft_contact_ke = 5.0e3
+    model.soft_contact_kd = 2.0
+    model.soft_contact_mu = 0.3
+    yield from _run_contacts(model, _body_solver(model, options), steps)
+
+
+def _shape_friction(builder, options: dict[str, str]) -> None:
+    rolling = float(options.get("rolling", 0.0))
+    builder.default_shape_cfg.mu_rolling = rolling
+    builder.default_shape_cfg.mu_torsional = rolling
+
+
+@scene
+def boxes_on_ground(steps: int, options: dict[str, str]) -> Iterator[Any]:
+    """Two boxes and a sphere body dropped on the ground and on each other (options: framework, rolling=,
+    epsilon=, body_block=1, diagonal=1)."""
+    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z)
+    _shape_friction(builder, options)
+    builder.default_shape_cfg.ke = 2.0e4
+    builder.default_shape_cfg.kd = 20.0
+    builder.default_shape_cfg.mu = 0.6
+    builder.add_ground_plane()
+    rotation = wp.quat_from_axis_angle(wp.normalize(wp.vec3(1.0, 1.0, 0.0)), 0.3)
+    for index, height in enumerate((0.12, 0.32)):
+        body = builder.add_body(xform=wp.transform(wp.vec3(0.03 * index, 0.0, height), rotation))
+        builder.add_shape_box(body=body, hx=0.08, hy=0.06, hz=0.05)
+    ball = builder.add_body(xform=wp.transform(wp.vec3(0.3, 0.0, 0.2), wp.quat_identity()))
+    builder.add_shape_sphere(body=ball, radius=0.06)
+    model = builder.finalize(device="cuda:0")
+    if options.get("perturb"):
+        # Shift every body by a tiny amount to measure how sensitive the scene is to round-off.
+        q = model.joint_q.numpy()
+        q[2::7] += float(options["perturb"])
+        model.joint_q.assign(q)
+    qd = model.body_qd.numpy()
+    qd[ball] = [0.0, 0.0, 0.0, -0.5, 0.0, 0.0]
+    model.body_qd.assign(qd)
+    model.joint_qd.assign(qd.reshape(-1))
+    solver = _body_solver(model, options)
+    if options.get("epsilon"):
+        solver.config.rigid_contact_friction_epsilon = float(options["epsilon"])
+    if options.get("diagonal"):
+        solver.config.enable_collision_hessian_non_diagonal = False
+    yield from _run_contacts(model, solver, steps)
