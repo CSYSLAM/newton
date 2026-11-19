@@ -166,3 +166,101 @@ def tetrahedra(steps: int, options: dict[str, str]) -> Iterator[Any]:
     solver.config.nonlinear_iterations = int(options.get("iterations", 4))
     solver.config.linear_iterations = int(options.get("linear", 50))
     yield from _run(model, solver, steps)
+
+
+def _body_solver(model, options: dict[str, str]):
+    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver.config.nonlinear_solver = _framework(options)
+    solver.config.nonlinear_iterations = int(options.get("iterations", 4))
+    solver.config.linear_iterations = int(options.get("linear", 50))
+    rigidity = options.get("rigidity")
+    if rigidity:
+        solver.config.affine_body_rigidity_model = getattr(s3d.AffineBodyRigidityModel, rigidity.upper())
+    if options.get("body_block"):
+        solver.config.affine_body_block_preconditioner = True
+    if options.get("penalty"):
+        solver.config.joint_constraint_mode = s3d.JointConstraintMode.PENALTY
+    return solver
+
+
+def _run_bodies(model, solver, steps: int, dt: float = 1.0 / 240.0, control=None) -> Iterator[Any]:
+    state_in, state_out = model.state(), model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
+    solver.sync_affine_body_state(state_in)
+    control = control or model.control()
+    for _ in range(steps):
+        state_in.clear_forces()
+        solver.step(state_in, state_out, control, None, dt)
+        state_in, state_out = state_out, state_in
+        yield state_in
+
+
+@scene
+def spinning_body(steps: int, options: dict[str, str]) -> Iterator[Any]:
+    """A free affine body with anisotropic inertia spinning under gravity (options: framework, rigidity,
+    body_block=1)."""
+    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z)
+    inertia = wp.mat33(0.04, 0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 0.07)
+    body = builder.add_body(
+        xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()), mass=1.5, inertia=inertia, lock_inertia=True
+    )
+    model = builder.finalize(device="cuda:0")
+    qd = model.body_qd.numpy()
+    qd[body] = [0.1, 0.0, 0.2, 0.3, 5.0, 0.2]
+    model.body_qd.assign(qd)
+    model.joint_qd.assign(qd[body])
+    yield from _run_bodies(model, _body_solver(model, options), steps)
+
+
+@scene
+def pendulum(steps: int, options: dict[str, str]) -> Iterator[Any]:
+    """A three-link revolute pendulum, the first joint driven to a target (options: framework, rigidity,
+    body_block=1, penalty=1, prismatic=1, armature=, limit=1)."""
+    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z)
+    inertia = wp.mat33(0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.002)
+    parent = -1
+    armature = float(options.get("armature", 0.0))
+    for link in range(3):
+        body = builder.add_link(
+            xform=wp.transform(wp.vec3(0.2 * link + 0.1, 0.0, 1.0), wp.quat_identity()),
+            mass=0.5,
+            inertia=inertia,
+            lock_inertia=True,
+        )
+        parent_xform = wp.transform(
+            wp.vec3(0.2 * link, 0.0, 1.0) if parent < 0 else wp.vec3(0.1, 0.0, 0.0), wp.quat_identity()
+        )
+        child_xform = wp.transform(wp.vec3(-0.1, 0.0, 0.0), wp.quat_identity())
+        if options.get("prismatic") and link == 0:
+            joint = builder.add_joint_prismatic(
+                parent,
+                body,
+                axis=(1.0, 0.0, 0.0),
+                parent_xform=parent_xform,
+                child_xform=child_xform,
+                target_q=0.05,
+                target_ke=200.0,
+                target_kd=5.0,
+                armature=armature,
+                actuator_mode=newton.JointTargetMode.POSITION,
+            )
+        else:
+            kwargs = {}
+            if link == 0:
+                kwargs = dict(
+                    target_q=0.4,
+                    target_ke=50.0,
+                    target_kd=2.0,
+                    armature=armature,
+                    actuator_mode=newton.JointTargetMode.POSITION,
+                )
+            if options.get("limit"):
+                kwargs.update(limit_lower=-0.2, limit_upper=0.2, limit_ke=100.0, limit_kd=1.0)
+            joint = builder.add_joint_revolute(
+                parent, body, axis=(0.0, 1.0, 0.0), parent_xform=parent_xform, child_xform=child_xform, **kwargs
+            )
+        builder.add_articulation([joint]) if False else None
+        parent = body
+    builder.add_articulation(list(range(builder.joint_count)))
+    model = builder.finalize(device="cuda:0")
+    yield from _run_bodies(model, _body_solver(model, options), steps)

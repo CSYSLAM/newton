@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 from collections import Counter
 from contextlib import nullcontext
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import warp as wp
@@ -30,8 +30,12 @@ from .api import (
     Span,
     State,
 )
+from .bodies import BodyPrecompute
+from .kernels import affine as affine_kernels
+from .kernels import affine_block as affine_block_kernels
 from .kernels import cloth as cloth_kernels
 from .kernels import drag as drag_kernels
+from .kernels import joints as joint_kernels
 from .kernels import pcg as pcg_kernels
 from .kernels import springs as spring_kernels
 from .kernels import step as step_kernels
@@ -79,7 +83,7 @@ def _resolve_stream(stream: Any, device: wp.context.Device) -> wp.Stream | None:
     raise TypeError("Expected a CUDA stream integer, CUDA Stream Protocol object, or None")
 
 
-class Solver:
+class Solver(BodyPrecompute):
     """Implicit Newton solver for particles, cloth, soft bodies and affine rigid bodies."""
 
     def __init__(self) -> None:
@@ -114,9 +118,26 @@ class Solver:
         raise _not_ported("hard rigid contacts")
 
     def reset_joint_drive_state(self, stream: Any = None, mask: Span = Span()) -> None:  # noqa: B008
-        if not self._initialized or not self.drive_total:
+        # External affine-state edits invalidate hard-contact history even without joint drives.
+        drive_total = self.drive_total if self._initialized else 0
+        if mask.size and mask.size != drive_total:
+            raise ValueError("joint drive reset mask must match the drive state count")
+        if not self._initialized or not self.count:
             return
-        raise _not_ported("joint drives")
+        with self._stream_scope(stream):
+            self.hard_previous_count.zero_()
+            if not self.drive_total:
+                return
+            if not mask.size:
+                self.drive_initialized.zero_()
+            else:
+                self._require(mask, self.drive_total, "mask")
+                self._launch(
+                    "drive_reset",
+                    joint_kernels.reset_selected_joint_drive_state,
+                    self.drive_total,
+                    [self._view(mask, wp.int32, self.drive_total), self.drive_initialized],
+                )
 
     def reset_cable_penalty_state(self, stream: Any = None, mask: Span = Span()) -> None:  # noqa: B008
         if not self._initialized or not self.cable_count:
@@ -214,13 +235,10 @@ class Solver:
 
     def _reject_unported(self, model: Model) -> None:
         unported = {
-            "affine bodies": model.body_count or model.body_state_count,
-            "non-diagonal particle masses": model.particle_mass_non_diagonal_count,
             "cables": model.cable_count,
             "shapes and contacts": model.shape_count,
             "fluid particles": model.fluid_particle_count,
             "granular particles": model.granular_particle_count or model.granular_bond_count,
-            "joint drives": model.joint_drive_count,
         }
         for feature, present in unported.items():
             if present:
@@ -325,7 +343,17 @@ class Solver:
         self.rhs = self._zeros(count, wp.vec3)
         self.previous = self._zeros(count, wp.vec3)
         self.target = self._zeros(count, wp.vec3)
+        self.hard_previous_count = self._zeros(1, wp.int32)
+        self.body_count = model.body_count
         self._precompute_drag()
+        copies = count // self.per_world
+        empty_f, empty_i = self._empty(wp.float32), self._empty(wp.int32)
+        self.drive_angle, self.drive_initialized, self.drive_qd = empty_f, empty_i, empty_f
+        if model.joint_drive_count:
+            states = model.joint_drive_count * copies
+            self.drive_angle = self._zeros(states, wp.float32)
+            self.drive_initialized = self._zeros(states, wp.int32)
+            self.drive_qd = self._zeros(states, wp.float32)
         self.base_diagonal = self._zeros(count, wp.float32)
         self.diagonal = self._zeros(count, wp.float32)
         self.scalar_inverse = self._zeros(count, wp.float32)
@@ -333,12 +361,25 @@ class Solver:
         self.preconditioner_blocks = self._zeros(count, wp.mat33)
         # The native solver inverts the preconditioner blocks in place.
         self.inverse = self.preconditioner_blocks
-        self.body_count = 0
-        self.body_state_count = 0
+        self.particle_kind = self._empty(wp.int32)
+        self.body_kind = self._empty(wp.int32)
+        self.body_state_count = model.body_state_count if model.body_state_count else self.body_count * copies
+        empty_v, empty_m = self._empty(wp.vec3), self._empty(wp.mat33)
+        self.joint_multiplier = self._zeros(model.joint_body_spring_count * copies, wp.vec3)
+        self.distance_target = self._zeros(model.body_distance_constraint_count * copies, wp.vec3)
+        self.distance_multiplier = self._zeros(model.body_distance_constraint_count * copies, wp.vec3)
+        line_states = model.joint_body_point_line_count * copies
+        self.line_segment = self._zeros(line_states, wp.float32)
+        self.line_projector = self._zeros(line_states, wp.mat33)
+        self.line_multiplier = self._zeros(line_states, wp.vec3)
+        del empty_v, empty_m
+        self._precompute_affine_blocks()
+        self.rolling = False
 
         self._precompute_springs()
         self._precompute_cloth()
-        # Material kernels need their state count and rest-volume cache.
+        self._precompute_bodies()
+        # Material kernels need their state count and rest-volume cache even alongside affine joints.
         self._precompute_tetrahedra()
         self._constructor_reads.clear()
 
@@ -350,7 +391,6 @@ class Solver:
         labels: dict[int, int] = {}
         for index, value in enumerate(local_ids):
             local_ids[index] = labels.setdefault(int(value), len(labels))
-        copies = count // self.per_world
         self.group_count = copies * len(labels)
         self.particles_per_group = count // self.group_count
         rows = np.arange(count)
@@ -636,13 +676,15 @@ class Solver:
             raise TypeError("step() received an invalid control or contact")
         return control, contact, float(np.float32(values["dt"])), values.get("stream")
 
+    def _stream_scope(self, stream: Any):
+        device = self.device if self.device is not None else wp.get_cuda_device()
+        resolved = _resolve_stream(stream, device)
+        return nullcontext() if resolved is None else wp.ScopedStream(resolved, sync_enter=False)
+
     def _step(self, state_in: State, state_out: State, control: Control, contact: Contact, dt: float, stream: Any):
         if not self._initialized:
             raise RuntimeError("initialize() must be called before step()")
-        device = self.device if self.device is not None else wp.get_cuda_device()
-        resolved = _resolve_stream(stream, device)
-        scope = nullcontext() if resolved is None else wp.ScopedStream(resolved, sync_enter=False)
-        with scope:
+        with self._stream_scope(stream):
             self._step_on_stream(state_in, state_out, control, contact, dt)
 
     def _step_on_stream(self, state_in: State, state_out: State, control: Control, contact: Contact, dt: float):
@@ -662,8 +704,6 @@ class Solver:
         self._validate_step_config()
         if contact.soft_max_count or contact.max_count:
             raise _not_ported("contacts")
-        if control.tetrahedron_activations.size and control.tetrahedron_activations.size < self.tetrahedron_count:
-            raise ValueError("tetrahedron activations are smaller than the tetrahedron state count")
         if config.enable_self_collision and self.self_collision_primitives:
             raise _not_ported("self-collision")
 
@@ -671,16 +711,43 @@ class Solver:
         drag = bool(self.drag_count) and config.air_density > 0.0
         bodies = self.body_count != 0
         rigidity = config.affine_body_rigidity_model
+        so3 = bodies and rigidity == AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
         six_springs = bodies and rigidity == AffineBodyRigidityModel.SIX_SPRINGS
+        constitutive = bodies and not so3 and not six_springs
+        joint_al = config.joint_constraint_mode == JointConstraintMode.AUGMENTED_LAGRANGIAN
         alpha = config.constraint_alpha
+        # AL joint terms apply without a constraint_alpha gate, as in the latest SDK.
+        joint_al_active = joint_al
+        body_tangent = (
+            (bodies and alpha > 0.0 and not six_springs)
+            or bool(self.drive_total)
+            or (pd and joint_al_active and bool(self.joint_line_total))
+        )
         block_matrix = not pd
-        block = block_matrix or self.bending_damping or bool(self.tetrahedron_count) or drag
+        block = block_matrix or self.bending_damping or bool(self.tetrahedron_count) or drag or body_tangent
+        # The PD branch ignores the body-block option when it selects the scalar matrix.
         body_block = bodies and block and config.affine_body_block_preconditioner
-        extra_product = self.bending_damping or bool(self.tetrahedron_count) or drag
+        coupled_materials = (
+            self._articulated_materials()
+            and so3
+            and joint_al
+            and not self.drag_count
+            and not config.rigid_contact_hard
+            and not config.affine_body_block_preconditioner
+            and (not pd or not self.tetrahedron_count)
+        )
+        extra_product = self.bending_damping or bool(self.tetrahedron_count) or drag or body_tangent
         reference_pcg = config.reference_linear_schedule
         fused_pcg = block_matrix and not body_block and not reference_pcg
-        del six_springs, alpha
-
+        if control.tetrahedron_activations.size and control.tetrahedron_activations.size < self.tetrahedron_count:
+            raise ValueError("tetrahedron activations are smaller than the tetrahedron state count")
+        if self.drive_total:
+            worlds_total = count // self.per_world
+            if control.joint_drive_velocities.size:
+                self._require(control.joint_drive_velocities, self.drive_total, "control.joint_drive_velocities")
+            self._require(control.joint_f, model.joint_dof_count * worlds_total, "control.joint_f")
+            self._require(control.joint_target_q, model.joint_target_count * worlds_total, "control.joint_target_q")
+            self._require(control.joint_target_qd, model.joint_dof_count * worlds_total, "control.joint_target_qd")
         self._require(state_in.particle_q, count, "state_in.particle_q")
         self._require(state_in.particle_qd, count, "state_in.particle_qd")
         if state_in.particle_f.size and state_in.particle_f.size < count:
@@ -688,81 +755,254 @@ class Solver:
         self._require(state_out.particle_q, count, "state_out.particle_q")
         self._require(state_out.particle_qd, count, "state_out.particle_qd")
 
+        per_world = self.per_world
         q_in = self._view(state_in.particle_q, wp.vec3, count)
         qd_in = self._view(state_in.particle_qd, wp.vec3, count)
         q_out = self._view(state_out.particle_q, wp.vec3, count)
         qd_out = self._view(state_out.particle_qd, wp.vec3, count)
         force = self._view(state_in.particle_f, wp.vec3, count)
-        mass = self._view(model.particle_masses, wp.float32, self.per_world)
-        flags = self._view(model.particle_flags, wp.int32, self.per_world)
+        mass = self._view(model.particle_masses, wp.float32, per_world)
+        flags = self._view(model.particle_flags, wp.int32, per_world)
         # Homogeneous replicated models (world_count <= 1) pass their world map; otherwise worlds follow the row.
         worlds = (
-            self._view(model.particle_world, wp.int32, self.per_world)
+            self._view(model.particle_world, wp.int32, per_world)
             if model.world_count <= 1 and model.particle_world.size
             else self._empty(wp.int32)
         )
         gravity = self._view(model.gravity, wp.vec3)
         inverse_dt = 1.0 / dt
         inverse_dt2 = 1.0 / (dt * dt)
-        per_world = self.per_world
+        so3_alpha = alpha * inverse_dt2
+        spring_alpha = alpha if six_springs else 0.0
+        body_so3_alpha = so3_alpha if so3 else 0.0
+        # AL joint lines give the constant D4/L5 channel zero weight; penalty joint lines weight it by alpha.
+        line_matrix_alpha = 0.0 if joint_al else alpha
         empty_v = self._empty(wp.vec3)
         empty_f = self._empty(wp.float32)
         empty_m = self._empty(wp.mat33)
-        empty_i = self._empty(wp.int32)
-        templates = self.particle_diagonal_templates
-        triangle_indices = self._view(model.triangle_indices, wp.vec3i, model.triangle_count)
-        triangle_poses = self._view(model.triangle_inv_dms, wp.mat22, model.triangle_count)
-        triangle_areas = self._view(model.triangle_rest_areas, wp.float32, model.triangle_count)
-        triangle_stiffness = self._view(model.triangle_aniso_stiffnesses, wp.vec3, model.triangle_count)
-        edge_indices = self._view(model.edge_indices, wp.vec4i, model.edge_count)
-        edge_areas = self._view(model.edge_rest_areas, wp.float32, model.edge_count)
-        edge_cots = self._view(model.edge_bending_cots, wp.vec4, model.edge_count)
-        edge_properties = self._view(model.edge_bending_properties, wp.vec2, model.edge_count)
-        tet_indices = self._view(model.tetrahedron_indices, wp.vec4i, model.tetrahedron_count)
-        tet_inverse = self._view(model.tetrahedron_inverse_dms, wp.mat33, model.tetrahedron_count)
-        tet_materials = self._view(model.tetrahedron_materials, wp.vec3, model.tetrahedron_count)
+        v = self._model_views()
         activations = self._view(control.tetrahedron_activations, wp.float32)
+        launch = self._launch
+        group_count = self.group_count
+        per_group = self.particles_per_group
+        bodies_per_world = self.body_count
+        body_states = self.body_state_count
+        body_indices = v["affine_body_indices"]
+        body_masses = v["body_masses"]
+        rows_total = count
 
-        self._launch(
-            "start",
-            step_kernels.initialize_step,
-            count,
-            [
-                dt,
-                gravity,
-                worlds,
-                qd_in,
-                q_in,
-                self.host_diagonal,
-                templates[0],
-                0.0,
-                templates[1],
-                0.0,
-                templates[2],
-                config.constraint_alpha,
-                templates[3],
-                0.0,
-                templates[4],
-                config.constraint_alpha,
-                mass,
-                flags,
-                self.particle_kind,
-                self.previous,
-                self.target,
-                self.diagonal,
+        if self._inertial_templates():
+            entries = self.max_entries * per_world
+            launch(
+                "refresh_nonzeros",
+                step_kernels.refresh_inertial_cache_nonzeros,
+                entries,
+                [
+                    v["particle_mass_non_diagonal_values"],
+                    self.body_offsets_a,
+                    self.body_ids_a,
+                    body_masses,
+                    self.body_offsets_b,
+                    self.body_ids_b,
+                    self.body_l1,
+                    self.body_l2,
+                ],
+            )
+            launch(
+                "refresh_diagonals",
+                step_kernels.refresh_inertial_cache_diagonals,
                 per_world,
-            ],
-        )
-        wp.copy(self.base_diagonal, self.diagonal, count=count)
+                [
+                    body_masses,
+                    self.body_diagonal_offsets,
+                    self.body_diagonal_ids,
+                    self.body_d1,
+                    self.body_d2,
+                ],
+            )
+            # Only SIX_SPRINGS weights D1/L2; constitutive models use their matrix-free tangent, not D2.
+            launch(
+                "start",
+                step_kernels.initialize_step,
+                count,
+                [
+                    dt,
+                    gravity,
+                    worlds,
+                    qd_in,
+                    q_in,
+                    self.host_diagonal,
+                    self.body_d1,
+                    spring_alpha,
+                    self.body_d2,
+                    0.0,
+                    self.joint_d3,
+                    alpha,
+                    self.line_d4,
+                    line_matrix_alpha,
+                    self.distance_d5,
+                    alpha,
+                    mass,
+                    flags,
+                    self.body_kind,
+                    self.previous,
+                    self.target,
+                    self.diagonal,
+                    per_world,
+                ],
+            )
+            # Preserve the native graph order for the supplied joint velocity and diagonal snapshots.
+            if self.drive_total and control.joint_drive_velocities.size:
+                wp.copy(self.drive_qd, self._view(control.joint_drive_velocities, wp.float32, self.drive_total))
+            wp.copy(self.base_diagonal, self.diagonal, count=count)
+            # The distance targets start from the prediction, before the SO(3) state.
+            if self.distance_total:
+                launch(
+                    "distance_initialize",
+                    joint_kernels.initialize_body_distance_constraint_state,
+                    self.distance_total,
+                    [
+                        q_in,
+                        body_indices,
+                        v["body_distance_constraint_indices"],
+                        v["body_distance_constraint_points0"],
+                        v["body_distance_constraint_points1"],
+                        self.distance_w0,
+                        self.distance_w1,
+                        v["body_distance_constraint_rest_lengths"],
+                        self.distance_target,
+                        self.distance_multiplier,
+                        model.body_distance_constraint_count,
+                        per_world,
+                    ],
+                )
+            # Derive velocities from the saved pre-prediction positions when the optional control span is absent.
+            if self.drive_total and not control.joint_drive_velocities.size:
+                launch(
+                    "drive_velocity",
+                    joint_kernels.initialize_joint_coordinate_velocities,
+                    self.drive_total,
+                    [
+                        self._joint_view(v),
+                        self.previous,
+                        qd_in,
+                        self.drive_qd,
+                    ],
+                )
+            if so3:
+                launch(
+                    "so3_initialize",
+                    affine_kernels.initialize_affine_body_so3_state,
+                    body_states,
+                    [
+                        q_in,
+                        body_indices,
+                        self.body_rotation,
+                        self.body_multiplier,
+                        bodies_per_world,
+                        per_world,
+                    ],
+                )
+            if joint_al and self.joint_spring_total:
+                launch(
+                    "joint_spring_initialize",
+                    joint_kernels.initialize_joint_body_spring_state,
+                    self.joint_spring_total,
+                    [self.joint_multiplier],
+                )
+            if joint_al and self.joint_line_total:
+                launch(
+                    "joint_line_initialize",
+                    joint_kernels.initialize_joint_body_point_line_state,
+                    self.joint_line_total,
+                    [
+                        q_in,
+                        body_indices,
+                        v["body_point_line_indices"],
+                        self.point_line_wp,
+                        self.point_line_we0,
+                        self.point_line_we1,
+                        v["body_point_line_endpoints0"],
+                        v["body_point_line_endpoints1"],
+                        self.line_segment,
+                        self.line_multiplier,
+                        self.line_projector,
+                        model.body_point_line_count,
+                        model.joint_body_point_line_count,
+                        per_world,
+                    ],
+                )
+            launch(
+                "combine",
+                step_kernels.combine_system_non_diagonal,
+                entries,
+                [
+                    inverse_dt2,
+                    spring_alpha,
+                    0.0,
+                    alpha,
+                    line_matrix_alpha,
+                    alpha,
+                    self.body_l0,
+                    self.body_l1,
+                    self.body_l2,
+                    self.body_zero_ell,
+                    self.joint_l4,
+                    self.line_l5,
+                    self.distance_l6,
+                    self.scalar_template_values,
+                ],
+            )
+        else:
+            templates = self.particle_diagonal_templates
+            launch(
+                "start",
+                step_kernels.initialize_step,
+                count,
+                [
+                    dt,
+                    gravity,
+                    worlds,
+                    qd_in,
+                    q_in,
+                    self.host_diagonal,
+                    templates[0],
+                    0.0,
+                    templates[1],
+                    0.0,
+                    templates[2],
+                    alpha,
+                    templates[3],
+                    0.0,
+                    templates[4],
+                    alpha,
+                    mass,
+                    flags,
+                    self.particle_kind,
+                    self.previous,
+                    self.target,
+                    self.diagonal,
+                    per_world,
+                ],
+            )
+            wp.copy(self.base_diagonal, self.diagonal, count=count)
         if drag:
-            self._launch(
+            launch(
                 "drag_start",
                 drag_kernels.initialize_triangle_drag,
                 self.drag_count,
-                [self.previous, self.drag_indices, self.drag_normal, self.drag_area, self.drag_local_count, per_world],
+                [
+                    self.previous,
+                    self.drag_indices,
+                    self.drag_normal,
+                    self.drag_area,
+                    self.drag_local_count,
+                    per_world,
+                ],
             )
+        # The native solver initializes drag before rebuilding the block template.
         if block_matrix and self.max_entries:
-            self._launch(
+            launch(
                 "block_entries",
                 pcg_kernels.initialize_block_non_diagonal,
                 self.max_entries * count,
@@ -777,11 +1017,11 @@ class Solver:
                 ],
             )
 
-        group_count = self.group_count
-        for _iteration in range(config.nonlinear_iterations):
+        for iteration in range(config.nonlinear_iterations):
             # The native solver restores this cache on every iteration, including contact-free models.
             wp.copy(self.diagonal, self.base_diagonal, count=count)
-            self._launch(
+            # With bodies the inertia couples through the unscaled mass non-diagonal cache (L1).
+            launch(
                 "rhs",
                 step_kernels.initialize_rhs,
                 count,
@@ -802,8 +1042,7 @@ class Solver:
                 ],
             )
             if drag:
-                wind = wp.vec3(*config.wind_velocity)
-                self._launch(
+                launch(
                     "drag_force",
                     drag_kernels.evaluate_triangle_drag,
                     self.drag_count,
@@ -815,7 +1054,7 @@ class Solver:
                         self.drag_normal,
                         self.drag_area,
                         config.air_density,
-                        wind,
+                        wp.vec3(*config.wind_velocity),
                         inverse_dt,
                         self.rhs,
                         self.drag_scalar,
@@ -823,48 +1062,257 @@ class Solver:
                         per_world,
                     ],
                 )
+            # Force order: plain body springs (the kernel skips joint springs), distance constraints, AL joint
+            # springs, point-lines, joint drive load, angular limits; finally SO(3).
+            if self.body_spring_total:
+                launch(
+                    "body_spring_force",
+                    joint_kernels.evaluate_body_spring_force,
+                    self.body_spring_total,
+                    [
+                        q_in,
+                        body_indices,
+                        v["body_spring_indices"],
+                        v["body_spring_points0"],
+                        v["body_spring_points1"],
+                        self.body_spring_w0,
+                        self.body_spring_w1,
+                        v["body_spring_stiffnesses"],
+                        v["body_spring_rest_lengths"],
+                        so3_alpha,
+                        model.joint_body_spring_count,
+                        int(not joint_al),
+                        self.rhs,
+                        model.body_spring_count,
+                        per_world,
+                    ],
+                )
+            if self.distance_total:
+                launch(
+                    "distance_force",
+                    joint_kernels.evaluate_body_distance_constraint_force,
+                    self.distance_total,
+                    [
+                        q_in,
+                        body_indices,
+                        v["body_distance_constraint_indices"],
+                        v["body_distance_constraint_points0"],
+                        v["body_distance_constraint_points1"],
+                        self.distance_w0,
+                        self.distance_w1,
+                        v["body_distance_constraint_mass_scales"],
+                        self.distance_target,
+                        self.distance_multiplier,
+                        so3_alpha,
+                        self.rhs,
+                        model.body_distance_constraint_count,
+                        per_world,
+                    ],
+                )
+            if joint_al_active and self.joint_spring_total:
+                launch(
+                    "joint_spring_force",
+                    joint_kernels.evaluate_joint_body_spring_augmented_lagrangian_force,
+                    self.joint_spring_total,
+                    [
+                        q_in,
+                        body_indices,
+                        v["body_spring_indices"],
+                        v["body_spring_points0"],
+                        v["body_spring_points1"],
+                        self.body_spring_w0,
+                        self.body_spring_w1,
+                        v["body_spring_stiffnesses"],
+                        self.joint_multiplier,
+                        so3_alpha,
+                        self.rhs,
+                        model.body_spring_count,
+                        model.joint_body_spring_count,
+                        per_world,
+                    ],
+                )
+            if self.point_line_total:
+                launch(
+                    "point_line_force",
+                    joint_kernels.evaluate_body_point_line_force,
+                    self.point_line_total,
+                    [
+                        q_in,
+                        body_indices,
+                        v["body_point_line_indices"],
+                        self.point_line_wp,
+                        self.point_line_we0,
+                        self.point_line_we1,
+                        v["body_point_line_endpoints0"],
+                        v["body_point_line_endpoints1"],
+                        v["body_point_line_stiffnesses"],
+                        so3_alpha,
+                        model.joint_body_point_line_count,
+                        int(not joint_al),
+                        self.rhs,
+                        model.body_point_line_count,
+                        per_world,
+                    ],
+                )
+            if joint_al_active and self.joint_line_total:
+                launch(
+                    "joint_line_force",
+                    joint_kernels.evaluate_joint_body_point_line_augmented_lagrangian_force,
+                    self.joint_line_total,
+                    [
+                        q_in,
+                        body_indices,
+                        v["body_point_line_indices"],
+                        self.point_line_wp,
+                        self.point_line_we0,
+                        self.point_line_we1,
+                        v["body_point_line_endpoints0"],
+                        v["body_point_line_endpoints1"],
+                        v["body_point_line_stiffnesses"],
+                        self.line_segment,
+                        self.line_multiplier,
+                        self.line_projector,
+                        so3_alpha,
+                        self.rhs,
+                        model.body_point_line_count,
+                        model.joint_body_point_line_count,
+                        per_world,
+                    ],
+                )
+            if self.drive_total:
+                launch(
+                    "drive_load",
+                    joint_kernels.evaluate_joint_drive_load,
+                    self.drive_total,
+                    [
+                        q_in,
+                        self.previous,
+                        self.drive_qd,
+                        self.drive_angle,
+                        self.drive_initialized,
+                        body_indices,
+                        v["joint_drive_types"],
+                        v["joint_drive_body_indices"],
+                        v["joint_drive_parent_origins"],
+                        v["joint_drive_parent_axis_points"],
+                        v["joint_drive_parent_reference_points"],
+                        self.drive_w_po,
+                        self.drive_w_co,
+                        self.drive_w_pa,
+                        self.drive_w_pr,
+                        self.drive_w_cr,
+                        v["joint_drive_dof_indices"],
+                        v["joint_drive_target_indices"],
+                        v["joint_target_stiffnesses"],
+                        v["joint_target_dampings"],
+                        v["joint_effort_limits"],
+                        v["joint_target_modes"],
+                        v["joint_passive_dampings"],
+                        self._view(control.joint_f, wp.float32),
+                        self._view(control.joint_target_q, wp.float32),
+                        self._view(control.joint_target_qd, wp.float32),
+                        self.rhs,
+                        model.joint_drive_count,
+                        per_world,
+                        model.joint_dof_count,
+                        model.joint_target_count,
+                        inverse_dt,
+                    ],
+                )
+                if self.armature:
+                    self._joint_armature(v, q_in, inverse_dt, empty_v, self.rhs, empty_m)
+                if self.angular_limits:
+                    self._angular_limits(v, q_in, inverse_dt, empty_v, self.rhs, empty_m)
+            if so3 and so3_alpha > 0.0:
+                launch(
+                    "so3_force",
+                    affine_kernels.evaluate_affine_body_so3_augmented_lagrangian_force,
+                    body_states,
+                    [
+                        q_in,
+                        body_indices,
+                        body_masses,
+                        self.body_rotation,
+                        self.body_multiplier,
+                        so3_alpha,
+                        self.rhs,
+                        bodies_per_world,
+                        per_world,
+                    ],
+                )
+            if six_springs and so3_alpha > 0.0:
+                launch(
+                    "rigidity_spring_force",
+                    affine_kernels.evaluate_affine_body_spring_force,
+                    body_states,
+                    [
+                        q_in,
+                        body_indices,
+                        body_masses,
+                        so3_alpha,
+                        self.rhs,
+                        bodies_per_world,
+                        per_world,
+                    ],
+                )
+            if constitutive and so3_alpha > 0.0:
+                launch(
+                    "constitutive_force",
+                    affine_kernels.evaluate_affine_body_constitutive_force,
+                    body_states,
+                    [
+                        q_in,
+                        body_indices,
+                        body_masses,
+                        so3_alpha,
+                        int(rigidity),
+                        self.rhs,
+                        bodies_per_world,
+                        per_world,
+                    ],
+                )
             if self.spring_count:
-                self._launch(
+                launch(
                     "spring_force",
                     spring_kernels.evaluate_spring_force,
                     self.spring_count,
                     [
                         q_in,
-                        self._view(model.spring_indices, wp.vec2i, model.spring_count),
-                        self._view(model.spring_stiffnesses, wp.float32, model.spring_count),
-                        self._view(model.spring_rest_lengths, wp.float32, model.spring_count),
+                        v["spring_indices"],
+                        v["spring_stiffnesses"],
+                        v["spring_rest_lengths"],
                         self.rhs,
                         model.spring_count,
                         per_world,
                     ],
                 )
             if self.triangle_count:
-                self._launch(
+                launch(
                     "stretch_force",
                     cloth_kernels.evaluate_stretch_force,
                     self.triangle_count,
                     [
                         q_in,
-                        triangle_areas,
-                        triangle_poses,
-                        triangle_indices,
-                        triangle_stiffness,
+                        v["triangle_rest_areas"],
+                        v["triangle_inv_dms"],
+                        v["triangle_indices"],
+                        v["triangle_aniso_stiffnesses"],
                         self.rhs,
                         model.triangle_count,
                         per_world,
                     ],
                 )
             if self.tetrahedron_count:
-                self._launch(
+                launch(
                     "tetrahedron_force",
                     tetrahedron_kernels.evaluate_tetrahedron_force,
                     self.tetrahedron_count,
                     [
                         q_in,
                         self.previous,
-                        tet_indices,
-                        tet_inverse,
-                        tet_materials,
+                        v["tetrahedron_indices"],
+                        v["tetrahedron_inverse_dms"],
+                        v["tetrahedron_materials"],
                         self.tetrahedron_volumes,
                         activations,
                         inverse_dt,
@@ -874,155 +1322,99 @@ class Solver:
                     ],
                 )
             if self.edge_count:
-                self._launch(
+                launch(
                     "bending_force",
                     cloth_kernels.evaluate_bending_force,
                     self.edge_count,
                     [
                         q_in,
                         self.previous,
-                        edge_areas,
-                        edge_cots,
-                        edge_indices,
-                        edge_properties,
+                        v["edge_rest_areas"],
+                        v["edge_bending_cots"],
+                        v["edge_indices"],
+                        v["edge_bending_properties"],
                         inverse_dt,
                         self.rhs,
                         model.edge_count,
                         per_world,
                     ],
                 )
+
             if not block:
-                # The contact-free PD path keeps the constant scalar spring matrix and uses 1 / D.
-                self._launch(
+                # The contact-free PD path keeps the constant scalar matrix and uses 1 / D.
+                launch(
                     "scalar_inverse",
                     pcg_kernels.prepare_inverse_preconditioner,
                     count,
-                    [self.diagonal, mass, flags, self.scalar_inverse, per_world],
+                    [
+                        self.diagonal,
+                        mass,
+                        flags,
+                        self.scalar_inverse,
+                        per_world,
+                    ],
                 )
             else:
-                self._launch(
-                    "blocks",
-                    step_kernels.initialize_block_diagonal,
-                    count,
-                    [self.diagonal, self.blocks, empty_m if block_matrix else self.preconditioner_blocks],
-                )
-                if block_matrix and self.max_entries:
-                    wp.copy(self.block_entry_columns, self.block_template_columns)
-                    wp.copy(self.block_entry_values, self.block_template_values)
-                if not pd and self.triangle_count:
-                    self._launch(
-                        "membrane_hessian",
-                        cloth_kernels.add_cloth_membrane_gauss_newton_hessian,
-                        self.triangle_count,
-                        [
-                            q_in,
-                            triangle_indices,
-                            triangle_poses,
-                            triangle_areas,
-                            triangle_stiffness,
-                            self.blocks,
-                            self.row_count,
-                            self.block_entry_columns,
-                            self.block_entry_values,
-                            self.max_entries,
-                            model.triangle_count,
-                            per_world,
-                            count,
-                        ],
-                    )
-                if not pd and self.spring_count:
-                    self._launch(
-                        "spring_hessian",
-                        spring_kernels.add_spring_gauss_newton_hessian,
-                        self.spring_count,
-                        [
-                            q_in,
-                            self._view(model.spring_indices, wp.vec2i, model.spring_count),
-                            self._view(model.spring_stiffnesses, wp.float32, model.spring_count),
-                            self._view(model.spring_rest_lengths, wp.float32, model.spring_count),
-                            self.blocks,
-                            self.row_count,
-                            self.block_entry_columns,
-                            self.block_entry_values,
-                            self.max_entries,
-                            model.spring_count,
-                            per_world,
-                            count,
-                        ],
-                    )
-                # The native solver retains A and inverts a separate preconditioner copy in place.
-                if block_matrix:
-                    wp.copy(self.preconditioner_blocks, self.blocks, count=count)
-                if self.tetrahedron_count:
-                    self._launch(
-                        "tetrahedron_preconditioner",
-                        tetrahedron_kernels.add_tetrahedron_preconditioner,
-                        self.tetrahedron_count,
-                        [
-                            q_in,
-                            tet_indices,
-                            tet_inverse,
-                            tet_materials,
-                            self.tetrahedron_volumes,
-                            inverse_dt,
-                            self.preconditioner_blocks,
-                            model.tetrahedron_count,
-                            per_world,
-                        ],
-                    )
-                if self.bending_damping:
-                    self._launch(
-                        "bending_preconditioner",
-                        cloth_kernels.add_bending_damping_preconditioner,
-                        self.edge_count,
-                        [
-                            q_in,
-                            edge_areas,
-                            edge_cots,
-                            edge_indices,
-                            edge_properties,
-                            inverse_dt,
-                            self.preconditioner_blocks,
-                            model.edge_count,
-                            per_world,
-                        ],
-                    )
-                if drag:
-                    self._launch(
-                        "drag_preconditioner",
-                        drag_kernels.add_triangle_drag_preconditioner,
-                        self.drag_count,
-                        [
-                            self.drag_indices,
-                            self.drag_normal,
-                            self.drag_scalar,
-                            self.preconditioner_blocks,
-                            self.drag_local_count,
-                            per_world,
-                        ],
-                    )
-                self._launch(
-                    "inverse",
-                    pcg_kernels.invert_block_preconditioner,
-                    count,
-                    [self.preconditioner_blocks, mass, flags, self.inverse, per_world],
+                self._assemble_blocks(
+                    v,
+                    q_in,
+                    mass,
+                    flags,
+                    inverse_dt,
+                    so3_alpha,
+                    body_so3_alpha,
+                    pd,
+                    block_matrix,
+                    body_block,
+                    so3,
+                    six_springs,
+                    constitutive,
+                    rigidity,
+                    joint_al,
+                    joint_al_active,
+                    drag,
                 )
 
             wp.copy(self.residual, self.rhs, count=count)
             self.solution.zero_()
-            iterations = config.linear_iterations
             self.numerator.zero_()
             self.denominator.zero_()
+            iterations = config.linear_iterations
             for k in range(iterations):
                 numerator = self.numerator[k * group_count : (k + 1) * group_count]
                 previous_numerator = (
                     self.numerator[(k - 1) * group_count : k * group_count] if k else self._empty(wp.float32)
                 )
                 denominator = self.denominator[k * group_count : (k + 1) * group_count]
-                per_group = self.particles_per_group
+                if body_block:
+                    launch(
+                        "block_apply",
+                        affine_block_kernels.apply_block_diagonal_preconditioner,
+                        count,
+                        [
+                            self.inverse,
+                            self.residual,
+                            self.z,
+                        ],
+                    )
+                    launch(
+                        "affine_apply",
+                        pcg_kernels.apply_affine_body_preconditioner,
+                        body_states,
+                        [
+                            body_indices,
+                            self.affine_blocks,
+                            self.affine_valid,
+                            self.residual,
+                            self.z,
+                            bodies_per_world,
+                            per_world,
+                        ],
+                    )
+                # With the fused PCG the previous iteration's update already preconditioned this residual.
                 if not fused_pcg or k == 0:
                     if block:
-                        self._launch(
+                        launch(
                             "precondition",
                             pcg_kernels.precondition_and_reduce_block,
                             count,
@@ -1037,7 +1429,7 @@ class Solver:
                             ],
                         )
                     else:
-                        self._launch(
+                        launch(
                             "scalar_precondition",
                             pcg_kernels.precondition_and_reduce_scalar,
                             count,
@@ -1052,7 +1444,7 @@ class Solver:
                             ],
                         )
                 if fused_pcg:
-                    self._launch(
+                    launch(
                         "fused_direction",
                         pcg_kernels.fused_cg_direction,
                         count,
@@ -1068,68 +1460,38 @@ class Solver:
                         ],
                     )
                 else:
-                    self._launch(
+                    launch(
                         "direction",
                         pcg_kernels.update_cg_direction,
                         count,
-                        [k, self.z, self.coefficient_world, per_group, numerator, previous_numerator, self.direction],
+                        [
+                            k,
+                            self.z,
+                            self.coefficient_world,
+                            per_group,
+                            numerator,
+                            previous_numerator,
+                            self.direction,
+                        ],
                     )
                     if extra_product:
                         self.contact_product.zero_()
-                if self.tetrahedron_count:
-                    self._launch(
-                        "tetrahedron_tangent",
-                        tetrahedron_kernels.multiply_tetrahedron_tangent,
-                        self.tetrahedron_count,
-                        [
-                            q_in,
-                            self.direction,
-                            tet_indices,
-                            tet_inverse,
-                            tet_materials,
-                            self.tetrahedron_volumes,
-                            inverse_dt,
-                            self.contact_product,
-                            model.tetrahedron_count,
-                            per_world,
-                        ],
-                    )
-                if self.bending_damping:
-                    self._launch(
-                        "bending_tangent",
-                        cloth_kernels.multiply_bending_damping_tangent,
-                        self.edge_count,
-                        [
-                            q_in,
-                            self.direction,
-                            edge_areas,
-                            edge_cots,
-                            edge_indices,
-                            edge_properties,
-                            inverse_dt,
-                            self.contact_product,
-                            model.edge_count,
-                            per_world,
-                        ],
-                    )
-                if drag:
-                    self._launch(
-                        "drag_tangent",
-                        drag_kernels.multiply_triangle_drag_tangent,
-                        self.drag_count,
-                        [
-                            self.direction,
-                            self.drag_indices,
-                            self.drag_normal,
-                            self.drag_scalar,
-                            self.contact_product,
-                            self.drag_local_count,
-                            per_world,
-                        ],
-                    )
+                self._multiply_tangents(
+                    v,
+                    q_in,
+                    inverse_dt,
+                    so3_alpha,
+                    pd,
+                    so3,
+                    constitutive,
+                    rigidity,
+                    coupled_materials,
+                    joint_al_active,
+                    drag,
+                )
                 extra = self.contact_product if extra_product else empty_v
                 if block_matrix:
-                    self._launch(
+                    launch(
                         "fused_multiply" if fused_pcg else "multiply",
                         pcg_kernels.multiply_block_matrix_and_reduce,
                         count,
@@ -1150,7 +1512,7 @@ class Solver:
                         ],
                     )
                 elif block:
-                    self._launch(
+                    launch(
                         "scalar_block_multiply",
                         pcg_kernels.multiply_scalar_block_matrix_and_reduce,
                         count,
@@ -1171,7 +1533,7 @@ class Solver:
                         ],
                     )
                 else:
-                    self._launch(
+                    launch(
                         "scalar_multiply",
                         pcg_kernels.multiply_scalar_matrix_and_reduce,
                         count,
@@ -1193,7 +1555,7 @@ class Solver:
                     )
                 if fused_pcg and k + 1 < iterations:
                     next_numerator = self.numerator[(k + 1) * group_count : (k + 2) * group_count]
-                    self._launch(
+                    launch(
                         "fused_update",
                         pcg_kernels.fused_update_and_precondition,
                         count,
@@ -1212,7 +1574,7 @@ class Solver:
                         ],
                     )
                 else:
-                    self._launch(
+                    launch(
                         "update",
                         pcg_kernels.update_solution_and_residual,
                         count,
@@ -1228,13 +1590,816 @@ class Solver:
                         ],
                     )
             # The native host updates state_in.q in place, even when state_out owns a separate allocation.
-            self._launch("apply", step_kernels.apply_nonlinear_step, count, [q_in, q_out, self.solution])
+            launch("apply", step_kernels.apply_nonlinear_step, count, [q_in, q_out, self.solution])
+            if self.distance_total:
+                launch(
+                    "distance_update",
+                    joint_kernels.update_body_distance_constraint_state,
+                    self.distance_total,
+                    [
+                        q_out,
+                        body_indices,
+                        v["body_distance_constraint_indices"],
+                        v["body_distance_constraint_points0"],
+                        v["body_distance_constraint_points1"],
+                        self.distance_w0,
+                        self.distance_w1,
+                        v["body_distance_constraint_rest_lengths"],
+                        self.distance_target,
+                        self.distance_multiplier,
+                        model.body_distance_constraint_count,
+                        per_world,
+                    ],
+                )
+            if so3 and so3_alpha > 0.0:
+                # The multiplier advances only after iteration c (from 1) == primal iterations, never the last one.
+                c = iteration + 1
+                advance = c < config.nonlinear_iterations and c == config.affine_body_rigidity_primal_iterations
+                launch(
+                    "so3_update",
+                    affine_kernels.update_affine_body_so3_augmented_lagrangian_state,
+                    body_states,
+                    [
+                        q_out,
+                        body_indices,
+                        self.body_rotation,
+                        self.body_multiplier,
+                        int(advance),
+                        bodies_per_world,
+                        per_world,
+                    ],
+                )
+            # Joint multipliers advance after iterations whose count is a multiple of the primal iteration count,
+            # never after the last one.
+            c = iteration + 1
+            primal = max(config.joint_constraint_primal_iterations, 1)
+            joint_advance = c < config.nonlinear_iterations and c % primal == 0
+            if joint_al_active and self.joint_spring_total and joint_advance:
+                launch(
+                    "joint_spring_update",
+                    joint_kernels.update_joint_body_spring_augmented_lagrangian_state,
+                    self.joint_spring_total,
+                    [
+                        q_out,
+                        body_indices,
+                        v["body_spring_indices"],
+                        v["body_spring_points0"],
+                        v["body_spring_points1"],
+                        self.body_spring_w0,
+                        self.body_spring_w1,
+                        self.joint_multiplier,
+                        model.body_spring_count,
+                        model.joint_body_spring_count,
+                        per_world,
+                    ],
+                )
+            if joint_al_active and self.joint_line_total:
+                launch(
+                    "joint_line_update",
+                    joint_kernels.update_joint_body_point_line_augmented_lagrangian_state,
+                    self.joint_line_total,
+                    [
+                        q_out,
+                        body_indices,
+                        v["body_point_line_indices"],
+                        self.point_line_wp,
+                        self.point_line_we0,
+                        self.point_line_we1,
+                        v["body_point_line_endpoints0"],
+                        v["body_point_line_endpoints1"],
+                        self.line_segment,
+                        self.line_multiplier,
+                        self.line_projector,
+                        int(joint_advance),
+                        model.body_point_line_count,
+                        model.joint_body_point_line_count,
+                        per_world,
+                    ],
+                )
             wp.copy(q_in, q_out, count=count)
 
+        self.hard_previous_count.zero_()
         if not config.nonlinear_iterations:
             wp.copy(q_out, q_in, count=count)
-        self._launch("velocity", step_kernels.update_velocity, count, [inverse_dt, self.previous, q_out, qd_out])
-        del empty_i
+        launch("velocity", step_kernels.update_velocity, count, [inverse_dt, self.previous, q_out, qd_out])
+        if self.drive_total:
+            launch(
+                "drive_angle_update",
+                joint_kernels.update_joint_drive_angle_state,
+                self.drive_total,
+                [
+                    q_out,
+                    self.drive_angle,
+                    self.drive_initialized,
+                    body_indices,
+                    v["joint_drive_types"],
+                    v["joint_drive_body_indices"],
+                    v["joint_drive_parent_origins"],
+                    v["joint_drive_parent_axis_points"],
+                    v["joint_drive_parent_reference_points"],
+                    self.drive_w_po,
+                    self.drive_w_co,
+                    self.drive_w_pa,
+                    self.drive_w_pr,
+                    self.drive_w_cr,
+                    model.joint_drive_count,
+                    per_world,
+                ],
+            )
+        del rows_total
+
+    def _articulated_materials(self) -> bool:
+        """Only joint-owned constraints share the mixed cloth/tetrahedron schedule of the robot demos."""
+        m = self.model
+        return bool(
+            m.body_count
+            and (m.triangle_count or m.tetrahedron_count)
+            and m.joint_drive_count
+            and m.joint_body_spring_count
+            and m.body_spring_count == m.joint_body_spring_count
+            and m.body_point_line_count == m.joint_body_point_line_count
+            and not m.body_distance_constraint_count
+            and not m.spring_count
+            and not m.cable_count
+            and not m.fluid_particle_count
+            and not m.granular_particle_count
+        )
+
+    _MODEL_SPANS: ClassVar[dict[str, tuple[Any, str]]] = {
+        "affine_body_indices": (wp.vec4i, "body_count"),
+        "body_masses": (wp.float32, "body_count"),
+        "particle_mass_non_diagonal_values": (wp.float32, "particle_mass_non_diagonal_count"),
+        "spring_indices": (wp.vec2i, "spring_count"),
+        "spring_stiffnesses": (wp.float32, "spring_count"),
+        "spring_rest_lengths": (wp.float32, "spring_count"),
+        "triangle_indices": (wp.vec3i, "triangle_count"),
+        "triangle_inv_dms": (wp.mat22, "triangle_count"),
+        "triangle_rest_areas": (wp.float32, "triangle_count"),
+        "triangle_aniso_stiffnesses": (wp.vec3, "triangle_count"),
+        "edge_indices": (wp.vec4i, "edge_count"),
+        "edge_rest_areas": (wp.float32, "edge_count"),
+        "edge_bending_cots": (wp.vec4, "edge_count"),
+        "edge_bending_properties": (wp.vec2, "edge_count"),
+        "tetrahedron_indices": (wp.vec4i, "tetrahedron_count"),
+        "tetrahedron_inverse_dms": (wp.mat33, "tetrahedron_count"),
+        "tetrahedron_materials": (wp.vec3, "tetrahedron_count"),
+        "body_spring_indices": (wp.vec2i, "body_spring_count"),
+        "body_spring_points0": (wp.vec3, "body_spring_count"),
+        "body_spring_points1": (wp.vec3, "body_spring_count"),
+        "body_spring_stiffnesses": (wp.float32, "body_spring_count"),
+        "body_spring_rest_lengths": (wp.float32, "body_spring_count"),
+        "body_distance_constraint_indices": (wp.vec2i, "body_distance_constraint_count"),
+        "body_distance_constraint_points0": (wp.vec3, "body_distance_constraint_count"),
+        "body_distance_constraint_points1": (wp.vec3, "body_distance_constraint_count"),
+        "body_distance_constraint_mass_scales": (wp.float32, "body_distance_constraint_count"),
+        "body_distance_constraint_rest_lengths": (wp.float32, "body_distance_constraint_count"),
+        "body_point_line_indices": (wp.vec2i, "body_point_line_count"),
+        "body_point_line_endpoints0": (wp.vec3, "body_point_line_count"),
+        "body_point_line_endpoints1": (wp.vec3, "body_point_line_count"),
+        "body_point_line_stiffnesses": (wp.float32, "body_point_line_count"),
+        "body_point_line_dampings": (wp.float32, "body_point_line_count"),
+        "joint_drive_types": (wp.int32, "joint_drive_count"),
+        "joint_drive_body_indices": (wp.vec2i, "joint_drive_count"),
+        "joint_drive_parent_origins": (wp.vec3, "joint_drive_count"),
+        "joint_drive_parent_axis_points": (wp.vec3, "joint_drive_count"),
+        "joint_drive_parent_reference_points": (wp.vec3, "joint_drive_count"),
+        "joint_drive_dof_indices": (wp.int32, "joint_drive_count"),
+        "joint_drive_target_indices": (wp.int32, "joint_drive_count"),
+        "joint_target_stiffnesses": (wp.float32, "joint_dof_count"),
+        "joint_target_dampings": (wp.float32, "joint_dof_count"),
+        "joint_effort_limits": (wp.float32, "joint_dof_count"),
+        "joint_target_modes": (wp.int32, "joint_dof_count"),
+        "joint_passive_dampings": (wp.float32, "joint_dof_count"),
+        "joint_armature": (wp.float32, "joint_dof_count"),
+        "joint_limit_lower": (wp.float32, "joint_dof_count"),
+        "joint_limit_upper": (wp.float32, "joint_dof_count"),
+        "joint_limit_stiffnesses": (wp.float32, "joint_dof_count"),
+        "joint_limit_dampings": (wp.float32, "joint_dof_count"),
+    }
+
+    def _model_views(self) -> dict[str, wp.array]:
+        """Typed views of the model spans used by the step (empty arrays for absent spans)."""
+        model = self.model
+        return {
+            name: self._view(getattr(model, name), dtype, getattr(model, count_field) or None)
+            for name, (dtype, count_field) in self._MODEL_SPANS.items()
+        }
+
+    def _joint_view(self, v: dict[str, wp.array]) -> Any:
+        view = joint_kernels.JointCoordinateView()
+        view.body_particles = v["affine_body_indices"]
+        view.types = v["joint_drive_types"]
+        view.bodies = v["joint_drive_body_indices"]
+        view.parent_origin = v["joint_drive_parent_origins"]
+        view.parent_axis = v["joint_drive_parent_axis_points"]
+        view.parent_reference = v["joint_drive_parent_reference_points"]
+        view.w_po = self.drive_w_po
+        view.w_co = self.drive_w_co
+        view.w_pa = self.drive_w_pa
+        view.w_pr = self.drive_w_pr
+        view.w_cr = self.drive_w_cr
+        view.dofs = v["joint_drive_dof_indices"]
+        view.joints_per_world = self.model.joint_drive_count
+        view.particles_per_world = self.per_world
+        return view
+
+    def _limit_view(self, v: dict[str, wp.array]) -> Any:
+        view = joint_kernels.AngularLimitView()
+        view.lower = v["joint_limit_lower"]
+        view.upper = v["joint_limit_upper"]
+        view.stiffness = v["joint_limit_stiffnesses"]
+        view.damping = v["joint_limit_dampings"]
+        return view
+
+    def _joint_armature(self, v, x, inverse_dt, direction, force, block) -> None:
+        self._launch(
+            "joint_armature",
+            joint_kernels.evaluate_joint_armature,
+            self.drive_total,
+            [
+                self._joint_view(v),
+                v["joint_armature"],
+                x,
+                self.previous,
+                self.drive_qd,
+                inverse_dt,
+                direction,
+                force,
+                block,
+            ],
+        )
+
+    def _angular_limits(self, v, x, inverse_dt, direction, force, block) -> None:
+        self._launch(
+            "angular_limits",
+            joint_kernels.evaluate_angular_limits,
+            self.drive_total,
+            [
+                self._joint_view(v),
+                self._limit_view(v),
+                x,
+                self.previous,
+                self.drive_angle,
+                self.drive_initialized,
+                inverse_dt,
+                direction,
+                force,
+                block,
+            ],
+        )
+
+    def _assemble_blocks(
+        self,
+        v,
+        q_in,
+        mass,
+        flags,
+        inverse_dt,
+        so3_alpha,
+        body_so3_alpha,
+        pd,
+        block_matrix,
+        body_block,
+        so3,
+        six_springs,
+        constitutive,
+        rigidity,
+        joint_al,
+        joint_al_active,
+        drag,
+    ) -> None:
+        """Diagonal blocks, block-ELL entries and the block preconditioner, in the native launch order."""
+        model, launch, count, per_world = self.model, self._launch, self.count, self.per_world
+        empty_m = self._empty(wp.mat33)
+        body_indices, body_masses = v["affine_body_indices"], v["body_masses"]
+        body_states, bodies_per_world = self.body_state_count, self.body_count
+        ell = [self.row_count, self.block_entry_columns, self.block_entry_values, self.max_entries]
+        launch(
+            "blocks",
+            step_kernels.initialize_block_diagonal,
+            count,
+            [
+                self.diagonal,
+                self.blocks,
+                empty_m if block_matrix else self.preconditioner_blocks,
+            ],
+        )
+        if block_matrix and self.max_entries:
+            wp.copy(self.block_entry_columns, self.block_template_columns)
+            wp.copy(self.block_entry_values, self.block_template_values)
+        if not pd and self.triangle_count:
+            launch(
+                "membrane_hessian",
+                cloth_kernels.add_cloth_membrane_gauss_newton_hessian,
+                self.triangle_count,
+                [
+                    q_in,
+                    v["triangle_indices"],
+                    v["triangle_inv_dms"],
+                    v["triangle_rest_areas"],
+                    v["triangle_aniso_stiffnesses"],
+                    self.blocks,
+                    *ell,
+                    model.triangle_count,
+                    per_world,
+                    count,
+                ],
+            )
+        if not pd and self.spring_count:
+            launch(
+                "spring_hessian",
+                spring_kernels.add_spring_gauss_newton_hessian,
+                self.spring_count,
+                [
+                    q_in,
+                    v["spring_indices"],
+                    v["spring_stiffnesses"],
+                    v["spring_rest_lengths"],
+                    self.blocks,
+                    *ell,
+                    model.spring_count,
+                    per_world,
+                    count,
+                ],
+            )
+        if block_matrix and six_springs and so3_alpha > 0.0:
+            launch(
+                "rigidity_spring_hessian",
+                affine_kernels.add_affine_body_spring_gauss_newton_hessian,
+                body_states,
+                [
+                    q_in,
+                    body_indices,
+                    body_masses,
+                    so3_alpha,
+                    self.blocks,
+                    *ell,
+                    bodies_per_world,
+                    per_world,
+                    count,
+                ],
+            )
+        if not pd and self.plain_spring_count:
+            launch(
+                "body_spring_hessian",
+                joint_kernels.add_body_spring_gauss_newton_hessian,
+                self.body_spring_total,
+                [
+                    q_in,
+                    body_indices,
+                    v["body_spring_indices"],
+                    v["body_spring_points0"],
+                    v["body_spring_points1"],
+                    self.body_spring_w0,
+                    self.body_spring_w1,
+                    v["body_spring_stiffnesses"],
+                    v["body_spring_rest_lengths"],
+                    self.blocks,
+                    *ell,
+                    model.body_spring_count,
+                    per_world,
+                    count,
+                ],
+            )
+        if not pd and (self.plain_line_count or (not joint_al and self.joint_line_total)):
+            launch(
+                "point_line_hessian",
+                joint_kernels.add_body_point_line_gauss_newton_hessian,
+                self.point_line_total,
+                [
+                    q_in,
+                    body_indices,
+                    v["body_point_line_indices"],
+                    self.point_line_wp,
+                    self.point_line_we0,
+                    self.point_line_we1,
+                    v["body_point_line_endpoints0"],
+                    v["body_point_line_endpoints1"],
+                    v["body_point_line_stiffnesses"],
+                    so3_alpha,
+                    model.joint_body_point_line_count,
+                    int(not joint_al or not self.joint_line_total),
+                    self.blocks,
+                    *ell,
+                    model.body_point_line_count,
+                    per_world,
+                    count,
+                ],
+            )
+        if not pd and joint_al_active and self.joint_line_total:
+            launch(
+                "joint_line_hessian",
+                joint_kernels.add_joint_body_point_line_gauss_newton_hessian,
+                self.joint_line_total,
+                [
+                    body_indices,
+                    v["body_point_line_indices"],
+                    self.point_line_wp,
+                    self.point_line_we0,
+                    self.point_line_we1,
+                    v["body_point_line_stiffnesses"],
+                    self.line_segment,
+                    self.line_projector,
+                    so3_alpha,
+                    self.blocks,
+                    *ell,
+                    model.body_point_line_count,
+                    model.joint_body_point_line_count,
+                    per_world,
+                    count,
+                ],
+            )
+        # The native solver retains A and inverts its separate cache in place.
+        if block_matrix:
+            wp.copy(self.preconditioner_blocks, self.blocks, count=count)
+        # Without the full body block, SO(3) precedes tetrahedra/bending.
+        if constitutive and so3_alpha > 0.0:
+            launch(
+                "constitutive_preconditioner",
+                affine_kernels.add_affine_body_constitutive_preconditioner,
+                body_states,
+                [
+                    q_in,
+                    body_indices,
+                    body_masses,
+                    so3_alpha,
+                    int(rigidity),
+                    self.preconditioner_blocks,
+                    bodies_per_world,
+                    per_world,
+                ],
+            )
+        if so3 and not body_block and so3_alpha > 0.0:
+            launch(
+                "so3_preconditioner",
+                affine_kernels.add_affine_body_so3_augmented_lagrangian_preconditioner,
+                body_states,
+                [
+                    body_indices,
+                    body_masses,
+                    self.body_rotation,
+                    so3_alpha,
+                    self.preconditioner_blocks,
+                    bodies_per_world,
+                    per_world,
+                ],
+            )
+        if self.tetrahedron_count:
+            launch(
+                "tetrahedron_preconditioner",
+                tetrahedron_kernels.add_tetrahedron_preconditioner,
+                self.tetrahedron_count,
+                [
+                    q_in,
+                    v["tetrahedron_indices"],
+                    v["tetrahedron_inverse_dms"],
+                    v["tetrahedron_materials"],
+                    self.tetrahedron_volumes,
+                    inverse_dt,
+                    self.preconditioner_blocks,
+                    model.tetrahedron_count,
+                    per_world,
+                ],
+            )
+        if self.bending_damping:
+            launch(
+                "bending_preconditioner",
+                cloth_kernels.add_bending_damping_preconditioner,
+                self.edge_count,
+                [
+                    q_in,
+                    v["edge_rest_areas"],
+                    v["edge_bending_cots"],
+                    v["edge_indices"],
+                    v["edge_bending_properties"],
+                    inverse_dt,
+                    self.preconditioner_blocks,
+                    model.edge_count,
+                    per_world,
+                ],
+            )
+        # Joint-line PD and drive terms precede the body-block assembly.
+        if pd and joint_al_active and self.joint_line_total and so3_alpha > 0.0:
+            launch(
+                "joint_line_pd_preconditioner",
+                joint_kernels.add_joint_body_point_line_augmented_lagrangian_preconditioner,
+                self.joint_line_total,
+                [
+                    body_indices,
+                    v["body_point_line_indices"],
+                    self.point_line_wp,
+                    self.point_line_we0,
+                    self.point_line_we1,
+                    v["body_point_line_stiffnesses"],
+                    self.line_segment,
+                    self.line_projector,
+                    so3_alpha,
+                    self.preconditioner_blocks,
+                    model.body_point_line_count,
+                    model.joint_body_point_line_count,
+                    per_world,
+                ],
+            )
+        if self.drive_total:
+            launch(
+                "drive_preconditioner",
+                joint_kernels.add_joint_drive_preconditioner,
+                self.drive_total,
+                [
+                    q_in,
+                    body_indices,
+                    v["joint_drive_types"],
+                    v["joint_drive_body_indices"],
+                    v["joint_drive_parent_origins"],
+                    v["joint_drive_parent_axis_points"],
+                    v["joint_drive_parent_reference_points"],
+                    self.drive_w_po,
+                    self.drive_w_co,
+                    self.drive_w_pa,
+                    self.drive_w_pr,
+                    self.drive_w_cr,
+                    v["joint_drive_dof_indices"],
+                    v["joint_target_modes"],
+                    v["joint_passive_dampings"],
+                    v["joint_target_dampings"],
+                    inverse_dt,
+                    self.preconditioner_blocks,
+                    model.joint_drive_count,
+                    per_world,
+                ],
+            )
+            if self.armature:
+                self._joint_armature(
+                    v, q_in, inverse_dt, self._empty(wp.vec3), self._empty(wp.vec3), self.preconditioner_blocks
+                )
+            if self.angular_limits:
+                self._angular_limits(
+                    v, q_in, inverse_dt, self._empty(wp.vec3), self._empty(wp.vec3), self.preconditioner_blocks
+                )
+        if body_block:
+            # The body assembly adds SO(3) itself, before the per-particle copies do.
+            if block_matrix:
+                launch(
+                    "affine_build",
+                    affine_block_kernels.build_affine_body_preconditioner_block,
+                    body_states,
+                    [
+                        body_indices,
+                        body_masses,
+                        mass,
+                        flags,
+                        self.preconditioner_blocks,
+                        self.row_count,
+                        self.block_entry_columns,
+                        self.block_entry_values,
+                        self.max_entries,
+                        count,
+                        self.body_rotation,
+                        body_so3_alpha,
+                        self.affine_enabled,
+                        self._empty(wp.float32),
+                        self.affine_blocks,
+                        self.affine_valid,
+                        bodies_per_world,
+                        per_world,
+                    ],
+                )
+            else:
+                launch(
+                    "affine_build_scalar",
+                    affine_block_kernels.build_affine_body_preconditioner_scalar,
+                    body_states,
+                    [
+                        body_indices,
+                        body_masses,
+                        mass,
+                        flags,
+                        self.preconditioner_blocks,
+                        self._template_row_counts(),
+                        self.scalar_template_columns,
+                        self.scalar_template_values,
+                        self.max_entries,
+                        per_world,
+                        self.body_rotation,
+                        body_so3_alpha,
+                        self.affine_enabled,
+                        self._empty(wp.float32),
+                        self.affine_blocks,
+                        self.affine_valid,
+                        bodies_per_world,
+                        per_world,
+                    ],
+                )
+        if so3 and body_block and so3_alpha > 0.0:
+            launch(
+                "so3_preconditioner",
+                affine_kernels.add_affine_body_so3_augmented_lagrangian_preconditioner,
+                body_states,
+                [
+                    body_indices,
+                    body_masses,
+                    self.body_rotation,
+                    so3_alpha,
+                    self.preconditioner_blocks,
+                    bodies_per_world,
+                    per_world,
+                ],
+            )
+        if drag:
+            launch(
+                "drag_preconditioner",
+                drag_kernels.add_triangle_drag_preconditioner,
+                self.drag_count,
+                [
+                    self.drag_indices,
+                    self.drag_normal,
+                    self.drag_scalar,
+                    self.preconditioner_blocks,
+                    self.drag_local_count,
+                    per_world,
+                ],
+            )
+        launch(
+            "inverse",
+            pcg_kernels.invert_block_preconditioner,
+            count,
+            [
+                self.preconditioner_blocks,
+                mass,
+                flags,
+                self.inverse,
+                per_world,
+            ],
+        )
+
+    def _multiply_tangents(
+        self,
+        v,
+        q_in,
+        inverse_dt,
+        so3_alpha,
+        pd,
+        so3,
+        constitutive,
+        rigidity,
+        coupled_materials,
+        joint_al_active,
+        drag,
+    ) -> None:
+        """Matrix-free tangent products added to contact_product, in the native order."""
+        model, launch, per_world = self.model, self._launch, self.per_world
+        body_indices, body_masses = v["affine_body_indices"], v["body_masses"]
+        body_states, bodies_per_world = self.body_state_count, self.body_count
+        product = self.contact_product
+        joint_line_pd = [
+            self.direction,
+            body_indices,
+            v["body_point_line_indices"],
+            self.point_line_wp,
+            self.point_line_we0,
+            self.point_line_we1,
+            v["body_point_line_stiffnesses"],
+            self.line_segment,
+            self.line_projector,
+            so3_alpha,
+            product,
+            model.body_point_line_count,
+            model.joint_body_point_line_count,
+            per_world,
+        ]
+        # Coupled-material schedules add the joint-line PD tangent before SO(3).
+        if pd and coupled_materials and self.joint_line_total and so3_alpha > 0.0:
+            launch(
+                "joint_line_pd_tangent",
+                joint_kernels.multiply_joint_body_point_line_augmented_lagrangian,
+                self.joint_line_total,
+                joint_line_pd,
+            )
+        if so3 and so3_alpha > 0.0:
+            launch(
+                "so3_tangent",
+                affine_kernels.multiply_affine_body_so3_augmented_lagrangian_tangent,
+                body_states,
+                [
+                    self.direction,
+                    body_indices,
+                    body_masses,
+                    self.body_rotation,
+                    so3_alpha,
+                    product,
+                    bodies_per_world,
+                    per_world,
+                ],
+            )
+        if constitutive and so3_alpha > 0.0:
+            launch(
+                "constitutive_tangent",
+                affine_kernels.multiply_affine_body_constitutive_tangent,
+                body_states,
+                [
+                    q_in,
+                    self.direction,
+                    body_indices,
+                    body_masses,
+                    so3_alpha,
+                    int(rigidity),
+                    product,
+                    bodies_per_world,
+                    per_world,
+                ],
+            )
+        if self.tetrahedron_count:
+            launch(
+                "tetrahedron_tangent",
+                tetrahedron_kernels.multiply_tetrahedron_tangent,
+                self.tetrahedron_count,
+                [
+                    q_in,
+                    self.direction,
+                    v["tetrahedron_indices"],
+                    v["tetrahedron_inverse_dms"],
+                    v["tetrahedron_materials"],
+                    self.tetrahedron_volumes,
+                    inverse_dt,
+                    product,
+                    model.tetrahedron_count,
+                    per_world,
+                ],
+            )
+        if self.bending_damping:
+            launch(
+                "bending_tangent",
+                cloth_kernels.multiply_bending_damping_tangent,
+                self.edge_count,
+                [
+                    q_in,
+                    self.direction,
+                    v["edge_rest_areas"],
+                    v["edge_bending_cots"],
+                    v["edge_indices"],
+                    v["edge_bending_properties"],
+                    inverse_dt,
+                    product,
+                    model.edge_count,
+                    per_world,
+                ],
+            )
+        # The other PD joint-line schedules add it after the contact tangents, ahead of the drive terms.
+        if pd and not coupled_materials and joint_al_active and self.joint_line_total and so3_alpha > 0.0:
+            launch(
+                "joint_line_pd_tangent",
+                joint_kernels.multiply_joint_body_point_line_augmented_lagrangian,
+                self.joint_line_total,
+                joint_line_pd,
+            )
+        if self.drive_total:
+            launch(
+                "drive_tangent",
+                joint_kernels.multiply_joint_drive_tangent,
+                self.drive_total,
+                [
+                    q_in,
+                    self.direction,
+                    body_indices,
+                    v["joint_drive_types"],
+                    v["joint_drive_body_indices"],
+                    v["joint_drive_parent_origins"],
+                    v["joint_drive_parent_axis_points"],
+                    v["joint_drive_parent_reference_points"],
+                    self.drive_w_po,
+                    self.drive_w_co,
+                    self.drive_w_pa,
+                    self.drive_w_pr,
+                    self.drive_w_cr,
+                    v["joint_drive_dof_indices"],
+                    v["joint_target_modes"],
+                    v["joint_passive_dampings"],
+                    v["joint_target_dampings"],
+                    inverse_dt,
+                    product,
+                    model.joint_drive_count,
+                    per_world,
+                ],
+            )
+            if self.armature:
+                self._joint_armature(v, q_in, inverse_dt, self.direction, product, self._empty(wp.mat33))
+            if self.angular_limits:
+                self._angular_limits(v, q_in, inverse_dt, self.direction, product, self._empty(wp.mat33))
+        if drag:
+            launch(
+                "drag_tangent",
+                drag_kernels.multiply_triangle_drag_tangent,
+                self.drag_count,
+                [
+                    self.direction,
+                    self.drag_indices,
+                    self.drag_normal,
+                    self.drag_scalar,
+                    product,
+                    self.drag_local_count,
+                    per_world,
+                ],
+            )
 
     def _validate_step_config(self) -> None:
         config = self._config
