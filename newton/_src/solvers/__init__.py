@@ -5,7 +5,8 @@ import importlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from . import mujoco, style3d
+    from . import coupled_high_accuracy, mujoco, style3d
+    from .coupled_high_accuracy import SolverCoupledHighAccuracy
     from .featherstone import SolverFeatherstone
     from .implicit_mpm import SolverImplicitMPM
     from .kamino import SolverKamino
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "SolverBase",
+    "SolverCoupledHighAccuracy",
     "SolverFeatherstone",
     "SolverImplicitMPM",
     "SolverKamino",
@@ -28,6 +30,7 @@ __all__ = [
     "SolverStyle3D",
     "SolverVBD",
     "SolverXPBD",
+    "coupled_high_accuracy",
     "mujoco",
     "style3d",
 ]
@@ -38,6 +41,7 @@ __all__ = [
 # not pay the import cost of every solver backend.
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "SolverBase": (".solver", "SolverBase"),
+    "SolverCoupledHighAccuracy": (".coupled_high_accuracy", "SolverCoupledHighAccuracy"),
     "SolverFeatherstone": (".featherstone", "SolverFeatherstone"),
     "SolverImplicitMPM": (".implicit_mpm", "SolverImplicitMPM"),
     "SolverKamino": (".kamino", "SolverKamino"),
@@ -47,6 +51,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "SolverStyle3D": (".style3d.solver_style3d", "SolverStyle3D"),
     "SolverVBD": (".vbd", "SolverVBD"),
     "SolverXPBD": (".xpbd", "SolverXPBD"),
+    "coupled_high_accuracy": (".coupled_high_accuracy", None),
     "mujoco": (".mujoco", None),
     "style3d": (".style3d", None),
 }

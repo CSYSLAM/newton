@@ -179,7 +179,10 @@ torch = [
 ]
 
 [dependency-groups]
-dev = ["asv>=0.6.4; (sys_platform != 'win32' or platform_machine != 'ARM64')"]
+dev = [
+    "asv>=0.6.4; (sys_platform != 'win32' or platform_machine != 'ARM64')",
+    "pytest>=9.2.0",
+]
 
 [tool.ruff]
 cache-dir = ".cache/ruff"
@@ -244,6 +247,8 @@ extend-immutable-calls = ["newton.solvers.SolverBase.Observables.field"]
 "newton/_src/solvers/kamino/examples/**/*" = ["T201"]
 # TID251 (banned APIs) only applies to tests
 "!newton/tests/**/*" = ["TID251"]
+# Tests ported verbatim from the engineRTS style3d_sim pytest suite keep their original structure.
+"newton/tests/coupled_high_accuracy/**/*" = ["E402", "PLC0415", "RUF043", "B023", "B905", "C408", "RUF059", "PLW2901", "E731", "RUF007", "RUF005"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "importlib.util.find_spec".msg = "Declare optional test dependencies with newton.tests.unittest_utils.requires() or has_module(), which also catch broken installs."
@@ -364,6 +369,9 @@ files.extend-exclude = ["/examples/assets", "*.urdf", "*.usd", "*.usda", "*.mjcf
 
 [tool.typos.default.extend-words]
 arange = "arange"
+# Affine body dynamics
+ABD = "ABD"
+abd = "abd"
 precess = "precess"
 ba = "ba"
 ix = "ix"
