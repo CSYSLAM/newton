@@ -43,6 +43,7 @@ from .kernels import rolling_contacts as rolling_contact_kernels
 from .kernels import soft_contacts as soft_contact_kernels
 from .kernels import springs as spring_kernels
 from .kernels import step as step_kernels
+from .kernels import surface_contacts as surface_contact_kernels
 from .kernels import tetrahedra as tetrahedron_kernels
 from .templates import SparseRows
 
@@ -333,6 +334,7 @@ class Solver(BodyPrecompute):
         self.model = model._copy()
         self.count = count
         self.per_world = model.particle_count
+        self.surface_tangent_cache = wp.zeros(0, dtype=surface_contact_kernels.SurfaceTangent, device=self.device)
         self.hard_capacity = 0
         for name, dtype in self._HARD_BUFFERS:
             setattr(self, name, self._empty(dtype))
@@ -764,8 +766,6 @@ class Solver(BodyPrecompute):
         particle_contact = bool(contact.soft_max_count and (not surface or contact.soft_particle_only_shapes.size))
         contact_product = particle_contact and config.enable_collision_hessian_non_diagonal
         rigid = bool(self.body_count and contact.max_count and contact.count.size)
-        if surface:
-            raise _not_ported("full-surface soft contacts")
         hard = rigid and config.rigid_contact_hard
         rolling = rigid and self.rolling
         if hard and config.rigid_contact_history and not contact.match_index.size:
@@ -835,6 +835,12 @@ class Solver(BodyPrecompute):
             surface or contact_product or self.bending_damping or bool(self.tetrahedron_count) or drag or body_tangent
         )
         reference_pcg = config.reference_linear_schedule
+        # Surface contact Jacobians are evaluated once per Newton iteration instead of once per CG iteration.
+        self._cached_surface = surface and extra_product and not reference_pcg
+        if self._cached_surface and self.surface_tangent_cache.shape[0] < contact.soft_max_count:
+            self.surface_tangent_cache = wp.zeros(
+                contact.soft_max_count, dtype=surface_contact_kernels.SurfaceTangent, device=self.device
+            )
         fused_pcg = block_matrix and not body_block and not reference_pcg
         if control.tetrahedron_activations.size and control.tetrahedron_activations.size < self.tetrahedron_count:
             raise ValueError("tetrahedron activations are smaller than the tetrahedron state count")
@@ -1182,6 +1188,16 @@ class Solver(BodyPrecompute):
                     inverse_dt,
                     [self.rhs, self._empty(wp.spatial_vector)],
                 )
+            # Rigid and rolling forces precede surface contacts, as in the native bag/balls schedules.
+            if surface:
+                self._surface_launch(
+                    "surface_force",
+                    surface_contact_kernels.evaluate_surface_contact_force,
+                    contact,
+                    q_in,
+                    inverse_dt,
+                    [self.rhs, self._empty(wp.spatial_vector)],
+                )
             if particle_contact:
                 self._soft_contact(contact, q_in, qd_in, inverse_dt, surface, force=self.rhs, scalar=self.diagonal)
             # Force order: plain body springs (the kernel skips joint springs), distance constraints, AL joint
@@ -1497,6 +1513,15 @@ class Solver(BodyPrecompute):
                     drag,
                 )
 
+            if self._cached_surface:
+                self._surface_launch(
+                    "surface_tangent_cache",
+                    surface_contact_kernels.cache_surface_contact_tangent,
+                    contact,
+                    q_in,
+                    inverse_dt,
+                    [self.surface_tangent_cache],
+                )
             wp.copy(self.residual, self.rhs, count=count)
             self.solution.zero_()
             self.numerator.zero_()
@@ -1827,6 +1852,15 @@ class Solver(BodyPrecompute):
                 inverse_dt,
                 [self._empty(wp.vec3), wrenches[: contact.max_count]],
             )
+        if contact.contact_force.size and surface:
+            self._surface_launch(
+                "surface_force",
+                surface_contact_kernels.evaluate_surface_contact_force,
+                contact,
+                q_in,
+                inverse_dt,
+                [self._empty(wp.vec3), wrenches[contact.max_count :]],
+            )
         if contact.contact_force.size and particle_contact:
             self._soft_contact(contact, q_in, qd_in, inverse_dt, surface, contact_force=wrenches[contact.max_count :])
         if hard:
@@ -1976,6 +2010,49 @@ class Solver(BodyPrecompute):
         view.previous = self.previous
         view.inv_dt = inverse_dt
         return view
+
+    def _surface_launch(self, key: str, kernel: Any, contact: Contact, x: wp.array, inverse_dt: float, outputs: list):
+        model = self.model
+        soft = self._soft_view(contact, x, self._empty(wp.vec3), inverse_dt, True)
+        view = surface_contact_kernels.SurfaceContactView()
+        view.count = soft.count
+        view.capacity = contact.soft_max_count
+        view.indices = self._view(contact.soft_indices, wp.vec3i, contact.soft_max_count)
+        view.barycentric = self._view(contact.soft_barycentric, wp.vec3, contact.soft_max_count)
+        for name in (
+            "shape",
+            "body_pos",
+            "body_vel",
+            "normal",
+            "radius",
+            "mass",
+            "particles_per_world",
+            "total_particles",
+            "shape_body",
+            "shape_type",
+            "shape_scale",
+            "shape_margin",
+            "shape_ke",
+            "shape_kd",
+            "shape_kf",
+            "shape_mu",
+            "local_shape_count",
+            "shapes_per_world",
+            "worlds",
+            "body_ids",
+            "body_indices",
+            "body_com",
+            "x",
+            "previous",
+            "inv_dt",
+        ):
+            setattr(view, name, getattr(soft, name))
+        view.particle_only = self._view(contact.soft_particle_only_shapes, wp.int32)
+        view.flags = self._view(model.particle_flags, wp.int32, self.per_world)
+        view.kind = soft.particle_kind
+        view.transform = soft.shape_transform
+        view.ke, view.kd, view.kf, view.mu = soft.global_ke, soft.global_kd, soft.global_kf, soft.global_mu
+        self._launch(key, kernel, contact.soft_max_count, [view, *outputs])
 
     def _launch_rolling(
         self, key: str, kernel: Any, contact: Contact, x: wp.array, inverse_dt: float, outputs: list
@@ -2535,6 +2612,15 @@ class Solver(BodyPrecompute):
                     per_world,
                 ],
             )
+        if self._surface:
+            self._surface_launch(
+                "surface_preconditioner",
+                surface_contact_kernels.add_surface_contact_preconditioner,
+                self._contact,
+                q_in,
+                inverse_dt,
+                [self.preconditioner_blocks],
+            )
         # Joint-line PD and drive terms precede the body-block assembly.
         if pd and joint_al_active and self.joint_line_total and so3_alpha > 0.0:
             launch(
@@ -2818,6 +2904,28 @@ class Solver(BodyPrecompute):
                     model.edge_count,
                     per_world,
                 ],
+            )
+        if self._cached_surface:
+            launch(
+                "surface_tangent_cached",
+                surface_contact_kernels.multiply_cached_surface_contact_tangent,
+                self._contact.soft_max_count,
+                [
+                    self._view(self._contact.soft_count, wp.int32, 1),
+                    self._contact.soft_max_count,
+                    self.surface_tangent_cache,
+                    self.direction,
+                    product,
+                ],
+            )
+        elif self._surface:
+            self._surface_launch(
+                "surface_tangent",
+                surface_contact_kernels.multiply_surface_contact_tangent,
+                self._contact,
+                q_in,
+                inverse_dt,
+                [self.direction, product],
             )
         if self._hard:
             self._hard_evaluate(self._contact, q_in, inverse_dt, direction=self.direction, product=self.contact_product)

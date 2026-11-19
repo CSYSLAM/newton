@@ -333,15 +333,9 @@ def cloth_ground(steps: int, options: dict[str, str]) -> Iterator[Any]:
     solver.config.linear_iterations = int(options.get("linear", 50))
     if options.get("diagonal"):
         solver.config.enable_collision_hessian_non_diagonal = False
-    pipeline_options = {}
-    if options.get("hard"):
-        solver.config.rigid_contact_hard = True
-        solver.config.rigid_contact_beta = float(options.get("beta", 0.0))
-        solver.config.rigid_contact_sliding_tangent = bool(options.get("sliding"))
-        if options.get("history"):
-            solver.config.rigid_contact_history = True
-            pipeline_options["contact_matching"] = "sticky"
-    yield from _run_contacts(model, solver, steps, **pipeline_options)
+    if options.get("reference"):
+        solver.config.reference_linear_schedule = True
+    yield from _run_contacts(model, solver, steps, enable_rigid_soft_full_surface_contact=bool(options.get("surface")))
 
 
 @scene
@@ -411,3 +405,44 @@ def boxes_on_ground(steps: int, options: dict[str, str]) -> Iterator[Any]:
             solver.config.rigid_contact_history = True
             pipeline_options["contact_matching"] = "sticky"
     yield from _run_contacts(model, solver, steps, **pipeline_options)
+
+
+@scene
+def cloth_on_box(steps: int, options: dict[str, str]) -> Iterator[Any]:
+    """A cloth draping over a free box body resting on the ground, with full-surface contacts (options: framework,
+    rolling=, hard=1, reference=1, point=1 for particle-only contacts)."""
+    from newton.solvers import style3d  # noqa: PLC0415
+
+    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z)
+    newton.solvers.SolverStyle3D.register_custom_attributes(builder)
+    _shape_friction(builder, options)
+    builder.default_shape_cfg.ke = 1.0e4
+    builder.default_shape_cfg.kd = 10.0
+    builder.add_ground_plane()
+    box = builder.add_body(xform=wp.transform(wp.vec3(0.18, 0.12, 0.06), wp.quat_identity()))
+    builder.add_shape_box(body=box, hx=0.08, hy=0.06, hz=0.05)
+    style3d.add_cloth_grid(
+        builder,
+        pos=wp.vec3(0.0, 0.0, 0.16),
+        rot=wp.quat_identity(),
+        dim_x=8,
+        dim_y=6,
+        cell_x=0.05,
+        cell_y=0.05,
+        vel=wp.vec3(0.0, 0.0, -0.3),
+        mass=0.02,
+        particle_radius=0.01,
+        tri_aniso_ke=wp.vec3(2.0e3, 1.0e3, 3.0e2),
+        edge_aniso_ke=wp.vec3(1.0e-3),
+        edge_kd=0.0,
+    )
+    model = builder.finalize(device="cuda:0")
+    model.soft_contact_ke = 2.0e3
+    model.soft_contact_kd = 5.0
+    model.soft_contact_mu = 0.5
+    solver = _body_solver(model, options)
+    if options.get("hard"):
+        solver.config.rigid_contact_hard = True
+    if options.get("reference"):
+        solver.config.reference_linear_schedule = True
+    yield from _run_contacts(model, solver, steps, enable_rigid_soft_full_surface_contact=not options.get("point"))
