@@ -525,12 +525,13 @@ class SelfCollisionHost:
             self._launch(
                 "self_full_tangent",
                 kernels.multiply_contact_tangents,
-                self.self_capacity,
+                min(self.self_capacity, 256 * 256),
                 [
                     self.self_contacts,
                     self.self_counter,
                     self.direction,
                     self.contact_product,
+                    min(self.self_capacity, 256 * 256),
                 ],
             )
         else:

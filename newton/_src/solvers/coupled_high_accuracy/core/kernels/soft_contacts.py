@@ -304,43 +304,77 @@ def evaluate_soft_contact_force(
             wp.atomic_add(precond, targets[j], block)
 
 
+@wp.struct
+class SoftTangentCache:
+    """Per-contact product data fixed during a Newton iteration's linear solve: five targets with their normal and
+    friction weights (flat, ``contact * 5 + entry``), the normal and the (normal, friction) stiffnesses. ``valid``
+    is 0 for skipped contacts."""
+
+    valid: wp.array[wp.int32]
+    targets: wp.array[wp.int32]
+    normal_weights: wp.array[float]
+    friction_weights: wp.array[float]
+    normal: wp.array[wp.vec3]
+    stiffness: wp.array[wp.vec2]
+
+
 @wp.kernel
-def multiply_soft_contact_hessian_off_diagonal(
-    v: SoftContactView,
+def cache_soft_contact_tangent(v: SoftContactView, stride: int, cache: SoftTangentCache):
+    """Evaluate each contact's geometry once per Newton iteration (``soft_contact_product`` re-evaluated it in every
+    CG iteration)."""
+    for i in range(wp.tid(), wp.min(v.capacity, wp.max(v.count[0], 0)), stride):
+        c = evaluate_soft_contact(v, i, 1)
+        cache.valid[i] = c.valid
+        if c.valid != 0:
+            stiff = float(0.0)
+            if c.fn > 0.0:
+                stiff = c.kd * v.inv_dt + c.ke
+            cache.stiffness[i] = wp.vec2(stiff, c.eta * v.inv_dt)
+            cache.normal[i] = c.n
+            d = c.raw - c.com
+            e = c.adjusted - c.com
+            base = i * 5
+            cache.targets[base] = c.p
+            cache.normal_weights[base] = 1.0
+            cache.friction_weights[base] = 1.0
+            cache.normal_weights[base + 1] = -1.0
+            cache.friction_weights[base + 1] = -1.0
+            for k in range(4):
+                cache.targets[base + 1 + k] = c.ids[k]
+            for k in range(3):
+                cache.normal_weights[base + 2 + k] = -d[k]
+                cache.friction_weights[base + 2 + k] = -e[k]
+
+
+@wp.kernel
+def multiply_cached_soft_contact_tangent(
+    count: wp.array[wp.int32],
+    capacity: int,
+    stride: int,
+    cache: SoftTangentCache,
     direction: wp.array[wp.vec3],
     product: wp.array[wp.vec3],
 ):
-    """Off-diagonal particle/body couplings of the contact Hessian times a direction (body-attached shapes only).
-    Terms between equal global state indices are excluded."""
-    i = wp.tid()
-    c = evaluate_soft_contact(v, i, 1)
-    if c.valid == 0:
-        return
-    inv_dt = v.inv_dt
-    n = c.n
-    stiff = float(0.0)
-    if c.fn > 0.0:
-        stiff = c.kd * inv_dt + c.ke
-    fric = c.eta * inv_dt
-    nn = wp.outer(n, n)
-    normal_block = stiff * nn
-    friction_block = fric * (wp.identity(n=3, dtype=float) - nn)
-    d = c.raw - c.com
-    e = c.adjusted - c.com
-    ids = c.ids
-    targets = vec5i(c.p, ids[0], ids[1], ids[2], ids[3])
-    for part in range(2):
-        lever = d
-        k = normal_block
-        if part == 1:
-            lever = e
-            k = friction_block
-        weights = vec5f(1.0, -1.0, -lever[0], -lever[1], -lever[2])
-        for a in range(5):
-            total = wp.vec3(0.0)
-            for b in range(5):
-                if b == a or targets[b] == targets[a]:
-                    continue
-                total = weights[b] * direction[targets[b]] + total
-            y = k * total
-            wp.atomic_add(product, targets[a], y * weights[a])
+    """The arithmetic of ``soft_contact_product`` from the cached data."""
+    for i in range(wp.tid(), wp.min(capacity, wp.max(count[0], 0)), stride):
+        if cache.valid[i] != 0:
+            n = cache.normal[i]
+            stiffness = cache.stiffness[i]
+            nn = wp.outer(n, n)
+            normal_block = stiffness[0] * nn
+            friction_block = stiffness[1] * (wp.identity(n=3, dtype=float) - nn)
+            base = i * 5
+            for a in range(5):
+                target = cache.targets[base + a]
+                normal_total = wp.vec3(0.0)
+                friction_total = wp.vec3(0.0)
+                for b in range(5):
+                    other = cache.targets[base + b]
+                    if b != a and other != target:
+                        p = direction[other]
+                        normal_total = cache.normal_weights[base + b] * p + normal_total
+                        friction_total = cache.friction_weights[base + b] * p + friction_total
+                value = (normal_block * normal_total) * cache.normal_weights[base + a] + (
+                    friction_block * friction_total
+                ) * cache.friction_weights[base + a]
+                wp.atomic_add(product, target, value)

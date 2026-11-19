@@ -950,17 +950,18 @@ def multiply_contact_tangents(
     counter: wp.array[wp.int32],
     direction: wp.array[wp.vec3],
     product: wp.array[wp.vec3],
+    stride: int,
 ):
-    i = wp.tid()
-    if i >= counter[0]:
-        return
-    c = contacts[i]
-    total = wp.vec3(0.0)
-    for point in range(c.count):
-        total = c.weights[point] * direction[c.ids[point]] + total
-    tangent = (c.stiffness * wp.dot(total, c.normal)) * c.normal
-    for point in range(c.count):
-        wp.atomic_add(product, c.ids[point], tangent * c.weights[point])
+    """Grid-stride over the recorded contacts with at most 256 x 256 threads, as natively; one thread per capacity
+    slot (pairs x 31) would launch millions of idle threads every CG iteration."""
+    for i in range(wp.tid(), counter[0], stride):
+        c = contacts[i]
+        total = wp.vec3(0.0)
+        for point in range(c.count):
+            total = c.weights[point] * direction[c.ids[point]] + total
+        tangent = (c.stiffness * wp.dot(total, c.normal)) * c.normal
+        for point in range(c.count):
+            wp.atomic_add(product, c.ids[point], tangent * c.weights[point])
 
 
 @wp.func

@@ -328,22 +328,32 @@ def add_surface_contact_preconditioner(v: SurfaceContactView, blocks: wp.array[w
 def surface_tangent_product(t: SurfaceTangent, direction: wp.array[wp.vec3], product: wp.array[wp.vec3]):
     # Constant trip counts let the compiler unroll and keep the seven-entry lists in registers; dynamic indexing
     # would spill them to local memory.
-    total = wp.vec3(0.0)
+    normal_total = wp.vec3(0.0)
     for j in range(7):
         if j < t.normal_entries:
-            total = t.normal_weights[j] * direction[t.normal_targets[j]] + total
-    value = t.normal_matrix * total
+            normal_total = t.normal_weights[j] * direction[t.normal_targets[j]] + normal_total
+    friction_total = wp.vec3(0.0)
+    for j in range(7):
+        if j < t.friction_entries:
+            friction_total = t.friction_weights[j] * direction[t.friction_targets[j]] + friction_total
+    normal_value = t.normal_matrix * normal_total
+    friction_value = t.friction_matrix * friction_total
+    # With identical target lists (the usual case) each target gets one atomic instead of two; contacts on a body
+    # share its proxies, so the product is bound by atomic contention.
+    shared = t.normal_entries == t.friction_entries
+    for j in range(7):
+        if j < t.normal_entries and t.normal_targets[j] != t.friction_targets[j]:
+            shared = False
     for j in range(7):
         if j < t.normal_entries:
-            wp.atomic_add(product, t.normal_targets[j], t.normal_weights[j] * value)
-    total = wp.vec3(0.0)
-    for j in range(7):
-        if j < t.friction_entries:
-            total = t.friction_weights[j] * direction[t.friction_targets[j]] + total
-    value = t.friction_matrix * total
-    for j in range(7):
-        if j < t.friction_entries:
-            wp.atomic_add(product, t.friction_targets[j], t.friction_weights[j] * value)
+            value = t.normal_weights[j] * normal_value
+            if shared:
+                value = value + t.friction_weights[j] * friction_value
+            wp.atomic_add(product, t.normal_targets[j], value)
+    if not shared:
+        for j in range(7):
+            if j < t.friction_entries:
+                wp.atomic_add(product, t.friction_targets[j], t.friction_weights[j] * friction_value)
 
 
 @wp.kernel

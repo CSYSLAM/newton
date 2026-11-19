@@ -337,6 +337,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
         self.surface_tangent_cache = wp.zeros(0, dtype=surface_contact_kernels.SurfaceTangent, device=self.device)
         self.rigid_tangent_capacity = 0
         self.rolling_tangent_capacity = 0
+        self.soft_tangent_capacity = 0
         self.hard_capacity = 0
         for name, dtype in self._HARD_BUFFERS:
             setattr(self, name, self._empty(dtype))
@@ -1684,6 +1685,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                     drag,
                 )
 
+            if self._contact_product:
+                self._cache_soft_contact_product(contact, q_in, self._qd_in, inverse_dt, self._surface)
             if rolling:
                 self._launch_rolling(
                     "rolling_tangent_cache",
@@ -2435,12 +2438,52 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
             ],
         )
 
-    def _soft_contact_product(self, contact, x, velocity, inverse_dt, filtered) -> None:
+    def _soft_tangent_cache(self, capacity: int) -> Any:
+        if self.soft_tangent_capacity < capacity:
+            self.soft_tangent_capacity = capacity
+            self.soft_tangent_valid = self._zeros(capacity, wp.int32)
+            self.soft_tangent_targets = self._zeros(5 * capacity, wp.int32)
+            self.soft_tangent_normal_weights = self._zeros(5 * capacity, wp.float32)
+            self.soft_tangent_friction_weights = self._zeros(5 * capacity, wp.float32)
+            self.soft_tangent_normal = self._zeros(capacity, wp.vec3)
+            self.soft_tangent_stiffness = self._zeros(capacity, wp.vec2)
+        cache = soft_contact_kernels.SoftTangentCache()
+        cache.valid = self.soft_tangent_valid
+        cache.targets = self.soft_tangent_targets
+        cache.normal_weights = self.soft_tangent_normal_weights
+        cache.friction_weights = self.soft_tangent_friction_weights
+        cache.normal = self.soft_tangent_normal
+        cache.stiffness = self.soft_tangent_stiffness
+        return cache
+
+    def _cache_soft_contact_product(self, contact, x, velocity, inverse_dt, filtered) -> None:
+        """Evaluate the soft-contact product data once per Newton iteration, before the linear solve."""
+        threads = self._surface_threads(contact.soft_max_count)
+        self._launch(
+            "soft_contact_product_cache",
+            soft_contact_kernels.cache_soft_contact_tangent,
+            threads,
+            [
+                self._soft_view(contact, x, velocity, inverse_dt, filtered),
+                threads,
+                self._soft_tangent_cache(contact.soft_max_count),
+            ],
+        )
+
+    def _soft_contact_product(self, contact) -> None:
+        threads = self._surface_threads(contact.soft_max_count)
         self._launch(
             "soft_contact_product",
-            soft_contact_kernels.multiply_soft_contact_hessian_off_diagonal,
-            contact.soft_max_count,
-            [self._soft_view(contact, x, velocity, inverse_dt, filtered), self.direction, self.contact_product],
+            soft_contact_kernels.multiply_cached_soft_contact_tangent,
+            threads,
+            [
+                self._view(contact.soft_count, wp.int32, 1),
+                contact.soft_max_count,
+                threads,
+                self._soft_tangent_cache(contact.soft_max_count),
+                self.direction,
+                self.contact_product,
+            ],
         )
 
     def _articulated_materials(self) -> bool:
@@ -3217,7 +3260,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                 ],
             )
         if self._contact_product:
-            self._soft_contact_product(self._contact, q_in, self._qd_in, inverse_dt, self._surface)
+            self._soft_contact_product(self._contact)
         # The other PD joint-line schedules add it after the contact tangents, ahead of the drive terms.
         if pd and not coupled_materials and joint_al_active and self.joint_line_total and so3_alpha > 0.0:
             launch(
