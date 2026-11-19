@@ -188,6 +188,8 @@ dev = [
 cache-dir = ".cache/ruff"
 line-length = 120
 indent-width = 4
+# Asset generator scripts copied verbatim from engineRTS.
+extend-exclude = ["newton/examples/coupled_high_accuracy/assets"]
 exclude = ["*.js"]
 
 [[tool.uv.index]]

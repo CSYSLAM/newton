@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--================================================================================================================-->
+<!--                                          DexForce Technology Co., Ltd                                          -->
+<!--                                                                                                                -->
+<!--                                       Robot URDF Model Generation Report                                       -->
+<!--                                      Generation Time: 2026-07-03 18:34:17                                      -->
+<!--                                  Version: DexForce URDF assembly manager V2.0                                  -->
+<!--                                           Included Modules: chassis                                            -->
+<!--================================================================================================================-->
+<robot name="chassis">
+  <link name="chassis_base_link">
+    <inertial>
+      <origin xyz="-0.0315847 -0.00190444 0.13284588" rpy="0 0 0" />
+      <mass value="70.3191" />
+      <inertia ixx="1.6615557e+04" ixy="-2.2400044e+03" ixz="0.0" iyy="1.6615855e+04" iyz="0.0" izz="1.6458854e+04" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 -0.0005" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="visual/chassis/base_link.glb" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.0005" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="collision/chassis/base_link.obj" />
+      </geometry>
+    </collision>
+  </link>
+</robot>

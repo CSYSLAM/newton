@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--================================================================================================================-->
+<!--                                          DexForce Technology Co., Ltd                                          -->
+<!--                                                                                                                -->
+<!--                                       Robot URDF Model Generation Report                                       -->
+<!--                                      Generation Time: 2026-07-03 18:34:17                                      -->
+<!--                                  Version: DexForce URDF assembly manager V2.0                                  -->
+<!--                                             Included Modules: head                                             -->
+<!--                                           head: {'version': 'v030'}                                            -->
+<!--================================================================================================================-->
+<robot name="head__v030">
+  <link name="head_base"> </link>
+  <link name="head_yaw_j1_link">
+    <inertial>
+      <origin xyz="0.00587173 -0.00603813 0.04730311" rpy="0 0 0" />
+      <mass value="0.7954" />
+      <inertia ixx="0.00071811" ixy="-0.00002666" ixz="0.00001827" iyy="0.00069509" iyz="0.00002464" izz="0.00067782" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="visual/head/head_yaw_j1_link.glb" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="collision/head/head_yaw_j1_link.obj" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="head_pitch_j2_link">
+    <inertial>
+      <origin xyz="0.0355772 -0.00276535 0.05528974" rpy="0 0 0" />
+      <mass value="0.8775" />
+      <inertia ixx="0.00154797" ixy="-0.00005248" ixz="-0.00010142" iyy="0.00151541" iyz="-0.00007970" izz="0.00204603" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="visual/head/head_pitch_j2_link.glb" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="collision/head/head_pitch_j2_link.obj" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="eyes">
+  </link>
+  <joint name="NECK1" type="revolute">
+    <origin xyz="0 0 0.098" rpy="0 0 0" />
+    <parent link="head_base" />
+    <child link="head_yaw_j1_link" />
+    <axis xyz="0 0 1" />
+    <limit lower="-1.5707963267948966" upper="1.5707963267948966" effort="24" velocity="4.145" />
+  </joint>
+  <joint name="NECK2" type="revolute">
+    <origin xyz="0 0 0.05" rpy="0 0 0" />
+    <parent link="head_yaw_j1_link" />
+    <child link="head_pitch_j2_link" />
+    <axis xyz="0 1 0" />
+    <limit lower="-0.6981317007977318" upper="0.7853981633974483" effort="24" velocity="4.145" />
+  </joint>
+  <joint name="EYES" type="fixed">
+    <origin xyz="0.091 0.0 0.051" rpy="1.3089969389957472 0.0 -1.5707963267948966" />
+    <parent link="head_pitch_j2_link" />
+    <child link="eyes" />
+  </joint>
+</robot>

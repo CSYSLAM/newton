@@ -1,0 +1,185 @@
+{
+  "source": {
+    "id": "simready:8a31e384-3882-4609-813c-fd3816848755",
+    "record_id": "8a31e384-3882-4609-813c-fd3816848755",
+    "model_id": "873063ddbb0430fd",
+    "name": "shopping basket001",
+    "collection": "simready",
+    "collection_label": "Sim Ready",
+    "category_path": [
+      "Retail",
+      "Basket"
+    ],
+    "description": null,
+    "created_at": "2025-07-25 14:06:34",
+    "updated_at": "2025-12-08 10:22:18",
+    "has_joints": true,
+    "has_usd": true,
+    "is_large": false,
+    "source_code": 30,
+    "source_label": "3D模型",
+    "license": {
+      "site_open_flag": true,
+      "site_label": "CC BY-NC 4.0",
+      "verification": "source_site_label_only"
+    },
+    "thumbnail_url": "https://synthesis-server.extwin.com/images/e8e3eb29-cd25-4e4e-9e83-b6a9525655b0.jpg",
+    "preview_image_url": "https://synthesis-server.extwin.com/images/e8e3eb29-cd25-4e4e-9e83-b6a9525655b0.jpg",
+    "version": {
+      "path_version": "0",
+      "provenance": "source_list_usd_path",
+      "available_versions": null
+    },
+    "joints": null,
+    "files": {
+      "usd_reported": true,
+      "model_downloaded": false,
+      "download_status": "use_source_website",
+      "verified_download_formats": []
+    },
+    "conversion_status": "未转换",
+    "ai_annotation": {
+      "description_zh": "一个典型的塑料购物篮，带有提手，用于在零售商店中携带物品。",
+      "description_en": "A typical plastic shopping basket with a handle, used for carrying items in retail stores.",
+      "tags": [
+        "shopping basket",
+        "retail basket",
+        "plastic basket",
+        "carry basket",
+        "store basket",
+        "购物篮",
+        "零售篮",
+        "塑料篮",
+        "提篮",
+        "超市篮"
+      ],
+      "provenance": "source_site_AI_unverified"
+    },
+    "source_url": "https://synthesis.extwin.com/#/home",
+    "detail_status": "not_collected",
+    "description_snapshot_date": "2026-09-04T07:53:14.639851+00:00",
+    "source_record": {
+      "Name": "shopping basket001",
+      "MiniLogo": "/images/e8e3eb29-cd25-4e4e-9e83-b6a9525655b0.jpg",
+      "ModelId": "873063ddbb0430fd",
+      "IsHasArticulus": true,
+      "IsHasUsdFile": true,
+      "CreateTime": "2025-07-25 14:06:34",
+      "ModifyTime": "2025-12-08 10:22:18",
+      "ShortTagNumber": "873063ddbb0430fd",
+      "TransformStatusType": 0,
+      "TransformStatusString": "未转换",
+      "IsSystem": true,
+      "Comment": "",
+      "UsdCurrentPath": "[\"/usd/873063ddbb0430fd/873063ddbb0430fd/0//model_basket_7.usda\"]",
+      "IsOpenFree": true,
+      "IsTop": null,
+      "Source": 30,
+      "IsLargeSize": false,
+      "Id": "8a31e384-3882-4609-813c-fd3816848755",
+      "CategoryNames": [
+        "Retail",
+        "Basket"
+      ]
+    }
+  },
+  "download": {
+    "manifest_version": 2,
+    "id": "simready:8a31e384-3882-4609-813c-fd3816848755",
+    "name": "shopping basket001",
+    "source_updated_at": "2025-12-08 10:22:18",
+    "category": "Retail",
+    "started_at": "2026-09-08T08:52:16.814209+00:00",
+    "entry_urls": [
+      "https://synthesis-multiverse.extwin.com/usd/873063ddbb0430fd/873063ddbb0430fd/0/model_basket_7.usda"
+    ],
+    "files": [
+      {
+        "url": "https://synthesis-multiverse.extwin.com/usd/873063ddbb0430fd/873063ddbb0430fd/0/model_basket_7.usda",
+        "path": "files/synthesis-multiverse.extwin.com/usd/873063ddbb0430fd/873063ddbb0430fd/0/model_basket_7.usda",
+        "size": 81263109,
+        "sha256": "2bb241c6f9394864fd6208cd5a784e10cb8570f8743122ab353cd73011f0873c",
+        "role": "entry",
+        "asset_local_path": "original/model_basket_7.usda"
+      },
+      {
+        "url": "https://synthesis-multiverse.extwin.com/usd/873063ddbb0430fd/873063ddbb0430fd/0/resource/material.usda",
+        "path": "files/synthesis-multiverse.extwin.com/usd/873063ddbb0430fd/873063ddbb0430fd/0/resource/material.usda",
+        "size": 2330,
+        "sha256": "891fe8784a1ed4881d03358f0069e3c7585d1844f20706c8534a48a29bc737b9",
+        "role": "dependency",
+        "asset_local_path": "original/resource/material.usda"
+      },
+      {
+        "url": "https://synthesis-multiverse.extwin.com/usd/873063ddbb0430fd/873063ddbb0430fd/0/resource/v_0/link_default_0.usda",
+        "path": "files/synthesis-multiverse.extwin.com/usd/873063ddbb0430fd/873063ddbb0430fd/0/resource/v_0/link_default_0.usda",
+        "size": 119959399,
+        "sha256": "c9732bfcc6473b4451a79a702cac030b1a57d49609ade35394d11950cbe4bd59",
+        "role": "dependency",
+        "asset_local_path": "original/resource/v_0/link_default_0.usda"
+      },
+      {
+        "url": "https://synthesis-server.extwin.com/images/e8e3eb29-cd25-4e4e-9e83-b6a9525655b0.jpg",
+        "path": "files/synthesis-server.extwin.com/images/e8e3eb29-cd25-4e4e-9e83-b6a9525655b0.jpg",
+        "size": 260477,
+        "sha256": "7c8691c28972ca580615f4e4a7f89e5ec7448603726c86b4e1695a5658db93a3",
+        "role": "preview",
+        "asset_local_path": "previews/thumbnail.jpg"
+      },
+      {
+        "url": "https://synthesis-server.extwin.com/images/e8e3eb29-cd25-4e4e-9e83-b6a9525655b0.jpg",
+        "path": "files/synthesis-server.extwin.com/images/e8e3eb29-cd25-4e4e-9e83-b6a9525655b0.jpg",
+        "size": 260477,
+        "sha256": "7c8691c28972ca580615f4e4a7f89e5ec7448603726c86b4e1695a5658db93a3",
+        "role": "preview",
+        "asset_local_path": "previews/preview.jpg"
+      }
+    ],
+    "unresolved": [],
+    "runtime_dependencies": [],
+    "absolute_references": [],
+    "status": "downloaded",
+    "preview_errors": [],
+    "entry_files": [
+      "original/model_basket_7.usda"
+    ],
+    "finished_at": "2026-09-08T08:52:52.937637+00:00",
+    "offline_ready": true
+  },
+  "packaging": {
+    "original_model_bytes_unchanged": true,
+    "entry": "model_basket_7.usda",
+    "files": [
+      {
+        "path": "model_basket_7.usda",
+        "sha256": "2bb241c6f9394864fd6208cd5a784e10cb8570f8743122ab353cd73011f0873c",
+        "size": 81263109
+      },
+      {
+        "path": "resource/material.usda",
+        "sha256": "891fe8784a1ed4881d03358f0069e3c7585d1844f20706c8534a48a29bc737b9",
+        "size": 2330
+      },
+      {
+        "path": "resource/v_0/link_default_0.usda",
+        "sha256": "c9732bfcc6473b4451a79a702cac030b1a57d49609ade35394d11950cbe4bd59",
+        "size": 119959399
+      }
+    ]
+  },
+  "inspection": {
+    "joint_prims": [
+      {
+        "path": "/root/E_handle_1_1/RevoluteJoint_basket_7_left",
+        "type": "PhysicsRevoluteJoint"
+      },
+      {
+        "path": "/root/E_handle_2_2/RevoluteJoint_basket_7_right",
+        "type": "PhysicsRevoluteJoint"
+      }
+    ],
+    "meters_per_unit": 1.0,
+    "up_axis": "Z",
+    "simulation_tested": false
+  }
+}

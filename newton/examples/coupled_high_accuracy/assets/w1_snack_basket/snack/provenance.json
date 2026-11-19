@@ -1,0 +1,197 @@
+{
+  "source": {
+    "id": "simready:34b799b9-c35e-4711-89d9-368b3f617e97",
+    "record_id": "34b799b9-c35e-4711-89d9-368b3f617e97",
+    "model_id": "55e6a31c05632e64",
+    "name": "snack004",
+    "collection": "simready",
+    "collection_label": "Sim Ready",
+    "category_path": [
+      "Retail",
+      "Snack"
+    ],
+    "description": null,
+    "created_at": "2025-10-24 17:39:10",
+    "updated_at": "2025-10-24 17:39:10",
+    "has_joints": false,
+    "has_usd": true,
+    "is_large": false,
+    "source_code": 30,
+    "source_label": "3D模型",
+    "license": {
+      "site_open_flag": true,
+      "site_label": "CC BY-NC 4.0",
+      "verification": "source_site_label_only"
+    },
+    "thumbnail_url": "https://synthesis-server.extwin.com/images/cd7e8184-28d4-4a37-ab18-a7b259c4dd9b.jpg",
+    "preview_image_url": "https://synthesis-server.extwin.com/images/cd7e8184-28d4-4a37-ab18-a7b259c4dd9b.jpg",
+    "version": {
+      "path_version": "1",
+      "provenance": "source_list_usd_path",
+      "available_versions": null
+    },
+    "joints": null,
+    "files": {
+      "usd_reported": true,
+      "model_downloaded": false,
+      "download_status": "use_source_website",
+      "verified_download_formats": []
+    },
+    "conversion_status": "未转换",
+    "ai_annotation": {
+      "description_zh": "一种包装零食，可能是薯片或类似脆片零食，带有彩色品牌标识，呈长方形或枕形。",
+      "description_en": "A packaged snack item, likely a bag of chips or similar crispy snack, with colorful branding and a rectangular or pillow shape.",
+      "tags": [
+        "snack",
+        "packaged_food",
+        "chips",
+        "crispy_snack",
+        "retail_item",
+        "food_packaging",
+        "零食",
+        "包装食品",
+        "薯片",
+        "脆片",
+        "零售商品",
+        "食品包装",
+        "零售零食",
+        "零食袋",
+        "packaged food",
+        "retail snack",
+        "crispy snack",
+        "bag of chips"
+      ],
+      "provenance": "source_site_AI_unverified"
+    },
+    "source_url": "https://synthesis.extwin.com/#/home",
+    "detail_status": "not_collected",
+    "description_snapshot_date": "2026-09-04T07:53:14.639851+00:00",
+    "source_record": {
+      "Name": "snack004",
+      "MiniLogo": "/images/cd7e8184-28d4-4a37-ab18-a7b259c4dd9b.jpg",
+      "ModelId": "55e6a31c05632e64",
+      "IsHasArticulus": false,
+      "IsHasUsdFile": true,
+      "CreateTime": "2025-10-24 17:39:10",
+      "ModifyTime": "2025-10-24 17:39:10",
+      "ShortTagNumber": "55e6a31c05632e64",
+      "TransformStatusType": 0,
+      "TransformStatusString": "未转换",
+      "IsSystem": true,
+      "Comment": "",
+      "UsdCurrentPath": "[\"/usd/55e6a31c05632e64/55e6a31c05632e64/1//model_snack004.usd\"]",
+      "IsOpenFree": true,
+      "IsTop": null,
+      "Source": 30,
+      "IsLargeSize": false,
+      "Id": "34b799b9-c35e-4711-89d9-368b3f617e97",
+      "CategoryNames": [
+        "Retail",
+        "Snack"
+      ]
+    }
+  },
+  "download": {
+    "manifest_version": 2,
+    "id": "simready:34b799b9-c35e-4711-89d9-368b3f617e97",
+    "name": "snack004",
+    "source_updated_at": "2025-10-24 17:39:10",
+    "category": "Retail",
+    "started_at": "2026-09-08T08:53:44.214165+00:00",
+    "entry_urls": [
+      "https://synthesis-multiverse.extwin.com/usd/55e6a31c05632e64/55e6a31c05632e64/1/model_snack004.usd"
+    ],
+    "files": [
+      {
+        "url": "https://synthesis-multiverse.extwin.com/usd/55e6a31c05632e64/55e6a31c05632e64/1/model_snack004.usd",
+        "path": "files/synthesis-multiverse.extwin.com/usd/55e6a31c05632e64/55e6a31c05632e64/1/model_snack004.usd",
+        "size": 4537,
+        "sha256": "5d5953eb4b455faeb67055b32f47e22621abbd8e1f48e4b9a7ec26313d64f623",
+        "role": "entry",
+        "asset_local_path": "original/model_snack004.usd"
+      },
+      {
+        "url": "https://synthesis-multiverse.extwin.com/usd/55e6a31c05632e64/55e6a31c05632e64/1/resource/material.usd",
+        "path": "files/synthesis-multiverse.extwin.com/usd/55e6a31c05632e64/55e6a31c05632e64/1/resource/material.usd",
+        "size": 1977,
+        "sha256": "29aa1ea7ac3e8a14698c6488099fdbba1f1b3ae4c14af618668b1e657601d225",
+        "role": "dependency",
+        "asset_local_path": "original/resource/material.usd"
+      },
+      {
+        "url": "https://synthesis-multiverse.extwin.com/usd/55e6a31c05632e64/55e6a31c05632e64/1/resource/v_0/link_0.usd",
+        "path": "files/synthesis-multiverse.extwin.com/usd/55e6a31c05632e64/55e6a31c05632e64/1/resource/v_0/link_0.usd",
+        "size": 8587,
+        "sha256": "b8857af3cf58930b3654b6cda29149bad352947cd88e5c16deecaf792e8f6ee8",
+        "role": "dependency",
+        "asset_local_path": "original/resource/v_0/link_0.usd"
+      },
+      {
+        "url": "https://synthesis-multiverse.extwin.com/usd/55e6a31c05632e64/55e6a31c05632e64/1/resource/img/57dd04deef32c53a6a1c3dc3db516907.png",
+        "path": "files/synthesis-multiverse.extwin.com/usd/55e6a31c05632e64/55e6a31c05632e64/1/resource/img/57dd04deef32c53a6a1c3dc3db516907.png",
+        "size": 1798384,
+        "sha256": "2e53ac00d825b82caec7ba85d7bb56af512b25b2af7c7744488b887c1dcd4e20",
+        "role": "dependency",
+        "asset_local_path": "original/resource/img/57dd04deef32c53a6a1c3dc3db516907.png"
+      },
+      {
+        "url": "https://synthesis-server.extwin.com/images/cd7e8184-28d4-4a37-ab18-a7b259c4dd9b.jpg",
+        "path": "files/synthesis-server.extwin.com/images/cd7e8184-28d4-4a37-ab18-a7b259c4dd9b.jpg",
+        "size": 240988,
+        "sha256": "7b377739953b0e44c7dfc7f2f6436f5199da773ed60826f4df32ce66dcc380d9",
+        "role": "preview",
+        "asset_local_path": "previews/thumbnail.jpg"
+      },
+      {
+        "url": "https://synthesis-server.extwin.com/images/cd7e8184-28d4-4a37-ab18-a7b259c4dd9b.jpg",
+        "path": "files/synthesis-server.extwin.com/images/cd7e8184-28d4-4a37-ab18-a7b259c4dd9b.jpg",
+        "size": 240988,
+        "sha256": "7b377739953b0e44c7dfc7f2f6436f5199da773ed60826f4df32ce66dcc380d9",
+        "role": "preview",
+        "asset_local_path": "previews/preview.jpg"
+      }
+    ],
+    "unresolved": [],
+    "runtime_dependencies": [],
+    "absolute_references": [],
+    "status": "downloaded",
+    "preview_errors": [],
+    "entry_files": [
+      "original/model_snack004.usd"
+    ],
+    "finished_at": "2026-09-08T08:53:53.222315+00:00",
+    "offline_ready": true
+  },
+  "packaging": {
+    "original_model_bytes_unchanged": true,
+    "entry": "model_snack004.usd",
+    "files": [
+      {
+        "path": "model_snack004.usd",
+        "sha256": "5d5953eb4b455faeb67055b32f47e22621abbd8e1f48e4b9a7ec26313d64f623",
+        "size": 4537
+      },
+      {
+        "path": "resource/material.usd",
+        "sha256": "29aa1ea7ac3e8a14698c6488099fdbba1f1b3ae4c14af618668b1e657601d225",
+        "size": 1977
+      },
+      {
+        "path": "resource/v_0/link_0.usd",
+        "sha256": "b8857af3cf58930b3654b6cda29149bad352947cd88e5c16deecaf792e8f6ee8",
+        "size": 8587
+      },
+      {
+        "path": "resource/img/57dd04deef32c53a6a1c3dc3db516907.png",
+        "sha256": "2e53ac00d825b82caec7ba85d7bb56af512b25b2af7c7744488b887c1dcd4e20",
+        "size": 1798384
+      }
+    ]
+  },
+  "inspection": {
+    "joint_prims": [],
+    "meters_per_unit": 1.0,
+    "up_axis": "Z",
+    "simulation_tested": false
+  }
+}
