@@ -40,6 +40,9 @@ def main() -> int:
     parser.add_argument("scenes", nargs="*")
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--warmup", type=int, default=20)
+    parser.add_argument(
+        "--repeat", type=int, default=3, help="alternating runs per backend; the minimum resists a shared GPU"
+    )
     parser.add_argument("--option", action="append", default=[], help="scene option key=value")
     parser.add_argument("--measure", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -49,14 +52,19 @@ def main() -> int:
         return 0
     print(f"{'scene':<28}{'native ms':>12}{'warp ms':>12}{'ratio':>8}")
     for scene_name in args.scenes:
-        times = []
-        for backend in ("native", "warp"):
-            command = [sys.executable, __file__, scene_name, "--measure", "--steps", str(args.steps)]
-            command += ["--warmup", str(args.warmup)] + [f"--option={item}" for item in args.option]
-            result = subprocess.run(
-                command, env=dict(os.environ, NEWTON_CHA_BACKEND=backend), capture_output=True, text=True, check=True
-            )
-            times.append(float(result.stdout.strip().splitlines()[-1]))
+        times = [float("inf"), float("inf")]
+        for _ in range(args.repeat):
+            for index, backend in enumerate(("native", "warp")):
+                command = [sys.executable, __file__, scene_name, "--measure", "--steps", str(args.steps)]
+                command += ["--warmup", str(args.warmup)] + [f"--option={item}" for item in args.option]
+                result = subprocess.run(
+                    command,
+                    env=dict(os.environ, NEWTON_CHA_BACKEND=backend),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                times[index] = min(times[index], float(result.stdout.strip().splitlines()[-1]))
         print(f"{scene_name:<28}{times[0]:>12.3f}{times[1]:>12.3f}{times[1] / times[0]:>8.2f}")
     return 0
 

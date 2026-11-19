@@ -5,6 +5,9 @@
 
 import warp as wp
 
+# The solver never differentiates through its kernels; skipping the adjoints halves compile time.
+wp.set_module_options({"enable_backward": False})
+
 
 @wp.kernel
 def apply_nonlinear_step(x: wp.array[wp.vec3], x_out: wp.array[wp.vec3], dx: wp.array[wp.vec3]):

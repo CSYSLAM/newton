@@ -327,6 +327,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
         self.count = count
         self.per_world = model.particle_count
         self.surface_tangent_cache = wp.zeros(0, dtype=surface_contact_kernels.SurfaceTangent, device=self.device)
+        self.rigid_tangent_capacity = 0
         self.hard_capacity = 0
         for name, dtype in self._HARD_BUFFERS:
             setattr(self, name, self._empty(dtype))
@@ -948,6 +949,17 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
         self._joint_cable_step = joint_cable_step
         # Surface contact Jacobians are evaluated once per Newton iteration instead of once per CG iteration.
         self._cached_surface = surface and extra_product and not reference_pcg
+        # The matrix-free rigid contact product reuses geometry cached once per Newton iteration.
+        self._cached_rigid = rigid and not hard and config.enable_collision_hessian_non_diagonal
+        if self._cached_rigid and self.rigid_tangent_capacity < contact.max_count:
+            n = contact.max_count
+            self.rigid_tangent_capacity = n
+            self.rigid_tangent_targets = self._zeros(8 * n, wp.int32)
+            self.rigid_tangent_normal_weights = self._zeros(8 * n, wp.float32)
+            self.rigid_tangent_friction_weights = self._zeros(8 * n, wp.float32)
+            self.rigid_tangent_entries = self._zeros(n, wp.int32)
+            self.rigid_tangent_normal = self._zeros(n, wp.vec3)
+            self.rigid_tangent_stiffness = self._zeros(n, wp.vec2)
         if self._cached_surface and self.surface_tangent_cache.shape[0] < contact.soft_max_count:
             self.surface_tangent_cache = wp.zeros(
                 contact.soft_max_count, dtype=surface_contact_kernels.SurfaceTangent, device=self.device
@@ -1656,6 +1668,13 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                     drag,
                 )
 
+            if self._cached_rigid:
+                launch(
+                    "rigid_tangent_cache",
+                    rigid_contact_kernels.cache_contact_tangent,
+                    contact.max_count,
+                    [self._rigid_view(contact, q_in, self._empty(wp.vec3), inverse_dt), self._rigid_tangent_cache()],
+                )
             if self._cached_surface:
                 self._surface_launch(
                     "surface_tangent_cache",
@@ -2355,6 +2374,16 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                 contact_force if contact_force is not None else self._empty(wp.spatial_vector),
             ],
         )
+
+    def _rigid_tangent_cache(self) -> Any:
+        cache = rigid_contact_kernels.RigidTangentCache()
+        cache.targets = self.rigid_tangent_targets
+        cache.normal_weights = self.rigid_tangent_normal_weights
+        cache.friction_weights = self.rigid_tangent_friction_weights
+        cache.entries = self.rigid_tangent_entries
+        cache.normal = self.rigid_tangent_normal
+        cache.stiffness = self.rigid_tangent_stiffness
+        return cache
 
     def _rigid_tangent(self, contact, x, inverse_dt, direction=None, product=None, system=None, precond=None):
         self._launch(
@@ -3139,7 +3168,18 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
         if self._hard:
             self._hard_evaluate(self._contact, q_in, inverse_dt, direction=self.direction, product=self.contact_product)
         elif self._rigid and self._config.enable_collision_hessian_non_diagonal:
-            self._rigid_tangent(self._contact, q_in, inverse_dt, direction=self.direction, product=self.contact_product)
+            launch(
+                "rigid_tangent",
+                rigid_contact_kernels.multiply_cached_contact_tangent,
+                self._contact.max_count,
+                [
+                    self._view(self._contact.count, wp.int32, 1),
+                    self._contact.max_count,
+                    self._rigid_tangent_cache(),
+                    self.direction,
+                    self.contact_product,
+                ],
+            )
         if self._contact_product:
             self._soft_contact_product(self._contact, q_in, self._qd_in, inverse_dt, self._surface)
         # The other PD joint-line schedules add it after the contact tangents, ahead of the drive terms.

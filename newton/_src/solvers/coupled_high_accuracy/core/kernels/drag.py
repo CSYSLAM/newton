@@ -7,6 +7,9 @@ import warp as wp
 
 from .common import normalized_or_zero
 
+# The solver never differentiates through its kernels; skipping the adjoints halves compile time.
+wp.set_module_options({"enable_backward": False})
+
 
 @wp.kernel
 def initialize_triangle_drag(

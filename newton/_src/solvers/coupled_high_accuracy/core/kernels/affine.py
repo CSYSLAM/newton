@@ -13,6 +13,9 @@ import warp as wp
 
 from .common import atomic_add_block, normalized_or_zero
 
+# The solver never differentiates through its kernels; skipping the adjoints halves compile time.
+wp.set_module_options({"enable_backward": False})
+
 
 @wp.func
 def column(m: wp.mat33, j: int):

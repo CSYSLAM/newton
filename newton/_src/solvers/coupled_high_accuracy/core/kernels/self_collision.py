@@ -11,6 +11,9 @@ the native traversal order, then penalty forces with mass-weighted stiffness are
 
 import warp as wp
 
+# The solver never differentiates through its kernels; skipping the adjoints halves compile time.
+wp.set_module_options({"enable_backward": False})
+
 vec5i = wp.types.vector(length=5, dtype=wp.int32)
 vec5f = wp.types.vector(length=5, dtype=wp.float32)
 

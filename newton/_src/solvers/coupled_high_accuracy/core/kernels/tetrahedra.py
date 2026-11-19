@@ -10,6 +10,9 @@ Inverse rest shapes are native ``glm::mat3`` spans read as ``wp.mat33`` over the
 
 import warp as wp
 
+# The solver never differentiates through its kernels; skipping the adjoints halves compile time.
+wp.set_module_options({"enable_backward": False})
+
 
 @wp.struct
 class Deformation:

@@ -13,6 +13,9 @@ import warp as wp
 
 from .common import atomic_add_block
 
+# The solver never differentiates through its kernels; skipping the adjoints halves compile time.
+wp.set_module_options({"enable_backward": False})
+
 
 @wp.func
 def body_point(x: wp.array[wp.vec3], particles: wp.vec4i, weights: wp.vec4):

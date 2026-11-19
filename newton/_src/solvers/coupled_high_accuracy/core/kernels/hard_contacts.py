@@ -23,6 +23,10 @@ from .contact_geometry import (
     contact_wrench,
 )
 
+# The solver never differentiates through its kernels; skipping the adjoints halves compile time.
+wp.set_module_options({"enable_backward": False})
+
+
 vec8i = wp.types.vector(length=8, dtype=wp.int32)
 vec8f = wp.types.vector(length=8, dtype=wp.float32)
 

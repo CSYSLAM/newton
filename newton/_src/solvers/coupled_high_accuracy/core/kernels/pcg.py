@@ -12,6 +12,9 @@ import warp as wp
 
 from .common import coefficient_world, guarded_ratio
 
+# The solver never differentiates through its kernels; skipping the adjoints halves compile time.
+wp.set_module_options({"enable_backward": False})
+
 
 @wp.kernel
 def prepare_inverse_preconditioner(

@@ -5,6 +5,9 @@
 
 import warp as wp
 
+# The solver never differentiates through its kernels; skipping the adjoints halves compile time.
+wp.set_module_options({"enable_backward": False})
+
 
 @wp.func
 def guarded_ratio(num: float, den: float):

@@ -11,6 +11,9 @@ grid again.
 
 import warp as wp
 
+# The solver never differentiates through its kernels; skipping the adjoints halves compile time.
+wp.set_module_options({"enable_backward": False})
+
 # Poly6 and spiky constants as stored by the native kernels (bit patterns 0x3fc88904 and 0xc11666c3).
 POLY6 = wp.constant(1.5666814)
 SPIKY_GRADIENT = wp.constant(-9.400088)

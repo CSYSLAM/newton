@@ -12,6 +12,9 @@ import warp as wp
 from .affine import column, nearest_rotation
 from .common import normalized_or_zero
 
+# The solver never differentiates through its kernels; skipping the adjoints halves compile time.
+wp.set_module_options({"enable_backward": False})
+
 
 @wp.func
 def contact_dot(a: wp.vec3, b: wp.vec3):

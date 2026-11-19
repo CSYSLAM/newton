@@ -23,6 +23,10 @@ from .contact_geometry import (
     contact_surface_velocity,
 )
 
+# The solver never differentiates through its kernels; skipping the adjoints halves compile time.
+wp.set_module_options({"enable_backward": False})
+
+
 vec7i = wp.types.vector(length=7, dtype=wp.int32)
 vec7f = wp.types.vector(length=7, dtype=wp.float32)
 

@@ -12,6 +12,9 @@ import warp as wp
 
 from .cables import CableView
 
+# The solver never differentiates through its kernels; skipping the adjoints halves compile time.
+wp.set_module_options({"enable_backward": False})
+
 mat1212 = wp.types.matrix(shape=(12, 12), dtype=wp.float32)
 mat312 = wp.types.matrix(shape=(3, 12), dtype=wp.float32)
 vec12 = wp.types.vector(length=12, dtype=wp.float32)

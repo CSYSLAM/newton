@@ -24,6 +24,10 @@ from .contact_geometry import (
     contact_wrench,
 )
 
+# The solver never differentiates through its kernels; skipping the adjoints halves compile time.
+wp.set_module_options({"enable_backward": False})
+
+
 vec8i = wp.types.vector(length=8, dtype=wp.int32)
 vec8f = wp.types.vector(length=8, dtype=wp.float32)
 
@@ -385,3 +389,93 @@ def evaluate_contact_tangent(
             wp.atomic_add(system, targets[a], block)
         if precond.shape[0] > 0:
             wp.atomic_add(precond, targets[a], block)
+
+
+@wp.struct
+class RigidTangentCache:
+    """Jacobian lists (8 slots per contact, flat) and stiffnesses fixed during a Newton iteration's linear solve.
+    Flat scalar arrays avoid the local-memory copies that dynamically indexed vector fields would need."""
+
+    targets: wp.array[wp.int32]
+    normal_weights: wp.array[float]
+    friction_weights: wp.array[float]
+    entries: wp.array[wp.int32]
+    normal: wp.array[wp.vec3]
+    stiffness: wp.array[wp.vec2]
+
+
+@wp.func
+def cache_side(cache: RigidTangentCache, base: int, ids: wp.vec4i, sign: float, rn: wp.vec3, rf: wp.vec3):
+    cache.targets[base] = ids[0]
+    cache.targets[base + 1] = ids[1]
+    cache.targets[base + 2] = ids[2]
+    cache.targets[base + 3] = ids[3]
+    cache.normal_weights[base] = sign
+    cache.friction_weights[base] = sign
+    for k in range(3):
+        cache.normal_weights[base + k + 1] = sign * rn[k]
+        cache.friction_weights[base + k + 1] = sign * rf[k]
+
+
+@wp.kernel
+def cache_contact_tangent(v: RigidContactView, cache: RigidTangentCache):
+    """Evaluate each active contact's geometry once per Newton iteration for the matrix-free CG product."""
+    i = wp.tid()
+    if not contact_active(v, i):
+        return
+    c = rigid_contact(v, i)
+    entries = int(0)
+    if c.valid != 0:
+        if c.slot0 >= 0:
+            cache_side(cache, i * 8, c.ids0, -1.0, c.raw0 - c.com0, c.adjusted0 - c.com0)
+            entries = 4
+        if c.slot1 >= 0:
+            cache_side(cache, i * 8 + entries, c.ids1, 1.0, c.raw1 - c.com1, c.adjusted1 - c.com1)
+            entries += 4
+        cn = float(0.0)
+        if c.fn > 0.0:
+            cn = c.normal_stiffness
+        cache.normal[i] = c.normal
+        cache.stiffness[i] = wp.vec2(cn, c.friction_stiffness)
+    cache.entries[i] = entries
+
+
+@wp.kernel
+def multiply_cached_contact_tangent(
+    count: wp.array[wp.int32],
+    capacity: int,
+    cache: RigidTangentCache,
+    direction: wp.array[wp.vec3],
+    product: wp.array[wp.vec3],
+):
+    """Off-diagonal Jacobian products from the cached lists (the arithmetic of ``evaluate_contact_tangent``)."""
+    i = wp.tid()
+    if i >= capacity or count.shape[0] == 0:
+        return
+    if i >= wp.max(count[0], 0):
+        return
+    entries = cache.entries[i]
+    if entries == 0:
+        return
+    base = i * 8
+    n = cache.normal[i]
+    stiffness = cache.stiffness[i]
+    nn = wp.outer(n, n)
+    normal_matrix = stiffness[0] * nn
+    friction_matrix = stiffness[1] * (wp.identity(n=3, dtype=float) - nn)
+    # Both parts share one atomic per target: the contacts of a body all hit its four proxies, so the product is
+    # bound by atomic contention. This only reassociates the two contributions before accumulation.
+    for a in range(entries):
+        target = cache.targets[base + a]
+        normal_total = wp.vec3(0.0)
+        friction_total = wp.vec3(0.0)
+        for b in range(entries):
+            other = cache.targets[base + b]
+            if other != target:
+                d = direction[other]
+                normal_total = cache.normal_weights[base + b] * d + normal_total
+                friction_total = cache.friction_weights[base + b] * d + friction_total
+        value = (normal_matrix * normal_total) * cache.normal_weights[base + a] + (
+            friction_matrix * friction_total
+        ) * cache.friction_weights[base + a]
+        wp.atomic_add(product, target, value)

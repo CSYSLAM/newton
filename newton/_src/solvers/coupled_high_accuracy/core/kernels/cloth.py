@@ -11,6 +11,9 @@ import warp as wp
 
 from .common import atomic_add_block, normalized_or_zero
 
+# The solver never differentiates through its kernels; skipping the adjoints halves compile time.
+wp.set_module_options({"enable_backward": False})
+
 
 @wp.func
 def hinge_vector(x: wp.array[wp.vec3], v0: int, v1: int, v2: int, v3: int, w1: float, w2: float, w3: float):

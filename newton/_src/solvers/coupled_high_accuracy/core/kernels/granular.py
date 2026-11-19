@@ -11,6 +11,9 @@ length after every step and break beyond their break strain.
 
 import warp as wp
 
+# The solver never differentiates through its kernels; skipping the adjoints halves compile time.
+wp.set_module_options({"enable_backward": False})
+
 CONTACT_CACHE = wp.constant(32)
 
 

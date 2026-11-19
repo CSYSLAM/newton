@@ -17,6 +17,9 @@ from .affine import column, nearest_rotation
 from .common import normalized_or_zero
 from .contact_geometry import contact_dot, contact_normalize, contact_point
 
+# The solver never differentiates through its kernels; skipping the adjoints halves compile time.
+wp.set_module_options({"enable_backward": False})
+
 vec8i = wp.types.vector(length=8, dtype=wp.int32)
 PI = wp.constant(3.14159265358979323846)
 TWO_PI = wp.constant(6.28318530717958647692)
