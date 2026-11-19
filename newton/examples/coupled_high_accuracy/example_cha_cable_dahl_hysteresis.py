@@ -35,7 +35,6 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.coupled_high_accuracy import rod_compat
 from newton.examples.coupled_high_accuracy._cable_viewer import node_xyz, set_viewer_camera
 from newton.examples.coupled_high_accuracy.cable_utils import (
     create_cable_builder,
@@ -198,20 +197,16 @@ class Example:
 
     def _add_cantilever(self, builder, name: str, mode: str) -> tuple[list[int], tuple[int, int]]:
         start = wp.vec3(0.0, self.CASE_Y[name], 0.0)
-        points = rod_compat.create_straight_cable_points(
-            start=start,
-            direction=wp.vec3(1.0, 0.0, 0.0),
-            length=self.cable_length,
-            num_segments=self.NUM_ELEMENTS,
-        )
-        quats = rod_compat.create_parallel_transport_cable_quaternions(points)
+        points = [
+            wp.vec3(p)
+            for p in newton.Rod.create_straight(
+                start, wp.vec3(1.0, 0.0, 0.0), self.cable_length, segment_count=self.NUM_ELEMENTS
+            ).points
+        ]
 
         joint_count_before = builder.joint_count
-        rod_bodies, _ = rod_compat.add_rod(
-            builder,
-            positions=points,
-            quaternions=quats,
-            radius=self.CABLE_RADIUS,
+        rod_bodies, _ = builder.add_rod(
+            rod=newton.Rod(points, radius=self.CABLE_RADIUS),
             stretch_stiffness=self.STRETCH_STIFFNESS,
             stretch_damping=0.0,
             bend_stiffness=self.BEND_STIFFNESS,
@@ -219,7 +214,6 @@ class Example:
             twist_stiffness=self.TWIST_STIFFNESS,
             twist_damping=self.TWIST_DAMPING,
             label=f"dahl_{name}",
-            body_frame_origin="com",
         )
         joint_count_after = builder.joint_count
 

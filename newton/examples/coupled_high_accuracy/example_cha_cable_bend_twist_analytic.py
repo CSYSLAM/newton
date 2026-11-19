@@ -52,7 +52,6 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.coupled_high_accuracy import rod_compat
 from newton.examples.coupled_high_accuracy._cable_viewer import com_from_node, node_xyz, set_viewer_camera
 from newton.examples.coupled_high_accuracy.cable_utils import (
     create_cable_builder,
@@ -198,20 +197,16 @@ class Example:
         twist_stiffness: float,
         label: str,
     ) -> tuple[list[int], list[int]]:
-        points = rod_compat.create_straight_cable_points(
-            start=wp.vec3(0.0, y, z),
-            direction=wp.vec3(1.0, 0.0, 0.0),
-            length=self.cable_length,
-            num_segments=self.NUM_ELEMENTS,
-        )
-        quats = rod_compat.create_parallel_transport_cable_quaternions(points)
+        points = [
+            wp.vec3(p)
+            for p in newton.Rod.create_straight(
+                wp.vec3(0.0, y, z), wp.vec3(1.0, 0.0, 0.0), self.cable_length, segment_count=self.NUM_ELEMENTS
+            ).points
+        ]
         bend_damping = bend_stiffness
         twist_damping = twist_stiffness
-        bodies, joints = rod_compat.add_rod(
-            builder,
-            positions=points,
-            quaternions=quats,
-            radius=self.CABLE_RADIUS,
+        bodies, joints = builder.add_rod(
+            rod=newton.Rod(points, radius=self.CABLE_RADIUS),
             stretch_stiffness=self.STRETCH_STIFFNESS,
             bend_stiffness=bend_stiffness,
             bend_damping=bend_damping,
@@ -219,7 +214,6 @@ class Example:
             twist_damping=twist_damping,
             label=label,
             wrap_in_articulation=False,
-            body_frame_origin="com",
         )
         return list(bodies), list(joints)
 

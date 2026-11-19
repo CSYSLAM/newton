@@ -42,7 +42,6 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.coupled_high_accuracy import rod_compat
 from newton.examples.coupled_high_accuracy._cable_viewer import node_xyz, set_viewer_camera
 from newton.examples.coupled_high_accuracy.cable_utils import (
     create_cable_builder,
@@ -88,13 +87,12 @@ class Example:
         for i, bend_stiffness in enumerate(self.BEND_STIFFNESS_VALUES):
             y_pos = (i - (self.num_cables - 1) * 0.5) * self.Y_SEPARATION
             start = wp.vec3(0.0, y_pos, 0.0)
-            points = rod_compat.create_straight_cable_points(
-                start=start,
-                direction=wp.vec3(1.0, 0.0, 0.0),
-                length=self.cable_length,
-                num_segments=self.NUM_ELEMENTS,
-            )
-            quats = rod_compat.create_parallel_transport_cable_quaternions(points)
+            points = [
+                wp.vec3(p)
+                for p in newton.Rod.create_straight(
+                    start, wp.vec3(1.0, 0.0, 0.0), self.cable_length, segment_count=self.NUM_ELEMENTS
+                ).points
+            ]
 
             # Twist != bend exercises the split stiffness path while the applied
             # load remains pure bending.
@@ -102,18 +100,14 @@ class Example:
             bend_damping = bend_stiffness
             twist_damping = twist_stiffness
 
-            rod_bodies, _ = rod_compat.add_rod(
-                builder,
-                positions=points,
-                quaternions=quats,
-                radius=self.CABLE_RADIUS,
+            rod_bodies, _ = builder.add_rod(
+                rod=newton.Rod(points, radius=self.CABLE_RADIUS),
                 stretch_stiffness=1.0e6,
                 bend_stiffness=bend_stiffness,
                 bend_damping=bend_damping,
                 twist_stiffness=twist_stiffness,
                 twist_damping=twist_damping,
                 label=f"cantilever_k{int(bend_stiffness)}",
-                body_frame_origin="com",
             )
             # Zero mass + zero inertia in Newton's VBD makes the root kinematic.
             root_body = rod_bodies[0]

@@ -36,7 +36,6 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.coupled_high_accuracy import rod_compat
 from newton.examples.coupled_high_accuracy._cable_viewer import node_xyz, set_viewer_camera
 from newton.examples.coupled_high_accuracy.cable_utils import (
     create_cable_builder,
@@ -102,10 +101,8 @@ class Example:
 
         for label, points in path_builders:
             points_np = self._points_array(points)
-            bodies, joints = rod_compat.add_rod(
-                builder,
-                positions=points,
-                radius=self.CABLE_RADIUS,
+            bodies, joints = builder.add_rod(
+                rod=newton.Rod(points, radius=self.CABLE_RADIUS),
                 stretch_stiffness=self.STRETCH_STIFFNESS,
                 bend_stiffness=self.BEND_STIFFNESS,
                 bend_damping=self.BEND_DAMPING,
@@ -113,7 +110,6 @@ class Example:
                 twist_damping=self.TWIST_DAMPING,
                 label=f"twist_transfer_{label}",
                 wrap_in_articulation=False,
-                body_frame_origin="com",
             )
             root_body = int(bodies[0])
             tip_body = int(bodies[-1])

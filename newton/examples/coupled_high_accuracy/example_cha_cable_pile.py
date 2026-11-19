@@ -25,7 +25,6 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.coupled_high_accuracy import rod_compat
 from newton.examples.coupled_high_accuracy.cable_utils import (
     create_cable_builder,
     create_cable_parser,
@@ -138,12 +137,12 @@ class Example:
 
                 cable_length = float(self.cable_length)
                 start0 = start - 0.5 * cable_length * dir_vec
-                pts = rod_compat.create_straight_cable_points(
-                    start=start0,
-                    direction=dir_vec,
-                    length=cable_length,
-                    num_segments=int(self.num_elements),
-                )
+                pts = [
+                    wp.vec3(p)
+                    for p in newton.Rod.create_straight(
+                        start0, dir_vec, cable_length, segment_count=int(self.num_elements)
+                    ).points
+                ]
 
                 # Sinusoidal waviness along orthogonal axis
                 cycles = 2.0
@@ -155,19 +154,17 @@ class Example:
                         amp = wav * cable_length * waviness_scale
                         pts[i] = pts[i] + ortho_vec * (amp * math.sin(phase))
 
-                edge_q = rod_compat.create_parallel_transport_cable_quaternions(pts, twist_total=float(twist))
+                frames = newton.Rod(pts)
+                frames.compute_frames(twist_total=float(twist))
+                edge_q = frames.quaternions
 
-                rod_compat.add_rod(
-                    builder,
-                    positions=pts,
-                    quaternions=edge_q,
-                    radius=cable_radius,
+                builder.add_rod(
+                    rod=newton.Rod(pts, quaternions=edge_q, radius=cable_radius),
                     cfg=cable_shape_cfg,
                     stretch_stiffness=stretch_stiffness,
                     bend_stiffness=bend_stiffness,
                     bend_damping=2.0e1,
                     label=f"cable_l{layer}_{lane}",
-                    body_frame_origin="com",
                 )
 
         builder.color()

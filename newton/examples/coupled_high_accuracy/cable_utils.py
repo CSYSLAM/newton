@@ -64,13 +64,17 @@ CABLE_SOLVER_PROFILES: dict[str, dict[str, CableSolverProfile]] = {
         "synreal": CableSolverProfile(2, 10, True),
         "pd": CableSolverProfile(2, 10, True),
     },
+    # Static validations compare a settled state against analytic stiffness. With the engineRTS budgets (one Newton
+    # step, 1-5 CG iterations per substep) the truncated solve settles at a fixed point roughly 8x off the
+    # equilibrium, and that fixed point depends on segment mass (Newton main's cylinder-only rod mass moved it
+    # by 10%). Four Newton steps with 50 CG iterations reach the mass-independent equilibrium.
     "example_cable_bend_stiffness": {
-        "synreal": CableSolverProfile(1, 5),
-        "pd": CableSolverProfile(1, 5),
+        "synreal": CableSolverProfile(4, 50),
+        "pd": CableSolverProfile(4, 50),
     },
     "example_cable_bend_twist_analytic": {
-        "synreal": CableSolverProfile(1, 1),
-        "pd": CableSolverProfile(1, 1),
+        "synreal": CableSolverProfile(4, 50),
+        "pd": CableSolverProfile(4, 50),
     },
     "example_cable_dahl_hysteresis": {
         "synreal": CableSolverProfile(1, 4),
@@ -81,8 +85,8 @@ CABLE_SOLVER_PROFILES: dict[str, dict[str, CableSolverProfile]] = {
         "pd": CableSolverProfile(1, 5, True),
     },
     "example_cable_torsion_material_mapping": {
-        "synreal": CableSolverProfile(1, 1),
-        "pd": CableSolverProfile(1, 1),
+        "synreal": CableSolverProfile(4, 50),
+        "pd": CableSolverProfile(4, 50),
     },
     "example_cable_twist_buckling": {
         "synreal": CableSolverProfile(1, 5, True),

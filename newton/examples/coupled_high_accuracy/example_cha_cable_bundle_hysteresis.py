@@ -25,7 +25,6 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.coupled_high_accuracy import rod_compat
 from newton.examples.coupled_high_accuracy.cable_utils import (
     create_cable_builder,
     create_cable_parser,
@@ -219,23 +218,16 @@ class Example:
             off_y, off_z = bundle_positions[i]
             cable_start = wp.vec3(start_x, start_y + off_y, start_z + off_z)
 
-            points, quats = rod_compat.create_straight_cable_points_and_quaternions(
-                start=cable_start,
-                direction=wp.vec3(1.0, 0.0, 0.0),
-                length=float(self.cable_length),
-                num_segments=int(self.num_elements),
-                twist_total=0.0,
+            rod = newton.Rod.create_straight(
+                cable_start,
+                wp.vec3(1.0, 0.0, 0.0),
+                float(self.cable_length),
+                segment_count=int(self.num_elements),
+                radius=self.cable_radius,
             )
 
-            rod_bodies, _rod_joints = rod_compat.add_rod(
-                builder,
-                positions=points,
-                quaternions=quats,
-                radius=self.cable_radius,
-                bend_stiffness=bend_stiffness,
-                bend_damping=bend_damping,
-                label=f"bundle_cable_{i}",
-                body_frame_origin="com",
+            rod_bodies, _rod_joints = builder.add_rod(
+                rod=rod, bend_stiffness=bend_stiffness, bend_damping=bend_damping, label=f"bundle_cable_{i}"
             )
             self.cable_body_ids.append(rod_bodies)
 

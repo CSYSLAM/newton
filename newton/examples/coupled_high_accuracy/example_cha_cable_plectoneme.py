@@ -33,7 +33,6 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.coupled_high_accuracy import rod_compat
 from newton.examples.coupled_high_accuracy.cable_utils import (
     create_cable_builder,
     create_cable_parser,
@@ -142,11 +141,8 @@ class Example:
             kd=self.CONTACT_DAMPING,
             gap=self.contact_gap,
         )
-        bodies, joints = rod_compat.add_rod(
-            builder,
-            positions=points,
-            quaternions=None,
-            radius=self.cable_radius,
+        bodies, joints = builder.add_rod(
+            rod=newton.Rod(points, quaternions=None, radius=self.cable_radius),
             cfg=shape_cfg,
             stretch_stiffness=self.STRETCH_STIFFNESS,
             stretch_damping=0.0,
@@ -156,7 +152,6 @@ class Example:
             twist_damping=self.TWIST_DAMPING,
             label="plectoneme",
             wrap_in_articulation=False,
-            body_frame_origin="com",
         )
         self.bodies = list(map(int, bodies))
         self.joints = list(map(int, joints))

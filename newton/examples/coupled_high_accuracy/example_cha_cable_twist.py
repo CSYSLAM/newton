@@ -25,7 +25,6 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.coupled_high_accuracy import rod_compat
 from newton.examples.coupled_high_accuracy.cable_utils import (
     create_cable_builder,
     create_cable_parser,
@@ -118,8 +117,10 @@ class Example:
             z = 0.0
             points.append(pos + wp.vec3(x, y, z))
 
-        edge_q = rod_compat.create_parallel_transport_cable_quaternions(points, twist_total=float(twisting_angle))
-        return points, edge_q
+        # Parallel-transported frames with the requested total twist about the capsule axis.
+        rod = newton.Rod(points)
+        rod.compute_frames(twist_total=float(twisting_angle))
+        return points, rod.quaternions
 
     def __init__(self, viewer, args):
         # Store viewer and arguments
@@ -179,18 +180,14 @@ class Example:
                 twisting_angle=0.0,
             )
 
-            rod_bodies, _rod_joints = rod_compat.add_rod(
-                builder,
-                positions=cable_points,
-                quaternions=cable_edge_q,
-                radius=cable_radius,
+            rod_bodies, _rod_joints = builder.add_rod(
+                rod=newton.Rod(cable_points, quaternions=cable_edge_q, radius=cable_radius),
                 stretch_stiffness=stretch_stiffness,
                 bend_stiffness=angular_stiffness,
                 twist_stiffness=angular_stiffness,
                 bend_damping=1.0e-2 * angular_stiffness,
                 twist_damping=1.0e-2 * angular_stiffness,
                 label=f"cable_{i}",
-                body_frame_origin="com",
             )
 
             # Fix the first body to make it kinematic

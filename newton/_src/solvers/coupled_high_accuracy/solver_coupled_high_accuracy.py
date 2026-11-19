@@ -13,6 +13,7 @@ from typing import Any
 from .builder import ModelBuilder
 from .core import Config, Contact, Control, Model, Solver, Span, State
 from .joint_drive_effort import evaluate_joint_drive_effort
+from .mesh_contact_filter import MeshContactFilter
 from .rigid_body_dynamics import (
     NONE,
     VBD_SEMI_IMPLICIT,
@@ -3802,9 +3803,16 @@ class SolverCoupledHighAccuracy(_newton.solvers.SolverBase, CouplingInterface):
         """Control history remapping for the next substep after collision detection."""
         self._rigid_history_update = bool(enabled)
 
-    def _as_synreal_contact(self, contacts: Any | None, contact_force: Any | None = None) -> Contact:
-        """Wrap Newton rigid- and soft-contact buffers without taking ownership."""
+    def _as_synreal_contact(
+        self, contacts: Any | None, contact_force: Any | None = None, state: Any | None = None
+    ) -> Contact:
+        """Wrap Newton rigid- and soft-contact buffers without taking ownership.
+
+        Full-surface mesh records are first reduced to the force-carrying ones (see :mod:`.mesh_contact_filter`),
+        evaluated on ``state``, the positions the records were detected at.
+        """
         native_contact = Contact()
+        self._pending_contact_force = None
         native_contact.history_refresh = getattr(self, "_rigid_history_update", True)
         self._rigid_history_update = True
         if contacts is None:
@@ -3818,7 +3826,29 @@ class SolverCoupledHighAccuracy(_newton.solvers.SolverBase, CouplingInterface):
         soft_capacity = int(contacts.soft_contact_max)
         if soft_capacity < 0:
             raise ValueError("Newton soft contact capacity cannot be negative.")
+        mesh_filter = (
+            soft_capacity
+            and state is not None
+            and getattr(contacts, "_enable_rigid_soft_full_surface_contact", False)
+            and MeshContactFilter.applies(contacts)
+        )
+        if mesh_filter:
+            if getattr(self, "_mesh_contact_filter", None) is None:
+                self._mesh_contact_filter = MeshContactFilter(self.device)
+            self._mesh_contact_filter.compact(
+                self.model, contacts, state.particle_q, state.body_q if self.model.body_count else None
+            )
         if contact_force is not None:
+            if mesh_filter:
+                # The core reports soft wrenches per compacted record; they are moved back after the step.
+                scratch = getattr(self, "_compact_contact_force", None)
+                if scratch is None or scratch.shape[0] < rigid_capacity + soft_capacity:
+                    scratch = self._wp.zeros(
+                        rigid_capacity + soft_capacity, dtype=self._wp.spatial_vector, device=self.device
+                    )
+                    self._compact_contact_force = scratch
+                self._pending_contact_force = (scratch, rigid_capacity, contact_force)
+                contact_force = scratch
             native_contact.contact_force = self._as_span(
                 contact_force,
                 rigid_capacity + soft_capacity,
@@ -3879,6 +3909,21 @@ class SolverCoupledHighAccuracy(_newton.solvers.SolverBase, CouplingInterface):
             )
 
         if soft_capacity:
+            if mesh_filter:
+                f = self._mesh_contact_filter
+                contacts = SimpleNamespace(
+                    soft_contact_count=f.count,
+                    soft_contact_particle=f.particle
+                    if getattr(contacts, "soft_contact_particle", None) is not None
+                    else None,
+                    soft_contact_indices=f.indices,
+                    soft_contact_barycentric=f.barycentric,
+                    soft_contact_shape=f.shape,
+                    soft_contact_body_pos=f.body_pos,
+                    soft_contact_body_vel=f.body_vel,
+                    soft_contact_normal=f.normal,
+                    _enable_rigid_soft_full_surface_contact=True,
+                )
             native_contact.soft_max_count = soft_capacity
             native_contact.soft_count = self._as_span(contacts.soft_contact_count, 1, expected_dtype=self._wp.int32)
             # Full-surface records can identify the deformable side with three
@@ -4026,7 +4071,7 @@ class SolverCoupledHighAccuracy(_newton.solvers.SolverBase, CouplingInterface):
         self._validate_body_state_arrays(state_in)
         self._validate_body_state_arrays(state_out)
         native_control = self._as_synreal_control(control)
-        native_contact = self._as_synreal_contact(contacts, contact_force)
+        native_contact = self._as_synreal_contact(contacts, contact_force, state_in)
         stream = self._wp.get_stream(self.device)
 
         if self.model.body_count:
@@ -4141,6 +4186,9 @@ class SolverCoupledHighAccuracy(_newton.solvers.SolverBase, CouplingInterface):
             dt,
             stream,
         )
+        if self._pending_contact_force is not None:
+            scratch, rigid_capacity, output = self._pending_contact_force
+            self._mesh_contact_filter.scatter_forces(scratch, rigid_capacity, output)
 
         if affine_body_state_count:
             if self._fixed_affine_bodies is not None:

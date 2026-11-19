@@ -45,7 +45,6 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.coupled_high_accuracy import rod_compat
 from newton.examples.coupled_high_accuracy._cable_viewer import node_xyz, set_viewer_camera
 from newton.examples.coupled_high_accuracy.cable_utils import (
     create_cable_builder,
@@ -70,6 +69,29 @@ def _spin_tip_kernel(
     X_new = wp.transform(pos, wp.mul(dq, rot))
     body_q0[tip_body] = X_new
     body_q1[tip_body] = X_new
+
+
+def elastic_cable_stiffness(
+    youngs_modulus: float,
+    radius: float,
+    segment_length: float,
+    *,
+    poissons_ratio: float | None = None,
+    shear_modulus: float | None = None,
+) -> tuple[float, float, float]:
+    """Per-joint stretch, bend and twist stiffness of a solid circular cable segment: ``EA/L``, ``EI/L`` and
+    ``GJ/L``. This mapping is what the example checks, so it is stated here rather than taken from the Rod
+    material path (which also derives a transverse shear term)."""
+    area = math.pi * radius * radius
+    bend_inertia = 0.25 * math.pi * radius**4
+    if shear_modulus is None:
+        shear_modulus = youngs_modulus / (2.0 * (1.0 + poissons_ratio))
+    polar_inertia = 0.5 * math.pi * radius**4
+    return (
+        youngs_modulus * area / segment_length,
+        youngs_modulus * bend_inertia / segment_length,
+        shear_modulus * polar_inertia / segment_length,
+    )
 
 
 class Example:
@@ -137,7 +159,7 @@ class Example:
             self.stretch_stiffness,
             self.bend_stiffness,
             self.twist_stiffness,
-        ) = rod_compat.create_cable_stiffness_from_elastic_moduli(
+        ) = elastic_cable_stiffness(
             self.YOUNGS_MODULUS,
             self.CABLE_RADIUS,
             self.SEGMENT_LENGTH,
@@ -152,19 +174,18 @@ class Example:
         self.polar_inertia = 0.5 * math.pi * self.CABLE_RADIUS**4
 
         builder = create_cable_builder(args, gravity=(0.0, 0.0, 0.0))
-        points = rod_compat.create_straight_cable_points(
-            start=wp.vec3(-0.5 * self.cable_length, 0.0, 0.45),
-            direction=wp.vec3(1.0, 0.0, 0.0),
-            length=self.cable_length,
-            num_segments=self.NUM_ELEMENTS,
-        )
-        quats = rod_compat.create_parallel_transport_cable_quaternions(points)
+        points = [
+            wp.vec3(p)
+            for p in newton.Rod.create_straight(
+                wp.vec3(-0.5 * self.cable_length, 0.0, 0.45),
+                wp.vec3(1.0, 0.0, 0.0),
+                self.cable_length,
+                segment_count=self.NUM_ELEMENTS,
+            ).points
+        ]
 
-        bodies, _joints = rod_compat.add_rod(
-            builder,
-            positions=points,
-            quaternions=quats,
-            radius=self.CABLE_RADIUS,
+        bodies, _joints = builder.add_rod(
+            rod=newton.Rod(points, radius=self.CABLE_RADIUS),
             stretch_stiffness=self.stretch_stiffness,
             stretch_damping=self.stretch_damping,
             bend_stiffness=self.bend_stiffness,
@@ -173,7 +194,6 @@ class Example:
             twist_damping=self.twist_damping,
             label="torsion_material_mapping",
             wrap_in_articulation=True,
-            body_frame_origin="com",
         )
 
         self.bodies = list(map(int, bodies))
@@ -273,7 +293,7 @@ class Example:
                 if shear_modulus_in is not None
                 else {"poissons_ratio": poissons_ratio}
             )
-            _stretch, _bend, twist = rod_compat.create_cable_stiffness_from_elastic_moduli(
+            _stretch, _bend, twist = elastic_cable_stiffness(
                 youngs_modulus,
                 radius,
                 segment_length,

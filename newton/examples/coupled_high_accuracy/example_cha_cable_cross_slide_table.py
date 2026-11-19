@@ -34,7 +34,6 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.coupled_high_accuracy import rod_compat
 from newton.examples.coupled_high_accuracy.cable_utils import (
     create_cable_builder,
     create_cable_parser,
@@ -685,24 +684,24 @@ class Example:
             segment_length=initial_segment_length,
             wrap_clearance=cable_wrap_clearance,
         )
-        cable_quats = rod_compat.create_parallel_transport_cable_quaternions(cable_points)
+        # Frames of the routed loop, used for the initial body poses below.
+        cable_quats = newton.Rod(cable_points).quaternions
         cable_segment_count = len(cable_points) - 1
-        straight_cable_points, straight_cable_quats = rod_compat.create_straight_cable_points_and_quaternions(
-            start=left_anchor_world,
-            direction=wp.vec3(1.0, 0.0, 0.0),
-            length=cable_segment_count * cable_segment_length,
-            num_segments=cable_segment_count,
+        # The rod is assembled straight (its structural rest shape) and posed along the route afterwards.
+        straight_rod = newton.Rod.create_straight(
+            left_anchor_world,
+            wp.vec3(1.0, 0.0, 0.0),
+            cable_segment_count * cable_segment_length,
+            segment_count=cable_segment_count,
+            radius=cable_radius,
         )
 
         cable_cfg = builder.default_shape_cfg.copy()
         cable_cfg.density = 200.0
         cable_cfg.gap = 2.0 * cable_radius
 
-        self.cable_bodies, cable_joints = rod_compat.add_rod(
-            builder,
-            positions=straight_cable_points,
-            quaternions=straight_cable_quats,
-            radius=cable_radius,
+        self.cable_bodies, cable_joints = builder.add_rod(
+            rod=straight_rod,
             cfg=cable_cfg,
             stretch_stiffness=1.0e5,
             stretch_damping=1.0e-4,
@@ -710,7 +709,6 @@ class Example:
             bend_damping=1.0e-2,
             wrap_in_articulation=False,
             label="xy_table_cable",
-            body_frame_origin="com",
         )
         initial_cable_xforms = [
             wp.transform(cable_points[i] + (cable_points[i + 1] - cable_points[i]) * 0.5, cable_quats[i])

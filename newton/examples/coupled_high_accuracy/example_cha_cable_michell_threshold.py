@@ -36,7 +36,6 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.coupled_high_accuracy import rod_compat
 from newton.examples.coupled_high_accuracy._cable_viewer import node_xyz, set_viewer_camera
 from newton.examples.coupled_high_accuracy.cable_utils import (
     create_cable_builder,
@@ -104,21 +103,16 @@ class Example:
             factor = self.TOTAL_TWIST / case_critical_twist
             label = f"{factor:.2f}x"
             points, quats = self._ring_points_and_quats(x_offset)
-            bodies, _joints = rod_compat.add_rod(
-                builder,
-                positions=points,
-                quaternions=quats,
-                radius=self.CABLE_RADIUS,
+            bodies, _joints = builder.add_rod(
+                rod=newton.Rod(points, quaternions=quats, radius=self.CABLE_RADIUS, closed=True),
                 stretch_stiffness=self.STRETCH_STIFFNESS,
                 stretch_damping=0.0,
                 bend_stiffness=self.BEND_STIFFNESS,
                 bend_damping=0.0,
                 twist_stiffness=twist_stiffness,
                 twist_damping=0.0,
-                closed=True,
                 label=f"michell_threshold_{label}",
                 wrap_in_articulation=True,
-                body_frame_origin="com",
             )
             is_dynamic = factor > 1.0
             if not is_dynamic:
@@ -213,6 +207,8 @@ class Example:
             wp.vec3(float(x_offset + cls.RING_RADIUS * math.cos(t)), float(cls.RING_RADIUS * math.sin(t)), 0.6)
             for t in theta
         ]
+        # A closed Rod requires the closing point to coincide exactly with the first one.
+        points[-1] = points[0]
 
         quats = []
         for i in range(cls.NUM_SEGMENTS):

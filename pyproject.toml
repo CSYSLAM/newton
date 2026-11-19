@@ -367,7 +367,7 @@ name = "Fixed"
 showcontent = true
 
 [tool.typos]
-files.extend-exclude = ["/examples/assets", "*.urdf", "*.usd", "*.usda", "*.mjcf", "*.js"]
+files.extend-exclude = ["/examples/assets", "/examples/coupled_high_accuracy/assets", "*.urdf", "*.usd", "*.usda", "*.mjcf", "*.js"]
 
 [tool.typos.default.extend-words]
 arange = "arange"

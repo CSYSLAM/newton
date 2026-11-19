@@ -4,7 +4,7 @@
 ###########################################################################
 # Example Cable Y-Junction
 #
-# This example shows how to simulate a Y-junction as a rod graph (`rod_compat.add_rod_graph`)
+# This example shows how to simulate a Y-junction as a rod graph (`newton.Rod(..., edges=...)`)
 # with a shared junction node.
 #
 # Run interactively:
@@ -26,7 +26,6 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.coupled_high_accuracy import rod_compat
 from newton.examples.coupled_high_accuracy.cable_utils import (
     create_cable_builder,
     create_cable_parser,
@@ -91,18 +90,14 @@ class Example:
                 edges.append((prev, cur))
                 prev = cur
 
-        self.graph_bodies, self.graph_joints = rod_compat.add_rod_graph(
-            builder,
-            node_positions=node_positions,
-            edges=edges,
-            radius=cable_radius,
+        self.graph_bodies, self.graph_joints = builder.add_rod(
+            rod=newton.Rod(node_positions, edges=edges, radius=cable_radius),
             cfg=cable_cfg,
             stretch_stiffness=stretch_stiffness,
             bend_stiffness=bend_stiffness,
             bend_damping=bend_damping,
             label="y_graph",
             wrap_in_articulation=True,
-            body_frame_origin="com",
         )
 
         # Pin one tip capsule (end of the first branch).
