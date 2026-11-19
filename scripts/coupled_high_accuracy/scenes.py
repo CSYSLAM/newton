@@ -89,3 +89,80 @@ def springs(steps: int, options: dict[str, str]) -> Iterator[Any]:
 if __name__ == "__main__":
     print(sorted(SCENES))
     np.set_printoptions(precision=4)
+
+
+def _cloth_model(options: dict[str, str]):
+    from newton.solvers import style3d  # noqa: PLC0415
+
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    newton.solvers.SolverStyle3D.register_custom_attributes(builder)
+    for world in range(int(options.get("worlds", 1))):
+        builder.begin_world()
+        style3d.add_cloth_grid(
+            builder,
+            pos=wp.vec3(0.0, 0.0, 1.0 + 0.2 * world),
+            rot=wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.3),
+            dim_x=8,
+            dim_y=6,
+            cell_x=0.05,
+            cell_y=0.05,
+            vel=wp.vec3(0.0),
+            mass=0.02,
+            fix_left=True,
+            particle_radius=0.01,
+            tri_aniso_ke=wp.vec3(2.0e3, 1.0e3, 3.0e2),
+            edge_aniso_ke=wp.vec3(float(options.get("bend", 1.0e-3))),
+            edge_kd=float(options.get("bend_damping", 0.0)),
+        )
+        builder.end_world()
+    if "springs" in options:
+        builder.add_spring(1, 9, 100.0, 0.0, 0)
+    model = builder.finalize(device="cuda:0")
+    drag = float(options.get("drag", 0.0))
+    if drag:
+        materials = model.tri_materials.numpy()
+        materials[:, 3] = drag
+        model.tri_materials.assign(materials)
+    return model
+
+
+@scene
+def cloth(steps: int, options: dict[str, str]) -> Iterator[Any]:
+    """Pinned Style3D cloth grid (options: framework=pd, bend=, bend_damping=, drag=, springs=1, worlds=N)."""
+    model = _cloth_model(options)
+    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver.config.nonlinear_solver = _framework(options)
+    solver.config.nonlinear_iterations = int(options.get("iterations", 4))
+    solver.config.linear_iterations = int(options.get("linear", 50))
+    yield from _run(model, solver, steps)
+
+
+@scene
+def tetrahedra(steps: int, options: dict[str, str]) -> Iterator[Any]:
+    """A falling-free tetrahedral soft cube pinned on one face (options: framework=pd, damping=, worlds=N)."""
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    for world in range(int(options.get("worlds", 1))):
+        builder.begin_world()
+        builder.add_soft_grid(
+            pos=wp.vec3(0.0, 0.5 * world, 1.0),
+            rot=wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.2),
+            vel=wp.vec3(0.0),
+            dim_x=3,
+            dim_y=2,
+            dim_z=2,
+            cell_x=0.1,
+            cell_y=0.1,
+            cell_z=0.1,
+            density=300.0,
+            k_mu=2.0e4,
+            k_lambda=8.0e4,
+            k_damp=float(options.get("damping", 0.0)),
+            fix_left=True,
+        )
+        builder.end_world()
+    model = builder.finalize(device="cuda:0")
+    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver.config.nonlinear_solver = _framework(options)
+    solver.config.nonlinear_iterations = int(options.get("iterations", 4))
+    solver.config.linear_iterations = int(options.get("linear", 50))
+    yield from _run(model, solver, steps)

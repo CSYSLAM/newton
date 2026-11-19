@@ -30,10 +30,13 @@ from .api import (
     Span,
     State,
 )
+from .kernels import cloth as cloth_kernels
 from .kernels import drag as drag_kernels
 from .kernels import pcg as pcg_kernels
 from .kernels import springs as spring_kernels
 from .kernels import step as step_kernels
+from .kernels import tetrahedra as tetrahedron_kernels
+from .templates import SparseRows
 
 __all__ = ["Solver"]
 
@@ -48,6 +51,7 @@ _NUMPY_TYPES = {
     wp.vec2i: (np.int32, (2,)),
     wp.vec3i: (np.int32, (3,)),
     wp.vec4i: (np.int32, (4,)),
+    wp.vec2: (np.float32, (2,)),
     wp.vec3: (np.float32, (3,)),
     wp.vec4: (np.float32, (4,)),
     wp.mat22: (np.float32, (2, 2)),
@@ -212,9 +216,6 @@ class Solver:
         unported = {
             "affine bodies": model.body_count or model.body_state_count,
             "non-diagonal particle masses": model.particle_mass_non_diagonal_count,
-            "cloth triangles": model.triangle_count,
-            "bending edges": model.edge_count,
-            "tetrahedra": model.tetrahedron_count,
             "cables": model.cable_count,
             "shapes and contacts": model.shape_count,
             "fluid particles": model.fluid_particle_count,
@@ -336,6 +337,9 @@ class Solver:
         self.body_state_count = 0
 
         self._precompute_springs()
+        self._precompute_cloth()
+        # Material kernels need their state count and rest-volume cache.
+        self._precompute_tetrahedra()
         self._constructor_reads.clear()
 
         # Remap arbitrary world labels (including -1) in first-seen order; each replicated template is offset by its
@@ -454,44 +458,156 @@ class Solver:
         self.local_row_count = self._empty(wp.int32)
         self.block_template_columns = self.block_entry_columns = self._empty(wp.int32)
         self.block_template_values = self.block_entry_values = self._empty(wp.mat33)
+        self.spring_rows: SparseRows | None = None
+        self.spring_diagonal: np.ndarray | None = None
         self.spring_count = model.spring_count * (self.count // per_world)
         if not self.spring_count:
-            self._precompute_particle_matrices(
-                np.zeros(per_world, dtype=np.float32),
-                np.zeros(self.count, dtype=np.int32),
-                np.zeros(0, dtype=np.int32),
-                np.zeros(0, dtype=np.float32),
-            )
+            if not self._inertial_templates() and not model.triangle_count and not model.edge_count:
+                self._precompute_particle_matrices(
+                    np.zeros(per_world, dtype=np.float32),
+                    np.zeros(self.count, dtype=np.int32),
+                    np.zeros(0, dtype=np.int32),
+                    np.zeros(0, dtype=np.float32),
+                )
             return
-        indices = self._read(model.spring_indices, wp.vec2i, model.spring_count)
+        indices = self._read(model.spring_indices, wp.vec2i, model.spring_count).astype(np.int64)
         stiffness = self._read(model.spring_stiffnesses, wp.float32, model.spring_count)
         rest = self._read(model.spring_rest_lengths, wp.float32, model.spring_count)
-        rows: list[dict[int, np.float32]] = [{} for _ in range(per_world)]
+        a, b = indices[:, 0], indices[:, 1]
+        checks = (
+            (~((stiffness >= 0.0) & np.isfinite(stiffness)), "spring stiffness must be finite and non-negative"),
+            (~((rest > 0.0) & np.isfinite(rest)), "spring rest length must be finite and positive"),
+            ((a < 0) | (b < 0) | (a >= per_world) | (b >= per_world), "spring references an invalid particle index"),
+            (a == b, "spring endpoints must reference different particles"),
+        )
+        bad = np.zeros(len(a), dtype=bool)
+        for mask, _message in checks:
+            bad |= mask
+        if bad.any():
+            # Report the first failing spring's first failing condition, as the native per-spring loop.
+            first = int(np.argmax(bad))
+            raise ValueError(next(message for mask, message in checks if mask[first]))
+        rows = SparseRows(per_world)
+        # Duplicate columns accumulate in spring order; each spring adds (a, b) then (b, a).
+        rows.add(np.stack([a, b], 1).ravel(), np.stack([b, a], 1).ravel(), np.repeat(stiffness, 2))
         diagonal = np.zeros(per_world, dtype=np.float32)
-        for (a, b), k, length in zip(indices, stiffness, rest, strict=True):
-            if not (k >= 0.0) or not math.isfinite(k):
-                raise ValueError("spring stiffness must be finite and non-negative")
-            if not (length > 0.0) or not math.isfinite(length):
-                raise ValueError("spring rest length must be finite and positive")
-            if a < 0 or b < 0 or a >= per_world or b >= per_world:
-                raise ValueError("spring references an invalid particle index")
-            if a == b:
-                raise ValueError("spring endpoints must reference different particles")
-            # Accumulate duplicate columns in spring order in float32, as the native std::map<int, float>.
-            rows[a][int(b)] = np.float32(rows[a].get(int(b), np.float32(0.0)) + k)
-            rows[b][int(a)] = np.float32(rows[b].get(int(a), np.float32(0.0)) + k)
-        for (a, b), k in zip(indices, stiffness, strict=True):
-            diagonal[a] = np.float32(diagonal[a] + k)
-            diagonal[b] = np.float32(diagonal[b] + k)
-        counts = np.array([len(rows[i % per_world]) for i in range(self.count)], dtype=np.int32)
-        self.max_entries = int(counts.max(initial=0))
-        columns = np.full(self.max_entries * per_world, -1, dtype=np.int32)
-        values = np.zeros(self.max_entries * per_world, dtype=np.float32)
-        for i in range(per_world):
-            for slot, column in enumerate(sorted(rows[i])):
-                columns[slot * per_world + i] = column
-                values[slot * per_world + i] = -rows[i][column]
+        np.add.at(diagonal, np.stack([a, b], 1).ravel(), np.repeat(stiffness, 2))
+        if self._inertial_templates() or model.triangle_count or model.edge_count:
+            # Negating once after the duplicate summation keeps the native rounding and signed zeros.
+            rows.negate()
+            self.spring_rows, self.spring_diagonal = rows, diagonal
+            return
+        columns, values, self.max_entries = rows.ell(-rows.values)
+        counts = np.tile(rows.counts(), self.count // per_world)
         self._precompute_particle_matrices(diagonal, counts, columns, values)
+
+    def _precompute_cloth(self) -> None:
+        model = self.model
+        per_world = self.per_world
+        copies = self.count // per_world
+        self.triangle_count = model.triangle_count * copies
+        self.edge_count = model.edge_count * copies
+        self.bending_damping = False
+        if not self.triangle_count and not self.edge_count:
+            return
+        f32 = np.float32
+        indices = self._read(model.triangle_indices, wp.vec3i, model.triangle_count).astype(np.int64)
+        poses = self._read(model.triangle_inv_dms, wp.mat22, model.triangle_count).reshape(-1, 4)
+        stiffness = self._read(model.triangle_aniso_stiffnesses, wp.vec3, model.triangle_count)
+        areas = self._read(model.triangle_rest_areas, wp.float32, model.triangle_count)
+        rows = self.spring_rows if self.spring_rows is not None else SparseRows(per_world)
+        diagonal = self.spring_diagonal if self.spring_diagonal is not None else np.zeros(per_world, dtype=f32)
+        self.spring_rows = self.spring_diagonal = None
+        if np.any((indices < 0) | (indices >= per_world)):
+            raise ValueError("triangle references an invalid particle index")
+        # Float32 host arithmetic in the native operation order (no fused multiply-add).
+        m0, m1, m2, m3 = (poses[:, k].astype(f32) for k in range(4))
+        u = np.stack([-m0 - m2, m0, m2], 1)
+        v = np.stack([-m1 - m3, m1, m3], 1)
+        ku = stiffness[:, 0] + stiffness[:, 2]
+        kv = stiffness[:, 2] + stiffness[:, 1]
+        pairs = [(i, j) for i in range(3) for j in range(i, 3)]
+        diagonal_rows: list = []
+        diagonal_values: list = []
+        off_rows: list = []
+        off_columns: list = []
+        off_values: list = []
+        values = np.stack([((u[:, i] * ku) * u[:, j] + (v[:, i] * kv) * v[:, j]) * areas for i, j in pairs], 1)
+        self._scatter_pairs(indices, pairs, values, diagonal_rows, diagonal_values, off_rows, off_columns, off_values)
+
+        edges = self._read(model.edge_indices, wp.vec4i, model.edge_count).astype(np.int64)
+        cots = self._read(model.edge_bending_cots, wp.vec4, model.edge_count)
+        properties = self._read(model.edge_bending_properties, wp.vec2, model.edge_count)
+        edge_areas = self._read(model.edge_rest_areas, wp.float32, model.edge_count)
+        valid = edge_areas > 0.0
+        for i in range(4):
+            valid &= edges[:, i] >= 0
+            for j in range(i + 1, 4):
+                valid &= edges[:, i] != edges[:, j]
+        if np.any(edges[valid] >= per_world):
+            raise ValueError("bending edge references an invalid particle index")
+        edges, cots, properties, edge_areas = edges[valid], cots[valid], properties[valid], edge_areas[valid]
+        self.bending_damping = bool(np.any(properties[:, 1] > 0.0))
+        c = cots.astype(f32)
+        w = np.stack([-c[:, 0] - c[:, 2], -c[:, 1] - c[:, 3], c[:, 2] + c[:, 3], c[:, 0] + c[:, 1]], 1)
+        scale = (f32(3.0) / edge_areas) * properties[:, 0]
+        edge_pairs = [(i, j) for i in range(4) for j in range(i, 4)]
+        edge_values = np.stack([(w[:, i] * scale) * w[:, j] for i, j in edge_pairs], 1).astype(f32)
+        self._scatter_pairs(
+            edges, edge_pairs, edge_values, diagonal_rows, diagonal_values, off_rows, off_columns, off_values
+        )
+        np.add.at(diagonal, np.concatenate(diagonal_rows), np.concatenate(diagonal_values))
+        rows.add(np.concatenate(off_rows), np.concatenate(off_columns), np.concatenate(off_values))
+        if self._inertial_templates():
+            # Kept for the body CSR/ELL assembly.
+            self.spring_rows, self.spring_diagonal = rows, diagonal
+            return
+        columns, values, self.max_entries = rows.ell()
+        counts = np.tile(rows.counts(), copies)
+        self._precompute_particle_matrices(diagonal, counts, columns, values)
+
+    @staticmethod
+    def _scatter_pairs(
+        indices: np.ndarray,
+        pairs: list[tuple[int, int]],
+        values: np.ndarray,
+        diagonal_rows: list,
+        diagonal_values: list,
+        off_rows: list,
+        off_columns: list,
+        off_values: list,
+    ) -> None:
+        """Element-major contribution lists: per element, per (a, b >= a) pair, the diagonal or (a, b), (b, a)."""
+        diagonal_mask = np.array([i == j for i, j in pairs])
+        first = np.array([i for i, _ in pairs])
+        second = np.array([j for _, j in pairs])
+        rows = indices[:, first]
+        columns = indices[:, second]
+        diagonal_rows.append(rows[:, diagonal_mask].ravel())
+        diagonal_values.append(values[:, diagonal_mask].ravel())
+        off_r, off_c, off_v = rows[:, ~diagonal_mask], columns[:, ~diagonal_mask], values[:, ~diagonal_mask]
+        off_rows.append(np.stack([off_r, off_c], 2).ravel())
+        off_columns.append(np.stack([off_c, off_r], 2).ravel())
+        off_values.append(np.stack([off_v, off_v], 2).ravel())
+
+    def _precompute_tetrahedra(self) -> None:
+        model = self.model
+        self.tetrahedron_count = model.tetrahedron_count * (self.count // self.per_world)
+        self.tetrahedron_volumes = self._empty(wp.float32)
+        if not self.tetrahedron_count:
+            return
+        indices = self._read(model.tetrahedron_indices, wp.vec4i, model.tetrahedron_count)
+        if np.any((indices < 0) | (indices >= self.per_world)):
+            raise ValueError("tetrahedron references an invalid particle index")
+        m = self._read(model.tetrahedron_inverse_dms, wp.mat33, model.tetrahedron_count).reshape(-1, 9)
+        m = m.astype(np.float32)
+        a = m[:, 8] * m[:, 4] - m[:, 5] * m[:, 7]
+        b = m[:, 8] * m[:, 3] - m[:, 5] * m[:, 6]
+        c = m[:, 3] * m[:, 7] - m[:, 6] * m[:, 4]
+        determinant = (m[:, 0] * a - m[:, 1] * b) + m[:, 2] * c
+        with np.errstate(divide="ignore"):
+            volumes = np.float32(1.0) / (determinant * np.float32(6.0))
+        self.tetrahedron_volumes = self._upload(volumes.astype(np.float32), wp.float32)
 
     # ------------------------------------------------------------------------------------------------------------
     # Step
@@ -546,8 +662,8 @@ class Solver:
         self._validate_step_config()
         if contact.soft_max_count or contact.max_count:
             raise _not_ported("contacts")
-        if control.tetrahedron_activations.size:
-            raise _not_ported("tetrahedron activations")
+        if control.tetrahedron_activations.size and control.tetrahedron_activations.size < self.tetrahedron_count:
+            raise ValueError("tetrahedron activations are smaller than the tetrahedron state count")
         if config.enable_self_collision and self.self_collision_primitives:
             raise _not_ported("self-collision")
 
@@ -558,9 +674,9 @@ class Solver:
         six_springs = bodies and rigidity == AffineBodyRigidityModel.SIX_SPRINGS
         alpha = config.constraint_alpha
         block_matrix = not pd
-        block = block_matrix or drag
+        block = block_matrix or self.bending_damping or bool(self.tetrahedron_count) or drag
         body_block = bodies and block and config.affine_body_block_preconditioner
-        extra_product = drag
+        extra_product = self.bending_damping or bool(self.tetrahedron_count) or drag
         reference_pcg = config.reference_linear_schedule
         fused_pcg = block_matrix and not body_block and not reference_pcg
         del six_springs, alpha
@@ -594,6 +710,18 @@ class Solver:
         empty_m = self._empty(wp.mat33)
         empty_i = self._empty(wp.int32)
         templates = self.particle_diagonal_templates
+        triangle_indices = self._view(model.triangle_indices, wp.vec3i, model.triangle_count)
+        triangle_poses = self._view(model.triangle_inv_dms, wp.mat22, model.triangle_count)
+        triangle_areas = self._view(model.triangle_rest_areas, wp.float32, model.triangle_count)
+        triangle_stiffness = self._view(model.triangle_aniso_stiffnesses, wp.vec3, model.triangle_count)
+        edge_indices = self._view(model.edge_indices, wp.vec4i, model.edge_count)
+        edge_areas = self._view(model.edge_rest_areas, wp.float32, model.edge_count)
+        edge_cots = self._view(model.edge_bending_cots, wp.vec4, model.edge_count)
+        edge_properties = self._view(model.edge_bending_properties, wp.vec2, model.edge_count)
+        tet_indices = self._view(model.tetrahedron_indices, wp.vec4i, model.tetrahedron_count)
+        tet_inverse = self._view(model.tetrahedron_inverse_dms, wp.mat33, model.tetrahedron_count)
+        tet_materials = self._view(model.tetrahedron_materials, wp.vec3, model.tetrahedron_count)
+        activations = self._view(control.tetrahedron_activations, wp.float32)
 
         self._launch(
             "start",
@@ -710,6 +838,59 @@ class Solver:
                         per_world,
                     ],
                 )
+            if self.triangle_count:
+                self._launch(
+                    "stretch_force",
+                    cloth_kernels.evaluate_stretch_force,
+                    self.triangle_count,
+                    [
+                        q_in,
+                        triangle_areas,
+                        triangle_poses,
+                        triangle_indices,
+                        triangle_stiffness,
+                        self.rhs,
+                        model.triangle_count,
+                        per_world,
+                    ],
+                )
+            if self.tetrahedron_count:
+                self._launch(
+                    "tetrahedron_force",
+                    tetrahedron_kernels.evaluate_tetrahedron_force,
+                    self.tetrahedron_count,
+                    [
+                        q_in,
+                        self.previous,
+                        tet_indices,
+                        tet_inverse,
+                        tet_materials,
+                        self.tetrahedron_volumes,
+                        activations,
+                        inverse_dt,
+                        self.rhs,
+                        model.tetrahedron_count,
+                        per_world,
+                    ],
+                )
+            if self.edge_count:
+                self._launch(
+                    "bending_force",
+                    cloth_kernels.evaluate_bending_force,
+                    self.edge_count,
+                    [
+                        q_in,
+                        self.previous,
+                        edge_areas,
+                        edge_cots,
+                        edge_indices,
+                        edge_properties,
+                        inverse_dt,
+                        self.rhs,
+                        model.edge_count,
+                        per_world,
+                    ],
+                )
             if not block:
                 # The contact-free PD path keeps the constant scalar spring matrix and uses 1 / D.
                 self._launch(
@@ -728,6 +909,27 @@ class Solver:
                 if block_matrix and self.max_entries:
                     wp.copy(self.block_entry_columns, self.block_template_columns)
                     wp.copy(self.block_entry_values, self.block_template_values)
+                if not pd and self.triangle_count:
+                    self._launch(
+                        "membrane_hessian",
+                        cloth_kernels.add_cloth_membrane_gauss_newton_hessian,
+                        self.triangle_count,
+                        [
+                            q_in,
+                            triangle_indices,
+                            triangle_poses,
+                            triangle_areas,
+                            triangle_stiffness,
+                            self.blocks,
+                            self.row_count,
+                            self.block_entry_columns,
+                            self.block_entry_values,
+                            self.max_entries,
+                            model.triangle_count,
+                            per_world,
+                            count,
+                        ],
+                    )
                 if not pd and self.spring_count:
                     self._launch(
                         "spring_hessian",
@@ -751,6 +953,40 @@ class Solver:
                 # The native solver retains A and inverts a separate preconditioner copy in place.
                 if block_matrix:
                     wp.copy(self.preconditioner_blocks, self.blocks, count=count)
+                if self.tetrahedron_count:
+                    self._launch(
+                        "tetrahedron_preconditioner",
+                        tetrahedron_kernels.add_tetrahedron_preconditioner,
+                        self.tetrahedron_count,
+                        [
+                            q_in,
+                            tet_indices,
+                            tet_inverse,
+                            tet_materials,
+                            self.tetrahedron_volumes,
+                            inverse_dt,
+                            self.preconditioner_blocks,
+                            model.tetrahedron_count,
+                            per_world,
+                        ],
+                    )
+                if self.bending_damping:
+                    self._launch(
+                        "bending_preconditioner",
+                        cloth_kernels.add_bending_damping_preconditioner,
+                        self.edge_count,
+                        [
+                            q_in,
+                            edge_areas,
+                            edge_cots,
+                            edge_indices,
+                            edge_properties,
+                            inverse_dt,
+                            self.preconditioner_blocks,
+                            model.edge_count,
+                            per_world,
+                        ],
+                    )
                 if drag:
                     self._launch(
                         "drag_preconditioner",
@@ -840,6 +1076,42 @@ class Solver:
                     )
                     if extra_product:
                         self.contact_product.zero_()
+                if self.tetrahedron_count:
+                    self._launch(
+                        "tetrahedron_tangent",
+                        tetrahedron_kernels.multiply_tetrahedron_tangent,
+                        self.tetrahedron_count,
+                        [
+                            q_in,
+                            self.direction,
+                            tet_indices,
+                            tet_inverse,
+                            tet_materials,
+                            self.tetrahedron_volumes,
+                            inverse_dt,
+                            self.contact_product,
+                            model.tetrahedron_count,
+                            per_world,
+                        ],
+                    )
+                if self.bending_damping:
+                    self._launch(
+                        "bending_tangent",
+                        cloth_kernels.multiply_bending_damping_tangent,
+                        self.edge_count,
+                        [
+                            q_in,
+                            self.direction,
+                            edge_areas,
+                            edge_cots,
+                            edge_indices,
+                            edge_properties,
+                            inverse_dt,
+                            self.contact_product,
+                            model.edge_count,
+                            per_world,
+                        ],
+                    )
                 if drag:
                     self._launch(
                         "drag_tangent",
