@@ -232,7 +232,7 @@ def pendulum(steps: int, options: dict[str, str]) -> Iterator[Any]:
         )
         child_xform = wp.transform(wp.vec3(-0.1, 0.0, 0.0), wp.quat_identity())
         if options.get("prismatic") and link == 0:
-            joint = builder.add_joint_prismatic(
+            builder.add_joint_prismatic(
                 parent,
                 body,
                 axis=(1.0, 0.0, 0.0),
@@ -247,19 +247,18 @@ def pendulum(steps: int, options: dict[str, str]) -> Iterator[Any]:
         else:
             kwargs = {}
             if link == 0:
-                kwargs = dict(
-                    target_q=0.4,
-                    target_ke=50.0,
-                    target_kd=2.0,
-                    armature=armature,
-                    actuator_mode=newton.JointTargetMode.POSITION,
-                )
+                kwargs = {
+                    "target_q": 0.4,
+                    "target_ke": 50.0,
+                    "target_kd": 2.0,
+                    "armature": armature,
+                    "actuator_mode": newton.JointTargetMode.POSITION,
+                }
             if options.get("limit"):
                 kwargs.update(limit_lower=-0.2, limit_upper=0.2, limit_ke=100.0, limit_kd=1.0)
-            joint = builder.add_joint_revolute(
+            builder.add_joint_revolute(
                 parent, body, axis=(0.0, 1.0, 0.0), parent_xform=parent_xform, child_xform=child_xform, **kwargs
             )
-        builder.add_articulation([joint]) if False else None
         parent = body
     builder.add_articulation(list(range(builder.joint_count)))
     model = builder.finalize(device="cuda:0")
