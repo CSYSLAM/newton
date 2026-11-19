@@ -494,7 +494,7 @@ def particle_pile(steps: int, options: dict[str, str]) -> Iterator[Any]:
     builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
     builder.add_ground_plane()
     rng = np.random.default_rng(3)
-    for index in range(64):
+    for _ in range(64):
         position = rng.uniform((-0.05, -0.05, 0.02), (0.05, 0.05, 0.2))
         builder.add_particle(pos=wp.vec3(*position), vel=wp.vec3(0.0), mass=0.01, radius=0.012)
     model = builder.finalize(device="cuda:0")
