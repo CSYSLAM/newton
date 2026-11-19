@@ -583,3 +583,42 @@ def fluid_drop(steps: int, options: dict[str, str]) -> Iterator[Any]:
     solver.config.nonlinear_iterations = int(options.get("iterations", 4))
     solver.config.linear_iterations = int(options.get("linear", 50))
     yield from _run(model, solver, steps)
+
+
+@scene
+def granular_heap(steps: int, options: dict[str, str]) -> Iterator[Any]:
+    """A jittered block of grains dropped onto a slanted pile of sibling grains (options: framework, cohesion=,
+    adhesion=1 for dynamic bonds, worlds=)."""
+    rng = np.random.default_rng(7)
+    side = 5
+    spacing = 0.021
+    grid = np.stack(np.meshgrid(*(np.arange(side),) * 3, indexing="ij"), -1).reshape(-1, 3)
+    points = grid * spacing + rng.uniform(-0.002, 0.002, (len(grid), 3)) + np.array([0.0, 0.0, 0.02])
+    worlds = int(options.get("worlds", 1))
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    world_builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    world_builder.add_particles(
+        pos=points.tolist(),
+        vel=[(0.05, 0.0, -0.2)] * len(points),
+        mass=[0.01] * len(points),
+        radius=[0.01] * len(points),
+    )
+    builder.replicate(world_builder, worlds)
+    builder.add_ground_plane()
+    model = builder.finalize(device="cuda:0")
+    adhesion = 50.0 if options.get("adhesion") else 0.0
+    s3d.configure_granular(
+        model,
+        np.arange(len(points), dtype=np.int32),
+        contact_stiffness=2000.0,
+        cohesion=float(options.get("cohesion", 200.0)),
+        adhesion=adhesion,
+        bond_formation_gap=0.002 if adhesion else 0.0,
+        bond_formation_speed=1.0,
+        max_dynamic_bonds=6,
+    )
+    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver.config.nonlinear_solver = _framework(options)
+    solver.config.nonlinear_iterations = int(options.get("iterations", 4))
+    solver.config.linear_iterations = int(options.get("linear", 50))
+    yield from _run(model, solver, steps)

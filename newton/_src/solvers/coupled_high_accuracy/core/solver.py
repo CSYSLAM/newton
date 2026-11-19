@@ -33,12 +33,14 @@ from .api import (
 from .bodies import BodyPrecompute
 from .cables import CableHost
 from .fluid import FluidHost
+from .granular import GranularHost
 from .kernels import affine as affine_kernels
 from .kernels import affine_block as affine_block_kernels
 from .kernels import cables as cable_kernels
 from .kernels import cloth as cloth_kernels
 from .kernels import drag as drag_kernels
 from .kernels import fluid as fluid_kernels
+from .kernels import granular as granular_kernels
 from .kernels import hard_contacts as hard_contact_kernels
 from .kernels import joints as joint_kernels
 from .kernels import pcg as pcg_kernels
@@ -75,10 +77,6 @@ _NUMPY_TYPES = {
 }
 
 
-def _not_ported(feature: str) -> NotImplementedError:
-    return NotImplementedError(f"The Warp solver core does not support {feature} yet (NEWTON_CHA_BACKEND=native).")
-
-
 def _resolve_stream(stream: Any, device: wp.context.Device) -> wp.Stream | None:
     if stream is None:
         return None
@@ -94,7 +92,7 @@ def _resolve_stream(stream: Any, device: wp.context.Device) -> wp.Stream | None:
     raise TypeError("Expected a CUDA stream integer, CUDA Stream Protocol object, or None")
 
 
-class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost):
+class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHost):
     """Implicit Newton solver for particles, cloth, soft bodies and affine rigid bodies."""
 
     def __init__(self) -> None:
@@ -250,14 +248,6 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost):
         ):
             raise RuntimeError("Requested source model topology has not been implemented")
 
-    def _reject_unported(self, model: Model) -> None:
-        unported = {
-            "granular particles": model.granular_particle_count or model.granular_bond_count,
-        }
-        for feature, present in unported.items():
-            if present:
-                raise _not_ported(feature)
-
     def initialize(self, model: Model) -> None:
         if not isinstance(model, Model):
             raise TypeError("initialize requires a Model")
@@ -335,10 +325,10 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost):
         self.drive_total = 0
         self.cable_count = 0
         self.fluid_rows = 0
+        self.granular_points = 0
         if not count:
             self._initialized = True
             return
-        self._reject_unported(model)
 
         masses = self._read(model.particle_masses, wp.float32, self.per_world)
         if not np.all(np.isfinite(masses)) or np.any(masses < 0.0):
@@ -468,6 +458,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost):
         # Built even with self-collision disabled, as natively.
         self._precompute_self_particle_pairs()
         self._precompute_fluid()
+        self._precompute_granular()
         wp.synchronize_device(self.device)
         self._initialized = True
 
@@ -824,6 +815,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost):
             or drag
             or body_tangent
             or bool(self.fluid_rows)
+            or bool(self.granular_points)
         )
         # The PD branch ignores the body-block option when it selects the scalar matrix.
         body_block = bodies and block and config.affine_body_block_preconditioner
@@ -845,6 +837,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost):
             or drag
             or body_tangent
             or bool(self.fluid_rows)
+            or bool(self.granular_points)
         )
         reference_pcg = config.reference_linear_schedule
         # Joint-owned cable models (every particle an affine proxy) evaluate cables with the drive terms.
@@ -1204,6 +1197,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost):
             )
             if self.fluid_rows:
                 self._accumulate_fluid(q_in, dt)
+            if self.granular_points:
+                self._accumulate_granular(q_in, dt)
             if drag:
                 launch(
                     "drag_force",
@@ -1914,6 +1909,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost):
             self.hard_previous_count.zero_()
         if not config.nonlinear_iterations:
             wp.copy(q_out, q_in, count=count)
+        if self.granular_points:
+            self._commit_granular(q_out, dt)
         # Report contact wrenches from the final solved pose before the velocity update.
         if contact.contact_force.size and (rigid or particle_contact):
             wrenches = self._view(contact.contact_force, wp.spatial_vector)
@@ -2705,6 +2702,13 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost):
                 count,
                 [self.fluid_diagonal, self.preconditioner_blocks],
             )
+        if self.granular_points:
+            launch(
+                "granular_12add_diagonal",
+                granular_kernels.add_diagonal,
+                count,
+                [self.granular_diagonal, self.preconditioner_blocks],
+            )
         if self._surface:
             self._surface_launch(
                 "surface_preconditioner",
@@ -3045,6 +3049,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost):
                     product,
                 ],
             )
+        if self.granular_points:
+            self._multiply_granular(self._dt, self.direction, product)
         if self._hard:
             self._hard_evaluate(self._contact, q_in, inverse_dt, direction=self.direction, product=self.contact_product)
         elif self._rigid and self._config.enable_collision_hessian_non_diagonal:
