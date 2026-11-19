@@ -446,3 +446,66 @@ def cloth_on_box(steps: int, options: dict[str, str]) -> Iterator[Any]:
     if options.get("reference"):
         solver.config.reference_linear_schedule = True
     yield from _run_contacts(model, solver, steps, enable_rigid_soft_full_surface_contact=not options.get("point"))
+
+
+@scene
+def cloth_self(steps: int, options: dict[str, str]) -> Iterator[Any]:
+    """A cloth hanging from one edge that folds onto itself on the ground, with self-collision (options: framework,
+    diagonal=1)."""
+    from newton.solvers import style3d  # noqa: PLC0415
+
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    newton.solvers.SolverStyle3D.register_custom_attributes(builder)
+    builder.add_ground_plane()
+    style3d.add_cloth_grid(
+        builder,
+        pos=wp.vec3(0.0, 0.0, 0.25),
+        rot=wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 1.2),
+        dim_x=10,
+        dim_y=10,
+        cell_x=0.03,
+        cell_y=0.03,
+        vel=wp.vec3(0.0, 0.3, -0.5),
+        mass=0.01,
+        particle_radius=0.006,
+        tri_aniso_ke=wp.vec3(2.0e3, 1.0e3, 3.0e2),
+        edge_aniso_ke=wp.vec3(1.0e-4),
+        edge_kd=0.0,
+    )
+    model = builder.finalize(device="cuda:0")
+    model.soft_contact_ke = 2.0e3
+    model.soft_contact_kd = 5.0
+    model.soft_contact_mu = 0.3
+    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver.config.nonlinear_solver = _framework(options)
+    solver.config.nonlinear_iterations = int(options.get("iterations", 4))
+    solver.config.linear_iterations = int(options.get("linear", 50))
+    solver.config.enable_self_collision = True
+    solver.config.self_collision_radius = 0.006
+    if options.get("diagonal"):
+        solver.config.enable_collision_hessian_non_diagonal = False
+    yield from _run_contacts(model, solver, steps)
+
+
+@scene
+def particle_pile(steps: int, options: dict[str, str]) -> Iterator[Any]:
+    """Free particles poured into a pile on the ground, with particle-particle self-collision (options:
+    framework, diagonal=1)."""
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    builder.add_ground_plane()
+    rng = np.random.default_rng(3)
+    for index in range(64):
+        position = rng.uniform((-0.05, -0.05, 0.02), (0.05, 0.05, 0.2))
+        builder.add_particle(pos=wp.vec3(*position), vel=wp.vec3(0.0), mass=0.01, radius=0.012)
+    model = builder.finalize(device="cuda:0")
+    model.soft_contact_ke = 2.0e3
+    model.soft_contact_kd = 2.0
+    model.soft_contact_mu = 0.3
+    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver.config.nonlinear_solver = _framework(options)
+    solver.config.nonlinear_iterations = int(options.get("iterations", 4))
+    solver.config.linear_iterations = int(options.get("linear", 50))
+    solver.config.enable_self_collision = True
+    if options.get("diagonal"):
+        solver.config.enable_collision_hessian_non_diagonal = False
+    yield from _run_contacts(model, solver, steps)

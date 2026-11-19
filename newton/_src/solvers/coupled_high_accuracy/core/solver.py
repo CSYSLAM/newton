@@ -40,11 +40,13 @@ from .kernels import joints as joint_kernels
 from .kernels import pcg as pcg_kernels
 from .kernels import rigid_contacts as rigid_contact_kernels
 from .kernels import rolling_contacts as rolling_contact_kernels
+from .kernels import self_collision as self_collision_kernels
 from .kernels import soft_contacts as soft_contact_kernels
 from .kernels import springs as spring_kernels
 from .kernels import step as step_kernels
 from .kernels import surface_contacts as surface_contact_kernels
 from .kernels import tetrahedra as tetrahedron_kernels
+from .self_collision import SelfCollisionHost
 from .templates import SparseRows
 
 __all__ = ["Solver"]
@@ -88,7 +90,7 @@ def _resolve_stream(stream: Any, device: wp.context.Device) -> wp.Stream | None:
     raise TypeError("Expected a CUDA stream integer, CUDA Stream Protocol object, or None")
 
 
-class Solver(BodyPrecompute):
+class Solver(BodyPrecompute, SelfCollisionHost):
     """Implicit Newton solver for particles, cloth, soft bodies and affine rigid bodies."""
 
     def __init__(self) -> None:
@@ -409,6 +411,7 @@ class Solver(BodyPrecompute):
             self.drive_qd = self._zeros(states, wp.float32)
         self.base_diagonal = self._zeros(count, wp.float32)
         self.diagonal = self._zeros(count, wp.float32)
+        self.collision_stiffness = self._zeros(count, wp.float32)
         self.scalar_inverse = self._zeros(count, wp.float32)
         self.blocks = self._zeros(count, wp.mat33)
         self.preconditioner_blocks = self._zeros(count, wp.mat33)
@@ -468,6 +471,8 @@ class Solver(BodyPrecompute):
         self.contact_product = self._zeros(count, wp.vec3)
         self.denominator = self._zeros(_MAX_LINEAR_ITERATIONS * self.group_count, wp.float32)
         self.numerator = self._zeros(_MAX_LINEAR_ITERATIONS * self.group_count, wp.float32)
+        # Built even with self-collision disabled, as natively.
+        self._precompute_self_particle_pairs()
         wp.synchronize_device(self.device)
         self._initialized = True
 
@@ -790,8 +795,8 @@ class Solver(BodyPrecompute):
         self._surface = surface
         self._qd_in = self._view(state_in.particle_qd, wp.vec3, count)
         self._contact_product = contact_product
-        if config.enable_self_collision and self.self_collision_primitives:
-            raise _not_ported("self-collision")
+        self_collision = bool(config.enable_self_collision and self.self_capacity)
+        self._self = self_collision
 
         pd = config.nonlinear_solver == NonlinearSolver.PD_NEWTON
         drag = bool(self.drag_count) and config.air_density > 0.0
@@ -813,6 +818,7 @@ class Solver(BodyPrecompute):
         block_matrix = not pd
         block = (
             block_matrix
+            or self_collision
             or surface
             or contact_product
             or self.bending_damping
@@ -832,7 +838,13 @@ class Solver(BodyPrecompute):
             and (not pd or not self.tetrahedron_count)
         )
         extra_product = (
-            surface or contact_product or self.bending_damping or bool(self.tetrahedron_count) or drag or body_tangent
+            self_collision
+            or surface
+            or contact_product
+            or self.bending_damping
+            or bool(self.tetrahedron_count)
+            or drag
+            or body_tangent
         )
         reference_pcg = config.reference_linear_schedule
         # Surface contact Jacobians are evaluated once per Newton iteration instead of once per CG iteration.
@@ -895,6 +907,9 @@ class Solver(BodyPrecompute):
         rows_total = count
         body_block_flag = bodies and block and config.affine_body_block_preconditioner
         self._contact_block = hard and body_block_flag and config.affine_body_contact_block_preconditioner
+        # Query the pre-prediction positions once per step, before the prediction mutates them.
+        if self_collision:
+            self._begin_self(q_in)
         if hard:
             self.reserve_rigid_contact_capacity(contact.max_count)
             launch(
@@ -1200,6 +1215,18 @@ class Solver(BodyPrecompute):
                 )
             if particle_contact:
                 self._soft_contact(contact, q_in, qd_in, inverse_dt, surface, force=self.rhs, scalar=self.diagonal)
+            if self_collision:
+                # Self penalties scale with this iteration's diagonal including the contact increments.
+                wp.copy(self.collision_stiffness, self.diagonal, count=count)
+                if surface:
+                    self._surface_launch(
+                        "surface_stiffness",
+                        surface_contact_kernels.add_surface_contact_stiffness_scale,
+                        contact,
+                        q_in,
+                        inverse_dt,
+                        [self.collision_stiffness],
+                    )
             # Force order: plain body springs (the kernel skips joint springs), distance constraints, AL joint
             # springs, point-lines, joint drive load, angular limits; finally SO(3).
             if self.body_spring_total:
@@ -1361,6 +1388,8 @@ class Solver(BodyPrecompute):
                     self._joint_armature(v, q_in, inverse_dt, empty_v, self.rhs, empty_m)
                 if self.angular_limits:
                     self._angular_limits(v, q_in, inverse_dt, empty_v, self.rhs, empty_m)
+            if self_collision:
+                self._accumulate_self(q_in)
             if so3 and so3_alpha > 0.0:
                 launch(
                     "so3_force",
@@ -2612,6 +2641,14 @@ class Solver(BodyPrecompute):
                     per_world,
                 ],
             )
+        # Self Hessians precede the fluid and surface contributions.
+        if self._self:
+            launch(
+                "self_preconditioner",
+                self_collision_kernels.add_hessian_diagonal,
+                count,
+                [self.self_diagonal, self.preconditioner_blocks],
+            )
         if self._surface:
             self._surface_launch(
                 "surface_preconditioner",
@@ -2905,6 +2942,8 @@ class Solver(BodyPrecompute):
                     per_world,
                 ],
             )
+        if self._self:
+            self._multiply_self()
         if self._cached_surface:
             launch(
                 "surface_tangent_cached",
