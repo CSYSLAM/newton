@@ -12,6 +12,7 @@ yet are rejected in ``initialize`` with ``NotImplementedError`` rather than sile
 from __future__ import annotations
 
 import math
+import os
 from collections import Counter
 from contextlib import nullcontext
 from typing import Any, ClassVar
@@ -77,6 +78,9 @@ _NUMPY_TYPES = {
 }
 
 
+_GRAPH_ENABLED = os.environ.get("NEWTON_CHA_GRAPH", "1") != "0"
+
+
 def _resolve_stream(stream: Any, device: wp.context.Device) -> wp.Stream | None:
     if stream is None:
         return None
@@ -99,6 +103,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
         self._config = Config()
         self._initialized = False
         self._launches: Counter[str] = Counter()
+        self._graphs: dict[tuple, tuple] = {}
+        self._graph_seen: set[tuple] = set()
         self._views: dict[tuple[int, int, Any], wp.array] = {}
         self._null: dict[Any, wp.array] = {}
         self.device: wp.context.Device | None = None
@@ -313,6 +319,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
         self._views.clear()
         self._null.clear()
         self._launches.clear()
+        self._graphs.clear()
+        self._graph_seen.clear()
         self._constructor_reads: dict[tuple[int, int, Any], np.ndarray] = {}
         self._initialized = False
         self.model = model._copy()
@@ -736,7 +744,78 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
         if not self._initialized:
             raise RuntimeError("initialize() must be called before step()")
         with self._stream_scope(stream):
+            key = self._graph_key(state_in, state_out, control, contact, dt)
+            if key is None:
+                self._step_on_stream(state_in, state_out, control, contact, dt)
+            else:
+                self._step_graph(key, state_in, state_out, control, contact, dt)
+
+    # A step issues hundreds of small launches whose Python overhead dominates; replaying a captured CUDA graph removes
+    # it. The graph bakes in every pointer, scalar and host branch, so it is keyed on all step inputs (buffer addresses,
+    # scalars, dt and the configuration) and on the addresses of the solver's own arrays, which grow lazily.
+    _GRAPH_CACHE_SIZE = 16
+
+    def _graph_key(self, state_in: State, state_out: State, control: Control, contact: Contact, dt: float):
+        if not _GRAPH_ENABLED or self.device is None or not self.device.is_cuda:
+            return None
+        # A caller capturing its own graph records the launches directly.
+        if self.device.is_capturing or not wp.is_mempool_enabled(self.device):
+            return None
+
+        def record(value: Any) -> tuple:
+            fields = []
+            for name, _kind, _default in value._FIELDS:
+                field = getattr(value, name)
+                fields.append((field.ptr, field.size) if isinstance(field, Span) else field)
+            return tuple(fields)
+
+        stream = wp.get_stream(self.device)
+        return (
+            record(state_in),
+            record(state_out),
+            record(control),
+            record(contact),
+            float(dt),
+            record(self._config),
+            stream.cuda_stream,
+        )
+
+    def _array_fingerprint(self) -> tuple:
+        # Only owned allocations: per-step views of the caller's buffers are covered by the key.
+        return tuple(
+            (name, value.ptr)
+            for name, value in vars(self).items()
+            if isinstance(value, wp.array) and value.deleter is not None
+        )
+
+    def _step_graph(self, key: tuple, state_in: State, state_out: State, control: Control, contact: Contact, dt: float):
+        cached = self._graphs.get(key)
+        if cached is not None:
+            graph, launches, fingerprint = cached
+            if fingerprint == self._array_fingerprint():
+                wp.capture_launch(graph)
+                self._launches.update(launches)
+                return
+            self._graphs.clear()
+        # The first step with a key runs eagerly: it validates the inputs, loads modules and grows lazy buffers.
+        if key not in self._graph_seen:
+            if len(self._graph_seen) >= 4 * self._GRAPH_CACHE_SIZE:
+                self._graph_seen.clear()
+            self._graph_seen.add(key)
             self._step_on_stream(state_in, state_out, control, contact, dt)
+            return
+        before = Counter(self._launches)
+        fingerprint = self._array_fingerprint()
+        with wp.ScopedCapture(device=self.device) as capture:
+            self._step_on_stream(state_in, state_out, control, contact, dt)
+        launches = Counter(self._launches)
+        launches.subtract(before)
+        # Capture records without executing; run this step from the graph.
+        wp.capture_launch(capture.graph)
+        if fingerprint == self._array_fingerprint():
+            if len(self._graphs) >= self._GRAPH_CACHE_SIZE:
+                self._graphs.clear()
+            self._graphs[key] = (capture.graph, +launches, fingerprint)
 
     def _step_on_stream(self, state_in: State, state_out: State, control: Control, contact: Contact, dt: float):
         model, config = self.model, self._config
