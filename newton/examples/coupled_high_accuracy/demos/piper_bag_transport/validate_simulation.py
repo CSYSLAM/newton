@@ -17,7 +17,8 @@ else:
     from run_artifacts import validate_sources
 
 DIRECTORY = Path(__file__).resolve().parent
-REPOSITORY = DIRECTORY.parents[1]
+# The Newton repository: export sources include the solver package outside the demo tree.
+REPOSITORY = DIRECTORY.parents[4]
 
 
 def require(condition, message):

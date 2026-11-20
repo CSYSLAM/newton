@@ -27,6 +27,10 @@ else:
 DIRECTORY = Path(__file__).resolve().parent
 
 
+# Sources span the demo and Newton's solver package, so they are recorded relative to the Newton repository.
+SOURCE_ROOT = Path(__file__).resolve().parents[5]
+
+
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -537,9 +541,12 @@ def main():
     )
     # The apple is downloaded into the Style3D Sim asset cache, so it is not a repository-relative source.
     sources = [Path(demo.__file__), Path(__file__)]
+    # The solver adapter and joint-drive effort live in Newton's coupled solver package.
+    import newton._src.solvers.coupled_high_accuracy as solver_package
+
     sources.extend(
-        demo.REPO_ROOT / "src/coupled_high_accuracy" / filename
-        for filename in ("newton_solver.py", "joint_drive_effort.py")
+        Path(solver_package.__file__).parent / filename
+        for filename in ("solver_coupled_high_accuracy.py", "joint_drive_effort.py")
     )
     for filename in ("piper_motion.py", "bag_pattern.py", "bag_bending.py", "film_uv.py", "motor_telemetry.py"):
         dependency = DIRECTORY / filename
@@ -552,7 +559,7 @@ def main():
         # The low cut lip defines the mouth plane; the same boundary continues up both U-shaped handles.
         motion_metadata["initial_mouth_height_m"] = float(mouth[:, 2].min())
     metadata = {
-        "source_sha256": {p.relative_to(demo.REPO_ROOT).as_posix(): sha256(p) for p in sources},
+        "source_sha256": {p.relative_to(SOURCE_ROOT).as_posix(): sha256(p) for p in sources},
         "physics_parameters": vars(args),
         "simulation": {
             "frames": args.num_frames,
@@ -607,7 +614,7 @@ def main():
     if errors:
         raise RuntimeError(f"{len(errors)} physics checks failed; inspect {metadata_path}")
     if example.telemetry is not None:
-        manifest = seal_run(metadata_path, demo.REPO_ROOT)
+        manifest = seal_run(metadata_path, SOURCE_ROOT)
         print(f"Sealed simulation run {manifest['run_id']}", flush=True)
 
 
