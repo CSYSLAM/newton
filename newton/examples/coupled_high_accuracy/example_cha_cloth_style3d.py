@@ -9,7 +9,7 @@ import newton.examples
 import newton.usd
 import newton.utils
 from newton import Mesh, ParticleFlags
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 from newton.solvers import style3d
 
 
@@ -124,7 +124,7 @@ class Example:
         self.model.set_gravity((0.0, 0.0, -9.81))
 
         if self.solver_type == "synreal":
-            self.solver = s3d.SolverCoupledHighAccuracy(self.model)
+            self.solver = cha.SolverCoupledHighAccuracy(self.model)
             self.solver.config.enable_self_collision = False
             self.solver.config.nonlinear_iterations = 20
             self.solver.config.linear_iterations = 10

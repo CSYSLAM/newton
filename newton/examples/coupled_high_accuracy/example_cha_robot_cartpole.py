@@ -16,7 +16,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 
 class Example:
@@ -58,7 +58,7 @@ class Example:
         if self.solver_type == "mujoco":
             self.solver = newton.solvers.SolverMuJoCo(self.model)
         else:
-            self.solver = s3d.SolverCoupledHighAccuracy(self.model)
+            self.solver = cha.SolverCoupledHighAccuracy(self.model)
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()

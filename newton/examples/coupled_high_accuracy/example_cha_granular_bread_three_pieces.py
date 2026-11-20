@@ -30,7 +30,7 @@ import newton
 import newton.examples
 from newton import ik
 from newton._src.solvers.coupled_high_accuracy.particle_surface import connected_components
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 # Resolved from the repository location so the example runs from any working directory.
 # Local link to the engineRTS asset directory (see README.md).
@@ -477,7 +477,7 @@ class Example:
         self._configure_drives()
         self.model.soft_contact_ke, self.model.soft_contact_kd = args.contact_stiffness, 2.0
         self.model.soft_contact_kf, self.model.soft_contact_mu = 1.0, args.board_friction
-        s3d.configure_granular(
+        cha.configure_granular(
             self.model,
             np.arange(first_particle, first_particle + self.bread_count, dtype=np.int32),
             contact_stiffness=args.grain_stiffness,
@@ -490,11 +490,11 @@ class Example:
             bond_radius=1.5 * SPACING,
             adhesion=0.0,
         )
-        self.solver = s3d.SolverCoupledHighAccuracy(self.model)
-        self.solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
-        self.solver.config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-        self.solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
-        self.solver.config.inertia_mode = s3d.InertiaMode.MIDPOINT_CAYLEY
+        self.solver = cha.SolverCoupledHighAccuracy(self.model)
+        self.solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+        self.solver.config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+        self.solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
+        self.solver.config.inertia_mode = cha.InertiaMode.MIDPOINT_CAYLEY
         self.solver.config.joint_constraint_primal_iterations = 2
         self.solver.config.nonlinear_iterations = args.iterations
         self.solver.config.linear_iterations = args.linear_iterations

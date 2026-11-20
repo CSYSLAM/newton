@@ -6,7 +6,7 @@ import pytest
 newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
 
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="The linear schedule requires CUDA")
 
@@ -48,12 +48,12 @@ def _run(reference: bool, capture: bool, reinitialize: bool = False):
         particle_radius=0.005,
     )
     model = builder.finalize(device="cuda:0")
-    solver = s3d.NewtonSolver(model)
+    solver = cha.NewtonSolver(model)
     config = solver.config
     config.reference_linear_schedule = reference
-    config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
-    config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-    config.inertia_mode = s3d.InertiaMode.NONE
+    config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+    config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+    config.inertia_mode = cha.InertiaMode.NONE
     config.nonlinear_iterations = 3
     config.linear_iterations = 60
     config.enable_self_collision = True

@@ -7,19 +7,19 @@ newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
 
 from newton._src.solvers.coupled_high_accuracy.solver_coupled_high_accuracy import NewtonSolver
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Affine block preconditioning requires CUDA")
-FRAMEWORKS = [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON]
+FRAMEWORKS = [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON]
 STATE_ARRAYS = ("particle_q", "particle_qd", "body_q", "body_qd")
 
 
 def _configure(solver, framework, *, enabled, nonlinear_iterations=3, linear_iterations=120):
     solver.config.nonlinear_solver = framework
     solver.config.affine_body_block_preconditioner = enabled
-    solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+    solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
     solver.config.constraint_alpha = 1.0
-    solver.config.inertia_mode = s3d.InertiaMode.NONE
+    solver.config.inertia_mode = cha.InertiaMode.NONE
     solver.config.nonlinear_iterations = nonlinear_iterations
     solver.config.linear_iterations = linear_iterations
 
@@ -37,7 +37,7 @@ def _assert_same_state(actual, expected):
 
 
 def _cable_model():
-    builder = s3d.ModelBuilder(gravity=wp.vec3(0.0))
+    builder = cha.ModelBuilder(gravity=wp.vec3(0.0))
     particle = builder.add_particle(pos=wp.vec3(1.0, 0.0, 0.0), vel=wp.vec3(0.0), mass=3.0)
     points = [wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 0.15), wp.vec3(0.03, 0.0, 0.3)]
     quaternions = newton.Rod(points).quaternions

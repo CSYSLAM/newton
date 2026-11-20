@@ -34,7 +34,7 @@ import newton.examples
 import newton.utils
 from newton import JointTargetMode
 from newton.examples.robot.onnx_policy_utils import validate_policy_io_shapes
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 from newton.solvers import style3d
 
 
@@ -438,7 +438,7 @@ class Example:
                 njmax=100,
             )
         else:
-            self.solver = s3d.SolverCoupledHighAccuracy(self.model)
+            self.solver = cha.SolverCoupledHighAccuracy(self.model)
             # Resolve the articulated constraints before feeding joint velocities back into the policy.
             # A ten-iteration linear solve leaves the small finger links with unstable angular motion.
             self.solver.config.constraint_alpha = 200

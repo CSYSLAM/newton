@@ -227,7 +227,7 @@ def test_cloth_shell_covers_scaled_visuals_without_changing_rigid_dynamics():
 def test_falling_sheet_stays_outside_visible_shell(use_shell):
     from scipy.spatial import ConvexHull
 
-    from newton.solvers import coupled_high_accuracy as s3d
+    from newton.solvers import coupled_high_accuracy as cha
     from newton.solvers import style3d
 
     module = load_example_module("example_cha_robot_cloth_policy")
@@ -260,7 +260,7 @@ def test_falling_sheet_stays_outside_visible_shell(use_shell):
         count = builder.particle_count
         model = builder.finalize()
         model.soft_contact_ke, model.soft_contact_kd = 2000.0, 20.0
-        solver = s3d.SolverCoupledHighAccuracy(model)
+        solver = cha.SolverCoupledHighAccuracy(model)
         solver.config.nonlinear_iterations, solver.config.linear_iterations = 5, 50
         solver.config.enable_collision_hessian_non_diagonal = True
         pipeline = newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True, soft_contact_gap=0.006)

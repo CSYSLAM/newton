@@ -7,7 +7,7 @@ newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
 
 from newton._src.solvers.coupled_high_accuracy.solver_coupled_high_accuracy import NewtonSolver
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Inertial refresh requires CUDA")
 
@@ -76,14 +76,14 @@ def test_affine_inertial_refresh_keeps_buffer_addresses_and_physical_particle_ma
     assert solver._particle_mass_diagonal.numpy()[0] == 3.0
 
 
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 def test_affine_inertial_refresh_reads_new_angular_metric_during_graph_replay(framework):
     model, body = _model()
     solver = NewtonSolver(model)
     solver.config.nonlinear_solver = framework
     solver.config.nonlinear_iterations = 5
     solver.config.linear_iterations = 30
-    solver.config.inertia_mode = s3d.InertiaMode.NONE
+    solver.config.inertia_mode = cha.InertiaMode.NONE
     state_in, state_out = model.state(), model.state()
     initial_q = state_in.particle_q.numpy()
     initial_body_q = state_in.body_q.numpy()
@@ -125,7 +125,7 @@ def test_affine_inertial_refresh_reads_new_angular_metric_during_graph_replay(fr
     reference.config.nonlinear_solver = framework
     reference.config.nonlinear_iterations = 5
     reference.config.linear_iterations = 30
-    reference.config.inertia_mode = s3d.InertiaMode.NONE
+    reference.config.inertia_mode = cha.InertiaMode.NONE
     reference_in, reference_out = reference_model.state(), reference_model.state()
     reference_in.body_f.assign(np.asarray([[0.0, 0.0, 0.0, 0.8, -0.4, 0.6]], dtype=np.float32))
     reference.step(reference_in, reference_out, reference_model.control(), None, 1.0e-3)
@@ -169,9 +169,9 @@ def test_affine_inertial_refresh_preserves_translation_only_proxy_mask():
     np.testing.assert_allclose(state_out.body_q.numpy()[body, 3:], [0.0, 0.0, 0.0, 1.0], atol=1.0e-7)
 
 
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 def test_eager_affine_inertial_refresh_rebuilds_spring_weights_after_com_edit(framework):
-    builder = s3d.ModelBuilder(gravity=wp.vec3(0.0))
+    builder = cha.ModelBuilder(gravity=wp.vec3(0.0))
     body = builder.add_link(
         mass=2.0,
         inertia=wp.mat33(0.4, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.6),
@@ -197,7 +197,7 @@ def test_eager_affine_inertial_refresh_rebuilds_spring_weights_after_com_edit(fr
     np.testing.assert_allclose(state_in.body_q.numpy()[body], initial[body], atol=2.0e-5)
 
 
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 @pytest.mark.parametrize("fixed_mass", [0.0, 2.0])
 def test_eager_affine_inertial_refresh_tracks_mobility_changes(framework, fixed_mass):
     model, body = _model()

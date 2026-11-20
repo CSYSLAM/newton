@@ -7,7 +7,7 @@ newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
 
 from newton._src.solvers.coupled_high_accuracy.cable_material import register_cable_attributes
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Coupled cables require CUDA")
 
@@ -15,7 +15,7 @@ pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Coupled cabl
 @pytest.mark.parametrize("capture", (False, True))
 @pytest.mark.parametrize("body_block", (False, True))
 def test_driven_slider_and_ball_anchored_cable(capture, body_block):
-    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+    builder = cha.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
     register_cable_attributes(builder)
     carriage = builder.add_link(mass=0.2, inertia=wp.mat33(np.eye(3) * 0.001), lock_inertia=True)
     slider = builder.add_joint_prismatic(
@@ -51,7 +51,7 @@ def test_driven_slider_and_ball_anchored_cable(capture, body_block):
     )
     builder.add_articulation([slider, *rods, anchor])
     model = builder.finalize(device="cuda:0")
-    solver = s3d.NewtonSolver(model)
+    solver = cha.NewtonSolver(model)
     solver.config.affine_body_block_preconditioner = body_block
     solver.config.nonlinear_iterations = 4
     solver.config.linear_iterations = 12

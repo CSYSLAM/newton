@@ -24,10 +24,11 @@ RULES = (
     (re.compile(r"^\s*sys\.path\.insert\(0, str\(Path\(__file__\)\.resolve\(\)\.parents\[\d\]\)\)\n", re.M), ""),
     (
         re.compile(r"^(\s*)import style3d_sim as s3d$", re.M),
-        r"\1from newton.solvers import coupled_high_accuracy as s3d",
+        r"\1from newton.solvers import coupled_high_accuracy as cha",
     ),
     (re.compile(r"^(\s*)from style3d_sim\.(\w+) import", re.M), rf"\1from {MODULE}.\2 import"),
-    (re.compile(r"\bs3d\.NewtonSolver\b"), "s3d.SolverCoupledHighAccuracy"),
+    (re.compile(r"\bs3d\.NewtonSolver\b"), "cha.SolverCoupledHighAccuracy"),
+    (re.compile(r"\bs3d\b"), "cha"),
     # Newton main removed the transitional flag; joint position targets always use the joint_q layout.
     (re.compile(r"^\s*newton\.use_coord_layout_targets = True\n", re.M), ""),
     (re.compile(r"(\w+) if newton\.use_coord_layout_targets else \w+"), r"\1"),

@@ -20,7 +20,7 @@ import newton.examples
 import newton.utils
 from newton import JointTargetMode
 from newton.selection import ArticulationView
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 
 def joint_scan_trajectory(initial, lower, upper, sample_rate=50.0, amplitude_degrees=30.0, speed_degrees=30.0):
@@ -151,14 +151,14 @@ class Example:
                 disable_contacts=True,
             )
         else:
-            self.solver = s3d.SolverCoupledHighAccuracy(
+            self.solver = cha.SolverCoupledHighAccuracy(
                 self.model,
                 joint_drive_armature=0.1,
             )
-            self.solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
-            self.solver.config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-            self.solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
-            self.solver.config.inertia_mode = s3d.InertiaMode.MIDPOINT_CAYLEY
+            self.solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+            self.solver.config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+            self.solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
+            self.solver.config.inertia_mode = cha.InertiaMode.MIDPOINT_CAYLEY
             self.solver.config.constraint_alpha = 200.0
             self.solver.config.joint_constraint_primal_iterations = 3
             self.solver.config.nonlinear_iterations = 5

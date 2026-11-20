@@ -19,7 +19,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 _DEFAULT_CHAIN_LENGTH = 32.583153
 _DEFAULT_LINK_COUNT = 163
@@ -136,7 +136,7 @@ class Example:
         self.upper_endpoint = np.array((0.0, 0.0, 0.55 * self.total_length), dtype=np.float64)
         nodes = nodes + self.upper_endpoint
 
-        builder = s3d.ModelBuilder(
+        builder = cha.ModelBuilder(
             up_axis=newton.Axis.Z,
             gravity=-9.81,
             affine_body_particle_radius=0.0,
@@ -261,11 +261,11 @@ class Example:
         builder.add_ground_plane()
 
         self.model = builder.finalize()
-        self.solver = s3d.SolverCoupledHighAccuracy(self.model)
-        self.solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
-        self.solver.config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-        self.solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
-        self.solver.config.inertia_mode = s3d.InertiaMode.MIDPOINT_CAYLEY
+        self.solver = cha.SolverCoupledHighAccuracy(self.model)
+        self.solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+        self.solver.config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+        self.solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
+        self.solver.config.inertia_mode = cha.InertiaMode.MIDPOINT_CAYLEY
         self.solver.config.joint_constraint_primal_iterations = 2
         self.solver.config.nonlinear_iterations = 30
         self.solver.config.linear_iterations = 20

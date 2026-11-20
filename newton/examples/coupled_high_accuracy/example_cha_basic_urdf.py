@@ -19,7 +19,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 
 class Example:
@@ -37,7 +37,7 @@ class Example:
 
         self.viewer = viewer
 
-        builder_type = s3d.ModelBuilder if self.solver_type == "synreal" else newton.ModelBuilder
+        builder_type = cha.ModelBuilder if self.solver_type == "synreal" else newton.ModelBuilder
         builder = builder_type(up_axis=newton.Axis.Z)
 
         quadruped = builder_type()
@@ -97,7 +97,7 @@ class Example:
                 iterations=2,
             )
         elif self.solver_type == "synreal":
-            self.solver = s3d.SolverCoupledHighAccuracy(self.model)
+            self.solver = cha.SolverCoupledHighAccuracy(self.model)
             self.solver.config.nonlinear_iterations = 20
             self.solver.config.linear_iterations = 2
         else:

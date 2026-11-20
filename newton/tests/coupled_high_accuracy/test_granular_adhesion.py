@@ -5,13 +5,13 @@ import pytest
 from test_granular import scene, set_positions
 
 wp = pytest.importorskip("warp")
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Native granular materials require CUDA")
 
 
 @pytest.mark.parametrize("adhesion", [0.0, 200.0])
-@pytest.mark.parametrize("method", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("method", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 def test_contact_creates_optional_adhesion_with_accepted_rest_length_and_conserves_momentum(adhesion, method):
     masses = np.array([0.5, 1.5], dtype=np.float32)
     _, solver, a, b = scene(

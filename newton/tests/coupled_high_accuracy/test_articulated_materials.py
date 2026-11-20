@@ -6,7 +6,7 @@ import pytest
 newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
 
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Articulated materials require CUDA")
 
@@ -86,11 +86,11 @@ def test_material_restoration_with_driven_joint(material, mode, capture, joint_k
         )
     material_count = builder.particle_count
     model = builder.finalize(device="cuda:0")
-    solver = s3d.NewtonSolver(model)
-    solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
-    solver.config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-    solver.config.nonlinear_solver = getattr(s3d.NonlinearSolver, mode)
-    solver.config.inertia_mode = s3d.InertiaMode.NONE
+    solver = cha.NewtonSolver(model)
+    solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+    solver.config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+    solver.config.nonlinear_solver = getattr(cha.NonlinearSolver, mode)
+    solver.config.inertia_mode = cha.InertiaMode.NONE
     solver.config.nonlinear_iterations = 4
     solver.config.linear_iterations = 20
     solver.config.enable_self_collision = True
@@ -136,7 +136,7 @@ def test_material_restoration_with_driven_joint(material, mode, capture, joint_k
         assert launches["drive_load"] > 0
     if material == "tetrahedron":
         # PD with tetrahedra and driven joints uses the general schedule rather than the coupled-material one.
-        solver.config.nonlinear_solver = s3d.NonlinearSolver.PD_NEWTON
+        solver.config.nonlinear_solver = cha.NonlinearSolver.PD_NEWTON
         solver.step(state, other, control, contacts, 0.002)
         wp.synchronize_device(model.device)
         for field in ("particle_q", "body_q"):

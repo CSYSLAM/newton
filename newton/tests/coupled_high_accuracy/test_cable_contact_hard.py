@@ -6,7 +6,7 @@ import pytest
 newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
 
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Hard contact simulation requires CUDA")
 
@@ -25,7 +25,7 @@ def _sphere_contact_scene(framework, history):
     builder.add_shape_sphere(body=body, radius=0.1)
     builder.add_ground_plane()
     model = builder.finalize(device="cuda:0")
-    solver = s3d.NewtonSolver(model)
+    solver = cha.NewtonSolver(model)
     # Coupled views can create a local collision pipeline after solver setup.
     # Its capacity must drive allocation even when the model estimate was zero.
     capacity = max(32, int(getattr(model, "rigid_contact_max", 0) or 0) + 7)
@@ -41,7 +41,7 @@ def _sphere_contact_scene(framework, history):
     return model, pipeline, solver, body
 
 
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 @pytest.mark.parametrize("history", [False, True])
 def test_hard_contact_matches_scalar_avbd_recurrence(framework, history):
     model, pipeline, solver, body = _sphere_contact_scene(framework, history)
@@ -82,7 +82,7 @@ def test_hard_contact_matches_scalar_avbd_recurrence(framework, history):
     np.testing.assert_allclose(observed, expected, rtol=0.0, atol=2.0e-7)
 
 
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 def test_hard_contact_history_survives_cuda_graph_replay(framework):
     def simulate(captured):
         model, pipeline, solver, body = _sphere_contact_scene(framework, True)
@@ -112,7 +112,7 @@ def test_hard_contact_history_survives_cuda_graph_replay(framework):
     np.testing.assert_allclose(simulate(True), simulate(False), rtol=0.0, atol=2.0e-7)
 
 
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 def test_separating_hard_contact_releases_saved_normal_support(framework):
     model, pipeline, solver, body = _sphere_contact_scene(framework, True)
     state_in, state_out = model.state(), model.state()

@@ -6,7 +6,7 @@ import pytest
 newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
 
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="NewtonSolver requires CUDA")
 
@@ -21,7 +21,7 @@ def run(coupling, nonlinear_solver):
     model.synreal_particle_mass_diagonal = wp.array([1.0, 1.0], dtype=wp.float32, device=model.device)
     model.synreal_particle_mass_non_diagonal_indices = wp.array([(0, 1)], dtype=wp.vec2i, device=model.device)
     model.synreal_particle_mass_non_diagonal_values = wp.array([coupling], dtype=wp.float32, device=model.device)
-    solver = s3d.NewtonSolver(model)
+    solver = cha.NewtonSolver(model)
     solver.config.nonlinear_solver = nonlinear_solver
     solver.config.nonlinear_iterations, solver.config.linear_iterations = 20, 40
     state, other = model.state(), model.state()
@@ -33,7 +33,7 @@ def run(coupling, nonlinear_solver):
     return state.particle_q.numpy(), state.particle_qd.numpy()
 
 
-@pytest.mark.parametrize("nonlinear_solver", (s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON))
+@pytest.mark.parametrize("nonlinear_solver", (cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON))
 def test_particle_only_mass_coupling_conserves_coupled_momentum(nonlinear_solver):
     coupling = 0.5
     positions, velocities = run(coupling, nonlinear_solver)

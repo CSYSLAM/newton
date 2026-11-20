@@ -26,7 +26,7 @@ from newton.examples.coupled_high_accuracy.trampoline.mesh import (
     load_trampoline_mesh,
     triangle_mesh_area,
 )
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 from newton.solvers import style3d
 
 
@@ -124,11 +124,11 @@ class Example:
         # authored articulation pose before constructing the solver.
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.model)
 
-        self.solver = s3d.SolverCoupledHighAccuracy(self.model)
-        self.solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SIX_SPRINGS
-        self.solver.config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-        self.solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
-        self.solver.config.inertia_mode = s3d.InertiaMode.MIDPOINT_CAYLEY
+        self.solver = cha.SolverCoupledHighAccuracy(self.model)
+        self.solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SIX_SPRINGS
+        self.solver.config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+        self.solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
+        self.solver.config.inertia_mode = cha.InertiaMode.MIDPOINT_CAYLEY
         self.solver.config.joint_constraint_primal_iterations = 2
         self.solver.config.nonlinear_iterations = 20
         self.solver.config.linear_iterations = 5

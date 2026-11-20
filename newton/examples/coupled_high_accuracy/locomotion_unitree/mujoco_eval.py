@@ -99,10 +99,10 @@ def load_run_config(checkpoint: Path) -> tuple[Any, dict[str, Any], Path]:
 def load_training_asset(spec: Any, asset_override: Path | None = None) -> tuple[Path, Any]:
     """Parse the exact USD and importer options used by UnitreeGo2Env."""
     import newton
-    from newton.solvers import coupled_high_accuracy as s3d
+    from newton.solvers import coupled_high_accuracy as cha
 
     asset = resolve_asset(spec, asset_override)
-    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z)
+    builder = cha.ModelBuilder(up_axis=newton.Axis.Z)
     builder.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
         armature=0.01,
         limit_ke=1.0e3,

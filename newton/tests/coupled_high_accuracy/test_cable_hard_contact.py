@@ -6,7 +6,7 @@ import pytest
 newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
 
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Rigid contact simulation requires CUDA")
 
@@ -34,7 +34,7 @@ def _overlapping_sphere(framework, *, history=False, upstream=False):
     if upstream:
         solver = newton.solvers.SolverVBD(model, iterations=1, rigid_contact_history=history)
     else:
-        solver = s3d.NewtonSolver(model)
+        solver = cha.NewtonSolver(model)
         solver.config.nonlinear_solver = framework
         solver.config.nonlinear_iterations = 1
         solver.config.rigid_contact_hard = True
@@ -42,7 +42,7 @@ def _overlapping_sphere(framework, *, history=False, upstream=False):
     return model, solver, pipeline, body
 
 
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 def test_hard_contact_initial_violation_matches_analytic_alpha(framework):
     # The engineRTS original also compared against Newton 1.7's SolverVBD hard contacts; Newton main replaced
     # that VBD contact model, so only the analytic first-solve value is checked here.
@@ -60,7 +60,7 @@ def test_hard_contact_initial_violation_matches_analytic_alpha(framework):
     np.testing.assert_allclose(heights, expected, atol=2.0e-8, rtol=0.0)
 
 
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 def test_matched_contact_history_accumulates_normal_support(framework):
     heights = []
     for history in (False, True):

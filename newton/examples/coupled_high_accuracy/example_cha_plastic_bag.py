@@ -16,7 +16,7 @@ import newton
 import newton.examples
 import newton.usd
 from newton import ParticleFlags
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 from newton.solvers import style3d
 
 ASSET = Path(__file__).resolve().parent / "assets" / "plastic_bag.usd"
@@ -115,7 +115,7 @@ class Example:
         self.model.soft_contact_mu = 0.25
         self.model.set_gravity((0.0, 0.0, -9.81))
         if args.solver == "synreal":
-            self.solver = s3d.SolverCoupledHighAccuracy(self.model)
+            self.solver = cha.SolverCoupledHighAccuracy(self.model)
             self.solver.config.nonlinear_iterations = args.iterations
             self.solver.config.linear_iterations = args.linear_iterations
             self.solver.config.enable_self_collision = True

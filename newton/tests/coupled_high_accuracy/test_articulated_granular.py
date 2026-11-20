@@ -7,7 +7,7 @@ import pytest
 
 newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = [
     pytest.mark.skipif(not wp.is_cuda_available(), reason="Articulated granular materials require CUDA"),
@@ -44,7 +44,7 @@ def scene(contact):
     model = builder.finalize(device="cuda:0")
     model.soft_contact_ke, model.soft_contact_kd = 1.0e4, 0.0
     model.soft_contact_kf, model.soft_contact_mu = 0.0, 0.0
-    s3d.configure_granular(
+    cha.configure_granular(
         model,
         [0, 1],
         contact_stiffness=1.0e-6,
@@ -54,10 +54,10 @@ def scene(contact):
         friction=0.0,
         max_compaction=0.0,
     )
-    solver = s3d.NewtonSolver(model)
-    solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
-    solver.config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-    solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
+    solver = cha.NewtonSolver(model)
+    solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+    solver.config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+    solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
     solver.config.nonlinear_iterations, solver.config.linear_iterations = 10, 40
     solver.config.enable_collision_hessian_non_diagonal = True
     a, b, control = model.state(), model.state(), model.control()
@@ -113,7 +113,7 @@ def test_grain_contact_reacts_on_driven_body_and_preserves_hinge(capture):
 def test_articulated_granular_runs_other_solver_configurations(option):
     _, solver, a, b, control, contacts, _ = scene(True)
     if option == "pd":
-        solver.config.nonlinear_solver = s3d.NonlinearSolver.PD_NEWTON
+        solver.config.nonlinear_solver = cha.NonlinearSolver.PD_NEWTON
     elif option == "body_block":
         solver.config.affine_body_block_preconditioner = True
     elif option == "hard_contact":
@@ -121,7 +121,7 @@ def test_articulated_granular_runs_other_solver_configurations(option):
     elif option == "self_collision":
         solver.config.enable_self_collision = True
     else:
-        solver.config.joint_constraint_mode = s3d.JointConstraintMode.PENALTY
+        solver.config.joint_constraint_mode = cha.JointConstraintMode.PENALTY
     solver.step(a, b, control, contacts, 1.0 / 240.0)
     wp.synchronize_device("cuda:0")
     assert np.isfinite(b.particle_q.numpy()).all()

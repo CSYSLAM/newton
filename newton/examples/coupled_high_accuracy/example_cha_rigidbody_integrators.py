@@ -11,7 +11,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.coupled_high_accuracy.rigid_body_dynamics import integrate_rigid_body
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 from newton.viewer import ViewerGL
 
 FPS = 60
@@ -30,25 +30,25 @@ BODY_SPACING = 2.8
 MODE_SPECS = (
     (
         "Explicit Euler",
-        s3d.InertiaMode.EXPLICIT_EULER,
+        cha.InertiaMode.EXPLICIT_EULER,
         wp.vec3(0.82, 0.20, 0.12),
         wp.vec3(1.00, 0.58, 0.12),
     ),
     (
         "Implicit Euler",
-        s3d.InertiaMode.IMPLICIT_EULER,
+        cha.InertiaMode.IMPLICIT_EULER,
         wp.vec3(0.10, 0.38, 0.78),
         wp.vec3(0.12, 0.72, 0.92),
     ),
     (
         "LIE-group midpoint",
-        s3d.InertiaMode.LIE_GROUP_MIDPOINT,
+        cha.InertiaMode.LIE_GROUP_MIDPOINT,
         wp.vec3(0.12, 0.58, 0.26),
         wp.vec3(0.58, 0.82, 0.18),
     ),
     (
         "Midpoint Cayley",
-        s3d.InertiaMode.MIDPOINT_CAYLEY,
+        cha.InertiaMode.MIDPOINT_CAYLEY,
         wp.vec3(0.48, 0.22, 0.68),
         wp.vec3(0.88, 0.38, 0.64),
     ),

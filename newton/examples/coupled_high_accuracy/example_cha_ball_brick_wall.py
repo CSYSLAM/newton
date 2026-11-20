@@ -96,12 +96,12 @@ class Example:
 
         self.model = builder.finalize()
         if args.solver == "synreal":
-            from newton.solvers import coupled_high_accuracy as s3d
+            from newton.solvers import coupled_high_accuracy as cha
 
-            self.solver = s3d.SolverCoupledHighAccuracy(self.model)
-            self.solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
-            self.solver.config.inertia_mode = s3d.InertiaMode.MIDPOINT_CAYLEY
-            self.solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
+            self.solver = cha.SolverCoupledHighAccuracy(self.model)
+            self.solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+            self.solver.config.inertia_mode = cha.InertiaMode.MIDPOINT_CAYLEY
+            self.solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
             self.solver.config.nonlinear_iterations = 5
             self.solver.config.linear_iterations = 50
         else:

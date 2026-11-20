@@ -5,7 +5,7 @@ import pytest
 
 newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Native granular materials require CUDA")
 
@@ -18,7 +18,7 @@ def scene(
     indices=None,
     radius=0.05,
     worlds=None,
-    method=s3d.NonlinearSolver.NEWTON,
+    method=cha.NonlinearSolver.NEWTON,
     iterations=1,
     **material,
 ):
@@ -35,8 +35,8 @@ def scene(
     if worlds is not None:
         model.particle_world.assign(np.asarray(worlds, dtype=np.int32))
     options = {"cohesion": 0.0, "friction": 0.0, **material}
-    s3d.configure_granular(model, np.arange(len(points), dtype=np.int32) if indices is None else indices, **options)
-    solver = s3d.NewtonSolver(model)
+    cha.configure_granular(model, np.arange(len(points), dtype=np.int32) if indices is None else indices, **options)
+    solver = cha.NewtonSolver(model)
     solver.config.nonlinear_solver = method
     solver.config.nonlinear_iterations = iterations
     solver.config.linear_iterations = 80
@@ -50,7 +50,7 @@ def set_positions(state, points):
     state.particle_qd.zero_()
 
 
-@pytest.mark.parametrize("method", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("method", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 @pytest.mark.parametrize("self_collision", [False, True])
 def test_contact_step_matches_implicit_pair_spring_without_duplicate_collision(method, self_collision):
     points = np.array([[-0.035, 0.0, 0.0], [0.035, 0.0, 0.0]], dtype=np.float32)
@@ -86,7 +86,7 @@ def test_friction_reduces_slip_and_preserves_linear_momentum():
     )
 
 
-@pytest.mark.parametrize("method", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("method", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 def test_dense_contacts_beyond_neighbor_cache_match_full_pair_matrix(method):
     grid = np.stack(np.meshgrid(np.arange(5), np.arange(4), np.arange(2), indexing="ij"), axis=-1)
     points = (grid.reshape(-1, 3) * 0.015).astype(np.float32)
@@ -183,9 +183,9 @@ def test_compaction_persists_after_unloading_and_does_not_depend_on_newton_itera
 def test_granular_selection_keeps_contact_with_other_materials(other_material):
     model, _, a, b = scene([[0, 0, 0], [0.03, 0, 0]], indices=[0])
     if other_material == "fluid":
-        s3d.configure_fluid(model, [1], smoothing_radius=0.1, bulk_modulus=0.0)
-    solver = s3d.NewtonSolver(model)
-    solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
+        cha.configure_fluid(model, [1], smoothing_radius=0.1, bulk_modulus=0.0)
+    solver = cha.NewtonSolver(model)
+    solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
     solver.config.nonlinear_iterations = 1
     solver.config.linear_iterations = 80
     solver.config.enable_self_collision = True
@@ -211,7 +211,7 @@ def test_replicated_native_worlds_get_independent_granular_response():
 
     results = []
     for world_count in (1, 2):
-        contact = ContactScene("particle_pair", True, s3d.NonlinearSolver.NEWTON, world_count=world_count)
+        contact = ContactScene("particle_pair", True, cha.NonlinearSolver.NEWTON, world_count=world_count)
         contact.model.granular_particle_count = 2
         contact.model.granular_particle_indices = contact.model.collision_particle_indices
         contact.model.granular_cohesion = 0.0
@@ -239,11 +239,11 @@ def test_world_reordering_remaps_grains_and_bonds_around_appended_rigid_proxies(
             )
             builder.end_world()
         model = builder.finalize(device="cuda:0")
-        s3d.configure_granular(model, np.arange(model.particle_count), bond_radius=0.21)
+        cha.configure_granular(model, np.arange(model.particle_count), bond_radius=0.21)
         np.testing.assert_array_equal(
             model.synreal_granular_bond_indices.numpy(), np.arange(2 * world_count).reshape(-1, 2)
         )
-        solver = s3d.NewtonSolver(model)
+        solver = cha.NewtonSolver(model)
         expected_pairs = np.arange(world_count)[:, None] * 6 + np.array([0, 1])
         grains = model.synreal_granular_particle_indices.numpy()
         bonds = model.synreal_granular_bond_indices.numpy()
@@ -255,7 +255,7 @@ def test_world_reordering_remaps_grains_and_bonds_around_appended_rigid_proxies(
         assert not np.intersect1d(grains, solver._affine_body_indices.numpy()).size
         assert solver.synreal_model.granular_particle_indices.ptr == model.synreal_granular_particle_indices.ptr
         assert solver.synreal_model.granular_bond_indices.ptr == model.synreal_granular_bond_indices.ptr
-        solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
+        solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
         solver.config.nonlinear_iterations = 1
         solver.config.linear_iterations = 80
         solver.config.enable_self_collision = False
@@ -273,7 +273,7 @@ def test_world_reordering_remaps_grains_and_bonds_around_appended_rigid_proxies(
 def test_granular_particle_transfers_contact_force_to_cloth_face():
     from test_self_collision_coupling import ContactScene
 
-    contact = ContactScene("particle_vertex_face", True, s3d.NonlinearSolver.NEWTON)
+    contact = ContactScene("particle_vertex_face", True, cha.NonlinearSolver.NEWTON)
     contact.model.granular_particle_count = 1
     contact.model.granular_particle_indices = contact.model.collision_particle_indices
     contact.model.granular_cohesion = 0.0
@@ -293,7 +293,7 @@ def test_material_selection_rejects_invalid_indices(indices):
     builder.add_particle((0, 0, 0), (0, 0, 0), 1.0)
     model = builder.finalize(device="cuda:0")
     with pytest.raises(ValueError, match="indices"):
-        s3d.configure_granular(model, indices)
+        cha.configure_granular(model, indices)
 
 
 @pytest.mark.parametrize(
@@ -315,7 +315,7 @@ def test_material_rejects_invalid_parameters(invalid):
     builder.add_particle((0, 0, 0), (0, 0, 0), 1.0)
     model = builder.finalize(device="cuda:0")
     with pytest.raises(ValueError):
-        s3d.configure_granular(model, [0], **invalid)
+        cha.configure_granular(model, [0], **invalid)
 
 
 def test_granular_cannot_share_elastic_particles():
@@ -324,16 +324,16 @@ def test_granular_cannot_share_elastic_particles():
     builder.add_particle((0.1, 0, 0), (0, 0, 0), 1.0)
     builder.add_spring(0, 1, ke=100.0, kd=0.0, control=0.0)
     model = builder.finalize(device="cuda:0")
-    s3d.configure_granular(model, [0], cohesion=0.0)
+    cha.configure_granular(model, [0], cohesion=0.0)
     with pytest.raises(ValueError, match="elastic"):
-        s3d.NewtonSolver(model)
+        cha.NewtonSolver(model)
 
 
 def test_fluid_and_granular_selections_cannot_overlap():
     model, _, _, _ = scene([[0, 0, 0]], cohesion=0.0)
     with pytest.raises(ValueError, match="overlap|fluid|granular"):
-        s3d.configure_fluid(model, [0], smoothing_radius=0.1)
-        s3d.NewtonSolver(model)
+        cha.configure_fluid(model, [0], smoothing_radius=0.1)
+        cha.NewtonSolver(model)
 
 
 def test_captured_steps_preserve_the_same_bond_history_as_uncaptured_steps():

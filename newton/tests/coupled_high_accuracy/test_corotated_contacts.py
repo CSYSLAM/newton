@@ -6,7 +6,7 @@ import pytest
 newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
 
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Native contacts require CUDA")
 
@@ -14,16 +14,16 @@ pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Native conta
 @pytest.mark.parametrize("capture", (False, True))
 @pytest.mark.parametrize("non_diagonal", (False, True))
 def test_free_corotated_body_responds_to_ground_contact(capture, non_diagonal):
-    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+    builder = cha.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
     builder.default_shape_cfg.mu = 0.0
     body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.10), wp.quat_identity()))
     builder.add_shape_sphere(body, radius=0.15)
     builder.add_ground_plane()
     model = builder.finalize(device="cuda:0")
-    solver = s3d.NewtonSolver(model)
-    solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.CO_ROTATED
-    solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
-    solver.config.inertia_mode = s3d.InertiaMode.MIDPOINT_CAYLEY
+    solver = cha.NewtonSolver(model)
+    solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.CO_ROTATED
+    solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
+    solver.config.inertia_mode = cha.InertiaMode.MIDPOINT_CAYLEY
     solver.config.nonlinear_iterations = 10
     solver.config.linear_iterations = 20
     solver.config.enable_collision_hessian_non_diagonal = non_diagonal

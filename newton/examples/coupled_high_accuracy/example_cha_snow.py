@@ -21,7 +21,7 @@ import newton
 import newton.examples
 from newton._src.solvers.coupled_high_accuracy.granular import _initial_bonds
 from newton.examples.coupled_high_accuracy.snow_interaction import SnowballPicking
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 FRAME_DT = 1.0 / 60.0
 SNOW_DENSITY = 250.0
@@ -110,7 +110,7 @@ class Example:
             np.arange(self.seed_count, dtype=np.int32),
             1.5 * self.spacing,
         )
-        s3d.configure_granular(
+        cha.configure_granular(
             self.model,
             np.arange(self.granular_count, dtype=np.int32),
             contact_stiffness=20000.0,
@@ -126,8 +126,8 @@ class Example:
             bond_formation_speed=3.0,
             max_dynamic_bonds=12,
         )
-        self.solver = s3d.SolverCoupledHighAccuracy(self.model)
-        self.solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
+        self.solver = cha.SolverCoupledHighAccuracy(self.model)
+        self.solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
         self.solver.config.nonlinear_iterations, self.solver.config.linear_iterations = (
             args.iterations,
             args.linear_iterations,

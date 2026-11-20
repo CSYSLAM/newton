@@ -17,7 +17,7 @@ import newton
 import newton.examples
 import newton.utils
 from newton import JointTargetMode
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 
 class Example:
@@ -79,11 +79,11 @@ class Example:
                 use_mujoco_contacts=use_mujoco_contacts,
             )
         else:
-            self.solver = s3d.SolverCoupledHighAccuracy(self.model)
-            self.solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
-            self.solver.config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-            self.solver.config.nonlinear_solver = s3d.NonlinearSolver.PD_NEWTON
-            self.solver.config.inertia_mode = s3d.InertiaMode.MIDPOINT_CAYLEY
+            self.solver = cha.SolverCoupledHighAccuracy(self.model)
+            self.solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+            self.solver.config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+            self.solver.config.nonlinear_solver = cha.NonlinearSolver.PD_NEWTON
+            self.solver.config.inertia_mode = cha.InertiaMode.MIDPOINT_CAYLEY
             self.solver.config.joint_constraint_primal_iterations = 5
             self.solver.config.nonlinear_iterations = 20
             self.solver.config.linear_iterations = 10

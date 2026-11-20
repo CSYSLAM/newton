@@ -146,14 +146,14 @@ class Example:
                 nconmax=256,
             )
         else:
-            from newton.solvers import coupled_high_accuracy as s3d
+            from newton.solvers import coupled_high_accuracy as cha
 
-            self.solver = s3d.SolverCoupledHighAccuracy(self.model)
+            self.solver = cha.SolverCoupledHighAccuracy(self.model)
             config = self.solver.config
-            config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
-            config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-            config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
-            config.inertia_mode = s3d.InertiaMode.MIDPOINT_CAYLEY
+            config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+            config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+            config.nonlinear_solver = cha.NonlinearSolver.NEWTON
+            config.inertia_mode = cha.InertiaMode.MIDPOINT_CAYLEY
             config.joint_constraint_primal_iterations = 3
             config.constraint_alpha = 200.0
             config.nonlinear_iterations = 5

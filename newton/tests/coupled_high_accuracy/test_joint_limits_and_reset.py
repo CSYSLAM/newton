@@ -8,14 +8,14 @@ wp = pytest.importorskip("warp")
 
 from test_joint_mujoco_semantics import _advance, _make_scene
 
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="NewtonSolver requires CUDA")
 
 
 @pytest.mark.parametrize("sign", [-1, 1], ids=["lower", "upper"])
 @pytest.mark.parametrize("floating_parent", [False, True])
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 def test_angular_stop_reacts_without_motor_and_preserves_momentum(sign, floating_parent, framework):
     scene = _make_scene(
         "revolute",
@@ -39,7 +39,7 @@ def test_angular_stop_reacts_without_motor_and_preserves_momentum(sign, floating
 
 
 @pytest.mark.parametrize("q, velocity", [(0.0, 0.3), (0.22, -1.0), (-0.22, 1.0)])
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 def test_angular_stop_is_inactive_inside_range_and_does_not_attract(q, velocity, framework):
     options = dict(initial_position=q, initial_velocity=velocity)
     bounded = _make_scene(
@@ -75,7 +75,7 @@ def test_invalid_angular_stop_parameters_are_rejected(options, message):
     for name, value in options.items():
         getattr(model, name).fill_(value)
     with pytest.raises(ValueError, match=message):
-        s3d.NewtonSolver(model)
+        cha.NewtonSolver(model)
 
 
 def _replicated_scene(upper_limits, *, initial_q=0.0, initial_qd=0.0):
@@ -100,10 +100,10 @@ def _replicated_scene(upper_limits, *, initial_q=0.0, initial_qd=0.0):
     builder.replicate(source, len(upper_limits))
     builder.joint_limit_upper[:] = list(upper_limits)
     model = builder.finalize(device="cuda:0")
-    solver = s3d.NewtonSolver(model, joint_damping=0.0, joint_drive_armature=0.0)
-    solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
-    solver.config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-    solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
+    solver = cha.NewtonSolver(model, joint_damping=0.0, joint_drive_armature=0.0)
+    solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+    solver.config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+    solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
     solver.config.nonlinear_iterations = 10
     solver.config.linear_iterations = 60
     states = [model.state(), model.state()]

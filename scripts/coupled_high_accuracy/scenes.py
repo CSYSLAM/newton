@@ -12,7 +12,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 SCENES: dict[str, Callable[[int, dict[str, str]], Iterator[Any]]] = {}
 # Set by compare_backends.py --replay: recorded states every step restarts from (one-step comparison).
@@ -35,7 +35,7 @@ def scene(function):
 
 
 def _framework(options: dict[str, str]):
-    return s3d.NonlinearSolver.PD_NEWTON if options.get("framework") == "pd" else s3d.NonlinearSolver.NEWTON
+    return cha.NonlinearSolver.PD_NEWTON if options.get("framework") == "pd" else cha.NonlinearSolver.NEWTON
 
 
 def _run(model, solver, steps: int, dt: float = 1.0 / 240.0) -> Iterator[Any]:
@@ -59,7 +59,7 @@ def particles(steps: int, options: dict[str, str]) -> Iterator[Any]:
             builder.add_particle(pos=wp.vec3(float(index), float(world), 1.0), vel=wp.vec3(0.1, 0.0, 0.5), mass=mass)
         builder.end_world()
     model = builder.finalize(device="cuda:0")
-    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver = cha.SolverCoupledHighAccuracy(model)
     solver.config.nonlinear_solver = _framework(options)
     solver.config.nonlinear_iterations = int(options.get("iterations", 3))
     solver.config.linear_iterations = int(options.get("linear", 20))
@@ -92,7 +92,7 @@ def springs(steps: int, options: dict[str, str]) -> Iterator[Any]:
                     builder.add_spring(index, index + n + 1, 200.0, 0.0, 0)
         builder.end_world()
     model = builder.finalize(device="cuda:0")
-    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver = cha.SolverCoupledHighAccuracy(model)
     solver.config.nonlinear_solver = _framework(options)
     solver.config.nonlinear_iterations = int(options.get("iterations", 4))
     solver.config.linear_iterations = int(options.get("linear", 50))
@@ -143,7 +143,7 @@ def _cloth_model(options: dict[str, str]):
 def cloth(steps: int, options: dict[str, str]) -> Iterator[Any]:
     """Pinned Style3D cloth grid (options: framework=pd, bend=, bend_damping=, drag=, springs=1, worlds=N)."""
     model = _cloth_model(options)
-    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver = cha.SolverCoupledHighAccuracy(model)
     solver.config.nonlinear_solver = _framework(options)
     solver.config.nonlinear_iterations = int(options.get("iterations", 4))
     solver.config.linear_iterations = int(options.get("linear", 50))
@@ -174,7 +174,7 @@ def tetrahedra(steps: int, options: dict[str, str]) -> Iterator[Any]:
         )
         builder.end_world()
     model = builder.finalize(device="cuda:0")
-    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver = cha.SolverCoupledHighAccuracy(model)
     solver.config.nonlinear_solver = _framework(options)
     solver.config.nonlinear_iterations = int(options.get("iterations", 4))
     solver.config.linear_iterations = int(options.get("linear", 50))
@@ -182,17 +182,17 @@ def tetrahedra(steps: int, options: dict[str, str]) -> Iterator[Any]:
 
 
 def _body_solver(model, options: dict[str, str]):
-    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver = cha.SolverCoupledHighAccuracy(model)
     solver.config.nonlinear_solver = _framework(options)
     solver.config.nonlinear_iterations = int(options.get("iterations", 4))
     solver.config.linear_iterations = int(options.get("linear", 50))
     rigidity = options.get("rigidity")
     if rigidity:
-        solver.config.affine_body_rigidity_model = getattr(s3d.AffineBodyRigidityModel, rigidity.upper())
+        solver.config.affine_body_rigidity_model = getattr(cha.AffineBodyRigidityModel, rigidity.upper())
     if options.get("body_block"):
         solver.config.affine_body_block_preconditioner = True
     if options.get("penalty"):
-        solver.config.joint_constraint_mode = s3d.JointConstraintMode.PENALTY
+        solver.config.joint_constraint_mode = cha.JointConstraintMode.PENALTY
     return solver
 
 
@@ -215,7 +215,7 @@ def _run_bodies(model, solver, steps: int, dt: float = 1.0 / 240.0, control=None
 def spinning_body(steps: int, options: dict[str, str]) -> Iterator[Any]:
     """A free affine body with anisotropic inertia spinning under gravity (options: framework, rigidity,
     body_block=1)."""
-    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z)
+    builder = cha.ModelBuilder(up_axis=newton.Axis.Z)
     inertia = wp.mat33(0.04, 0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 0.07)
     body = builder.add_body(
         xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()), mass=1.5, inertia=inertia, lock_inertia=True
@@ -232,7 +232,7 @@ def spinning_body(steps: int, options: dict[str, str]) -> Iterator[Any]:
 def pendulum(steps: int, options: dict[str, str]) -> Iterator[Any]:
     """A three-link revolute pendulum, the first joint driven to a target (options: framework, rigidity,
     body_block=1, penalty=1, prismatic=1, armature=, limit=1)."""
-    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z)
+    builder = cha.ModelBuilder(up_axis=newton.Axis.Z)
     inertia = wp.mat33(0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.002)
     parent = -1
     armature = float(options.get("armature", 0.0))
@@ -327,7 +327,7 @@ def cloth_ground(steps: int, options: dict[str, str]) -> Iterator[Any]:
     model.soft_contact_ke = 2.0e3
     model.soft_contact_kd = 5.0
     model.soft_contact_mu = float(options.get("friction", 0.5))
-    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver = cha.SolverCoupledHighAccuracy(model)
     solver.config.nonlinear_solver = _framework(options)
     solver.config.nonlinear_iterations = int(options.get("iterations", 4))
     solver.config.linear_iterations = int(options.get("linear", 50))
@@ -341,7 +341,7 @@ def cloth_ground(steps: int, options: dict[str, str]) -> Iterator[Any]:
 @scene
 def particles_on_body(steps: int, options: dict[str, str]) -> Iterator[Any]:
     """Particles hitting a sphere and a box attached to a free affine body, without gravity (options: framework)."""
-    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+    builder = cha.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
     _shape_friction(builder, options)
     body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.5), wp.quat_identity()))
     builder.add_shape_sphere(body=body, radius=0.1)
@@ -369,7 +369,7 @@ def _shape_friction(builder, options: dict[str, str]) -> None:
 def boxes_on_ground(steps: int, options: dict[str, str]) -> Iterator[Any]:
     """Two boxes and a sphere body dropped on the ground and on each other (options: framework, rolling=,
     epsilon=, body_block=1, diagonal=1)."""
-    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z)
+    builder = cha.ModelBuilder(up_axis=newton.Axis.Z)
     _shape_friction(builder, options)
     builder.default_shape_cfg.ke = 2.0e4
     builder.default_shape_cfg.kd = 20.0
@@ -413,7 +413,7 @@ def cloth_on_box(steps: int, options: dict[str, str]) -> Iterator[Any]:
     rolling=, hard=1, reference=1, point=1 for particle-only contacts)."""
     from newton.solvers import style3d  # noqa: PLC0415
 
-    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z)
+    builder = cha.ModelBuilder(up_axis=newton.Axis.Z)
     newton.solvers.SolverStyle3D.register_custom_attributes(builder)
     _shape_friction(builder, options)
     builder.default_shape_cfg.ke = 1.0e4
@@ -476,7 +476,7 @@ def cloth_self(steps: int, options: dict[str, str]) -> Iterator[Any]:
     model.soft_contact_ke = 2.0e3
     model.soft_contact_kd = 5.0
     model.soft_contact_mu = 0.3
-    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver = cha.SolverCoupledHighAccuracy(model)
     solver.config.nonlinear_solver = _framework(options)
     solver.config.nonlinear_iterations = int(options.get("iterations", 4))
     solver.config.linear_iterations = int(options.get("linear", 50))
@@ -501,7 +501,7 @@ def particle_pile(steps: int, options: dict[str, str]) -> Iterator[Any]:
     model.soft_contact_ke = 2.0e3
     model.soft_contact_kd = 2.0
     model.soft_contact_mu = 0.3
-    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver = cha.SolverCoupledHighAccuracy(model)
     solver.config.nonlinear_solver = _framework(options)
     solver.config.nonlinear_iterations = int(options.get("iterations", 4))
     solver.config.linear_iterations = int(options.get("linear", 50))
@@ -517,7 +517,7 @@ def cable(steps: int, options: dict[str, str]) -> Iterator[Any]:
     ramp=1 for penalty ramping, damping=)."""
     from newton._src.solvers.coupled_high_accuracy.cable_material import register_cable_attributes  # noqa: PLC0415
 
-    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z)
+    builder = cha.ModelBuilder(up_axis=newton.Axis.Z)
     register_cable_attributes(builder)
     points = [wp.vec3(0.04 * k, 0.01 * k * k, 1.0 - 0.002 * k * k) for k in range(9)]
     damping = float(options.get("damping", 0.0))
@@ -568,7 +568,7 @@ def fluid_drop(steps: int, options: dict[str, str]) -> Iterator[Any]:
     floor = np.stack(np.meshgrid(np.arange(-3, side + 3), np.arange(-3, side + 3), indexing="ij"), -1).reshape(-1, 2)
     boundary = np.column_stack([floor * spacing, np.zeros(len(floor))]).astype(np.float32)
     smoothing = spacing * (3.0 if options.get("overflow") else 2.0)
-    s3d.configure_fluid(
+    cha.configure_fluid(
         model,
         np.arange(len(points), dtype=np.int32),
         smoothing_radius=smoothing,
@@ -578,7 +578,7 @@ def fluid_drop(steps: int, options: dict[str, str]) -> Iterator[Any]:
         boundary_positions=boundary,
         boundary_volumes=np.full(len(boundary), spacing**3, dtype=np.float32),
     )
-    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver = cha.SolverCoupledHighAccuracy(model)
     solver.config.nonlinear_solver = _framework(options)
     solver.config.nonlinear_iterations = int(options.get("iterations", 4))
     solver.config.linear_iterations = int(options.get("linear", 50))
@@ -607,7 +607,7 @@ def granular_heap(steps: int, options: dict[str, str]) -> Iterator[Any]:
     builder.add_ground_plane()
     model = builder.finalize(device="cuda:0")
     adhesion = 50.0 if options.get("adhesion") else 0.0
-    s3d.configure_granular(
+    cha.configure_granular(
         model,
         np.arange(len(points), dtype=np.int32),
         contact_stiffness=2000.0,
@@ -617,7 +617,7 @@ def granular_heap(steps: int, options: dict[str, str]) -> Iterator[Any]:
         bond_formation_speed=1.0,
         max_dynamic_bonds=6,
     )
-    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver = cha.SolverCoupledHighAccuracy(model)
     solver.config.nonlinear_solver = _framework(options)
     solver.config.nonlinear_iterations = int(options.get("iterations", 4))
     solver.config.linear_iterations = int(options.get("linear", 50))

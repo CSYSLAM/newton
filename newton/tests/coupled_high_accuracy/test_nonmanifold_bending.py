@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from newton.examples.coupled_high_accuracy.demos.piper_bag_transport.bag_bending import rebuild_bag_bending
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 wp = pytest.importorskip("warp")
 newton = pytest.importorskip("newton")
@@ -69,7 +69,7 @@ def test_welded_seam_preserves_every_developed_sheet_face(separate_plies: bool) 
 def test_collision_edges_are_unique_while_sheet_hinges_remain_distinct() -> None:
     builder, _ = _welded_sheets()
     model = builder.finalize(device="cuda:0")
-    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver = cha.SolverCoupledHighAccuracy(model)
     assert solver.synreal_model.edge_count == 10
     assert solver.synreal_model.edge_indices.ptr == model.edge_indices.ptr
     assert solver.synreal_model.collision_edge_count == 9
@@ -78,7 +78,7 @@ def test_collision_edges_are_unique_while_sheet_hinges_remain_distinct() -> None
 
 
 @pytest.mark.skipif(not wp.is_cuda_available(), reason="Native solver requires CUDA")
-@pytest.mark.parametrize("nonlinear_solver", (s3d.NonlinearSolver.PD_NEWTON, s3d.NonlinearSolver.NEWTON))
+@pytest.mark.parametrize("nonlinear_solver", (cha.NonlinearSolver.PD_NEWTON, cha.NonlinearSolver.NEWTON))
 @pytest.mark.parametrize("collapsed_row", (False, True))
 def test_native_nonmanifold_bending_matches_sum_of_sheet_energies(nonlinear_solver, collapsed_row: bool) -> None:
     # Two sheets have the same endpoints but independent opposite vertices. The
@@ -94,19 +94,19 @@ def test_native_nonmanifold_bending_matches_sum_of_sheet_energies(nonlinear_solv
         "edge_bending_cots": wp.full(len(edges), wp.vec4(0.5), dtype=wp.vec4, device="cuda:0"),
         "edge_bending_properties": wp.full(len(edges), wp.vec2(5.0, 0.0), dtype=wp.vec2, device="cuda:0"),
     }
-    model = s3d.Model()
+    model = cha.Model()
     model.particle_count = len(points)
     model.edge_count = len(edges)
     for name, array in arrays.items():
-        setattr(model, name, s3d.Span(ptr=array.ptr, size=len(array)))
+        setattr(model, name, cha.Span(ptr=array.ptr, size=len(array)))
     position_in = wp.array(points, dtype=wp.vec3, device="cuda:0")
     position_out = wp.zeros_like(position_in)
     velocity_in, velocity_out = wp.zeros_like(position_in), wp.zeros_like(position_in)
-    state_in, state_out = s3d.State(), s3d.State()
+    state_in, state_out = cha.State(), cha.State()
     for state, position, velocity in ((state_in, position_in, velocity_in), (state_out, position_out, velocity_out)):
-        state.particle_q = s3d.Span(ptr=position.ptr, size=len(position))
-        state.particle_qd = s3d.Span(ptr=velocity.ptr, size=len(velocity))
-    solver = s3d.Solver()
+        state.particle_q = cha.Span(ptr=position.ptr, size=len(position))
+        state.particle_qd = cha.Span(ptr=velocity.ptr, size=len(velocity))
+    solver = cha.Solver()
     solver.initialize(model)
     solver.config.nonlinear_solver = nonlinear_solver
     solver.config.nonlinear_iterations = 4
@@ -152,23 +152,23 @@ def test_nonmanifold_edge_face_recovery_uses_every_incident_ply() -> None:
             "collision_edge_indices": wp.array([(*opposites, 0, 1)], dtype=wp.vec4i, device="cuda:0"),
             "collision_triangle_indices": wp.array(faces, dtype=wp.vec3i, device="cuda:0"),
         }
-        model = s3d.Model()
+        model = cha.Model()
         model.particle_count = len(points)
         model.collision_edge_count = 1
         model.collision_triangle_count = len(faces)
         for name, array in arrays.items():
-            setattr(model, name, s3d.Span(ptr=array.ptr, size=len(array)))
+            setattr(model, name, cha.Span(ptr=array.ptr, size=len(array)))
         position_in = arrays["particle_rest_positions"]
         position_out = wp.zeros_like(position_in)
         velocity_in, velocity_out = wp.zeros_like(position_in), wp.zeros_like(position_in)
-        state_in, state_out = s3d.State(), s3d.State()
+        state_in, state_out = cha.State(), cha.State()
         for state, position, velocity in (
             (state_in, position_in, velocity_in),
             (state_out, position_out, velocity_out),
         ):
-            state.particle_q = s3d.Span(ptr=position.ptr, size=len(position))
-            state.particle_qd = s3d.Span(ptr=velocity.ptr, size=len(velocity))
-        solver = s3d.Solver()
+            state.particle_q = cha.Span(ptr=position.ptr, size=len(position))
+            state.particle_qd = cha.Span(ptr=velocity.ptr, size=len(velocity))
+        solver = cha.Solver()
         solver.initialize(model)
         solver.config.nonlinear_iterations = 4
         solver.config.linear_iterations = 80

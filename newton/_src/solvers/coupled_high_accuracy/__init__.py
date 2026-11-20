@@ -5,7 +5,8 @@
 fluid particles, and affine rigid bodies with joints and contacts.
 
 The public names mirror the engineRTS ``style3d_sim`` package this solver was ported from, so that code written
-against ``import style3d_sim as s3d`` works with ``from newton.solvers import coupled_high_accuracy as s3d``.
+against ``import style3d_sim as s3d`` works with ``from newton.solvers import coupled_high_accuracy as cha`` once
+the alias is renamed.
 """
 
 from __future__ import annotations

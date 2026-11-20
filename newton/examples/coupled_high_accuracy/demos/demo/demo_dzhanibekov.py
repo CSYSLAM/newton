@@ -20,7 +20,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 DEFAULT_NUT_ASSET = Path(__file__).resolve().parents[2] / "assets/dzhanibekov/Nut.usd"
 
@@ -37,7 +37,7 @@ class Example:
         self.solver_type = args.solver if hasattr(args, "solver") and args.solver else "vbd"
         self.min_spin_axis_alignment = 1.0
 
-        builder_type = s3d.ModelBuilder if self.solver_type == "synreal" else newton.ModelBuilder
+        builder_type = cha.ModelBuilder if self.solver_type == "synreal" else newton.ModelBuilder
         builder = builder_type(up_axis=newton.Axis.Z)
 
         initial_orientation = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), wp.pi / 2.0)
@@ -114,11 +114,11 @@ class Example:
             )
             self.contacts = None
         elif self.solver_type == "synreal":
-            self.solver = s3d.SolverCoupledHighAccuracy(model=self.model)
-            self.solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.CO_ROTATED
-            self.solver.config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-            self.solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
-            self.solver.config.inertia_mode = s3d.InertiaMode.MIDPOINT_CAYLEY
+            self.solver = cha.SolverCoupledHighAccuracy(model=self.model)
+            self.solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.CO_ROTATED
+            self.solver.config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+            self.solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
+            self.solver.config.inertia_mode = cha.InertiaMode.MIDPOINT_CAYLEY
             self.solver.config.joint_constraint_primal_iterations = 2
             self.solver.config.nonlinear_iterations = 20
             self.solver.config.linear_iterations = 10

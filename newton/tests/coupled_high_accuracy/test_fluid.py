@@ -5,7 +5,7 @@ import pytest
 
 newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Native fluid requires CUDA")
 
@@ -18,7 +18,7 @@ def make_scene(count, method):
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     builder.add_particles(pos=points, vel=velocities, mass=masses, radius=np.full(count, 0.001))
     model = builder.finalize(device="cuda:0")
-    s3d.configure_fluid(
+    cha.configure_fluid(
         model,
         np.arange(count, dtype=np.int32),
         smoothing_radius=0.1,
@@ -27,7 +27,7 @@ def make_scene(count, method):
         boundary_positions=[[0.045, 0.0, 0.0]],
         boundary_volumes=[0.00015],
     )
-    solver = s3d.NewtonSolver(model)
+    solver = cha.NewtonSolver(model)
     solver.config.nonlinear_solver = method
     solver.config.enable_self_collision = False
     solver.config.linear_iterations = 100
@@ -89,7 +89,7 @@ def newton_solution(model, previous, velocity, dt, iterations):
     return reference
 
 
-@pytest.mark.parametrize("method", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("method", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 @pytest.mark.parametrize("count", [8, 70])
 @pytest.mark.parametrize("iterations", [1, 2, 3, 5, 9])
 def test_fluid_matches_reference_and_resets_each_step(method, count, iterations):
@@ -106,7 +106,7 @@ def test_fluid_matches_reference_and_resets_each_step(method, count, iterations)
 
 
 def test_fluid_runtime_iteration_changes_match_reference():
-    model, solver = make_scene(8, s3d.NonlinearSolver.NEWTON)
+    model, solver = make_scene(8, cha.NonlinearSolver.NEWTON)
     results = []
     for iterations in (1, 5, 1):
         solver.config.nonlinear_iterations = iterations
@@ -120,7 +120,7 @@ def test_fluid_runtime_iteration_changes_match_reference():
 
 @pytest.mark.parametrize("iterations", [2, 5])
 def test_fluid_graph_replay_refreshes_linearization(iterations):
-    model, solver = make_scene(8, s3d.NonlinearSolver.NEWTON)
+    model, solver = make_scene(8, cha.NonlinearSolver.NEWTON)
     solver.config.nonlinear_iterations = iterations
     a, b = model.state(), model.state()
     dt = 0.002
@@ -151,7 +151,7 @@ def test_fluid_graph_replay_refreshes_linearization(iterations):
     ],
 )
 def test_fluid_rejects_invalid_step_configuration(field, value):
-    model, solver = make_scene(8, s3d.NonlinearSolver.NEWTON)
+    model, solver = make_scene(8, cha.NonlinearSolver.NEWTON)
     setattr(solver.config, field, value)
     with pytest.raises(ValueError, match="fluid relaxation"):
         solver.step(model.state(), model.state(), None, None, 0.002)

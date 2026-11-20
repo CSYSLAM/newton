@@ -85,7 +85,7 @@ def test_zero_area_trampoline_is_rejected():
 def test_small_foot_is_caught_between_cloth_vertices(full_surface):
     wp = pytest.importorskip("warp")
     newton = pytest.importorskip("newton")
-    from newton.solvers import coupled_high_accuracy as s3d
+    from newton.solvers import coupled_high_accuracy as cha
     from newton.solvers import style3d
 
     if not wp.is_cuda_available():
@@ -118,7 +118,7 @@ def test_small_foot_is_caught_between_cloth_vertices(full_surface):
             builder.particle_mass[vertex] = 0.0
         model = builder.finalize()
         model.soft_contact_ke, model.soft_contact_kd = 1e5, 1e3
-        solver = s3d.SolverCoupledHighAccuracy(model)
+        solver = cha.SolverCoupledHighAccuracy(model)
         solver.config.nonlinear_iterations, solver.config.linear_iterations = 5, 50
         solver.config.enable_collision_hessian_non_diagonal = True
         first, second, control = model.state(), model.state(), model.control()

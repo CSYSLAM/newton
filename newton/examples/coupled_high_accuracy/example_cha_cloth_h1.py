@@ -185,7 +185,7 @@ class Example:
         # Cloth solver
         # ------------------------------------------------------------------
         if self.solver_type == "synreal":
-            from newton.solvers import coupled_high_accuracy as s3d
+            from newton.solvers import coupled_high_accuracy as cha
 
             # SynReal accepts prescribed contacts as world-space static targets. Keep the original
             # shape-to-link mapping for IK, rendering, and collision generation, and share cloth arrays.
@@ -197,8 +197,8 @@ class Example:
             self.cloth_model.joint_count = 0
             self.cloth_model.joint_dof_count = 0
             self.cloth_model.joint_target_q = wp.empty(0, dtype=wp.float32, device=self.model.device)
-            self.cloth_solver = s3d.SolverCoupledHighAccuracy(self.cloth_model)
-            self.cloth_solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
+            self.cloth_solver = cha.SolverCoupledHighAccuracy(self.cloth_model)
+            self.cloth_solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
             self.cloth_solver.config.nonlinear_iterations = 20
             self.cloth_solver.config.linear_iterations = 5
             self.cloth_solver.config.enable_self_collision = True

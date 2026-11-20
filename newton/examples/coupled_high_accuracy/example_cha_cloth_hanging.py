@@ -124,11 +124,11 @@ class Example:
 
             self.solver = ReconstructedSolver(self.model)
         elif self.solver_type == "synreal":
-            from newton.solvers import coupled_high_accuracy as s3d
+            from newton.solvers import coupled_high_accuracy as cha
 
-            self.solver = s3d.SolverCoupledHighAccuracy(self.model)
-            self.solver.config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-            self.solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
+            self.solver = cha.SolverCoupledHighAccuracy(self.model)
+            self.solver.config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+            self.solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
             self.solver.config.joint_constraint_primal_iterations = 1
             self.solver.config.nonlinear_iterations = 5
             self.solver.config.linear_iterations = 50

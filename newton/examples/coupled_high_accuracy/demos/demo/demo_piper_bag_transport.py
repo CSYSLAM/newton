@@ -18,7 +18,7 @@ import newton
 import newton.examples
 import newton.usd
 from newton import JointTargetMode, ShapeFlags
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 from newton.solvers import style3d
 
 DEMO_DIRECTORY = Path(__file__).resolve().parents[1] / "piper_bag_transport"
@@ -233,7 +233,7 @@ def create_motion_plan(positions=None):
     """Drive only physical arm motors; the bag and apples remain free dynamic objects."""
     from scipy.spatial.transform import Rotation
 
-    arm = PiperKinematics(s3d.get_asset(PIPER_ASSET), PIPER_BASE)
+    arm = PiperKinematics(cha.get_asset(PIPER_ASSET), PIPER_BASE)
     seed = np.asarray(PIPER_GRASP_Q)
     times, poses = [], []
 
@@ -334,7 +334,7 @@ def add_piper(builder, initial_q=PIPER_GRASP_Q):
     builder.default_shape_cfg.kf = CONTACT_FRICTION_GAIN
     builder.default_shape_cfg.mu = GRIPPER_FRICTION
     builder.add_mjcf(
-        s3d.get_asset(PIPER_ASSET),
+        cha.get_asset(PIPER_ASSET),
         xform=wp.transform(wp.vec3(*PIPER_BASE), wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 0.5 * wp.pi)),
         floating=False,
         enable_self_collisions=False,
@@ -402,7 +402,7 @@ def bag_grip_vertices(points):
 
 def load_apple_meshes():
     """Retain the original textured apple and its complete collision hull."""
-    apple_asset = Path(s3d.get_asset(APPLE_ASSET))
+    apple_asset = Path(cha.get_asset(APPLE_ASSET))
     visual = newton.usd.get_mesh(
         apple_asset,
         root_path="/World/Apple/visual",
@@ -581,12 +581,12 @@ class Example:
         # Cloth/shape contact uses the smaller coefficient, retaining grip while apples can slide on the film.
         self.model.soft_contact_mu = CLOTH_CONTACT_FRICTION
 
-        self.solver = s3d.SolverCoupledHighAccuracy(self.model)
-        self.solver.config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-        self.solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+        self.solver = cha.SolverCoupledHighAccuracy(self.model)
+        self.solver.config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+        self.solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
         # Retain the PD Hessian bound on the light, valence-two boundary vertices introduced by refinement.
-        self.solver.config.nonlinear_solver = s3d.NonlinearSolver.PD_NEWTON
-        self.solver.config.inertia_mode = s3d.InertiaMode.NONE
+        self.solver.config.nonlinear_solver = cha.NonlinearSolver.PD_NEWTON
+        self.solver.config.inertia_mode = cha.InertiaMode.NONE
         self.solver.config.joint_constraint_primal_iterations = 1
         self.solver.config.nonlinear_iterations = args.iterations
         self.solver.config.linear_iterations = args.linear_iterations
@@ -660,7 +660,7 @@ class Example:
 
     def update_handle_approach(self, refine_grasp=False):
         """Aim at the settled material crown after loading, without attaching or repositioning the bag."""
-        arm = PiperKinematics(s3d.get_asset(PIPER_ASSET), PIPER_BASE)
+        arm = PiperKinematics(cha.get_asset(PIPER_ASSET), PIPER_BASE)
         cloth = self.state_0.particle_q.numpy()[: self.bag_particle_count]
         crown = cloth[self.grip_vertices].mean(axis=0)
         rotation = loading_drop_rotation(downward_tilt=0.0)

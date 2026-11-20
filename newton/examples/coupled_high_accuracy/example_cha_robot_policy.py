@@ -31,7 +31,7 @@ import newton.examples
 import newton.utils
 from newton import JointTargetMode
 from newton.examples.robot.onnx_policy_utils import validate_policy_io_shapes
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 
 @dataclass
@@ -310,12 +310,12 @@ class Example:
                 njmax=100,
             )
         else:
-            self.solver = s3d.SolverCoupledHighAccuracy(self.model)
+            self.solver = cha.SolverCoupledHighAccuracy(self.model)
             # Preserve rotations with the solver's constrained SO(3) projection.
-            self.solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
-            self.solver.config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-            self.solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
-            self.solver.config.inertia_mode = s3d.InertiaMode.MIDPOINT_CAYLEY
+            self.solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+            self.solver.config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+            self.solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
+            self.solver.config.inertia_mode = cha.InertiaMode.MIDPOINT_CAYLEY
             self.solver.config.joint_constraint_primal_iterations = 3
             self.solver.config.nonlinear_iterations = 5
             self.solver.config.linear_iterations = 20

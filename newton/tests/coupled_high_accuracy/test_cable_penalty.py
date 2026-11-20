@@ -12,17 +12,17 @@ newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
 
 from newton._src.solvers.coupled_high_accuracy.cable_material import register_cable_attributes
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 # Rod DOFs of each material family in Newton main: stretch z, shear x/y, bend x/y, twist z.
 ROD_MATERIAL_SLOTS = ((2,), (0, 1), (3, 4), (5,))
 
 
 cuda = pytest.mark.skipif(not wp.is_cuda_available(), reason="Native cable penalties require CUDA")
-FRAMEWORKS = [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON]
+FRAMEWORKS = [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON]
 
 
-def _scene(*, worlds=1, globals=False, builder_type=s3d.ModelBuilder):
+def _scene(*, worlds=1, globals=False, builder_type=cha.ModelBuilder):
     builder = builder_type(gravity=wp.vec3(0.0))
     register_cable_attributes(builder)
     bodies = []
@@ -63,7 +63,7 @@ def _scene(*, worlds=1, globals=False, builder_type=s3d.ModelBuilder):
 
 
 def _solver(model, framework):
-    solver = s3d.NewtonSolver(model)
+    solver = cha.NewtonSolver(model)
     solver.config.nonlinear_solver = framework
     solver.config.nonlinear_iterations = 3
     solver.config.linear_iterations = 2
@@ -96,7 +96,7 @@ def _rod_materials(model, solver, values):
 def _penalties(solver):
     values = wp.empty(solver._cable_count, dtype=wp.vec4, device=solver.device)
     solver._native_solver.copy_cable_penalties(
-        s3d.Span(ptr=values.ptr, size=len(values)),
+        cha.Span(ptr=values.ptr, size=len(values)),
         wp.get_stream(solver.device),
     )
     return values.numpy()
@@ -152,7 +152,7 @@ def test_disabled_cable_decays_without_strain_ramping(framework):
 @pytest.mark.parametrize("linear_beta,angular_beta", [(0.0, 0.0), (0.0, 20.0), (100.0, 0.0)])
 def test_zero_beta_uses_authored_caps_independently_per_slot_family(linear_beta, angular_beta):
     model, bodies = _scene()
-    solver = _solver(model, s3d.NonlinearSolver.NEWTON)
+    solver = _solver(model, cha.NonlinearSolver.NEWTON)
     solver.config.cable_linear_beta = linear_beta
     solver.config.cable_angular_beta = angular_beta
     solver.config.nonlinear_iterations = 0
@@ -173,7 +173,7 @@ def test_zero_beta_uses_authored_caps_independently_per_slot_family(linear_beta,
 @pytest.mark.parametrize("selected_slot", [0, 2])
 def test_selected_penalty_reset_is_world_isolated_and_graph_safe(captured, selected_slot):
     model, bodies = _scene(worlds=2, globals=True)
-    solver = _solver(model, s3d.NonlinearSolver.NEWTON)
+    solver = _solver(model, cha.NonlinearSolver.NEWTON)
     state_in, state_out = model.state(), model.state()
     _deform(state_in, bodies)
     solver.sync_affine_body_state(state_in)
@@ -206,7 +206,7 @@ def test_selected_penalty_reset_is_world_isolated_and_graph_safe(captured, selec
 @cuda
 def test_material_notification_reinitializes_penalty_at_new_capped_seed():
     model, bodies = _scene()
-    solver = _solver(model, s3d.NonlinearSolver.NEWTON)
+    solver = _solver(model, cha.NonlinearSolver.NEWTON)
     state_in, state_out = model.state(), model.state()
     _deform(state_in, bodies)
     solver.sync_affine_body_state(state_in)
@@ -232,7 +232,7 @@ def test_material_notification_reinitializes_penalty_at_new_capped_seed():
 )
 def test_invalid_cable_penalty_config_is_rejected(name, value):
     model, _ = _scene()
-    solver = _solver(model, s3d.NonlinearSolver.NEWTON)
+    solver = _solver(model, cha.NonlinearSolver.NEWTON)
     setattr(solver.config, name, value)
     with pytest.raises(ValueError, match="cable.*(gamma|ramps|seeds)"):
         _penalties(solver)
@@ -270,7 +270,7 @@ def test_example_helper_preserves_vbd_penalty_option_precedence(monkeypatch, opt
     monkeypatch.setitem(sys.modules, spec.name, helper)
     spec.loader.exec_module(helper)
     monkeypatch.setattr(
-        helper.s3d, "SolverCoupledHighAccuracy", lambda model: SimpleNamespace(config=SimpleNamespace())
+        helper.cha, "SolverCoupledHighAccuracy", lambda model: SimpleNamespace(config=SimpleNamespace())
     )
     solver = helper.create_cable_solver(argparse.Namespace(solver="synreal"), object(), **options)
     names = (

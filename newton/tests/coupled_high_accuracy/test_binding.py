@@ -1,10 +1,10 @@
 import pytest
 
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 
 def test_span_exposes_pointer_and_element_count() -> None:
-    span = s3d.Span(ptr=0x1234, size=7)
+    span = cha.Span(ptr=0x1234, size=7)
 
     assert span.ptr == 0x1234
     assert span.size == 7
@@ -14,11 +14,11 @@ def test_span_exposes_pointer_and_element_count() -> None:
 
 def test_span_rejects_nonempty_null_pointer() -> None:
     with pytest.raises(ValueError, match="nonzero device address"):
-        s3d.Span(ptr=0, size=1)
+        cha.Span(ptr=0, size=1)
 
 
 def test_model_count_fields() -> None:
-    model = s3d.Model()
+    model = cha.Model()
     model.particle_count = 2
     model.particle_state_count = 20
     model.spring_count = 3
@@ -53,7 +53,7 @@ def test_model_count_fields() -> None:
 
 
 def test_model_fields_round_trip_raw_spans_without_reading_memory() -> None:
-    model = s3d.Model()
+    model = cha.Model()
     fields = [
         "particle_indices",
         "particle_masses",
@@ -116,7 +116,7 @@ def test_model_fields_round_trip_raw_spans_without_reading_memory() -> None:
     # These deliberately invalid addresses are safe because the binding must only
     # pass device pointers through, never dereference them on the host.
     for index, field in enumerate(fields):
-        expected = s3d.Span(ptr=0x1000 + index * 0x100, size=index + 1)
+        expected = cha.Span(ptr=0x1000 + index * 0x100, size=index + 1)
         setattr(model, field, expected)
         actual = getattr(model, field)
 
@@ -125,13 +125,13 @@ def test_model_fields_round_trip_raw_spans_without_reading_memory() -> None:
 
 
 def test_config_exposes_runtime_options() -> None:
-    config = s3d.Config()
+    config = cha.Config()
 
     nonlinear_solvers = (
-        s3d.NonlinearSolver.NEWTON,
-        s3d.NonlinearSolver.PD_NEWTON,
+        cha.NonlinearSolver.NEWTON,
+        cha.NonlinearSolver.PD_NEWTON,
     )
-    assert config.nonlinear_solver == s3d.NonlinearSolver.NEWTON
+    assert config.nonlinear_solver == cha.NonlinearSolver.NEWTON
     assert config.nonlinear_iterations == 5
     assert config.linear_iterations == 50
     assert config.enable_collision_hessian_non_diagonal is True
@@ -158,7 +158,7 @@ def test_config_exposes_runtime_options() -> None:
 
     assert not hasattr(config, "enable_affine_body_velocity_correction")
     assert not hasattr(config, "rigid_body_integrator")
-    assert not hasattr(s3d, "RigidBodyIntegrator")
+    assert not hasattr(cha, "RigidBodyIntegrator")
 
     assert config.enable_self_collision is False
     config.enable_self_collision = True
@@ -176,12 +176,12 @@ def test_config_exposes_runtime_options() -> None:
         assert getattr(config, name) == pytest.approx(expected)
 
     rigidity_models = (
-        s3d.AffineBodyRigidityModel.CO_ROTATED,
-        s3d.AffineBodyRigidityModel.ABD_ORTHOGONALITY,
-        s3d.AffineBodyRigidityModel.SIX_SPRINGS,
-        s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN,
+        cha.AffineBodyRigidityModel.CO_ROTATED,
+        cha.AffineBodyRigidityModel.ABD_ORTHOGONALITY,
+        cha.AffineBodyRigidityModel.SIX_SPRINGS,
+        cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN,
     )
-    assert config.affine_body_rigidity_model == s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+    assert config.affine_body_rigidity_model == cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
     assert {model.name for model in rigidity_models} == {
         "CO_ROTATED",
         "ABD_ORTHOGONALITY",
@@ -198,14 +198,14 @@ def test_config_exposes_runtime_options() -> None:
     assert config.affine_body_rigidity_primal_iterations == 6
 
     inertia_modes = (
-        s3d.InertiaMode.EXPLICIT_EULER,
-        s3d.InertiaMode.IMPLICIT_EULER,
-        s3d.InertiaMode.LIE_GROUP_MIDPOINT,
-        s3d.InertiaMode.MIDPOINT_CAYLEY,
-        s3d.InertiaMode.NONE,
-        s3d.InertiaMode.VBD_SEMI_IMPLICIT,
+        cha.InertiaMode.EXPLICIT_EULER,
+        cha.InertiaMode.IMPLICIT_EULER,
+        cha.InertiaMode.LIE_GROUP_MIDPOINT,
+        cha.InertiaMode.MIDPOINT_CAYLEY,
+        cha.InertiaMode.NONE,
+        cha.InertiaMode.VBD_SEMI_IMPLICIT,
     )
-    assert config.inertia_mode == s3d.InertiaMode.MIDPOINT_CAYLEY
+    assert config.inertia_mode == cha.InertiaMode.MIDPOINT_CAYLEY
     assert {mode.name for mode in inertia_modes} == {
         "EXPLICIT_EULER",
         "IMPLICIT_EULER",
@@ -228,10 +228,10 @@ def test_config_exposes_runtime_options() -> None:
         assert config.inertia_mode == mode
 
     joint_constraint_modes = (
-        s3d.JointConstraintMode.PENALTY,
-        s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN,
+        cha.JointConstraintMode.PENALTY,
+        cha.JointConstraintMode.AUGMENTED_LAGRANGIAN,
     )
-    assert config.joint_constraint_mode == s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
+    assert config.joint_constraint_mode == cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
     assert {mode.name for mode in joint_constraint_modes} == {
         "PENALTY",
         "AUGMENTED_LAGRANGIAN",
@@ -247,7 +247,7 @@ def test_config_exposes_runtime_options() -> None:
 
 
 def test_model_fields_require_span() -> None:
-    model = s3d.Model()
+    model = cha.Model()
 
     with pytest.raises(TypeError):
         model.particle_masses = [1.0, 2.0]
@@ -261,18 +261,18 @@ def test_model_fields_require_span() -> None:
     ),
 )
 def test_solver_rejects_state_count_without_local_count(field: str, message: str) -> None:
-    model = s3d.Model()
+    model = cha.Model()
     setattr(model, field, 1)
 
     with pytest.raises(ValueError, match=message):
-        s3d.Solver().initialize(model)
+        cha.Solver().initialize(model)
 
 
 def test_solver_rejects_excess_replicated_shape_count() -> None:
-    model = s3d.Model()
+    model = cha.Model()
     model.shape_count = 1
     model.shape_replicated_count = 2
-    storage = s3d.Span(ptr=0x1000, size=1)
+    storage = cha.Span(ptr=0x1000, size=1)
     model.shape_bodies = storage
     model.shape_types = storage
     model.shape_transforms = storage
@@ -284,12 +284,12 @@ def test_solver_rejects_excess_replicated_shape_count() -> None:
     model.shape_margins = storage
 
     with pytest.raises(ValueError, match="shape_replicated_count exceeds shape_count"):
-        s3d.Solver().initialize(model)
+        cha.Solver().initialize(model)
 
 
 def test_control_tetrahedron_activations_round_trip_raw_span() -> None:
-    control = s3d.Control()
-    expected = s3d.Span(ptr=0xBEEF, size=3)
+    control = cha.Control()
+    expected = cha.Span(ptr=0xBEEF, size=3)
 
     control.tetrahedron_activations = expected
 

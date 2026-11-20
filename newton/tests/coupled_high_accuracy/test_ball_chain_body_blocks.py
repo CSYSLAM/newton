@@ -5,7 +5,7 @@ import pytest
 
 newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = [
     pytest.mark.skipif(not wp.is_cuda_available(), reason="Ball-chain body blocks require CUDA"),
@@ -15,7 +15,7 @@ pytestmark = [
 @pytest.mark.parametrize("capture", (False, True))
 @pytest.mark.parametrize("contact_block", (False, True))
 def test_ball_chain_body_blocks_with_ground_and_external_load(capture, contact_block):
-    builder = s3d.ModelBuilder(gravity=(0.0, 0.0, -9.81))
+    builder = cha.ModelBuilder(gravity=(0.0, 0.0, -9.81))
     shape = newton.ModelBuilder.ShapeConfig(ke=8.0e4, kd=20.0, mu=0.0)
     bodies, joints = [], []
     for i in range(3):
@@ -41,7 +41,7 @@ def test_ball_chain_body_blocks_with_ground_and_external_load(capture, contact_b
     builder.add_articulation(joints)
     builder.add_ground_plane(cfg=shape)
     model = builder.finalize(device="cuda:0")
-    solver = s3d.NewtonSolver(model)
+    solver = cha.NewtonSolver(model)
     solver.config.affine_body_block_preconditioner = True
     solver.config.affine_body_contact_block_preconditioner = contact_block
     solver.config.rigid_contact_hard = True

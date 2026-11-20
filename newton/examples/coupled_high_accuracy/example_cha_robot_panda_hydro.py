@@ -26,7 +26,7 @@ import newton.ik as ik
 import newton.usd
 import newton.utils
 from newton.geometry import HydroelasticSDF
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 
 class SceneType(Enum):
@@ -312,7 +312,7 @@ class Example:
                 impratio=1000.0,
             )
         else:
-            self.solver = s3d.SolverCoupledHighAccuracy(self.model)
+            self.solver = cha.SolverCoupledHighAccuracy(self.model)
 
         # num_hydroelastic = (self.model.shape_flags.numpy() & newton.ShapeFlags.HYDROELASTIC).astype(bool).sum()
         # print(f"Number of hydroelastic shapes: {num_hydroelastic} / {self.model.shape_count}")

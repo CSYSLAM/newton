@@ -23,7 +23,7 @@ import warp as wp
 import newton
 import newton.examples
 import newton.usd
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 TANK_LOWER = (0.0, -0.56, 0.0)
 TANK_UPPER = (3.36, 0.56, 2.24)
@@ -95,7 +95,7 @@ def boundary_samples(spacing):
 
 def add_ducks(builder, water_height):
     """Resolve the textured ducks with several fluid particles across their submerged hulls."""
-    duck_asset = s3d.get_asset(DUCK_ASSET)
+    duck_asset = cha.get_asset(DUCK_ASSET)
     visual = newton.usd.get_mesh(
         duck_asset, root_path="/World/simple_xhy/Body/visual", load_normals=True, load_uvs=True, compute_inertia=False
     )
@@ -219,7 +219,7 @@ class Example:
         self.duck_bodies, self.duck_vertices = add_ducks(builder, positions[:, 2].max() + 0.5 * self.spacing)
         self.model = builder.finalize(device=device)
         boundaries = boundary_samples(self.spacing)
-        s3d.configure_fluid(
+        cha.configure_fluid(
             self.model,
             np.arange(len(positions), dtype=np.int32),
             smoothing_radius=2.0 * self.spacing,
@@ -228,8 +228,8 @@ class Example:
             boundary_positions=boundaries,
             boundary_volumes=np.full(len(boundaries), self.volume),
         )
-        self.solver = s3d.SolverCoupledHighAccuracy(self.model)
-        self.solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
+        self.solver = cha.SolverCoupledHighAccuracy(self.model)
+        self.solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
         self.solver.config.nonlinear_iterations = args.iterations
         self.solver.config.linear_iterations = args.linear_iterations
         self.solver.config.enable_collision_hessian_non_diagonal = True
@@ -239,7 +239,7 @@ class Example:
         self.fluid_positions = self.state_0.particle_q[: self.fluid_count]
         self.fluid_velocities = self.state_0.particle_qd[: self.fluid_count]
         self.surface = (
-            s3d.ParticleSurface(self.spacing, self.fluid_positions, voxel_size=0.5 * self.spacing)
+            cha.ParticleSurface(self.spacing, self.fluid_positions, voxel_size=0.5 * self.spacing)
             if args.build_surface
             else None
         )
@@ -302,7 +302,7 @@ class Example:
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
         if mesh is not None:
-            s3d.log_surface_mesh(self.viewer, "fluid_surface", mesh, color=(0.025, 0.20, 0.65), roughness=0.18)
+            cha.log_surface_mesh(self.viewer, "fluid_surface", mesh, color=(0.025, 0.20, 0.65), roughness=0.18)
         else:
             self.viewer.log_points("fluid", self.fluid_positions, self.radius, self.colors)
         self.viewer.log_lines("tank", self.tank_starts, self.tank_ends, (0.45, 0.62, 0.72))

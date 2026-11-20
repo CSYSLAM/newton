@@ -18,7 +18,7 @@ import newton.examples
 import newton.utils
 import newton.viewer
 from newton import JointTargetMode, ParticleFlags
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 from newton.solvers import style3d
 
 CONTROL_FPS = 50
@@ -135,7 +135,7 @@ class TrampolineEnv:
         self.model.soft_contact_mu = soft_contact_friction
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.model)
-        self.solver = s3d.SolverCoupledHighAccuracy(self.model)
+        self.solver = cha.SolverCoupledHighAccuracy(self.model)
         self.solver.config.constraint_alpha = 200.0
         self.solver.config.nonlinear_iterations = 15
         self.solver.config.linear_iterations = 6

@@ -6,7 +6,7 @@ import pytest
 newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
 
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Cable simulation requires CUDA")
 
@@ -16,7 +16,7 @@ def _skew(vector):
     return np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]])
 
 
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 @pytest.mark.parametrize("rotated_inertia", [False, True])
 def test_anisotropic_cable_torque_accelerates_rotation_without_affine_shear(framework, rotated_inertia):
     moment = np.diag([0.001, 0.01, 0.1])
@@ -37,12 +37,12 @@ def test_anisotropic_cable_torque_accelerates_rotation_without_affine_shear(fram
         twist_stiffness=100.0,
     )
     model = builder.finalize(device="cuda:0")
-    solver = s3d.NewtonSolver(model)
+    solver = cha.NewtonSolver(model)
     solver.config.nonlinear_solver = framework
     solver.config.nonlinear_iterations = 1
     solver.config.linear_iterations = 100
     solver.config.constraint_alpha = 0.0
-    solver.config.inertia_mode = s3d.InertiaMode.NONE
+    solver.config.inertia_mode = cha.InertiaMode.NONE
     rest = np.array([0.2, -0.1, 0.15], dtype=np.float32)
     solver._joint_cable_rest_kb.assign(np.array([[rest[0], rest[1], 0.0]], dtype=np.float32))
     solver._joint_cable_rest_twist.assign(np.array([rest[2]], dtype=np.float32))

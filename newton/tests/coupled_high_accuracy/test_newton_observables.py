@@ -6,14 +6,14 @@ import pytest
 newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
 
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="NewtonSolver observable tests require CUDA")
 
 
 def _step_with_observables(
     model: object,
-    solver: s3d.NewtonSolver,
+    solver: cha.NewtonSolver,
     pipeline: object,
     contacts: object,
     kinds: set[str],
@@ -37,17 +37,17 @@ def _step_with_observables(
 
 
 def test_body_qdd_observable_covers_replicated_body_states() -> None:
-    scene = s3d.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
+    scene = cha.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
     body = scene.add_body(
         xform=wp.transform(wp.vec3(0.0), wp.quat_identity()),
         mass=1.0,
         inertia=wp.mat33(0.1, 0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.1),
     )
     scene.body_qd[body] = wp.spatial_vector(0.0)
-    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
+    builder = cha.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
     builder.replicate(scene, 2)
     model = builder.finalize(device="cuda:0")
-    solver = s3d.NewtonSolver(model)
+    solver = cha.NewtonSolver(model)
     state_in, state_out = model.state(), model.state()
     observables = solver.observables({solver.ObservableKind.BODY_QDD})
 
@@ -68,7 +68,7 @@ def test_body_qdd_observable_covers_replicated_body_states() -> None:
 def test_contact_f_observable_reports_rigid_pair_wrench_and_clears_unused_rows(
     hard_contacts: bool,
 ) -> None:
-    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
+    builder = cha.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
     builder.default_shape_cfg.ke = 1.0e5
     builder.default_shape_cfg.kd = 100.0
     builder.default_shape_cfg.mu = 0.0
@@ -81,7 +81,7 @@ def test_contact_f_observable_reports_rigid_pair_wrench_and_clears_unused_rows(
     )
     builder.add_shape_sphere(body, radius=0.25)
     model = builder.finalize(device="cuda:0")
-    solver = s3d.NewtonSolver(model)
+    solver = cha.NewtonSolver(model)
     solver.config.rigid_contact_hard = hard_contacts
     pipeline = newton.CollisionPipeline(model)
     contacts = pipeline.contacts()
@@ -108,13 +108,13 @@ def test_contact_f_observable_reports_rigid_pair_wrench_and_clears_unused_rows(
 
 
 def test_contact_f_observable_reports_soft_particle_wrench_about_world_origin() -> None:
-    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+    builder = cha.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
     builder.add_ground_plane()
     builder.add_particle(pos=(0.2, 0.0, 0.04), vel=(0.0, 0.0, 0.0), mass=1.0, radius=0.05)
     model = builder.finalize(device="cuda:0")
     model.soft_contact_ke = 1.0e5
     model.soft_contact_kd = 0.0
-    solver = s3d.NewtonSolver(model)
+    solver = cha.NewtonSolver(model)
     pipeline = newton.CollisionPipeline(model)
     contacts = pipeline.contacts()
 
@@ -139,7 +139,7 @@ def test_contact_f_observable_reports_soft_particle_wrench_about_world_origin() 
 def test_contact_f_observable_reports_full_surface_soft_contacts() -> None:
     from newton.solvers import style3d
 
-    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+    builder = cha.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
     newton.solvers.SolverStyle3D.register_custom_attributes(builder)
     style3d.add_cloth_grid(
         builder,
@@ -157,7 +157,7 @@ def test_contact_f_observable_reports_full_surface_soft_contacts() -> None:
     model = builder.finalize(device="cuda:0")
     model.soft_contact_ke = 1.0e4
     model.soft_contact_kd = 0.0
-    solver = s3d.NewtonSolver(model)
+    solver = cha.NewtonSolver(model)
     pipeline = newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True)
     contacts = pipeline.contacts()
 
@@ -178,7 +178,7 @@ def test_contact_f_observable_reports_full_surface_soft_contacts() -> None:
 
 
 def test_contact_f_observable_includes_rolling_resistance_torque() -> None:
-    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
+    builder = cha.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
     builder.default_shape_cfg.density = 0.0
     builder.default_shape_cfg.ke = 1.0e5
     builder.default_shape_cfg.kd = 100.0
@@ -196,7 +196,7 @@ def test_contact_f_observable_includes_rolling_resistance_torque() -> None:
     builder.body_qd[body] = wp.spatial_vector(0.5, 0.0, 0.0, 0.0, 2.0, 0.0)
     builder.add_shape_sphere(body, radius=0.25)
     model = builder.finalize(device="cuda:0")
-    solver = s3d.NewtonSolver(model)
+    solver = cha.NewtonSolver(model)
     pipeline = newton.CollisionPipeline(model)
     contacts = pipeline.contacts()
 
@@ -216,7 +216,7 @@ def test_contact_f_observable_includes_rolling_resistance_torque() -> None:
 
 
 def test_solver_observables_support_cuda_graph_capture_and_replay() -> None:
-    builder = s3d.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
+    builder = cha.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
     builder.default_shape_cfg.ke = 1.0e5
     builder.default_shape_cfg.kd = 100.0
     builder.add_ground_plane()
@@ -228,7 +228,7 @@ def test_solver_observables_support_cuda_graph_capture_and_replay() -> None:
     )
     builder.add_shape_sphere(body, radius=0.25)
     model = builder.finalize(device="cuda:0")
-    solver = s3d.NewtonSolver(model)
+    solver = cha.NewtonSolver(model)
     pipeline = newton.CollisionPipeline(model)
     contacts = pipeline.contacts()
     state_in, state_out = model.state(), model.state()

@@ -16,7 +16,7 @@ import newton
 import newton.examples
 import newton.utils
 from newton import JointTargetMode
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 
 class Example:
@@ -85,7 +85,7 @@ class Example:
                 use_mujoco_contacts=use_mujoco_contacts,
             )
         else:
-            self.solver = s3d.SolverCoupledHighAccuracy(self.model)
+            self.solver = cha.SolverCoupledHighAccuracy(self.model)
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()

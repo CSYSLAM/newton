@@ -17,7 +17,7 @@ Blender 工程：reference_scene.blend（需要同目录 simulation.usdc 缓存�
 
 机器人资产位于项目 assets/w1/robot/w1-030/robot.urdf，袋子贴图位于 assets/w1/courier。
 路径根据脚本所在位置解析，不需要本机外部 Newton 工作区。
-参考双向抓取示例的 W1 V030 模型和二指夹爪，物理统一使用 s3d.NewtonSolver；不使用原例的 MuJoCo/VBD 求解器。
+参考双向抓取示例的 W1 V030 模型和二指夹爪，物理统一使用 cha.SolverCoupledHighAccuracy；不使用原例的 MuJoCo/VBD 求解器。
 默认 8 子步、4 次非线性迭代、50 次线性迭代。机械臂通过 IK 产生关节驱动目标，包裹靠接触与摩擦运动。
 左右同时操作；0–3 秒靠近，3–4 秒夹紧，4–4.5 秒保持夹紧，4.5–7 秒提起，7–10 秒抖动，10 秒后打开夹爪并后撤。
 快递袋材质与包裹几何沿用前一场景；软包内部保留有限刚度粘附弹簧，没有机器人到袋子的固定约束。

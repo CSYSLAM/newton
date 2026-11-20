@@ -11,13 +11,13 @@ from newton._src.solvers.coupled_high_accuracy.cable_material import (
     register_cable_attributes,
 )
 from newton._src.solvers.coupled_high_accuracy.solver_coupled_high_accuracy import NewtonSolver
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Cable lifecycle tests require CUDA")
 
 
 def _model(*, worlds=1, global_cable=False):
-    builder = s3d.ModelBuilder(gravity=wp.vec3(0.0))
+    builder = cha.ModelBuilder(gravity=wp.vec3(0.0))
     register_cable_attributes(builder)
     cables = []
 
@@ -49,7 +49,7 @@ def _model(*, worlds=1, global_cable=False):
     return model, cables
 
 
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 @pytest.mark.parametrize("edited_rest", ["joint_frame", "body_pose"])
 def test_notified_cable_rest_edit_remains_force_free(framework, edited_rest):
     model, cables = _model()

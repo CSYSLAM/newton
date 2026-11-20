@@ -12,7 +12,7 @@ from scipy.spatial import ConvexHull, cKDTree
 from scipy.spatial.transform import Rotation
 
 import newton
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 from newton.solvers import style3d
 
 DIRECTORY = Path(__file__).resolve().parents[1] / "w1_courier_transport"
@@ -183,12 +183,12 @@ class Simulation:
         self.model.soft_contact_kd = 1
         self.model.soft_contact_kf = 1e3
         self.model.soft_contact_mu = 4.0
-        self.solver = s3d.SolverCoupledHighAccuracy(self.model)
+        self.solver = cha.SolverCoupledHighAccuracy(self.model)
         cfg = self.solver.config
-        cfg.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-        cfg.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
-        cfg.nonlinear_solver = s3d.NonlinearSolver.NEWTON
-        cfg.inertia_mode = s3d.InertiaMode.NONE
+        cfg.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+        cfg.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+        cfg.nonlinear_solver = cha.NonlinearSolver.NEWTON
+        cfg.inertia_mode = cha.InertiaMode.NONE
         cfg.joint_constraint_primal_iterations = 1
         cfg.nonlinear_iterations, cfg.linear_iterations = args.iterations, args.linear_iterations
         cfg.enable_collision_hessian_non_diagonal = True
@@ -388,7 +388,7 @@ def main(argv=None):
                 bag_size_m=BAG_SIZE,
                 bag_construction="two_rectangular_panels_perimeter_welded",
                 robot="W1 V030",
-                solver="s3d.SolverCoupledHighAccuracy",
+                solver="cha.SolverCoupledHighAccuracy",
                 motion="simultaneous_dual_arm_grip_shake_drop",
                 shake_local_seconds=(SHAKE_START, SHAKE_END),
                 shake_cycles=SHAKE_CYCLES,

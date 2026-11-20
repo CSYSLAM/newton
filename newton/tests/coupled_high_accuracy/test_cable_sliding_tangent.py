@@ -79,9 +79,9 @@ def test_cpu_coulomb_disk_derivative_and_affine_blocks(alpha, trial_fraction):
 
 
 def test_sliding_tangent_config_defaults_to_legacy():
-    from newton.solvers import coupled_high_accuracy as s3d
+    from newton.solvers import coupled_high_accuracy as cha
 
-    config = s3d.Config()
+    config = cha.Config()
     assert config.rigid_contact_sliding_tangent is False
     config.rigid_contact_sliding_tangent = True
     assert config.rigid_contact_sliding_tangent is True
@@ -97,7 +97,7 @@ def test_translation_only_hard_contact_matches_selected_disk_tangent(
     wp = pytest.importorskip("warp")
     if not wp.is_cuda_available():
         pytest.skip("Hard contact simulation requires CUDA")
-    from newton.solvers import coupled_high_accuracy as s3d
+    from newton.solvers import coupled_high_accuracy as cha
 
     builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
     builder.default_shape_cfg.ke = 1.0e4
@@ -116,14 +116,14 @@ def test_translation_only_hard_contact_matches_selected_disk_tangent(
     )
     builder.add_ground_plane()
     model = builder.finalize(device="cuda:0")
-    solver = s3d.NewtonSolver(model)
-    solver.config.nonlinear_solver = getattr(s3d.NonlinearSolver, framework_name)
+    solver = cha.NewtonSolver(model)
+    solver.config.nonlinear_solver = getattr(cha.NonlinearSolver, framework_name)
     solver.config.nonlinear_iterations = 1
     solver.config.linear_iterations = 40
     solver.config.affine_body_block_preconditioner = True
     solver.config.affine_body_contact_block_preconditioner = True
     solver.config.enable_collision_hessian_non_diagonal = True
-    solver.config.inertia_mode = s3d.InertiaMode.NONE
+    solver.config.inertia_mode = cha.InertiaMode.NONE
     solver.config.rigid_contact_hard = True
     solver.config.rigid_contact_history = False
     solver.config.rigid_contact_sliding_tangent = sliding_tangent

@@ -14,7 +14,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 from newton.solvers import style3d
 
 CLOTH_HEIGHT = 1.25
@@ -145,7 +145,7 @@ class Example:
         self.initial_corner_positions = initial_positions[self.corner_indices].copy()
         self.initial_cloth_center_height = float(initial_positions[self.cloth_center_index, 2])
 
-        self.solver = s3d.SolverCoupledHighAccuracy(self.model)
+        self.solver = cha.SolverCoupledHighAccuracy(self.model)
         self.solver.config.nonlinear_iterations = 20
         self.solver.config.linear_iterations = 12
         self.solver.config.enable_self_collision = True

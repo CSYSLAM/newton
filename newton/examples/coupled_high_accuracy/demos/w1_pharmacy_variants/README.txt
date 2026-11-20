@@ -51,7 +51,7 @@ trajectory.npz / simulation.usdc：原始求解器轨迹和对应的渲染缓存
 validation.json：拾取、初始形变、松爪回弹/残余折痕、分级差异和体积采样检查。
 
 物理范围：
-使用 s3d.NewtonSolver 同时求解机器人、夹爪、橡胶接触垫和空心纸盒。
+使用 cha.SolverCoupledHighAccuracy 同时求解机器人、夹爪、橡胶接触垫和空心纸盒。
 纸盒没有绑定在手上，也没有直接修改节点位置的形变动画。
 两指联动由 demos/utils/parallel_gripper.py 补齐，读取原URDF的prismatic mimic关系。
 使用有限刚度的被动力联动补偿，不是原生硬齿轮约束；只施加关节力，不修改夹爪或纸盒位置。

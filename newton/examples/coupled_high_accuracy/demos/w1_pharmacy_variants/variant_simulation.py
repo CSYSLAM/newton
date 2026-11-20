@@ -11,7 +11,7 @@ from variant_geometry import make_carton
 from variant_motion import create_plan
 
 import newton
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 
 @wp.kernel
@@ -120,14 +120,14 @@ class Simulation:
         self.model.soft_contact_kd = 10
         self.model.soft_contact_kf = 1000
         self.model.soft_contact_mu = 0.65
-        self.solver = s3d.SolverCoupledHighAccuracy(self.model)
+        self.solver = cha.SolverCoupledHighAccuracy(self.model)
         cfg = self.solver.config
-        cfg.nonlinear_solver = s3d.NonlinearSolver.NEWTON
+        cfg.nonlinear_solver = cha.NonlinearSolver.NEWTON
         cfg.nonlinear_iterations = args.iterations
         cfg.linear_iterations = args.linear_iterations
-        cfg.inertia_mode = s3d.InertiaMode.NONE
-        cfg.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-        cfg.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+        cfg.inertia_mode = cha.InertiaMode.NONE
+        cfg.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+        cfg.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
         cfg.joint_constraint_primal_iterations = 1
         cfg.constraint_alpha = 500
         cfg.enable_collision_hessian_non_diagonal = True
@@ -251,7 +251,7 @@ def record(sim, args, folder):
             arrays[f"{field}_{i}"] = a[field]
     np.savez_compressed(folder / "trajectory.npz", **arrays)
     report = dict(
-        solver="s3d.SolverCoupledHighAccuracy",
+        solver="cha.SolverCoupledHighAccuracy",
         seconds=args.seconds,
         fps=30,
         cases=[c.report() for c in sim.cases],

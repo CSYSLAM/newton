@@ -14,7 +14,7 @@ import newton.examples
 
 # Re-exported for the examples that register cable attributes on their own builders.
 from newton._src.solvers.coupled_high_accuracy.cable_material import register_cable_attributes  # noqa: F401
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 
 @dataclass(frozen=True)
@@ -159,7 +159,7 @@ def create_cable_parser(example_name: str) -> argparse.ArgumentParser:
 def create_cable_builder(args: Any = None, **kwargs: Any) -> newton.ModelBuilder:
     if getattr(args, "solver", "synreal") == "vbd":
         return newton.ModelBuilder(**kwargs)
-    builder = s3d.ModelBuilder(**kwargs)
+    builder = cha.ModelBuilder(**kwargs)
     # These examples compare the same authored material/contact model across
     # solvers. The general SynReal builder's stiffer contact defaults would alter it.
     builder.default_shape_cfg = newton.ModelBuilder.ShapeConfig()
@@ -174,10 +174,10 @@ def create_cable_solver(args: Any, model: newton.Model, **vbd_options: Any):
     """
     if getattr(args, "solver", "synreal") == "vbd":
         return newton.solvers.SolverVBD(model, **vbd_options)
-    solver = s3d.SolverCoupledHighAccuracy(model)
+    solver = cha.SolverCoupledHighAccuracy(model)
     inertia_mode = getattr(args, "inertia_mode", None)
     if inertia_mode is not None:
-        solver.config.inertia_mode = getattr(s3d.InertiaMode, inertia_mode.replace("-", "_").upper())
+        solver.config.inertia_mode = getattr(cha.InertiaMode, inertia_mode.replace("-", "_").upper())
     # Preserve the scene's VBD contact law, including defaults omitted by the
     # example. C0 stabilization and history change the mechanics of gripping.
     contact_alpha = vbd_options.get("rigid_avbd_contact_alpha")
@@ -211,7 +211,7 @@ def create_cable_solver(args: Any, model: newton.Model, **vbd_options: Any):
     for name, value in cable_options.items():
         setattr(solver.config, name, value)
     solver.config.nonlinear_solver = (
-        s3d.NonlinearSolver.PD_NEWTON if getattr(args, "solver", "synreal") == "pd" else s3d.NonlinearSolver.NEWTON
+        cha.NonlinearSolver.PD_NEWTON if getattr(args, "solver", "synreal") == "pd" else cha.NonlinearSolver.NEWTON
     )
     nonlinear_iterations = getattr(args, "nonlinear_iterations", None)
     linear_iterations = getattr(args, "linear_iterations", None)

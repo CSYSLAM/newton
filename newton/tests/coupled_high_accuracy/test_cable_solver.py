@@ -8,12 +8,12 @@ wp = pytest.importorskip("warp")
 
 from newton._src.solvers.coupled_high_accuracy.cable_material import register_cable_attributes
 from newton._src.solvers.coupled_high_accuracy.solver_coupled_high_accuracy import NewtonSolver
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Cable simulation requires CUDA")
 
 
-def _cable_model(builder_type=s3d.ModelBuilder, *, curved=False, dahl=False):
+def _cable_model(builder_type=cha.ModelBuilder, *, curved=False, dahl=False):
     builder = builder_type(gravity=wp.vec3(0.0))
     if dahl:
         register_cable_attributes(builder)
@@ -39,8 +39,8 @@ def _cable_model(builder_type=s3d.ModelBuilder, *, curved=False, dahl=False):
     return model, bodies, joints
 
 
-@pytest.mark.parametrize("builder_type", [s3d.ModelBuilder, newton.ModelBuilder])
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("builder_type", [cha.ModelBuilder, newton.ModelBuilder])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 def test_curved_cable_rest_shape_is_force_free(builder_type, framework):
     model, bodies, _ = _cable_model(builder_type, curved=True)
     solver = NewtonSolver(model)
@@ -57,7 +57,7 @@ def test_curved_cable_rest_shape_is_force_free(builder_type, framework):
     assert int(model.body_count) == len(bodies)
 
 
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 def test_cable_prescribed_endpoint_updates_and_pull_response(framework):
     model, bodies, _ = _cable_model()
     solver = NewtonSolver(model)
@@ -95,7 +95,7 @@ def test_cable_dahl_history_tracks_material_twist():
     assert np.isfinite(solver.joint_sigma_prev.numpy()).all()
 
 
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 @pytest.mark.parametrize("captured", [False, True])
 def test_cable_solve_and_material_history_do_not_call_vbd(monkeypatch, framework, captured):
     def reject_reference(*args, **kwargs):
@@ -127,7 +127,7 @@ def test_cable_solve_and_material_history_do_not_call_vbd(monkeypatch, framework
     else:
         solver.step(state_out, state_in, model.control(), None, 1.0e-3)
     final = state_in.body_q.numpy()
-    assert isinstance(solver.native_solver, s3d.Solver)
+    assert isinstance(solver.native_solver, cha.Solver)
     assert np.isfinite(final).all()
     assert np.max(np.abs(final[bodies[-1]] - poses[bodies[-1]])) > 1.0e-6
     assert np.max(np.abs(solver.joint_sigma_prev.numpy()[joints])) > 0.0
@@ -165,7 +165,7 @@ def test_effective_inertia_can_lock_a_coupled_proxy_rotation(is_proxy):
     assert np.isfinite(state_out.body_qd.numpy()).all()
 
 
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 @pytest.mark.parametrize("surface", ["translate_box", "rotate_box", "spin_capsule"])
 def test_prescribed_affine_surface_transfers_friction(framework, surface):
     def simulate(friction):

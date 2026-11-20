@@ -14,7 +14,7 @@ import warp as wp
 import newton
 import newton.utils
 from newton import JointTargetMode
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 from .config import (
     ARM_JOINTS,
@@ -360,14 +360,14 @@ class SynRealG1LocomotionEnv:
         self.model = builder.finalize(device=self.wp_device)
         self.friction_summary = layout["friction_summary"]
         self.model.set_gravity((0.0, 0.0, self.cfg.simulation.gravity))
-        self.solver = s3d.SolverCoupledHighAccuracy(
+        self.solver = cha.SolverCoupledHighAccuracy(
             self.model,
             joint_drive_armature=self.cfg.simulation.joint_armature_approximation,
         )
-        self.solver.config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-        self.solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SIX_SPRINGS
-        self.solver.config.inertia_mode = s3d.InertiaMode.MIDPOINT_CAYLEY
-        self.solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
+        self.solver.config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+        self.solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SIX_SPRINGS
+        self.solver.config.inertia_mode = cha.InertiaMode.MIDPOINT_CAYLEY
+        self.solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
         self.solver.config.constraint_alpha = self.cfg.simulation.constraint_alpha
         self.solver.config.joint_constraint_primal_iterations = self.cfg.simulation.joint_constraint_primal_iterations
         self.solver.config.nonlinear_iterations = self.cfg.simulation.nonlinear_iterations

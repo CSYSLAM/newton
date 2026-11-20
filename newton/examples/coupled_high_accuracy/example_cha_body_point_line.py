@@ -17,7 +17,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 _LINE_HALF_LENGTH = 1.5
 _CONSTRAINT_STIFFNESS = 1.0e5
@@ -67,7 +67,7 @@ class Example:
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.viewer = viewer
 
-        builder = s3d.ModelBuilder(
+        builder = cha.ModelBuilder(
             up_axis=newton.Axis.Z,
             gravity=0.0,
             affine_body_particle_radius=0.0,
@@ -144,7 +144,7 @@ class Example:
             )
 
         self.model = builder.finalize()
-        self.solver = s3d.SolverCoupledHighAccuracy(self.model)
+        self.solver = cha.SolverCoupledHighAccuracy(self.model)
         self.solver.config.nonlinear_iterations = 10
         self.solver.config.linear_iterations = 5
 

@@ -7,7 +7,7 @@ newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
 pytest.importorskip("mujoco")
 
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="NewtonSolver requires CUDA")
 
@@ -69,12 +69,12 @@ def _make_scene(
     model = builder.finalize(device="cuda:0")
     np.testing.assert_allclose(model.joint_armature.numpy()[-1], armature)
     if backend == "synreal":
-        solver = s3d.NewtonSolver(
+        solver = cha.NewtonSolver(
             model, joint_damping=0.0, joint_drive_armature=0.0, joint_line_half_length=guide_half_length
         )
-        solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
-        solver.config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-        solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
+        solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+        solver.config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+        solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
         solver.config.nonlinear_iterations = 10
         solver.config.linear_iterations = 60
         solver.config.joint_constraint_primal_iterations = 5
@@ -151,7 +151,7 @@ def test_joint_armature_also_resists_external_body_wrench(kind):
     # Body wrenches enter the rigid predictor before the constraint solve.
     # Armature must resist their acceleration as well as joint_f acceleration.
     scene = _make_scene(kind, "synreal", armature=0.1)
-    scene[1].config.inertia_mode = s3d.InertiaMode.MIDPOINT_CAYLEY
+    scene[1].config.inertia_mode = cha.InertiaMode.MIDPOINT_CAYLEY
     actual, _ = _advance(scene, kind, body_wrench=0.5)
     body_inertia = 0.04 if kind == "revolute" else 2.0
     expected = 0.5 * 0.00125 / (body_inertia + 0.1)
@@ -169,10 +169,10 @@ def test_joint_armature_handles_replicated_worlds_during_cuda_graph_replay(armat
     armatures = np.asarray(armatures, dtype=np.float32)
     builder.joint_armature[:] = armatures.tolist()
     model = builder.finalize(device="cuda:0")
-    solver = s3d.NewtonSolver(model, joint_damping=0.0, joint_drive_armature=0.0)
+    solver = cha.NewtonSolver(model, joint_damping=0.0, joint_drive_armature=0.0)
     assert solver.synreal_model.world_count == (3 if len(np.unique(armatures)) == 1 else 1)
-    solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
-    solver.config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
+    solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+    solver.config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
     solver.config.nonlinear_iterations = 10
     solver.config.linear_iterations = 60
     solver.config.joint_constraint_primal_iterations = 5

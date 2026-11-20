@@ -22,7 +22,7 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.solvers.coupled_high_accuracy.particle_surface import connected_components
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 FRAME_DT = 1.0 / 60.0
 INITIAL_KNIFE_HEIGHT = 0.45
@@ -109,7 +109,7 @@ class BeefSurfaceMaterial:
     def log_mesh(self, viewer, mesh, uvs=None):
         if uvs is None:
             uvs = self.build_uvs(mesh)
-        s3d.log_surface_mesh(
+        cha.log_surface_mesh(
             viewer,
             "beef_surface",
             mesh,
@@ -401,7 +401,7 @@ class Example:
         self.model = builder.finalize(device=device)
         self.model.soft_contact_ke, self.model.soft_contact_kd = cfg.ke, cfg.kd
         self.model.soft_contact_kf, self.model.soft_contact_mu = 15.0, 0.15
-        s3d.configure_granular(
+        cha.configure_granular(
             self.model,
             np.arange(len(points), dtype=np.int32),
             contact_stiffness=20000.0,
@@ -414,8 +414,8 @@ class Example:
             bond_radius=1.5 * self.spacing,
             adhesion=0.0,
         )
-        self.solver = s3d.SolverCoupledHighAccuracy(self.model)
-        self.solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
+        self.solver = cha.SolverCoupledHighAccuracy(self.model)
+        self.solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
         self.solver.config.nonlinear_iterations = args.iterations
         self.solver.config.linear_iterations = args.linear_iterations
         self.solver.config.enable_collision_hessian_non_diagonal = True
@@ -431,7 +431,7 @@ class Example:
         self.bonds = self.model.synreal_granular_bond_indices
         self.broken = wp.zeros(len(self.bonds), dtype=int, device=device)
         self.surface = (
-            s3d.ParticleSurface(
+            cha.ParticleSurface(
                 self.spacing,
                 rest_positions,
                 bonds=self.bonds,

@@ -17,7 +17,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 _BODY_COUNT = 10
 _BOX_HALF_LENGTH = 0.5
@@ -48,7 +48,7 @@ class Example:
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.viewer = viewer
 
-        builder = s3d.ModelBuilder(
+        builder = cha.ModelBuilder(
             up_axis=newton.Axis.Z,
             gravity=-0.98,
             affine_body_particle_radius=0.04,
@@ -79,7 +79,7 @@ class Example:
             builder.add_body_spring(body0, body1, self.point0, self.point1, stiffness=1.0e7, rest_length=0.0)
 
         self.model = builder.finalize()
-        self.solver = s3d.SolverCoupledHighAccuracy(self.model)
+        self.solver = cha.SolverCoupledHighAccuracy(self.model)
         self.solver.config.nonlinear_iterations = 10
         self.solver.config.linear_iterations = 2
 

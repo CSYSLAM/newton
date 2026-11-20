@@ -69,12 +69,12 @@ class UnitreeGo2Env(SynRealLocomotionEnv):
         }
 
     def _configure_solver(self) -> None:
-        s3d = self.s3d
+        cha = self.cha
         config = self.solver.config
-        config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-        config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SIX_SPRINGS
-        config.inertia_mode = s3d.InertiaMode.MIDPOINT_CAYLEY
-        config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
+        config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+        config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SIX_SPRINGS
+        config.inertia_mode = cha.InertiaMode.MIDPOINT_CAYLEY
+        config.nonlinear_solver = cha.NonlinearSolver.NEWTON
         config.joint_constraint_primal_iterations = 2
         config.nonlinear_iterations = 30
         config.linear_iterations = 10

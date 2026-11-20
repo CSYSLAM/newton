@@ -19,7 +19,7 @@ from newton.examples.coupled_high_accuracy.example_cha_ball import (
     PARTICLE_RADIUS,
     create_tetrahedral_ball,
 )
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 from newton.solvers import style3d
 
 BALL_DROP_HEIGHT = 2.7
@@ -136,7 +136,7 @@ class Example:
         initial_ball_positions = initial_positions[self.ball_start : self.ball_stop]
         self.initial_ball_signed_six_volumes = self._signed_six_volumes(initial_ball_positions[self.ball_tetrahedra])
 
-        self.solver = s3d.SolverCoupledHighAccuracy(self.model)
+        self.solver = cha.SolverCoupledHighAccuracy(self.model)
         self.solver.config.nonlinear_iterations = 20
         self.solver.config.linear_iterations = 10
         self.solver.config.enable_self_collision = True

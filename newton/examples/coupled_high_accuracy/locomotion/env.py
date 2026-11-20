@@ -78,11 +78,11 @@ class SynRealLocomotionEnv:
         import warp as wp
 
         import newton
-        from newton.solvers import coupled_high_accuracy as s3d
+        from newton.solvers import coupled_high_accuracy as cha
 
         self.newton = newton
         self.wp = wp
-        self.s3d = s3d
+        self.cha = cha
         self.spec = load_policy_spec(robot)
         self.num_envs = num_envs
         self.num_actions = self.spec.action_dim
@@ -113,7 +113,7 @@ class SynRealLocomotionEnv:
             self.viewer.set_model(self.model)
             self.viewer.set_world_offsets((2.5, 2.5, 0.0))
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.model)
-        self.solver = s3d.SolverCoupledHighAccuracy(self.model)
+        self.solver = cha.SolverCoupledHighAccuracy(self.model)
         self._configure_solver()
         self.collision_pipeline = newton.CollisionPipeline(self.model)
         self.contacts = self.collision_pipeline.contacts()
@@ -192,10 +192,10 @@ class SynRealLocomotionEnv:
             self.capture_simulation_graph()
 
     def _configure_solver(self) -> None:
-        s3d = self.s3d
-        self.solver.config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-        self.solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.CO_ROTATED
-        self.solver.config.inertia_mode = s3d.InertiaMode.MIDPOINT_CAYLEY
+        cha = self.cha
+        self.solver.config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+        self.solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.CO_ROTATED
+        self.solver.config.inertia_mode = cha.InertiaMode.MIDPOINT_CAYLEY
         self.solver.config.constraint_alpha = 2e2
         self.solver.config.nonlinear_iterations = self.spec.solver_iterations
         self.solver.config.linear_iterations = self.spec.linear_iterations
@@ -203,7 +203,7 @@ class SynRealLocomotionEnv:
     def _build_model(self, num_envs: int) -> tuple[Any, dict[str, Any]]:
         newton = self.newton
         spec = self.spec
-        builder_type = self.s3d.ModelBuilder if spec.asset_source == "newton" else newton.ModelBuilder
+        builder_type = self.cha.ModelBuilder if spec.asset_source == "newton" else newton.ModelBuilder
         robot = builder_type(up_axis=newton.Axis.Z)
         robot.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
             armature=0.01 if spec.asset_source == "newton" else 0.0,

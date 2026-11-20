@@ -20,7 +20,7 @@ from pxr import Usd
 import newton
 import newton.examples
 import newton.usd
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 
 class Example:
@@ -35,7 +35,7 @@ class Example:
         self.viewer = viewer
         self.solver_type = args.solver if hasattr(args, "solver") and args.solver else "xpbd"
 
-        builder_type = s3d.ModelBuilder if self.solver_type == "synreal" else newton.ModelBuilder
+        builder_type = cha.ModelBuilder if self.solver_type == "synreal" else newton.ModelBuilder
         builder = builder_type()
 
         builder.default_shape_cfg.mu = 0.5  # Friction coefficient
@@ -110,11 +110,11 @@ class Example:
                 iterations=10,
             )
         elif self.solver_type == "synreal":
-            self.solver = s3d.SolverCoupledHighAccuracy(self.model)
-            self.solver.config.affine_body_rigidity_model = s3d.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
-            self.solver.config.joint_constraint_mode = s3d.JointConstraintMode.AUGMENTED_LAGRANGIAN
-            self.solver.config.nonlinear_solver = s3d.NonlinearSolver.NEWTON
-            self.solver.config.inertia_mode = s3d.InertiaMode.MIDPOINT_CAYLEY
+            self.solver = cha.SolverCoupledHighAccuracy(self.model)
+            self.solver.config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
+            self.solver.config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
+            self.solver.config.nonlinear_solver = cha.NonlinearSolver.NEWTON
+            self.solver.config.inertia_mode = cha.InertiaMode.MIDPOINT_CAYLEY
             self.solver.config.joint_constraint_primal_iterations = 2
             self.solver.config.nonlinear_iterations = 2
             self.solver.config.linear_iterations = 50

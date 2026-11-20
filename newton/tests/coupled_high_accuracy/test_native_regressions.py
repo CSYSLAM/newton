@@ -1,25 +1,25 @@
 import numpy as np
 import pytest
 
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 wp = pytest.importorskip("warp")
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Native solver requires CUDA")
 
 
-def _span(array: wp.array) -> s3d.Span:
-    return s3d.Span(ptr=array.ptr, size=len(array))
+def _span(array: wp.array) -> cha.Span:
+    return cha.Span(ptr=array.ptr, size=len(array))
 
 
-def _state(positions: wp.array, velocities: wp.array) -> s3d.State:
-    state = s3d.State()
+def _state(positions: wp.array, velocities: wp.array) -> cha.State:
+    state = cha.State()
     state.particle_q = _span(positions)
     state.particle_qd = _span(velocities)
     return state
 
 
-@pytest.mark.parametrize("nonlinear_solver", (s3d.NonlinearSolver.PD_NEWTON, s3d.NonlinearSolver.NEWTON))
+@pytest.mark.parametrize("nonlinear_solver", (cha.NonlinearSolver.PD_NEWTON, cha.NonlinearSolver.NEWTON))
 @pytest.mark.parametrize("in_place", (False, True))
 @pytest.mark.parametrize("capture", (False, True))
 def test_zero_iterations_returns_inertial_prediction(nonlinear_solver, in_place: bool, capture: bool) -> None:
@@ -32,12 +32,12 @@ def test_zero_iterations_returns_inertial_prediction(nonlinear_solver, in_place:
     masses = wp.array((1.0, 0.0, 1.0), dtype=wp.float32, device="cuda:0")
     flags = wp.array((1, 1, 0), dtype=wp.int32, device="cuda:0")
     gravity = wp.array(((0.0, 0.0, -9.81),), dtype=wp.vec3, device="cuda:0")
-    model = s3d.Model()
+    model = cha.Model()
     model.particle_count = 3
     model.particle_masses = _span(masses)
     model.particle_flags = _span(flags)
     model.gravity = _span(gravity)
-    solver = s3d.Solver()
+    solver = cha.Solver()
     solver.initialize(model)
     solver.config.nonlinear_solver = nonlinear_solver
     solver.config.nonlinear_iterations = 0
@@ -65,7 +65,7 @@ def test_replicated_particles_contact_global_ground(world_count: int) -> None:
     builder.replicate(scene, world_count)
     builder.add_ground_plane()
     model = builder.finalize(device="cuda:0")
-    solver = s3d.NewtonSolver(model)
+    solver = cha.NewtonSolver(model)
     if world_count > 1:
         assert solver.synreal_model.world_count == world_count
         assert solver.synreal_model.shape_replicated_count == 0
@@ -82,7 +82,7 @@ def test_replicated_particles_contact_global_ground(world_count: int) -> None:
     np.testing.assert_allclose(positions, np.repeat(positions[:1], world_count, axis=0), atol=1.0e-6)
 
 
-@pytest.mark.parametrize("nonlinear_solver", (s3d.NonlinearSolver.PD_NEWTON, s3d.NonlinearSolver.NEWTON))
+@pytest.mark.parametrize("nonlinear_solver", (cha.NonlinearSolver.PD_NEWTON, cha.NonlinearSolver.NEWTON))
 @pytest.mark.parametrize("fixed_side", ("face", "particle", "both"))
 @pytest.mark.parametrize("fixed_by_flags", (False, True))
 def test_vertex_face_contact_with_fixed_particles(nonlinear_solver, fixed_side: str, fixed_by_flags: bool) -> None:
@@ -106,7 +106,7 @@ def test_vertex_face_contact_with_fixed_particles(nonlinear_solver, fixed_side: 
     velocity_in = wp.zeros(4, dtype=wp.vec3, device="cuda:0")
     position_out = wp.zeros(4, dtype=wp.vec3, device="cuda:0")
     velocity_out = wp.zeros(4, dtype=wp.vec3, device="cuda:0")
-    model = s3d.Model()
+    model = cha.Model()
     model.particle_count = 4
     model.particle_masses = _span(masses)
     model.particle_flags = _span(flags)
@@ -116,7 +116,7 @@ def test_vertex_face_contact_with_fixed_particles(nonlinear_solver, fixed_side: 
     model.collision_triangle_indices = _span(triangles)
     model.collision_particle_count = 1
     model.collision_particle_indices = _span(particles)
-    solver = s3d.Solver()
+    solver = cha.Solver()
     solver.initialize(model)
     solver.config.nonlinear_solver = nonlinear_solver
     solver.config.enable_self_collision = True
@@ -142,14 +142,14 @@ def test_particle_collision_stiffness_remains_finite_for_large_mass(mass: float)
     masses = wp.full(2, mass, dtype=wp.float32, device="cuda:0")
     radii = wp.full(2, 0.1, dtype=wp.float32, device="cuda:0")
     particles = wp.array((0, 1), dtype=wp.int32, device="cuda:0")
-    model = s3d.Model()
+    model = cha.Model()
     model.particle_count = 2
     model.particle_masses = _span(masses)
     model.particle_radii = _span(radii)
     model.particle_rest_positions = _span(position_in)
     model.collision_particle_count = 2
     model.collision_particle_indices = _span(particles)
-    solver = s3d.Solver()
+    solver = cha.Solver()
     solver.initialize(model)
     solver.config.enable_self_collision = True
     solver.step(_state(position_in, velocity_in), _state(position_out, velocity_out), 0.01)

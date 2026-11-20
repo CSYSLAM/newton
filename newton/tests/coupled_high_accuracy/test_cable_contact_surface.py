@@ -6,12 +6,12 @@ import pytest
 newton = pytest.importorskip("newton")
 wp = pytest.importorskip("warp")
 
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Cable contact simulation requires CUDA")
 
 
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 @pytest.mark.parametrize("friction_epsilon", [0.0, 0.01])
 def test_capsule_material_spin_uses_surface_friction_anchor(framework, friction_epsilon):
     def simulate(friction, ground_friction=None):
@@ -33,7 +33,7 @@ def test_capsule_material_spin_uses_surface_friction_anchor(framework, friction_
             builder.default_shape_cfg.mu = ground_friction
         builder.add_ground_plane()
         model = builder.finalize(device="cuda:0")
-        solver = s3d.NewtonSolver(model)
+        solver = cha.NewtonSolver(model)
         solver.config.nonlinear_solver = framework
         solver.config.nonlinear_iterations = 5
         solver.config.rigid_contact_friction_epsilon = friction_epsilon
@@ -68,8 +68,8 @@ def test_capsule_material_spin_uses_surface_friction_anchor(framework, friction_
         np.testing.assert_allclose(frictionless_surface, free, atol=1.0e-5)
 
 
-@pytest.mark.parametrize("builder_type", [newton.ModelBuilder, s3d.ModelBuilder])
-@pytest.mark.parametrize("framework", [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON])
+@pytest.mark.parametrize("builder_type", [newton.ModelBuilder, cha.ModelBuilder])
+@pytest.mark.parametrize("framework", [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON])
 @pytest.mark.parametrize("hard_contact", [False, True])
 def test_prescribed_kinematic_surface_transmits_traction(builder_type, framework, hard_contact):
     builder = builder_type(gravity=wp.vec3(0.0))
@@ -92,7 +92,7 @@ def test_prescribed_kinematic_surface_transmits_traction(builder_type, framework
     )
     builder.add_shape_sphere(body=sphere, radius=0.1, cfg=cfg)
     model = builder.finalize(device="cuda:0")
-    solver = s3d.NewtonSolver(model)
+    solver = cha.NewtonSolver(model)
     solver.config.nonlinear_solver = framework
     solver.config.nonlinear_iterations = 3
     solver.config.linear_iterations = 20

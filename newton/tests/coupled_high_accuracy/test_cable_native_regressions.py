@@ -3,20 +3,20 @@
 import numpy as np
 import pytest
 
-from newton.solvers import coupled_high_accuracy as s3d
+from newton.solvers import coupled_high_accuracy as cha
 
 wp = pytest.importorskip("warp")
 
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="Native solver requires CUDA")
-FRAMEWORKS = [s3d.NonlinearSolver.NEWTON, s3d.NonlinearSolver.PD_NEWTON]
+FRAMEWORKS = [cha.NonlinearSolver.NEWTON, cha.NonlinearSolver.PD_NEWTON]
 
 
 def _span(array):
-    return s3d.Span(ptr=array.ptr, size=len(array))
+    return cha.Span(ptr=array.ptr, size=len(array))
 
 
 def _state(positions, velocities):
-    state = s3d.State()
+    state = cha.State()
     state.particle_q = _span(positions)
     state.particle_qd = _span(velocities)
     return state
@@ -25,8 +25,8 @@ def _state(positions, velocities):
 @pytest.mark.parametrize("framework", FRAMEWORKS)
 @pytest.mark.parametrize("captured", [False, True])
 def test_empty_native_model_accepts_optional_cable_state(framework, captured):
-    solver = s3d.Solver()
-    solver.initialize(s3d.Model())
+    solver = cha.Solver()
+    solver.initialize(cha.Model())
     solver.config.nonlinear_solver = framework
     solver.config.affine_body_block_preconditioner = True
     solver.config.cable_linear_beta = 100.0
@@ -34,8 +34,8 @@ def test_empty_native_model_accepts_optional_cable_state(framework, captured):
 
     def advance():
         solver.reset_cable_penalty_state()
-        solver.copy_cable_penalties(s3d.Span())
-        solver.step(s3d.State(), s3d.State(), 0.01, wp.get_stream("cuda:0"))
+        solver.copy_cable_penalties(cha.Span())
+        solver.step(cha.State(), cha.State(), 0.01, wp.get_stream("cuda:0"))
 
     if captured:
         # No cable state exists, so an empty scene must not launch a zero-block kernel.
@@ -58,12 +58,12 @@ def test_particle_only_native_model_ignores_optional_cable_paths(framework, capt
     masses = wp.array([1.0, 2.0], dtype=wp.float32, device="cuda:0")
     flags = wp.array([1, 0], dtype=wp.int32, device="cuda:0")
     gravity = wp.zeros(1, dtype=wp.vec3, device="cuda:0")
-    model = s3d.Model()
+    model = cha.Model()
     model.particle_count = 2
     model.particle_masses = _span(masses)
     model.particle_flags = _span(flags)
     model.gravity = _span(gravity)
-    solver = s3d.Solver()
+    solver = cha.Solver()
     solver.initialize(model)
     solver.config.nonlinear_solver = framework
     solver.config.affine_body_block_preconditioner = True
@@ -74,7 +74,7 @@ def test_particle_only_native_model_ignores_optional_cable_paths(framework, capt
 
     def advance():
         solver.reset_cable_penalty_state()
-        solver.copy_cable_penalties(s3d.Span())
+        solver.copy_cable_penalties(cha.Span())
         solver.step(state_in, state_out, 0.01, wp.get_stream("cuda:0"))
 
     if captured:
@@ -91,14 +91,14 @@ def test_particle_only_native_model_ignores_optional_cable_paths(framework, capt
 
 
 def test_native_cable_count_requires_complete_metadata():
-    model = s3d.Model()
+    model = cha.Model()
     model.cable_count = 1
     with pytest.raises(ValueError, match="cable metadata is smaller than cable_count"):
-        s3d.Solver().initialize(model)
+        cha.Solver().initialize(model)
 
 
 def test_native_cable_buffers_reject_null_addresses_before_solver_entry():
     # Span is immutable, so invalid cable buffers are rejected before either
     # reset or copy can receive them. Empty buffers are exercised above.
     with pytest.raises(ValueError, match="requires a nonzero device address"):
-        s3d.Span(ptr=0, size=1)
+        cha.Span(ptr=0, size=1)
