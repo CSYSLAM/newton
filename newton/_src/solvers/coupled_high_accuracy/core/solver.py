@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 import os
 from collections import Counter
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from typing import Any, ClassVar
 
 import numpy as np
@@ -96,6 +96,24 @@ def _resolve_stream(stream: Any, device: wp.context.Device) -> wp.Stream | None:
     raise TypeError("Expected a CUDA stream integer, CUDA Stream Protocol object, or None")
 
 
+class _Branches:
+    """Round-robin side streams forked from one event; each stream waits on the fork before its first launch."""
+
+    def __init__(self, streams: list[Any], fork: Any):
+        self.streams = streams
+        self.fork = fork
+        self.used: list[Any] = []
+        self.next = 0
+
+    def scope(self) -> Any:
+        stream = self.streams[self.next % len(self.streams)]
+        self.next += 1
+        if stream not in self.used:
+            stream.wait_event(self.fork)
+            self.used.append(stream)
+        return wp.ScopedStream(stream, sync_enter=False)
+
+
 class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHost):
     """Implicit Newton solver for particles, cloth, soft bodies and affine rigid bodies."""
 
@@ -103,6 +121,9 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
         self._config = Config()
         self._initialized = False
         self._launches: Counter[str] = Counter()
+        # Side streams for the concurrent tangent product (config.tangent_streams) and the active fork, if any.
+        self._side_streams: list[Any] = []
+        self._branches: _Branches | None = None
         self._graphs: dict[tuple, tuple] = {}
         self._graph_seen: set[tuple] = set()
         self._views: dict[tuple[int, int, Any], wp.array] = {}
@@ -245,6 +266,33 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
         block = pcg_kernels.REDUCE_BLOCK
         wp.launch_tiled(kernel, dim=[(rows + block - 1) // block], inputs=inputs, block_dim=block, device=self.device)
         self._launches[key] += 1
+
+    def _branch(self) -> Any:
+        """Stream scope for one independent term inside ``_concurrent_branches``; a no-op outside it."""
+        return self._branches.scope() if self._branches is not None else nullcontext()
+
+    @contextmanager
+    def _concurrent_branches(self, branches: int):
+        """Fork ``branches`` side streams for the ``_branch()`` scopes inside the block and join them on exit.
+
+        Each ``_branch()`` scope keeps its own launches in order on one stream; different scopes must be independent,
+        e.g. matrix-free tangent products that each ``atomic_add`` into the same output. A captured graph then runs
+        them as parallel branches instead of one serial chain: for small systems the PCG iteration cost is launch
+        latency, not arithmetic. The sum only changes by the (already unordered) floating-point atomic order.
+        """
+        if branches <= 1 or self.device is None or not self.device.is_cuda:
+            yield
+            return
+        while len(self._side_streams) < branches:
+            self._side_streams.append(wp.Stream(self.device))
+        main = wp.get_stream(self.device)
+        self._branches = _Branches(self._side_streams[:branches], main.record_event())
+        try:
+            yield
+        finally:
+            used, self._branches = self._branches.used, None
+            for stream in used:
+                main.wait_stream(stream)
 
     # ------------------------------------------------------------------------------------------------------------
     # Initialization
@@ -1815,19 +1863,20 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                     )
                     if extra_product:
                         self.contact_product.zero_()
-                self._multiply_tangents(
-                    v,
-                    q_in,
-                    inverse_dt,
-                    so3_alpha,
-                    pd,
-                    so3,
-                    constitutive,
-                    rigidity,
-                    coupled_materials,
-                    joint_al_active,
-                    drag,
-                )
+                with self._concurrent_branches(config.tangent_streams):
+                    self._multiply_tangents(
+                        v,
+                        q_in,
+                        inverse_dt,
+                        so3_alpha,
+                        pd,
+                        so3,
+                        constitutive,
+                        rigidity,
+                        coupled_materials,
+                        joint_al_active,
+                        drag,
+                    )
                 extra = self.contact_product if extra_product else empty_v
                 if block_matrix:
                     self._launch_reduce(
@@ -3106,8 +3155,17 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
         joint_al_active,
         drag,
     ) -> None:
-        """Matrix-free tangent products added to contact_product, in the native order."""
-        model, launch, per_world = self.model, self._launch, self.per_world
+        """Matrix-free tangent products added to contact_product, in the native order.
+
+        Every term only adds into the product, so with ``config.tangent_streams > 1`` each term runs in its own
+        ``_branch()`` scope (see ``_concurrent_branches``).
+        """
+        model, per_world, branch = self.model, self.per_world, self._branch
+
+        def launch(*args: Any) -> None:
+            with branch():
+                self._launch(*args)
+
         body_indices, body_masses = v["affine_body_indices"], v["body_masses"]
         body_states, bodies_per_world = self.body_state_count, self.body_count
         product = self.contact_product
@@ -3205,7 +3263,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                 ],
             )
         if self._self:
-            self._multiply_self()
+            with branch():
+                self._multiply_self()
         if self._cached_surface:
             launch(
                 "surface_tangent_cached",
@@ -3221,14 +3280,15 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                 ],
             )
         elif self._surface:
-            self._surface_launch(
-                "surface_tangent",
-                surface_contact_kernels.multiply_surface_contact_tangent,
-                self._contact,
-                q_in,
-                inverse_dt,
-                [self.direction, product],
-            )
+            with branch():
+                self._surface_launch(
+                    "surface_tangent",
+                    surface_contact_kernels.multiply_surface_contact_tangent,
+                    self._contact,
+                    q_in,
+                    inverse_dt,
+                    [self.direction, product],
+                )
         if self.fluid_rows:
             launch(
                 "fluid_13multiply_rows",
@@ -3243,9 +3303,13 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                 ],
             )
         if self.granular_points:
-            self._multiply_granular(self._dt, self.direction, product)
+            with branch():
+                self._multiply_granular(self._dt, self.direction, product)
         if self._hard:
-            self._hard_evaluate(self._contact, q_in, inverse_dt, direction=self.direction, product=self.contact_product)
+            with branch():
+                self._hard_evaluate(
+                    self._contact, q_in, inverse_dt, direction=self.direction, product=self.contact_product
+                )
         elif self._rigid and self._config.enable_collision_hessian_non_diagonal:
             launch(
                 "rigid_tangent",
@@ -3260,7 +3324,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                 ],
             )
         if self._contact_product:
-            self._soft_contact_product(self._contact)
+            with branch():
+                self._soft_contact_product(self._contact)
         # The other PD joint-line schedules add it after the contact tangents, ahead of the drive terms.
         if pd and not coupled_materials and joint_al_active and self.joint_line_total and so3_alpha > 0.0:
             launch(
@@ -3299,15 +3364,19 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                 ],
             )
             if self.armature:
-                self._joint_armature(v, q_in, inverse_dt, self.direction, product, self._empty(wp.mat33))
+                with branch():
+                    self._joint_armature(v, q_in, inverse_dt, self.direction, product, self._empty(wp.mat33))
             if self._joint_cable_step and self.cable_count:
-                self._evaluate_cables(q_in, inverse_dt, direction=self.direction, force=product)
+                with branch():
+                    self._evaluate_cables(q_in, inverse_dt, direction=self.direction, force=product)
             if self.angular_limits:
-                self._angular_limits(v, q_in, inverse_dt, self.direction, product, self._empty(wp.mat33))
+                with branch():
+                    self._angular_limits(v, q_in, inverse_dt, self.direction, product, self._empty(wp.mat33))
         if self.cable_count and not self._joint_cable_step:
-            self._evaluate_cables(q_in, inverse_dt, direction=self.direction, force=product)
+            with branch():
+                self._evaluate_cables(q_in, inverse_dt, direction=self.direction, force=product)
         if self._rolling:
-            self._launch(
+            launch(
                 "rolling_tangent",
                 rolling_contact_kernels.multiply_cached_rolling_contact_tangent,
                 self._contact.max_count,
@@ -3351,6 +3420,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
             raise ValueError("config.nonlinear_iterations must be between 0 and 999")
         if not 1 <= config.linear_iterations <= _MAX_LINEAR_ITERATIONS:
             raise ValueError("config.linear_iterations must be between 1 and 999")
+        if not 1 <= config.tangent_streams <= 32:
+            raise ValueError("config.tangent_streams must be between 1 and 32")
         if not finite(config.constraint_alpha) or config.constraint_alpha < 0.0:
             raise ValueError("config.constraint_alpha must be finite and non-negative")
         if not 1 <= config.joint_constraint_primal_iterations <= _MAX_LINEAR_ITERATIONS:

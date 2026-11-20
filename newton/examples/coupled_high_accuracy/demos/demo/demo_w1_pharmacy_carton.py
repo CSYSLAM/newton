@@ -181,6 +181,7 @@ class Simulation:
         cfg.nonlinear_solver = cha.NonlinearSolver.NEWTON
         cfg.nonlinear_iterations = args.iterations
         cfg.linear_iterations = args.linear_iterations
+        cfg.tangent_streams = args.tangent_streams
         cfg.inertia_mode = cha.InertiaMode.NONE
         cfg.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
         cfg.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
@@ -292,6 +293,8 @@ def main():
     p.add_argument("--substeps", type=int, default=8)
     p.add_argument("--iterations", type=int, default=4)
     p.add_argument("--linear-iterations", type=int, default=120)
+    # Concurrent PCG tangent terms; 1 restores the serial kernel order.
+    p.add_argument("--tangent-streams", type=int, default=8)
     p.add_argument("--young", type=float, default=8e6)
     p.add_argument("--yield-strain", type=float, default=0.04)
     p.add_argument("--normal-force", type=float, default=2.5)
@@ -372,6 +375,7 @@ def main():
         substeps=args.substeps,
         nonlinear_iterations=args.iterations,
         linear_iterations=args.linear_iterations,
+        tangent_streams=args.tangent_streams,
         mass_damping_rate_per_s=8.0,
         plastic_hardening=0.035,
         plastic_viscosity_s=0.015,

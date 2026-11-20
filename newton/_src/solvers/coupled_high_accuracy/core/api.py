@@ -347,6 +347,8 @@ _CONFIG_FIELDS = (
     ("self_collision_particle_particle_stiffness", "f32", 1.0),
     ("self_collision_radius", "f32", 0.003000000026077032),
     ("self_collision_vertex_face_stiffness", "f32", 0.5),
+    # Warp backend only: side streams for the PCG matrix-free tangent terms; 1 keeps the serial native order.
+    ("tangent_streams", "i32", 1),
     ("wind_velocity", "vec3", (0.0, 0.0, 0.0)),
 )
 
