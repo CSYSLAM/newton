@@ -979,11 +979,11 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         project_particle_contacts: bool = False
         """Project residual particle penetration after grid-to-particle transfer.
 
-        Opt-in discrete contact stabilization for thin containers. Corrects
-        position, velocity and velocity gradient using the collider mesh;
-        opposite velocity impulses are included in collider feedback.
-        This is not continuous collision detection or an energy-conserving
-        integrator. It cannot recover particles already beyond a thin wall.
+        Opt-in contact stabilization for thin containers. Tests particle
+        advection segments against the current collider mesh, then corrects
+        residual penetration, velocity and velocity gradient. Opposite
+        velocity impulses are included in collider feedback. This does not
+        sweep rotating/deforming colliders or conserve integration energy.
         """
         collider_basis: _MPMColliderBasisName = "S2"
         """Collider basis function. Defaults to ``"S2"``; pass ``"Q1"``
@@ -2366,6 +2366,8 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 state_in.body_qd if self.collider_velocity_mode == "forward" else None,
                 self._last_step_data.body_q_prev if self.collider_velocity_mode == "backward" else None,
                 dt,
+                None,
+                None,
             ],
             outputs=[
                 state_out.particle_q,
@@ -3167,6 +3169,9 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         self._save_for_next_warmstart(scratch, pic, last_step_data)
 
         # Update and advect particles
+        # Preserve the segment origin for in-place stepping as well as
+        # ping-pong states; captured clones are owned by the CUDA graph.
+        positions_start = wp.clone(state_in.particle_q) if self.project_particle_contacts else None
         self._update_particles(state_in, state_out, dt, pic, scratch)
 
         if self.project_particle_contacts:
@@ -3193,6 +3198,8 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                     state_in.body_qd if self.collider_velocity_mode == "forward" else None,
                     last_step_data.body_q_prev if self.collider_velocity_mode == "backward" else None,
                     dt,
+                    positions_start,
+                    last_step_data.body_q_prev,
                 ],
                 outputs=[state_out.particle_q, state_out.particle_qd, state_out.mpm.particle_qd_grad, *reactions],
                 device=model.device,

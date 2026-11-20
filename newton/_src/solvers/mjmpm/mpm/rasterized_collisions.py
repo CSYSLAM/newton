@@ -415,6 +415,69 @@ def collider_is_dynamic(collider_id: int, collider: MJMPMCollider, body_mass: wp
     return body_mass[body_id] > 0.0
 
 
+@wp.func
+def _swept_collision_sdf(
+    start: wp.vec3,
+    end: wp.vec3,
+    environment_index: int,
+    collider: MJMPMCollider,
+    body_q: wp.array[wp.transform],
+    body_q_start: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_q_prev: wp.array[wp.transform],
+    dt: float,
+):
+    """Find the first entry into a shell along a particle's advection segment."""
+    closest_fraction = float(1.0)
+    closest_id = int(_NULL_COLLIDER_ID)
+    material_id = int(0)
+    normal = wp.vec3(0.0)
+    velocity = wp.vec3(0.0)
+    point = wp.vec3(0.0)
+    distance = float(_INFINITY)
+    query_begin, query_count = _collider_query_range(environment_index, collider)
+    for query_offset in range(query_count):
+        cid = _queried_collider_id(environment_index, query_begin, query_offset, collider)
+        body_id = collider.collider_body_index[cid]
+        origin = start
+        target = end
+        if body_id >= 0:
+            inverse = wp.transform_inverse(body_q[body_id])
+            origin = wp.transform_point(inverse, start)
+            if body_q_start:
+                origin = wp.transform_point(wp.transform_inverse(body_q_start[body_id]), start)
+            target = wp.transform_point(inverse, end)
+        length = wp.length(target - origin)
+        if length <= 1.0e-7:
+            continue
+        direction = (target - origin) / length
+        mesh = collider.collider_mesh[cid]
+        hit = wp.mesh_query_ray(mesh, origin, direction, closest_fraction * length)
+        if hit.result and wp.dot(direction, hit.normal) < 0.0:
+            closest_fraction = hit.t / length
+            closest_id = cid
+            point = wp.mesh_eval_position(mesh, hit.face, hit.u, hit.v)
+            normal = hit.normal
+            velocity = wp.mesh_eval_velocity(mesh, hit.face, hit.u, hit.v)
+            material_id = collider.face_material_index[collider.collider_face_offset[cid] + hit.face]
+            # Keep the particle on the entry side, even if the endpoint
+            # has already crossed the entire wall into empty space.
+            distance = (length - hit.t) * wp.dot(direction, normal) - collider.material_thickness[material_id]
+    return _finish_collision_sdf(
+        distance,
+        normal,
+        velocity,
+        point,
+        closest_id,
+        material_id,
+        collider,
+        body_q,
+        body_qd,
+        body_q_prev,
+        dt,
+    )
+
+
 @wp.kernel
 def project_outside_collider(
     positions: wp.array[wp.vec3],
@@ -428,6 +491,8 @@ def project_outside_collider(
     body_qd: wp.array[wp.spatial_vector],
     body_q_prev: wp.array[wp.transform],
     dt: float,
+    positions_start: wp.array[wp.vec3],
+    body_q_start: wp.array[wp.transform],
     positions_out: wp.array[wp.vec3],
     velocities_out: wp.array[wp.vec3],
     velocity_gradients_out: wp.array[wp.mat33],
@@ -455,6 +520,10 @@ def project_outside_collider(
         body_qd: Rigid body velocities.
         body_q_prev: Previous rigid body transforms (for finite-difference velocity).
         dt: Timestep length.
+        positions_start: Optional positions before advection. When supplied,
+            test the corrected motion segment against the shell.
+        body_q_start: Optional collider poses at the segment start. Use these
+            for relative sweeps against translating rigid bodies.
         positions_out: Output particle positions.
         velocities_out: Output particle velocities.
         velocity_gradients_out: Output particle velocity gradients.
@@ -487,7 +556,6 @@ def project_outside_collider(
     sdf, sdf_gradient, sdf_vel, collider_id, material_id = collision_sdf(
         pos_adv, environment_index, collider, body_q, body_qd, body_q_prev, dt
     )
-
     sdf_end = sdf - wp.dot(sdf_vel, sdf_gradient) * dt + collider.material_projection_threshold[material_id]
     if sdf_end < 0:
         # remove normal vel
@@ -507,6 +575,31 @@ def project_outside_collider(
 
         # make velocity gradient rigid
         vel_grad = 0.5 * (vel_grad - wp.transpose(vel_grad))
+
+    # Check the corrected segment as well: endpoint projection itself can
+    # choose the far side of a thin moving shell.
+    if positions_start:
+        swept_sdf, swept_grad, swept_vel, swept_id, swept_material = _swept_collision_sdf(
+            positions_start[i], pos_adv, environment_index, collider, body_q, body_q_start, body_qd, body_q_prev, dt
+        )
+        if swept_id >= 0:
+            delta_vel = (
+                solve_coulomb_isotropic(
+                    collider.material_friction[swept_material], swept_grad, velocities[i] - swept_vel
+                )
+                + swept_vel
+                - velocities[i]
+            )
+            if reaction_impulses:
+                reaction_impulses[i] = -particle_mass[i] * delta_vel
+                reaction_positions[i] = pos_adv - swept_sdf * swept_grad
+                reaction_collider_ids[i] = swept_id
+            p_vel = velocities[i] + delta_vel
+            penetration = (
+                swept_sdf - wp.dot(swept_vel, swept_grad) * dt + collider.material_projection_threshold[swept_material]
+            )
+            pos_adv -= wp.min(0.0, penetration) * swept_grad
+            vel_grad = 0.5 * (vel_grad - wp.transpose(vel_grad))
 
     positions_out[i] = pos_adv
     velocities_out[i] = p_vel

@@ -22,20 +22,29 @@ class TestParticleContactProjection(unittest.TestCase):
                 SolverImplicitMPM.register_custom_attributes(builder)
                 body = builder.add_body()
                 builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.01, cfg=builder.ShapeConfig(mu=0.0))
-                for z, mass, flags in ((0.009, 2.0, 1), (0.009, 2.0, 0), (0.009, 0.0, 1), (0.03, 1.0, 1)):
-                    builder.add_particle((0.0, 0.0, z), (0.0, 0.0, -1.0), mass, 0.001, flags=flags)
+                for z, mass, flags in (
+                    (0.009, 2.0, 1),
+                    (0.009, 2.0, 0),
+                    (0.009, 0.0, 1),
+                    (0.03, 1.0, 1),
+                    (-0.03, 1.0, 1),
+                ):
+                    builder.add_particle((0.0, 0.0, z), (0.0, 0.0, -60.0 if z < 0 else -1.0), mass, 0.001, flags=flags)
                 model = builder.finalize(device=device)
                 solver = SolverImplicitMPM(model, SolverImplicitMPM.Config(voxel_size=0.01))
                 state, output = model.state(), model.state()
                 state.body_qd.assign(
                     wp.array([wp.spatial_vector(0.1, 0.0, 0.2, 0.0, 0.0, 0.0)], dtype=wp.spatial_vector)
                 )
-                reaction = wp.full(4, wp.vec3(999.0), dtype=wp.vec3)
-                points = wp.empty(4, dtype=wp.vec3)
-                ids = wp.full(4, 999, dtype=int)
+                starts = state.particle_q.numpy().copy()
+                starts[-1, 2] = 0.03
+                starts = wp.array(starts, dtype=wp.vec3)
+                reaction = wp.full(5, wp.vec3(999.0), dtype=wp.vec3)
+                points = wp.empty(5, dtype=wp.vec3)
+                ids = wp.full(5, 999, dtype=int)
                 command = wp.launch(
                     project_outside_collider,
-                    dim=4,
+                    dim=5,
                     inputs=[
                         state.particle_q,
                         state.particle_qd,
@@ -48,6 +57,8 @@ class TestParticleContactProjection(unittest.TestCase):
                         state.body_qd,
                         None,
                         0.001,
+                        starts,
+                        None,
                     ],
                     outputs=[output.particle_q, output.particle_qd, output.mpm.particle_qd_grad, reaction, points, ids],
                     record_cmd=True,
@@ -62,12 +73,50 @@ class TestParticleContactProjection(unittest.TestCase):
                 np.testing.assert_allclose(impulse, -delta, atol=1.0e-6)
                 np.testing.assert_allclose(impulse[0], [0.0, 0.0, -2.4], atol=1.0e-5)
                 self.assertGreater(float(output.particle_q.numpy()[0, 2]), 0.01)
-                np.testing.assert_array_equal(ids.numpy()[1:], -1)
-                np.testing.assert_array_equal(output.particle_q.numpy()[1:], state.particle_q.numpy()[1:])
+                self.assertGreater(float(output.particle_q.numpy()[4, 2]), 0.01)
+                np.testing.assert_allclose(impulse[4], [0.0, 0.0, -60.2], atol=1.0e-5)
+                np.testing.assert_array_equal(ids.numpy()[1:4], -1)
+                np.testing.assert_array_equal(output.particle_q.numpy()[1:4], state.particle_q.numpy()[1:4])
                 # The existing explicit projection API still works without feedback buffers.
                 legacy = model.state()
                 solver.project_outside(state, legacy, 0.001)
-                np.testing.assert_allclose(legacy.particle_q.numpy(), output.particle_q.numpy(), atol=1.0e-7)
+                np.testing.assert_allclose(legacy.particle_q.numpy()[:4], output.particle_q.numpy()[:4], atol=1.0e-7)
+                # A translating wall can cross a stationary particle even
+                # when its world-space advection segment has zero length.
+                positions = state.particle_q.numpy().copy()
+                positions[0] = 0.0
+                state.particle_q.assign(positions)
+                velocities = state.particle_qd.numpy().copy()
+                velocities[0] = 0.0
+                state.particle_qd.assign(velocities)
+                starts.assign(positions)
+                state.body_q.assign([wp.transform(wp.vec3(0.0, 0.0, 0.03), wp.quat_identity())])
+                state.body_qd.assign([wp.spatial_vector(0.0, 0.0, 60.0, 0.0, 0.0, 0.0)])
+                previous_pose = wp.array(
+                    [wp.transform(wp.vec3(0.0, 0.0, -0.03), wp.quat_identity())], dtype=wp.transform
+                )
+                wp.launch(
+                    project_outside_collider,
+                    dim=1,
+                    inputs=[
+                        state.particle_q,
+                        state.particle_qd,
+                        state.mpm.particle_qd_grad,
+                        model.particle_flags,
+                        model.particle_mass,
+                        None,
+                        solver._mpm_model.collider,
+                        state.body_q,
+                        state.body_qd,
+                        None,
+                        0.001,
+                        starts,
+                        previous_pose,
+                    ],
+                    outputs=[output.particle_q, output.particle_qd, output.mpm.particle_qd_grad, reaction, points, ids],
+                )
+                self.assertGreater(float(output.particle_q.numpy()[0, 2]), 0.04)
+                np.testing.assert_allclose(reaction.numpy()[0], [0.0, 0.0, -120.0], atol=1.0e-5)
 
     def test_step_collects_projection_feedback(self):
         """Include stabilization reactions in step feedback for coupled consumers."""

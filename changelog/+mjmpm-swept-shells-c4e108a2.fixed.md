@@ -1,0 +1,1 @@
+Prevent particles from crossing thin collider shells during advection when MJMPM particle contact projection is enabled. Test motion segments against the collider mesh while retaining opposite contact impulses, in-place stepping and CUDA graph replay.
