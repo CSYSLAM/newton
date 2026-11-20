@@ -2,7 +2,6 @@
 
 import csv
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -13,11 +12,6 @@ from newton.examples.coupled_high_accuracy.demos.piper_bag_transport.motor_telem
     MotorTelemetryCSV,
     capture_motor_sample,
 )
-
-
-@pytest.fixture(autouse=True, scope="module")
-def local_warp_cache(tmp_path_factory):
-    wp.config.kernel_cache_dir = str(Path(tmp_path_factory.mktemp("warp-motor-telemetry-tests")))
 
 
 @pytest.fixture
