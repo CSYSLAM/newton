@@ -134,6 +134,7 @@ def test_config_exposes_runtime_options() -> None:
     assert config.nonlinear_solver == cha.NonlinearSolver.NEWTON
     assert config.nonlinear_iterations == 5
     assert config.linear_iterations == 50
+    assert config.tangent_streams == 8
     assert config.enable_collision_hessian_non_diagonal is True
     assert config.reference_linear_schedule is False
     config.reference_linear_schedule = True

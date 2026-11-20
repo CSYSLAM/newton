@@ -11,7 +11,7 @@ from newton.solvers import coupled_high_accuracy as cha
 pytestmark = pytest.mark.skipif(not wp.is_cuda_available(), reason="The linear schedule requires CUDA")
 
 
-def _run(reference: bool, capture: bool, reinitialize: bool = False, tangent_streams: int = 1):
+def _run(reference: bool, capture: bool, reinitialize: bool = False, tangent_streams: int | None = None):
     # A tetrahedral block pressed by a driven sphere onto the ground: it exercises the tetrahedron, SO(3), drive,
     # self-collision, surface and soft contact tangents that the default schedule runs concurrently.
     builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -51,7 +51,8 @@ def _run(reference: bool, capture: bool, reinitialize: bool = False, tangent_str
     solver = cha.NewtonSolver(model)
     config = solver.config
     config.reference_linear_schedule = reference
-    config.tangent_streams = tangent_streams
+    if tangent_streams is not None:
+        config.tangent_streams = tangent_streams
     config.affine_body_rigidity_model = cha.AffineBodyRigidityModel.SO3_AUGMENTED_LAGRANGIAN
     config.joint_constraint_mode = cha.JointConstraintMode.AUGMENTED_LAGRANGIAN
     config.inertia_mode = cha.InertiaMode.NONE
@@ -119,7 +120,7 @@ def test_reinitialized_solver_does_not_reuse_released_caches():
 
 @pytest.mark.parametrize("capture", (False, True))
 def test_concurrent_tangent_streams_match_serial_order(capture):
-    serial_q, serial_body, serial_contacts, serial_launches = _run(False, capture)
+    serial_q, serial_body, serial_contacts, serial_launches = _run(False, capture, tangent_streams=1)
     streams_q, streams_body, streams_contacts, streams_launches = _run(False, capture, tangent_streams=8)
     assert serial_contacts > 0 and streams_contacts > 0
     # Side streams change where the tangent terms run, not which kernels run.
