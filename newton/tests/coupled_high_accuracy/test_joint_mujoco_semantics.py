@@ -244,6 +244,13 @@ def test_joint_drive_modes_and_aggregate_limit_match_mujoco(kind, mode, kp, targ
     expected, _ = _advance(mujoco, kind)
     np.testing.assert_allclose(mujoco[1].mj_data.qfrc_actuator[-1], expected_actuator, rtol=1.0e-5, atol=1.0e-6)
     np.testing.assert_allclose(feedback.numpy()[-1], 0.8 + expected_actuator, rtol=1.0e-5, atol=1.0e-5)
+    if np.isclose(abs(expected_actuator), limit):
+        # A saturated drive keeps kd in the implicit velocity term, as MuJoCo
+        # 3.x implicitfast did. MuJoCo 4 drops the clamped actuator's velocity
+        # derivative, so compare the clipped load against the drive law instead.
+        dt = 0.00125
+        inertia = 0.04 if kind == "revolute" else 2.0
+        expected = 0.7 + (0.8 + expected_actuator) * dt / (inertia + options["kd"] * dt)
     np.testing.assert_allclose(actual - 0.7, expected - 0.7, rtol=0.025, atol=5.0e-5)
 
 
