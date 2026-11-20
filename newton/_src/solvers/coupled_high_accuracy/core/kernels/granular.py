@@ -380,7 +380,8 @@ def multiply_contacts(view: GranularView, direction: wp.array[wp.vec3], product:
                     pair.normal, pair.viscosity, view.stiffness, direction[a] - direction[view.ids[j]]
                 )
             j, it = neighbours_advance(view, it)
-    product[a] = accumulated + product[a]
+    # Atomic: other tangent terms may add into the same row concurrently (config.tangent_streams).
+    wp.atomic_add(product, a, accumulated)
 
 
 @wp.func

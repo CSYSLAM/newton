@@ -280,7 +280,8 @@ def add_hessian_diagonal(hessian: wp.array[wp.mat33], diagonal: wp.array[wp.mat3
 @wp.kernel
 def multiply_hessian_diagonal(hessian: wp.array[wp.mat33], v: wp.array[wp.vec3], product: wp.array[wp.vec3]):
     i = wp.tid()
-    product[i] = hessian[i] * v[i] + product[i]
+    # Atomic: other tangent terms may add into the same row concurrently (config.tangent_streams).
+    wp.atomic_add(product, i, hessian[i] * v[i])
 
 
 @wp.func

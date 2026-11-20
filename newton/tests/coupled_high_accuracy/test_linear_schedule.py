@@ -132,3 +132,43 @@ def test_concurrent_tangent_streams_match_serial_order(capture):
 def test_tangent_streams_out_of_range_is_rejected(streams):
     with pytest.raises(ValueError, match="tangent_streams"):
         _run(False, False, tangent_streams=streams)
+
+
+@wp.kernel
+def _add_ones(product: wp.array[wp.vec3], repeats: int):
+    i = wp.tid()
+    for _ in range(repeats):
+        wp.atomic_add(product, i % product.shape[0], wp.vec3(1.0))
+
+
+@pytest.mark.parametrize("term", ("self_diagonal", "granular_contacts"))
+def test_tangent_terms_keep_concurrent_additions(term):
+    # With tangent_streams > 1 a term may run while other terms atomic_add into the same rows; a read-modify-write
+    # of the product would drop those additions. Both terms below contribute zero, so every row must keep all of them.
+    from newton._src.solvers.coupled_high_accuracy.core.kernels import granular, self_collision
+
+    device = wp.get_device("cuda:0")
+    rows, repeats, terms = 1 << 16, 4, 8
+    product = wp.zeros(rows, dtype=wp.vec3, device=device)
+    if term == "self_diagonal":
+        kernel = self_collision.multiply_hessian_diagonal
+        inputs = [wp.zeros(rows, dtype=wp.mat33, device=device), wp.zeros(rows, dtype=wp.vec3, device=device)]
+    else:
+        kernel = granular.multiply_contacts
+        view = granular.GranularView()
+        view.ids = wp.array(np.arange(rows, dtype=np.int32), device=device)
+        view.counts = wp.zeros(rows, dtype=wp.int32, device=device)
+        view.count = rows
+        inputs = [view, wp.zeros(rows, dtype=wp.vec3, device=device)]
+    main, side = wp.get_stream(device), wp.Stream(device)
+    with wp.ScopedCapture(device=device) as capture:
+        product.zero_()
+        side.wait_event(main.record_event())
+        with wp.ScopedStream(side, sync_enter=False):
+            wp.launch(_add_ones, dim=terms * rows, inputs=[product, repeats], device=device)
+        for _ in range(terms):
+            wp.launch(kernel, dim=rows, inputs=[*inputs, product], device=device)
+        main.wait_stream(side)
+    for _ in range(10):
+        wp.capture_launch(capture.graph)
+        np.testing.assert_array_equal(product.numpy(), terms * repeats)
