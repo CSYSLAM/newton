@@ -116,6 +116,14 @@ class Example:
             find_body(hand_body_name),
         }
         self.ee_index = find_body(hand_body_name)
+        # The grasp waypoints are authored for the fr3_hand frame. With fixed joints collapsed, fr3_hand is part of
+        # fr3_link7, so the IK targets the hand frame through its URDF offset (fr3_joint8, then fr3_hand_joint).
+        if self.solver_type == "synreal":
+            self.ee_offset = wp.transform(
+                wp.vec3(0.0, 0.0, 0.107), wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), -0.25 * np.pi)
+            )
+        else:
+            self.ee_offset = wp.transform_identity()
         non_finger_shape_indices = []
         for shape_idx, body_idx in enumerate(builder.shape_body):
             if body_idx in finger_body_indices and builder.shape_type[shape_idx] == newton.GeoType.MESH:
@@ -493,19 +501,19 @@ class Example:
 
     def setup_ik(self):
         body_q_np = self.state.body_q.numpy()
-        self.ee_tf = wp.transform(*body_q_np[self.ee_index])
+        self.ee_tf = wp.transform_multiply(wp.transform(*body_q_np[self.ee_index]), self.ee_offset)
 
         # Position objective (single IK problem)
         self.pos_obj = ik.IKObjectivePosition(
             link_index=self.ee_index,
-            link_offset=wp.vec3(0.0, 0.0, 0.0),
+            link_offset=wp.transform_get_translation(self.ee_offset),
             target_positions=wp.array([wp.transform_get_translation(self.ee_tf)], dtype=wp.vec3),
         )
 
         # Rotation objective (single IK problem)
         self.rot_obj = ik.IKObjectiveRotation(
             link_index=self.ee_index,
-            link_offset_rotation=wp.quat_identity(),
+            link_offset_rotation=wp.transform_get_rotation(self.ee_offset),
             target_rotations=wp.array([quat_to_vec4(wp.transform_get_rotation(self.ee_tf))], dtype=wp.vec4),
         )
 
