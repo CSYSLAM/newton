@@ -170,8 +170,9 @@ class Example:
         builder.color()
 
         self.model = builder.finalize()
-        # Size persistent contact history before graph capture.
-        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="sticky")
+        # Size persistent contact history before graph capture. Cables are rigid bodies; their affine proxy
+        # particles add no soft-contact samples, and particles x shapes would reserve ~6 GB here.
+        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="sticky", soft_contact_max=0)
         self.contacts = self.collision_pipeline.contacts()
 
         self.solver = create_cable_solver(
