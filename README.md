@@ -917,6 +917,14 @@ python -m newton.examples --describe robot_omniwheel
     </td>
   </tr>
   <tr>
+    <td align="center" width="33%">
+      <a href="newton/examples/multiphysics/example_mujoco_cha_w1_grasp.py">
+        <img width="320" src="docs/images/examples/example_mujoco_cha_w1_grasp.jpg" alt="W1 dual grasp with MuJoCo and CHA">
+      </a>
+      <br><code>python -m newton.examples mujoco_cha_w1_grasp</code>
+    </td>
+  </tr>
+  <tr>
     <td colspan="3"><h3>Contacts Examples</h3></td>
   </tr>
   <tr>

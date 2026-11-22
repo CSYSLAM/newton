@@ -1960,6 +1960,28 @@ add_example_test(
 )
 add_example_test(
     TestMultiphysicsExamples,
+    name="multiphysics.example_mujoco_cha_w1_grasp",
+    devices=cuda_test_devices,
+    test_options={"requires": ("trimesh", "collada", *MUJOCO_MODULES), "num-frames": 480},
+    use_viewer=True,
+    # The bundled W1 visuals lack UVs on some links; its URDF also needs the builder's inertia correction.
+    allow_output_regexes=[
+        (
+            r"^.*import_urdf\.py:\d+: NewtonWarning: Mesh [^\n]*w1-030[/\\]visual[/\\][^\n]*\.glb "
+            r"has a texture but no UVs; texture will be ignored\.\n"
+            r"  parse_shapes\(link, visuals, density=0\.0, just_visual=True, visible=not hide_visuals\)\n?",
+            "stderr",
+        ),
+        (
+            r"^.*example_mujoco_cha_w1_grasp\.py:\d+: NewtonWarning: Inertia validation corrected 9 bodies\. "
+            r"Set validate_inertia_detailed=True for detailed per-body warnings\.\n"
+            r"  self\.model = builder\.finalize\(\)\n?",
+            "stderr",
+        ),
+    ],
+)
+add_example_test(
+    TestMultiphysicsExamples,
     name="multiphysics.example_franka_cable_ik_pick_place",
     devices=cuda_test_devices,
     test_options={"requires": ("git", "trimesh", "collada", *MUJOCO_MODULES)},

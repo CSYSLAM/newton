@@ -1,0 +1,1 @@
+Add a W1 dual-gripper example using MuJoCo for the robot articulation and `SolverCoupledHighAccuracy` for two free tetrahedral blocks, with two-way finger contact reactions through experimental `SolverCoupledProxy` coupling.
