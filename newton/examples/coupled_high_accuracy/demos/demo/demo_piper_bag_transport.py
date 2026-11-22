@@ -610,7 +610,9 @@ class Example:
             rigid_contact_max=max(4096, 512 * (APPLE_COUNT + self.robot_body_count)),
             soft_contact_margin=0.006,
             enable_rigid_soft_full_surface_contact=True,
-            # CHA applies no force from the rejected apple-bag records; skipping them is 5x faster collision.
+            # CHA applies forces only to the records its filter selects, and those stay identical; skipping the
+            # rejected apple-bag records makes collision about 5x faster. Not valid with SolverVBD, whose step
+            # truncation reads every record. The gripper checks in test_final count only the kept records.
             full_surface_force_contacts_only=True,
         )
         self.contacts = self.collision_pipeline.contacts()

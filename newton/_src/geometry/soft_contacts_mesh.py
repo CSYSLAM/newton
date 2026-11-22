@@ -1707,7 +1707,8 @@ class MeshContactData:
     ):
         self.vertex_pairs = vertex_pairs
         # Emit only the edge-edge and face-vertex records that ``_soft_contact_force_enabled`` accepts, for
-        # consumers that ignore the remaining (penetration-prevention) records.
+        # consumers that ignore the rest (CHA). SolverVBD's DAT truncation reads every record, so it needs False.
+        # See CollisionPipeline(full_surface_force_contacts_only=...).
         self.force_records_only = force_records_only
         meshes = _collision_meshes(model, shape_mask)
         if model.tri_count:

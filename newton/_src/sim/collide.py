@@ -1867,13 +1867,31 @@ class CollisionPipeline:
                 collision/solver time. Set ``soft_contact_max`` to size storage explicitly;
                 this does not reduce the number of feature pairs queried.
                 See :ref:`full-surface-mesh-contact-costs`.
-            full_surface_force_contacts_only: With ``enable_rigid_soft_full_surface_contact``, skip
-                the mesh face-vertex and edge-edge records that a solver's force selection rejects
-                (unresolved sign, inactive soft features, redundant representations), before their
-                costly sign query. Only for solvers that ignore those records, such as
-                :class:`~newton.solvers.SolverCoupledHighAccuracy`; :class:`~newton.solvers.SolverVBD`
-                still reads them. Vertex-face records and non-mesh shapes are unaffected.
-                Defaults to False.
+            full_surface_force_contacts_only: Only takes effect with
+                ``enable_rigid_soft_full_surface_contact``. When True, mesh face-vertex and
+                edge-edge detection drops every record that the solver-side force selection would
+                reject: records without an active soft particle, edge-edge pairs whose closest
+                points are not interior to both edges, face-vertex pairs whose closest point the
+                soft face does not own, and pairs whose side stays unresolved. All but the
+                side-dependent checks run before the costly inside/outside query; those run right
+                after it. The records that remain are identical to those emitted with False; only
+                the rejected ones are missing.
+
+                Use it when the consumer applies forces to the selected records and reads nothing
+                else, e.g. :class:`~newton.solvers.SolverCoupledHighAccuracy`, whose mesh contact
+                filter keeps exactly these records. In such scenes most full-surface records are
+                rejected, so this can cut detection time several-fold.
+
+                Do not use it with :class:`~newton.solvers.SolverVBD`: its DAT step truncation
+                bounds every particle and body move by all records, including the rejected ones,
+                and skipping them can let the cloth tunnel through the rigid surface. The same
+                applies to any other consumer of the rejected records, e.g. code that counts or
+                inspects :attr:`Contacts.soft_contact_count` or ``soft_contact_shape`` (such as an
+                example check that the gripper no longer touches the cloth), which then sees fewer
+                records.
+
+                Vertex-face records, edge penetration recovery records, non-mesh rigid shapes and
+                per-particle contacts are unaffected. Defaults to False.
             requires_grad: Whether pipeline-generated soft contacts require gradients.
                 If None, uses ``model.requires_grad``. Rigid-contact gradients come from
                 :func:`newton.eval_rigid_contact_kinematics` and do not depend on this flag.
