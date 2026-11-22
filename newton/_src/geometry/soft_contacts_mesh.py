@@ -438,6 +438,133 @@ def _mesh_feature_data(mesh: Mesh) -> tuple[np.ndarray, np.ndarray, np.ndarray, 
     return vertex_table, vertex_normals, edge_table, edge_outward
 
 
+# Warp's nearest-point queries skip triangles whose area / sum of squared edge lengths falls below 1e-6. A
+# pseudonormal table needs the query to see every face, so it rejects meshes with any face below this larger bound.
+_PSEUDONORMAL_MIN_FACE_SHAPE = 1.0e-5
+# The convexity check compares every vertex with every face plane; larger hulls keep the parity query.
+_PSEUDONORMAL_MAX_CHECK = 50_000_000
+
+
+def _mesh_face_pseudonormals(mesh: Mesh) -> np.ndarray | None:
+    """Return outward angle-weighted pseudonormals indexed by ``face * 7 + triangle_closest_point`` feature.
+
+    Each face has its three corner, three edge (AB, AC, BC) and face pseudonormals. For a convex solid, the sign of
+    ``(p - closest) . pseudonormal`` is the exact inside/outside classification (Baerentzen and Aanaes 2005), so the
+    caller uses it only for convex-hull shapes. It agrees with the parity query except where the parity ray passes
+    through shared edges or vertices and miscounts crossings; there it corrects the parity result. The table is
+    returned only when every precondition holds; otherwise None keeps the parity query:
+
+    - every edge borders exactly two faces and every face has a consistent winding (each directed edge appears once),
+      so a face, edge or corner pseudonormal is well defined and points to one side;
+    - the faces form a single connected shell, which rules out separate or nested components whose parity differs
+      from the nearest face's side;
+    - every vertex lies behind every face plane (the shell is convex, hence not self-intersecting);
+    - no face is thin enough for Warp's nearest-point query to skip it.
+    """
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    tris = np.asarray(mesh.indices, dtype=np.int32).reshape(-1, 3)
+    if len(tris) == 0 or len(tris) * len(verts) > _PSEUDONORMAL_MAX_CHECK:
+        return None
+    canonical = mesh._canonical_vertex_ids()
+    _orig_edges, slot_keys, _sort, _keys, face_normals, face_norms = mesh._build_edge_slot_topology(canonical)
+    _edge_keys, inverse, edge_faces = np.unique(slot_keys, return_inverse=True, return_counts=True)
+    if np.any(edge_faces != 2):
+        return None
+    # Consistent winding: with two faces per edge, every directed edge appearing once means opposite directions.
+    c = canonical[tris]
+    directed = np.concatenate((c[:, [0, 1]], c[:, [1, 2]], c[:, [2, 0]])).astype(np.int64)
+    if len(np.unique((directed[:, 0] << 32) | directed[:, 1])) != len(directed):
+        return None
+    # A single shell: join the two faces of every edge.
+    face_of_slot = np.arange(len(slot_keys)) // 3
+    order = np.argsort(inverse, kind="stable")
+    pairs = face_of_slot[order].reshape(-1, 2)
+    parent = np.arange(len(tris))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for a, b in pairs:
+        ra, rb = root(a), root(b)
+        if ra != rb:
+            parent[ra] = rb
+    if len({root(i) for i in range(len(tris))}) != 1:
+        return None
+    e0 = verts[tris[:, 1]] - verts[tris[:, 0]]
+    e1 = verts[tris[:, 2]] - verts[tris[:, 0]]
+    e2 = verts[tris[:, 2]] - verts[tris[:, 1]]
+    edge_squares = np.einsum("ij,ij->i", e0, e0) + np.einsum("ij,ij->i", e1, e1) + np.einsum("ij,ij->i", e2, e2)
+    if np.any(face_norms <= _PSEUDONORMAL_MIN_FACE_SHAPE * edge_squares):
+        return None
+    fn_unit = face_normals / face_norms[:, None]
+    # Orient the (consistently wound) shell outward, then require every vertex behind every face plane.
+    volume = np.einsum("ij,ij->i", verts[tris[:, 0]], np.cross(verts[tris[:, 1]], verts[tris[:, 2]])).sum()
+    if volume == 0.0:
+        return None
+    if volume < 0.0:
+        fn_unit = -fn_unit
+    tolerance = 1.0e-6 * float(np.linalg.norm(verts.max(axis=0) - verts.min(axis=0)))
+    for chunk in range(0, len(tris), 1024):
+        rows = slice(chunk, chunk + 1024)
+        heights = fn_unit[rows] @ verts.T - np.einsum("ij,ij->i", fn_unit[rows], verts[tris[rows, 0]])[:, None]
+        if heights.max() > tolerance:
+            return None
+    corner_normals = np.zeros((int(canonical.max()) + 1, 3), dtype=np.float64)
+    for k, (a, b) in enumerate(((1, 2), (2, 0), (0, 1))):
+        da = verts[tris[:, a]] - verts[tris[:, k]]
+        db = verts[tris[:, b]] - verts[tris[:, k]]
+        cos_angle = np.einsum("ij,ij->i", da, db) / (np.linalg.norm(da, axis=1) * np.linalg.norm(db, axis=1))
+        angle = np.arccos(np.clip(cos_angle, -1.0, 1.0))
+        np.add.at(corner_normals, canonical[tris[:, k]], fn_unit * angle[:, None])
+    edge_normals = np.zeros((len(edge_faces), 3), dtype=np.float64)
+    np.add.at(edge_normals, inverse, np.repeat(fn_unit, 3, axis=0))
+    # Edge slots per face are (0, 1), (1, 2), (0, 2); feature order is A, B, C, AB, AC, BC, face.
+    slot_edges = edge_normals[inverse].reshape(-1, 3, 3)
+    table = np.stack(
+        (
+            corner_normals[canonical[tris[:, 0]]],
+            corner_normals[canonical[tris[:, 1]]],
+            corner_normals[canonical[tris[:, 2]]],
+            slot_edges[:, 0],
+            slot_edges[:, 2],
+            slot_edges[:, 1],
+            fn_unit,
+        ),
+        axis=1,
+    )
+    return table.reshape(-1, 3).astype(np.float32)
+
+
+def _build_face_pseudonormals(model: Model, meshes: dict[int, Mesh]) -> tuple[wp.array[wp.vec3], wp.array[wp.int32]]:
+    """Concatenate the per-geometry pseudonormal tables, with each shape's offset (-1 without a table)."""
+    offsets = np.full(model.shape_count, -1, dtype=np.int32)
+    blocks: list[np.ndarray] = []
+    start = 0
+    cache: dict[tuple, int] = {}
+    # Face-vertex and edge-edge detection, the only readers, need soft triangles.
+    shape_types = model.shape_type.numpy() if model.tri_count else np.empty(0, np.int32)
+    for shape, mesh in meshes.items():
+        if not model.tri_count or shape_types[shape] != int(GeoType.CONVEX_MESH):
+            continue
+        key = _geometry_key(mesh)
+        if key not in cache:
+            table = _mesh_face_pseudonormals(mesh)
+            cache[key] = -1
+            if table is not None:
+                cache[key] = start
+                blocks.append(table)
+                start += len(table)
+        offsets[shape] = cache[key]
+    table = np.concatenate(blocks) if blocks else np.empty((0, 3), np.float32)
+    return (
+        wp.array(table, dtype=wp.vec3, device=model.device),
+        wp.array(offsets, dtype=wp.int32, device=model.device),
+    )
+
+
 def _build_rigid_features(
     model: Model, meshes: dict[int, Mesh]
 ) -> tuple[wp.array[wp.vec2i], wp.array[wp.vec3], wp.array[wp.vec3i], wp.array[wp.vec3]]:
@@ -558,7 +685,14 @@ def _face_vertex_velocity(mesh: wp.uint64, index: wp.int32):
 
 @wp.func
 def _feature_mesh_sign(
-    mesh: wp.uint64, X_sw: wp.transform, scale: wp.vec3, soft: wp.vec3, sign_method: int, feature_distance: float
+    mesh: wp.uint64,
+    X_sw: wp.transform,
+    scale: wp.vec3,
+    soft: wp.vec3,
+    sign_method: int,
+    feature_distance: float,
+    pseudonormals: wp.array[wp.vec3],
+    pseudonormal_offset: int,
 ):
     """Sign a soft feature point: -1 inside, 1 outside, 2 on the surface, 0 without a surface.
 
@@ -569,6 +703,27 @@ def _feature_mesh_sign(
     feature distance.
     """
     query_point = wp.cw_div(wp.transform_point(X_sw, soft), scale)
+    if sign_method == MeshSignMethod.PARITY and pseudonormal_offset >= 0:
+        # On a gated convex shell the closest feature's pseudonormal gives the exact side without casting a ray; it
+        # also avoids the parity ray's miscounts when that ray passes through shared edges or vertices.
+        # The rigid feature lies on the surface within feature_distance, which bounds the nearest search; a miss
+        # (from rounding of that bound) repeats it unbounded.
+        bound = feature_distance / wp.min(wp.abs(scale)) * 1.001 + 1.0e-6 * (wp.length(query_point) + 1.0)
+        closest = wp.mesh_query_point_no_sign(mesh, query_point, bound)
+        if not closest.result:
+            closest = wp.mesh_query_point_no_sign(mesh, query_point, 1.0e6)
+        if not closest.result:
+            return int(0)
+        surface = wp.mesh_eval_position(mesh, closest.face, closest.u, closest.v)
+        separation = wp.length(wp.cw_mul(query_point - surface, scale))
+        if separation <= 2.0e-6 * (wp.length(soft) + wp.length(X_sw.p)) + 1.0e-4 * feature_distance:
+            return int(2)
+        a = wp.mesh_get_point(mesh, closest.face * 3 + 0)
+        b = wp.mesh_get_point(mesh, closest.face * 3 + 1)
+        c = wp.mesh_get_point(mesh, closest.face * 3 + 2)
+        cp, _bary, feature = triangle_closest_point(a, b, c, query_point)
+        side = wp.dot(query_point - cp, pseudonormals[pseudonormal_offset + closest.face * 7 + feature])
+        return wp.where(side < 0.0, -1, 1)
     query = mesh_query_point_sign(mesh, query_point, 1.0e6, sign_method)
     if not query.result:
         return int(0)
@@ -718,6 +873,8 @@ def _detect_mesh_face_contacts(
     force_records_only: int,
     particle_flags: wp.array[wp.int32],
     soft_adjacency: MeshAdjacencyData,
+    pseudonormals: wp.array[wp.vec3],
+    pseudonormal_offsets: wp.array[wp.int32],
     contact_count: wp.array[wp.int64],
     features: wp.array[wp.vec3i],
     contact_shapes: wp.array[int],
@@ -796,6 +953,8 @@ def _detect_mesh_face_contacts(
                         cp,
                         resolve_mesh_sign_method(shape_mesh_properties[shape_index]),
                         wp.length(cp - x_w),
+                        pseudonormals,
+                        pseudonormal_offsets[shape_index],
                     )
                     if sign == 2:
                         reference = transform_normal_with_scale(X_ws, scale, vertex_outward[tid])
@@ -857,6 +1016,8 @@ def _detect_mesh_edge_contacts(
     edge_outward: wp.array[wp.vec3],
     force_records_only: int,
     particle_flags: wp.array[wp.int32],
+    pseudonormals: wp.array[wp.vec3],
+    pseudonormal_offsets: wp.array[wp.int32],
     contact_count: wp.array[wp.int64],
     features: wp.array[wp.vec3i],
     contact_shapes: wp.array[int],
@@ -933,6 +1094,8 @@ def _detect_mesh_edge_contacts(
                         soft_point,
                         resolve_mesh_sign_method(shape_mesh_properties[shape_index]),
                         std[2],
+                        pseudonormals,
+                        pseudonormal_offsets[shape_index],
                     )
                     if sign == 2:
                         reference = transform_normal_with_scale(X_ws, scale, edge_outward[tid])
@@ -1358,6 +1521,8 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
                 force_records_only,
                 model.particle_flags,
                 soft_adjacency,
+                data.face_pseudonormals,
+                data.face_pseudonormal_offsets,
             ],
             outputs=[contact_count, features, contact_shapes],
             device=device,
@@ -1386,6 +1551,8 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
                 *cone_args,
                 force_records_only,
                 model.particle_flags,
+                data.face_pseudonormals,
+                data.face_pseudonormal_offsets,
             ],
             outputs=[contact_count, features, contact_shapes],
             device=device,
@@ -1737,6 +1904,7 @@ class MeshContactData:
             dtype=wp.vec2i,
             device=model.device,
         )
+        self.face_pseudonormals, self.face_pseudonormal_offsets = _build_face_pseudonormals(model, meshes)
         vertices, vertex_normals, edges, edge_normals = self.rigid_features
         if (
             max(_MESH_QUERY_PARTITIONS * len(vertex_pairs), len(vertices), len(edges), len(self.rigid_faces))
