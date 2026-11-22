@@ -197,7 +197,7 @@ class Example:
         # Face and edge contacts close the gaps between particles in this single-layer shell.
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
-            soft_contact_margin=0.006,
+            soft_contact_gap=0.006,
             enable_rigid_soft_full_surface_contact=True,
         )
         self.contacts = self.collision_pipeline.contacts()

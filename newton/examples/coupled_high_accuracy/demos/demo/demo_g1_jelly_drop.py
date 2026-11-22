@@ -287,7 +287,7 @@ class Example:
         # Generate candidates before a fast limb crosses the surface during the next discrete substep.
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
-            soft_contact_margin=0.05,
+            soft_contact_gap=0.05,
             enable_rigid_soft_full_surface_contact=True,
             soft_contact_max=max(32768, 4 * self.model.particle_count),
         )

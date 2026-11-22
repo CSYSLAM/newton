@@ -608,7 +608,7 @@ class Example:
             self.model,
             # Dense convex-mesh stacks emit many more contacts than the default primitive-shape estimate.
             rigid_contact_max=max(4096, 512 * (APPLE_COUNT + self.robot_body_count)),
-            soft_contact_margin=0.006,
+            soft_contact_gap=0.006,
             enable_rigid_soft_full_surface_contact=True,
             # CHA applies forces only to the records its filter selects, and those stay identical; skipping the
             # rejected apple-bag records makes collision about 5x faster. Not valid with SolverVBD, whose step

@@ -48,8 +48,9 @@ def test_cloth_ground_step_satisfies_implicit_force_balance(angle: float) -> Non
     solver.config.nonlinear_solver = NonlinearSolver.NEWTON
     solver.config.nonlinear_iterations = 10
     solver.config.linear_iterations = 50
-    contacts = model.contacts()
-    model.collide(state, contacts)
+    pipeline = newton.CollisionPipeline(model, broad_phase="explicit")
+    contacts = pipeline.contacts()
+    pipeline.collide(state, contacts)
     assert int(contacts.soft_contact_count.numpy()[0]) > 0
     dt = 1.0 / 120.0
     state.clear_forces()

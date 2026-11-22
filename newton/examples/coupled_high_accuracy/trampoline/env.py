@@ -143,7 +143,8 @@ class TrampolineEnv:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.contacts()
+        self.collision_pipeline = newton.CollisionPipeline(self.model, broad_phase="explicit")
+        self.contacts = self.collision_pipeline.contacts()
         newton.eval_fk(
             self.model,
             self.state_0.joint_q,
@@ -453,7 +454,7 @@ class TrampolineEnv:
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
-            self.model.collide(self.state_0, self.contacts)
+            self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.step(
                 self.state_0,
                 self.state_1,

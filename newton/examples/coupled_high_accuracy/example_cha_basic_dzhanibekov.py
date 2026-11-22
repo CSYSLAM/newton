@@ -102,10 +102,10 @@ class Example:
 
         if self.solver_type == "vbd":
             self.solver = newton.solvers.SolverVBD(self.model, iterations=4)
-            self.contacts = self.model.contacts()
+            self.contacts = newton.CollisionPipeline(self.model, broad_phase="explicit").contacts()
         elif self.solver_type == "xpbd":
             self.solver = newton.solvers.SolverXPBD(self.model, iterations=10)
-            self.contacts = self.model.contacts()
+            self.contacts = newton.CollisionPipeline(self.model, broad_phase="explicit").contacts()
         elif self.solver_type == "mujoco":
             self.solver = newton.solvers.SolverMuJoCo(
                 self.model,
@@ -124,7 +124,7 @@ class Example:
             self.solver.config.joint_constraint_primal_iterations = 2
             self.solver.config.nonlinear_iterations = 20
             self.solver.config.linear_iterations = 10
-            self.contacts = self.model.contacts()
+            self.contacts = newton.CollisionPipeline(self.model, broad_phase="explicit").contacts()
         else:
             raise ValueError(
                 f"Unknown solver type: {self.solver_type}. Choose from 'vbd', 'xpbd', 'mujoco', or 'synreal'."

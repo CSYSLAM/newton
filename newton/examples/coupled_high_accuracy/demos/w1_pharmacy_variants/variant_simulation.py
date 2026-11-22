@@ -154,7 +154,7 @@ class Simulation:
             self.model,
             rigid_contact_max=8192,
             soft_contact_max=65536,
-            soft_contact_margin=0.0015,
+            soft_contact_gap=0.0015,
             enable_rigid_soft_full_surface_contact=True,
         )
         self.contacts = self.pipeline.contacts()
