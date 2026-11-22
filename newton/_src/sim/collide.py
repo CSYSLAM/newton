@@ -1766,6 +1766,7 @@ class CollisionPipeline:
         soft_contact_gap: float | None = None,
         soft_contact_margin: float | None = None,
         enable_rigid_soft_full_surface_contact: bool = False,
+        full_surface_force_contacts_only: bool = False,
         requires_grad: bool | None = None,
         broad_phase: Literal["nxn", "sap", "explicit"]
         | BroadPhaseAllPairs
@@ -1866,6 +1867,13 @@ class CollisionPipeline:
                 collision/solver time. Set ``soft_contact_max`` to size storage explicitly;
                 this does not reduce the number of feature pairs queried.
                 See :ref:`full-surface-mesh-contact-costs`.
+            full_surface_force_contacts_only: With ``enable_rigid_soft_full_surface_contact``, skip
+                the mesh face-vertex and edge-edge records that a solver's force selection rejects
+                (unresolved sign, inactive soft features, redundant representations), before their
+                costly sign query. Only for solvers that ignore those records, such as
+                :class:`~newton.solvers.SolverCoupledHighAccuracy`; :class:`~newton.solvers.SolverVBD`
+                still reads them. Vertex-face records and non-mesh shapes are unaffected.
+                Defaults to False.
             requires_grad: Whether pipeline-generated soft contacts require gradients.
                 If None, uses ``model.requires_grad``. Rigid-contact gradients come from
                 :func:`newton.eval_rigid_contact_kinematics` and do not depend on this flag.
@@ -2581,6 +2589,7 @@ class CollisionPipeline:
                     model,
                     mesh_mask,
                     mesh_vertex_pairs,
+                    force_records_only=full_surface_force_contacts_only,
                 )
         else:
             self.soft_edge_rigid_pairs = empty_pairs

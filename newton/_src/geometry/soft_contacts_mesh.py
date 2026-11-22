@@ -715,6 +715,9 @@ def _detect_mesh_face_contacts(
     neighbors: wp.array[int],
     vertex_outward: wp.array[wp.vec3],
     edge_outward: wp.array[wp.vec3],
+    force_records_only: int,
+    particle_flags: wp.array[wp.int32],
+    soft_adjacency: MeshAdjacencyData,
     contact_count: wp.array[wp.int64],
     features: wp.array[wp.vec3i],
     contact_shapes: wp.array[int],
@@ -769,6 +772,17 @@ def _detect_mesh_face_contacts(
                 cp, _bary, _feature = triangle_closest_point(particle_q[t0], particle_q[t1], particle_q[t2], x_w)
                 r_soft = wp.max(particle_radius[t0], wp.max(particle_radius[t1], particle_radius[t2]))
                 if wp.length(cp - x_w) < gap + s_margin + r_soft:
+                    if force_records_only != 0:
+                        # Skip, before the sign query, records that fail force selection for either sign.
+                        active = (particle_flags[t0] | particle_flags[t1] | particle_flags[t2]) & ParticleFlags.ACTIVE
+                        if active == 0:
+                            continue
+                        if not _soft_face_valid(
+                            particle_q, particle_flags, tri_indices, soft_adjacency, cp, x_w - cp, _bary, tri_index
+                        ) and not _soft_face_valid(
+                            particle_q, particle_flags, tri_indices, soft_adjacency, cp, cp - x_w, _bary, tri_index
+                        ):
+                            continue
                     cp_local = wp.transform_point(_X_sw, cp)
                     diff = cp_local - x_local
                     # The cones only resolve which side an on-surface point lies on; they do not
@@ -786,6 +800,21 @@ def _detect_mesh_face_contacts(
                     if sign == 2:
                         reference = transform_normal_with_scale(X_ws, scale, vertex_outward[tid])
                         sign = _local_side(outward, inward, cp - x_w, reference)
+                    if force_records_only != 0:
+                        if sign == 0:
+                            continue
+                        side = wp.where(sign < 0, -1.0, 1.0)
+                        if not _soft_face_valid(
+                            particle_q,
+                            particle_flags,
+                            tri_indices,
+                            soft_adjacency,
+                            cp,
+                            side * (x_w - cp),
+                            _bary,
+                            tri_index,
+                        ):
+                            continue
                     _append_mesh_contact(
                         _mesh_feature_flags(_MESH_FEATURE_TV, sign),
                         tri_index,
@@ -826,6 +855,8 @@ def _detect_mesh_edge_contacts(
     neighbors: wp.array[int],
     vertex_outward: wp.array[wp.vec3],
     edge_outward: wp.array[wp.vec3],
+    force_records_only: int,
+    particle_flags: wp.array[wp.int32],
     contact_count: wp.array[wp.int64],
     features: wp.array[wp.vec3i],
     contact_shapes: wp.array[int],
@@ -883,6 +914,11 @@ def _detect_mesh_edge_contacts(
                 std = wp.closest_point_edge_edge(r0_w, r1_w, particle_q[sv0], particle_q[sv1], 0.0)
                 r_soft = wp.max(particle_radius[sv0], particle_radius[sv1])
                 if std[2] < gap + s_margin + r_soft:
+                    if force_records_only != 0:
+                        # Force selection keeps only interior solutions on active edges; it ignores the sign.
+                        active = (particle_flags[sv0] | particle_flags[sv1]) & ParticleFlags.ACTIVE
+                        if active == 0 or not (0.0 < std[0] and std[0] < 1.0 and 0.0 < std[1] and std[1] < 1.0):
+                            continue
                     soft_point = particle_q[sv0] + std[1] * (particle_q[sv1] - particle_q[sv0])
                     rigid_point = r0_w + std[0] * (r1_w - r0_w)
                     rigid_local = wp.transform_point(_X_sw, rigid_point)
@@ -901,6 +937,8 @@ def _detect_mesh_edge_contacts(
                     if sign == 2:
                         reference = transform_normal_with_scale(X_ws, scale, edge_outward[tid])
                         sign = _local_side(outward, inward, soft_point - rigid_point, reference)
+                    if force_records_only != 0 and sign == 0:
+                        continue
                     _append_mesh_contact(
                         _mesh_feature_flags(_MESH_FEATURE_EE, sign),
                         edge_index,
@@ -1250,6 +1288,12 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
         return
 
     cone_args = data.adjacency
+    force_records_only = int(data.force_records_only)
+    soft_adjacency = model.soft_mesh_adjacency_device
+    if soft_adjacency is None:
+        if force_records_only:
+            raise ValueError("force_records_only requires the soft mesh adjacency")
+        soft_adjacency = MeshAdjacencyData()
 
     shape_args = [
         state.body_q,
@@ -1311,6 +1355,9 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
                 max_particle_radius,
                 contact_max,
                 *cone_args,
+                force_records_only,
+                model.particle_flags,
+                soft_adjacency,
             ],
             outputs=[contact_count, features, contact_shapes],
             device=device,
@@ -1337,6 +1384,8 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
                 max_particle_radius,
                 contact_max,
                 *cone_args,
+                force_records_only,
+                model.particle_flags,
             ],
             outputs=[contact_count, features, contact_shapes],
             device=device,
@@ -1654,8 +1703,12 @@ class MeshContactData:
         shape_mask: np.ndarray,
         vertex_pairs: wp.array[wp.vec2i],
         contact_headroom: int = 8,
+        force_records_only: bool = False,
     ):
         self.vertex_pairs = vertex_pairs
+        # Emit only the edge-edge and face-vertex records that ``_soft_contact_force_enabled`` accepts, for
+        # consumers that ignore the remaining (penetration-prevention) records.
+        self.force_records_only = force_records_only
         meshes = _collision_meshes(model, shape_mask)
         if model.tri_count:
             self.rigid_features = _build_rigid_features(model, meshes)
