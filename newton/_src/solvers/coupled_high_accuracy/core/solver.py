@@ -53,6 +53,7 @@ from .kernels import springs as spring_kernels
 from .kernels import step as step_kernels
 from .kernels import surface_contacts as surface_contact_kernels
 from .kernels import tetrahedra as tetrahedron_kernels
+from .kernels.common import PRODUCT_REPLICAS
 from .self_collision import SelfCollisionHost
 from .templates import SparseRows
 
@@ -382,7 +383,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
         self.model = model._copy()
         self.count = count
         self.per_world = model.particle_count
-        self.surface_tangent_cache = wp.zeros(0, dtype=surface_contact_kernels.SurfaceTangent, device=self.device)
+        self.surface_tangent_cache = wp.zeros(0, dtype=surface_contact_kernels.CachedSurfaceTangent, device=self.device)
         self.rigid_tangent_capacity = 0
         self.rolling_tangent_capacity = 0
         self.soft_tangent_capacity = 0
@@ -520,6 +521,10 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
         self.z = self._zeros(count, wp.vec3)
         self.product = self._zeros(count, wp.vec3)
         self.contact_product = self._zeros(count, wp.vec3)
+        # Replicas of the contact tangent product on affine-body proxy rows (see PRODUCT_REPLICAS).
+        self.proxy_slot = self._zeros(count, wp.int32)
+        self.product_replicas = self._zeros(int(PRODUCT_REPLICAS) * 4 * self.body_state_count, wp.vec3)
+        self._proxy_slot, self._replicas = self._empty(wp.int32), self._empty(wp.vec3)
         self.denominator = self._zeros(_MAX_LINEAR_ITERATIONS * self.group_count, wp.float32)
         self.numerator = self._zeros(_MAX_LINEAR_ITERATIONS * self.group_count, wp.float32)
         # Built even with self-collision disabled, as natively.
@@ -1027,9 +1032,10 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
             self.rolling_tangent_scale = self._zeros(n, wp.vec3)
         if self._cached_surface and self.surface_tangent_cache.shape[0] < contact.soft_max_count:
             self.surface_tangent_cache = wp.zeros(
-                contact.soft_max_count, dtype=surface_contact_kernels.SurfaceTangent, device=self.device
+                contact.soft_max_count, dtype=surface_contact_kernels.CachedSurfaceTangent, device=self.device
             )
-        fused_pcg = block_matrix and not body_block and not reference_pcg
+        # The fused kernels apply the same block preconditioner, whichever matrix (block or PD scalar) multiplies.
+        fused_pcg = block and not body_block and not reference_pcg
         if control.tetrahedron_activations.size and control.tetrahedron_activations.size < self.tetrahedron_count:
             raise ValueError("tetrahedron activations are smaller than the tetrahedron state count")
         if self.drive_total:
@@ -1321,6 +1327,19 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                     self.block_template_columns,
                     self.block_template_values,
                 ],
+            )
+
+        # Only the surface and cached rigid contact tangents write proxy rows through the replicas; the map from
+        # rows to replica slots depends on the topology alone, so it is built once per step.
+        self._replicas, self._proxy_slot = empty_v, self._empty(wp.int32)
+        if body_states and extra_product and (surface or self._cached_rigid):
+            self._replicas, self._proxy_slot = self.product_replicas, self.proxy_slot
+            self.proxy_slot.fill_(-1)
+            launch(
+                "proxy_slots",
+                pcg_kernels.build_proxy_slots,
+                body_states,
+                [body_indices, bodies_per_world, per_world, self.proxy_slot],
             )
 
         for iteration in range(config.nonlinear_iterations):
@@ -1760,6 +1779,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                     inverse_dt,
                     [self.surface_tangent_cache],
                 )
+            replicas, proxy_slot = self._replicas, self._proxy_slot
             wp.copy(self.residual, self.rhs, count=count)
             self.solution.zero_()
             self.numerator.zero_()
@@ -1844,6 +1864,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                             previous_numerator,
                             self.direction,
                             self.contact_product if extra_product else empty_v,
+                            replicas,
+                            count,
                         ],
                     )
                 else:
@@ -1863,6 +1885,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                     )
                     if extra_product:
                         self.contact_product.zero_()
+                    if replicas.size:
+                        replicas.zero_()
                 with self._concurrent_branches(config.tangent_streams):
                     self._multiply_tangents(
                         v,
@@ -1891,6 +1915,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                             self.blocks,
                             self.direction,
                             extra,
+                            proxy_slot,
+                            replicas,
                             self.product,
                             self.coefficient_world,
                             per_group,
@@ -1912,6 +1938,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                             self.blocks,
                             self.direction,
                             extra,
+                            proxy_slot,
+                            replicas,
                             self.product,
                             self.coefficient_world,
                             per_group,
@@ -1933,6 +1961,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                             self.diagonal,
                             self.direction,
                             extra,
+                            proxy_slot,
+                            replicas,
                             self.product,
                             self.coefficient_world,
                             per_group,
@@ -3277,6 +3307,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                     self.surface_tangent_cache,
                     self.direction,
                     product,
+                    self._proxy_slot,
+                    self._replicas,
                 ],
             )
         elif self._surface:
@@ -3287,7 +3319,7 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                     self._contact,
                     q_in,
                     inverse_dt,
-                    [self.direction, product],
+                    [self.direction, product, self._proxy_slot, self._replicas],
                 )
         if self.fluid_rows:
             launch(
@@ -3321,6 +3353,8 @@ class Solver(BodyPrecompute, SelfCollisionHost, CableHost, FluidHost, GranularHo
                     self._rigid_tangent_cache(),
                     self.direction,
                     self.contact_product,
+                    self._proxy_slot,
+                    self._replicas,
                 ],
             )
         if self._contact_product:

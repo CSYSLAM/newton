@@ -10,7 +10,7 @@ this only changes the floating-point summation order, which the native code alre
 
 import warp as wp
 
-from .common import REDUCE_BLOCK, block_world_add, coefficient_world, guarded_ratio
+from .common import REDUCE_BLOCK, block_world_add, coefficient_world, guarded_ratio, replicated_product
 
 # The solver never differentiates through its kernels; skipping the adjoints halves compile time.
 wp.set_module_options({"enable_backward": False})
@@ -264,9 +264,14 @@ def fused_cg_direction(
     previous_numerator: wp.array[float],
     direction: wp.array[wp.vec3],
     tangent: wp.array[wp.vec3],
+    replicas: wp.array[wp.vec3],
+    count: int,
 ):
-    """update_cg_direction that also zeroes the matrix-free tangent accumulator for the coming product."""
+    """update_cg_direction that also zeroes the matrix-free tangent accumulator and its replicas for the coming
+    product."""
     i = wp.tid()
+    for j in range(i, replicas.shape[0], count):
+        replicas[j] = wp.vec3(0.0)
     value = z[i]
     if iteration > 0:
         w = coefficient_world(i, world, particles_per_world)
@@ -337,6 +342,8 @@ def multiply_block_matrix_and_reduce(
     diagonal: wp.array[wp.mat33],
     direction: wp.array[wp.vec3],
     extra: wp.array[wp.vec3],
+    proxy_slot: wp.array[wp.int32],
+    replicas: wp.array[wp.vec3],
     product: wp.array[wp.vec3],
     world: wp.array[wp.int32],
     particles_per_world: int,
@@ -355,7 +362,7 @@ def multiply_block_matrix_and_reduce(
             row_count, columns, values, max_count, direction, i, count, rows_per_world
         )
         if extra.shape[0] > 0:
-            value = value + extra[i]
+            value = value + extra[i] + replicated_product(proxy_slot, replicas, i)
         product[i] = value
         w = coefficient_world(i, world, particles_per_world)
         dot = wp.dot(value, direction[i])
@@ -371,6 +378,8 @@ def multiply_scalar_matrix_and_reduce(
     diagonal: wp.array[float],
     direction: wp.array[wp.vec3],
     extra: wp.array[wp.vec3],
+    proxy_slot: wp.array[wp.int32],
+    replicas: wp.array[wp.vec3],
     product: wp.array[wp.vec3],
     world: wp.array[wp.int32],
     particles_per_world: int,
@@ -389,7 +398,7 @@ def multiply_scalar_matrix_and_reduce(
             row_count, columns, values, max_count, direction, i, count, rows_per_world
         )
         if extra.shape[0] > 0:
-            value = value + extra[i]
+            value = value + extra[i] + replicated_product(proxy_slot, replicas, i)
         product[i] = value
         w = coefficient_world(i, world, particles_per_world)
         dot = wp.dot(value, direction[i])
@@ -405,6 +414,8 @@ def multiply_scalar_block_matrix_and_reduce(
     diagonal: wp.array[wp.mat33],
     direction: wp.array[wp.vec3],
     extra: wp.array[wp.vec3],
+    proxy_slot: wp.array[wp.int32],
+    replicas: wp.array[wp.vec3],
     product: wp.array[wp.vec3],
     world: wp.array[wp.int32],
     particles_per_world: int,
@@ -423,7 +434,7 @@ def multiply_scalar_block_matrix_and_reduce(
             row_count, columns, values, max_count, direction, i, count, rows_per_world
         )
         if extra.shape[0] > 0:
-            value = value + extra[i]
+            value = value + extra[i] + replicated_product(proxy_slot, replicas, i)
         product[i] = value
         w = coefficient_world(i, world, particles_per_world)
         dot = wp.dot(value, direction[i])
@@ -458,3 +469,18 @@ def apply_affine_body_preconditioner(
         value = z[target]
         value[row % 3] = total
         z[target] = value
+
+
+@wp.kernel
+def build_proxy_slots(
+    body_particles: wp.array[wp.vec4i],
+    bodies_per_world: int,
+    particles_per_world: int,
+    proxy_slot: wp.array[wp.int32],
+):
+    """Map each affine-body proxy row to its slot in the product replicas (other rows keep -1)."""
+    i = wp.tid()
+    p = body_particles[i % bodies_per_world]
+    offset = (i // bodies_per_world) * particles_per_world
+    for k in range(4):
+        proxy_slot[p[k] + offset] = 4 * i + k

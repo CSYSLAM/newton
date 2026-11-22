@@ -11,7 +11,7 @@ the material parameters and regularises friction below epsilon.
 
 import warp as wp
 
-from .common import normalized_or_zero
+from .common import add_tangent_product, normalized_or_zero
 from .contact_geometry import (
     contact_body_slot,
     contact_dot,
@@ -440,6 +440,11 @@ def cache_contact_tangent(v: RigidContactView, cache: RigidTangentCache):
     cache.entries[i] = entries
 
 
+vec8i = wp.types.vector(length=8, dtype=wp.int32)
+vec8f = wp.types.vector(length=8, dtype=float)
+mat83 = wp.types.matrix(shape=(8, 3), dtype=float)
+
+
 @wp.kernel
 def multiply_cached_contact_tangent(
     count: wp.array[wp.int32],
@@ -447,6 +452,8 @@ def multiply_cached_contact_tangent(
     cache: RigidTangentCache,
     direction: wp.array[wp.vec3],
     product: wp.array[wp.vec3],
+    proxy_slot: wp.array[wp.int32],
+    replicas: wp.array[wp.vec3],
 ):
     """Off-diagonal Jacobian products from the cached lists (the arithmetic of ``evaluate_contact_tangent``)."""
     i = wp.tid()
@@ -463,19 +470,30 @@ def multiply_cached_contact_tangent(
     nn = wp.outer(n, n)
     normal_matrix = stiffness[0] * nn
     friction_matrix = stiffness[1] * (wp.identity(n=3, dtype=float) - nn)
+    # Load each entry once; the pairwise sums below then run on registers (constant trip counts keep them unrolled)
+    # in the same order as summing straight from memory.
+    targets = vec8i(-1)
+    normal_weights = vec8f(0.0)
+    friction_weights = vec8f(0.0)
+    d = mat83(0.0)
+    for b in range(8):
+        if b < entries:
+            targets[b] = cache.targets[base + b]
+            normal_weights[b] = cache.normal_weights[base + b]
+            friction_weights[b] = cache.friction_weights[base + b]
+            d[b] = direction[targets[b]]
     # Both parts share one atomic per target: the contacts of a body all hit its four proxies, so the product is
     # bound by atomic contention. This only reassociates the two contributions before accumulation.
-    for a in range(entries):
-        target = cache.targets[base + a]
-        normal_total = wp.vec3(0.0)
-        friction_total = wp.vec3(0.0)
-        for b in range(entries):
-            other = cache.targets[base + b]
-            if other != target:
-                d = direction[other]
-                normal_total = cache.normal_weights[base + b] * d + normal_total
-                friction_total = cache.friction_weights[base + b] * d + friction_total
-        value = (normal_matrix * normal_total) * cache.normal_weights[base + a] + (
-            friction_matrix * friction_total
-        ) * cache.friction_weights[base + a]
-        wp.atomic_add(product, target, value)
+    for a in range(8):
+        if a < entries:
+            target = targets[a]
+            normal_total = wp.vec3(0.0)
+            friction_total = wp.vec3(0.0)
+            for b in range(8):
+                if b < entries and targets[b] != target:
+                    normal_total = normal_weights[b] * d[b] + normal_total
+                    friction_total = friction_weights[b] * d[b] + friction_total
+            value = (normal_matrix * normal_total) * normal_weights[a] + (friction_matrix * friction_total) * (
+                friction_weights[a]
+            )
+            add_tangent_product(product, proxy_slot, replicas, i, target, value)

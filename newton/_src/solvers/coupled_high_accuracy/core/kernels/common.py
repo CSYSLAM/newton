@@ -25,6 +25,44 @@ def normalized_or_zero(v: wp.vec3, length: float, threshold: float):
     return wp.vec3(0.0)
 
 
+# Contact tangent products onto affine-body proxy rows go to this many replicas, picked by contact, which are summed
+# when the product is read: every contact on a body hits the same four proxies, and the atomics on those rows serialize.
+PRODUCT_REPLICAS = wp.constant(32)
+
+
+@wp.func
+def add_tangent_product(
+    product: wp.array[wp.vec3],
+    proxy_slot: wp.array[wp.int32],
+    replicas: wp.array[wp.vec3],
+    contact: int,
+    row: int,
+    value: wp.vec3,
+):
+    """product[row] += value, spread over the replicas of a proxy row when they exist."""
+    if replicas.shape[0] > 0:
+        slot = proxy_slot[row]
+        if slot >= 0:
+            wp.atomic_add(
+                replicas, (contact % PRODUCT_REPLICAS) * (replicas.shape[0] // PRODUCT_REPLICAS) + slot, value
+            )
+            return
+    wp.atomic_add(product, row, value)
+
+
+@wp.func
+def replicated_product(proxy_slot: wp.array[wp.int32], replicas: wp.array[wp.vec3], row: int):
+    """Sum of the replicas of a proxy row (zero for other rows)."""
+    total = wp.vec3(0.0)
+    if replicas.shape[0] > 0:
+        slot = proxy_slot[row]
+        if slot >= 0:
+            stride = replicas.shape[0] // PRODUCT_REPLICAS
+            for r in range(PRODUCT_REPLICAS):
+                total = total + replicas[r * stride + slot]
+    return total
+
+
 @wp.func
 def coefficient_world(i: int, world: wp.array[wp.int32], particles_per_world: int):
     """CG coefficient group of row i: an explicit group map, or contiguous groups of particles_per_world rows."""

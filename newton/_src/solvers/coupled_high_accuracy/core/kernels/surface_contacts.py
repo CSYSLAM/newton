@@ -10,7 +10,7 @@ weights, followed by the four body proxies with weights (-1, -lever) when the sh
 
 import warp as wp
 
-from .common import normalized_or_zero
+from .common import add_tangent_product, normalized_or_zero
 from .contact_geometry import (
     contact_body_slot,
     contact_dot,
@@ -87,6 +87,23 @@ class SurfaceTangent:
     friction_entries: int
     normal_matrix: wp.mat33
     friction_matrix: wp.mat33
+    normal: wp.vec3
+    normal_scale: float
+    friction_scale: float
+
+
+@wp.struct
+class CachedSurfaceTangent:
+    """The part of a SurfaceTangent the linear solve reads, in about half the bytes: the friction list shares the
+    normal list's targets (both are built together), and the matrices are rebuilt from the normal and scales."""
+
+    targets: vec7i
+    normal_weights: vec7f
+    friction_weights: vec7f
+    entries: int
+    normal: wp.vec3
+    normal_scale: float
+    friction_scale: float
 
 
 @wp.struct
@@ -277,6 +294,9 @@ def surface_contact(v: SurfaceContactView, i: int):
     t.friction_entries = friction_entries
     t.normal_matrix = surface_matrix(n, c.stiffness_sum, 0)
     t.friction_matrix = surface_matrix(n, eta * v.inv_dt, 1)
+    t.normal = n
+    t.normal_scale = c.stiffness_sum
+    t.friction_scale = eta * v.inv_dt
     c.tangent = t
     return c
 
@@ -325,7 +345,14 @@ def add_surface_contact_preconditioner(v: SurfaceContactView, blocks: wp.array[w
 
 
 @wp.func
-def surface_tangent_product(t: SurfaceTangent, direction: wp.array[wp.vec3], product: wp.array[wp.vec3]):
+def surface_tangent_product(
+    t: SurfaceTangent,
+    direction: wp.array[wp.vec3],
+    product: wp.array[wp.vec3],
+    proxy_slot: wp.array[wp.int32],
+    replicas: wp.array[wp.vec3],
+    contact: int,
+):
     # Constant trip counts let the compiler unroll and keep the seven-entry lists in registers; dynamic indexing
     # would spill them to local memory.
     normal_total = wp.vec3(0.0)
@@ -349,24 +376,46 @@ def surface_tangent_product(t: SurfaceTangent, direction: wp.array[wp.vec3], pro
             value = t.normal_weights[j] * normal_value
             if shared:
                 value = value + t.friction_weights[j] * friction_value
-            wp.atomic_add(product, t.normal_targets[j], value)
+            add_tangent_product(product, proxy_slot, replicas, contact, t.normal_targets[j], value)
     if not shared:
         for j in range(7):
             if j < t.friction_entries:
-                wp.atomic_add(product, t.friction_targets[j], t.friction_weights[j] * friction_value)
+                add_tangent_product(
+                    product,
+                    proxy_slot,
+                    replicas,
+                    contact,
+                    t.friction_targets[j],
+                    t.friction_weights[j] * friction_value,
+                )
 
 
 @wp.kernel
-def multiply_surface_contact_tangent(v: SurfaceContactView, direction: wp.array[wp.vec3], product: wp.array[wp.vec3]):
+def multiply_surface_contact_tangent(
+    v: SurfaceContactView,
+    direction: wp.array[wp.vec3],
+    product: wp.array[wp.vec3],
+    proxy_slot: wp.array[wp.int32],
+    replicas: wp.array[wp.vec3],
+):
     for i in range(wp.tid(), contact_count(v), v.stride):
-        surface_tangent_product(surface_contact(v, i).tangent, direction, product)
+        surface_tangent_product(surface_contact(v, i).tangent, direction, product, proxy_slot, replicas, i)
 
 
 @wp.kernel
-def cache_surface_contact_tangent(v: SurfaceContactView, cache: wp.array[SurfaceTangent]):
+def cache_surface_contact_tangent(v: SurfaceContactView, cache: wp.array[CachedSurfaceTangent]):
     """Evaluate each contact's Jacobians and matrices once per Newton iteration (not in the reference SDK)."""
     for i in range(wp.tid(), contact_count(v), v.stride):
-        cache[i] = surface_contact(v, i).tangent
+        t = surface_contact(v, i).tangent
+        cached = CachedSurfaceTangent()
+        cached.targets = t.normal_targets
+        cached.normal_weights = t.normal_weights
+        cached.friction_weights = t.friction_weights
+        cached.entries = t.normal_entries
+        cached.normal = t.normal
+        cached.normal_scale = t.normal_scale
+        cached.friction_scale = t.friction_scale
+        cache[i] = cached
 
 
 @wp.kernel
@@ -374,9 +423,21 @@ def multiply_cached_surface_contact_tangent(
     count: wp.array[wp.int32],
     capacity: int,
     stride: int,
-    cache: wp.array[SurfaceTangent],
+    cache: wp.array[CachedSurfaceTangent],
     direction: wp.array[wp.vec3],
     product: wp.array[wp.vec3],
+    proxy_slot: wp.array[wp.int32],
+    replicas: wp.array[wp.vec3],
 ):
     for i in range(wp.tid(), wp.min(capacity, wp.max(count[0], 0)), stride):
-        surface_tangent_product(cache[i], direction, product)
+        c = cache[i]
+        t = SurfaceTangent()
+        t.normal_targets = c.targets
+        t.normal_weights = c.normal_weights
+        t.normal_entries = c.entries
+        t.friction_targets = c.targets
+        t.friction_weights = c.friction_weights
+        t.friction_entries = c.entries
+        t.normal_matrix = surface_matrix(c.normal, c.normal_scale, 0)
+        t.friction_matrix = surface_matrix(c.normal, c.friction_scale, 1)
+        surface_tangent_product(t, direction, product, proxy_slot, replicas, i)
